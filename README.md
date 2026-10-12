@@ -315,6 +315,10 @@ GPU free, packages, the pinned base model, config invariants, disk, Azure write/
 document OCR'd, the post-OCR check passed, and the corpus: rows per split, documents set aside and why, share
 over the sequence caps (WARN above 5%, FAIL above 25%). The smoke run runs it before its own `finetune`.
 
+When `finetune` follows straight after it in one chain, add `--skip-corpus`: `finetune` builds the same corpus
+itself and refuses the same >25% set-aside before anything trains, so the build runs once (~20 min saved on
+the CGL corpus) instead of twice.
+
 It takes 4 train, 1 val and 1 test source document with all their twins (split intact, lines spread; more with
 `--train-sources`, `--val-sources`, `--test-sources`), never freezes or packages, and leaves the real data
 untouched. Read the corpus build's rejected-row count and the

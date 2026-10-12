@@ -40,6 +40,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -278,8 +279,13 @@ def generation_scorer(rows: list[dict[str, Any]], model: Any) -> Scorer:
 
         release_model(model)
 
+    passes: list[dict[str, Any]] = []
+
     def score(checkpoint: str) -> dict[str, float]:
-        generations = generate_validation(rows, model, adapter=checkpoint)
+        stats: dict[str, Any] = {}
+        generations = generate_validation(rows, model, adapter=checkpoint, stats=stats)
+        # What each pass cost, for the stage result: rows, calls, seconds.
+        passes.append({"checkpoint": checkpoint, **stats})
         # Raises for a broken pass, so select_best records this checkpoint as
         # unscorable instead of ranking it at 0.0 — and refuses the stage when
         # no checkpoint scored at all.
@@ -292,7 +298,22 @@ def generation_scorer(rows: list[dict[str, Any]], model: Any) -> Scorer:
 
     # Called by the checkpoint stage once selection is done, to free the engine.
     score.close = close  # type: ignore[attr-defined]
+    score.passes = passes  # type: ignore[attr-defined]
     return score
+
+
+def generation_cost(scorer: Any) -> dict[str, Any]:
+    """The generation passes a selection made - the sample's and ``.full``'s -
+    and their totals: what selection's time went on. Empty for a scorer that
+    keeps none (the parallel one: each worker generates in its own process)."""
+    passes = [*getattr(scorer, "passes", []), *getattr(getattr(scorer, "full", None), "passes", [])]
+    if not passes:
+        return {}
+    return {
+        "passes": passes,
+        "rows": sum(int(p.get("generated", 0)) for p in passes),
+        "seconds": round(sum(float(p.get("seconds", 0.0)) for p in passes), 1),
+    }
 
 
 def break_tie(report: SelectionReport, full_scorer: Scorer, margin: float) -> SelectionReport:
@@ -331,8 +352,29 @@ DOCUMENT_ACCURACY = "document_field_normalized_match"
 DOCUMENT_GUARDS = ("document_hallucination_rate", "document_false_null_rate")
 
 
+def rows_in_modes(rows: list[dict[str, Any]], modes: Sequence[str] | None) -> list[dict[str, Any]]:
+    """The validation rows read in ``modes``; every row when none are named.
+
+    Filtered by reading mode, never by row: each document keeps all its windows
+    in a mode, so the whole-document merge (validation_generation.merged_windows)
+    sees every document whole. A filter that leaves nothing is refused - judging
+    the finalists on no documents would decide nothing.
+    """
+    if not modes:
+        return list(rows)
+    wanted = set(modes)
+    kept = [row for row in rows if row.get("modality_mode") in wanted]
+    if not kept:
+        raise CheckpointEvalError(
+            f"no validation row is read in {sorted(wanted)}: the finalists would be judged on no "
+            "documents. Check selection_document_modes against the split's modality_mode values."
+        )
+    return kept
+
+
 def choose_on_documents(
     report: SelectionReport, full_scorer: Scorer | None, *, finalists: int, guard_margin: float,
+    modes: Sequence[str] | None = None,
 ) -> SelectionReport:
     """Re-decide among the ``finalists`` best candidates on whole validation documents.
 
@@ -345,6 +387,9 @@ def choose_on_documents(
     empty is within ``guard_margin`` of the best finalist's. A checkpoint that
     buys accuracy by inventing more, or by leaving more empty, does not win on
     it. Ties go to the later step, as in :func:`select_best`.
+
+    ``modes`` names the reading modes ``full_scorer`` reads (``selection_document_modes``;
+    none = all three), recorded with the decision.
     """
     ranked = sorted(report.scores, key=lambda s: (s.field_f1, s.step), reverse=True)[:finalists]
     if len(ranked) < 2:
@@ -384,6 +429,7 @@ def choose_on_documents(
                                      for k in (DOCUMENT_ACCURACY, *DOCUMENT_GUARDS) if k in metrics[c.checkpoint]}
                       for c in scored},
         "guard_margin": guard_margin,
+        "modes": list(modes) if modes else "all",
         "excluded_by_guard": excluded,
         "decided": winner.checkpoint,
         "changed_choice": winner.checkpoint != report.selected,
@@ -396,13 +442,17 @@ def choose_on_documents(
 
 def vllm_scorer(
     *, client: Any, val_path: str, model: Any = None, images_root: str | None = None,
-    sample_rows: int = 0,
+    sample_rows: int = 0, full_modes: Sequence[str] | None = None,
 ) -> Scorer:
     """A :func:`generation_scorer` over the stored validation split, on the base.
 
     The base is loaded in bf16 with LoRA enabled and each checkpoint applied as a
     decoder LoRA: one LoRA per request is exactly what vLLM supports, so no
     checkpoint needs merging to be scored.
+
+    ``full_modes`` narrows ``.full`` - the finalists' whole-document pass and the
+    near-tie - to those reading modes (:func:`rows_in_modes`); the sample keeps
+    every mode. On the CGL run one mode was a third of the ~6,170 rows per finalist.
     """
     from evaluation.validation_generation import read_rows
 
@@ -426,8 +476,9 @@ def vllm_scorer(
 
     sample = validation_sample(rows, sample_rows)
     score = generation_scorer(sample, model)
-    if len(sample) < len(rows):
-        score.full = generation_scorer(rows, model)  # type: ignore[attr-defined]
+    full_rows = rows_in_modes(rows, full_modes)
+    if len(sample) < len(full_rows):
+        score.full = generation_scorer(full_rows, model)  # type: ignore[attr-defined]
     return score
 
 
@@ -485,6 +536,8 @@ class ParallelScorer:
     work_dir: Path
     #: Score every validation row, not the sample (the near-tie's ``.full``).
     full_split: bool = False
+    #: The reading modes the full split is narrowed to (:func:`rows_in_modes`).
+    full_modes: list[str] = field(default_factory=list)
     poll_seconds: float = 15.0
 
     def __call__(self, checkpoint: str) -> dict[str, float]:
@@ -515,6 +568,8 @@ class ParallelScorer:
                 command += ["--images-root", str(self.images_root)]
             if self.full_split:
                 command.append("--full")
+                for mode in self.full_modes:
+                    command += ["--full-mode", mode]
             for checkpoint in share:
                 command += ["--checkpoint", checkpoint]
             # One GPU each; the worker scores in place - it must not re-launch
@@ -552,7 +607,7 @@ class ParallelScorer:
 
 def parallel_vllm_scorer(
     *, client: Any, val_path: str, images_root: str | None, sample_rows: int, gpus: list[str],
-    work_dir: Path,
+    work_dir: Path, full_modes: Sequence[str] | None = None,
 ) -> ParallelScorer:
     """A :class:`ParallelScorer` over the stored validation split, with a ``.full``
     one for the near-tie when the sample is smaller than the split.
@@ -570,9 +625,9 @@ def parallel_vllm_scorer(
 
         localize_rows(rows, client, images_root)
     settings = dict(val_path=val_path, images_root=images_root, sample_rows=sample_rows,
-                    gpus=list(gpus), work_dir=Path(work_dir))
+                    gpus=list(gpus), work_dir=Path(work_dir), full_modes=list(full_modes or []))
     scorer = ParallelScorer(**settings)
-    if sample_rows and len(validation_sample(rows, sample_rows)) < len(rows):
+    if sample_rows and len(validation_sample(rows, sample_rows)) < len(rows_in_modes(rows, full_modes)):
         scorer.full = ParallelScorer(**settings, full_split=True)  # type: ignore[attr-defined]
     return scorer
 

@@ -90,11 +90,10 @@ batch:
   gradient_checkpointing: true
   bf16: true
 
-  # Processes for ms-swift's length pass before step 1. group_by_length makes it
-  # encode every row once up front (images included) to learn its length, and
-  # on one process that runs at ~2 rows/s: ~10 min for the smoke set, ~5 h for
-  # the full corpus. It keeps only the length, so more processes cost CPU, not
-  # memory. Capped at the pod's CPU count at launch.
+  # Processes for ms-swift's dataset preprocessing. Capped at the pod's CPU count
+  # at launch. (With length_grouped_sampling on, ms-swift also encoded every row
+  # up front to learn its length - ~1 row/s on the CGL full run, 1.5 h before
+  # step 1 - which is why that is off below.)
   dataset_num_proc: 8
 
 memory:
@@ -103,10 +102,15 @@ memory:
   # this is the difference between fitting on one 80GB card and not (§9.3).
   use_logits_to_keep: true
 
-  # No memory spent on padding, and sequences of similar length batched together
-  # so a 4k classify example is not padded to a 32k policy extraction.
+  # No memory spent on padding: rows are concatenated, never padded, so a 4k
+  # classify example is not padded to a 32k policy extraction.
   padding_free: true
-  length_grouped_sampling: true
+  # Off. Grouping rows of similar length only saves padding, and with one row
+  # per device and padding_free there is none to save - while it made ms-swift
+  # encode every row before step 1 to learn its length (1.5 h on the CGL full
+  # run, 13 min on 1,185 rows). Off, the same rows are visited in a plain random
+  # order: same data, same steps.
+  length_grouped_sampling: false
 
 evaluation:
   # Validation LOSS during training - field F1 needs generation, which the
@@ -138,10 +142,14 @@ evaluation:
 
   # The validation cut. In-training checks per run, each on a fixed stratified
   # sample of the validation split (evaluation.validation_sample); checkpoint
-  # selection ranks its candidates on the same sample. On the delivered corpus,
+  # selection ranks its candidates on a larger one. On the delivered corpus,
   # every 50 steps on all ~3,300 rows cost 50-60 h of a ~35 h training run.
   evaluations_per_run: 10
   validation_sample_rows: 400
+  # The in-training checks' own sample (training.train.loss_sample_rows). Their
+  # loss only draws the progress curve: no early stopping, best-loss weights
+  # never loaded. 160 rows instead of 400: ~3 min per check instead of ~7.4.
+  loss_sample_rows: 160
   # When the top two candidates are closer than this in field accuracy on the
   # sample, those two are scored again on the full validation split, which
   # decides. Sample noise only matters inside such a margin.
@@ -152,7 +160,14 @@ evaluation:
   # and of printed values left empty are within the guard margin of the best
   # finalist's. 0 or 1: the sample decides (with the near-tie rule above).
   # Costs one full validation pass per finalist, run at once on a multi-GPU pod.
-  selection_document_finalists: 3
+  # 2, not 3: on the CGL run each finalist pass was ~6,170 rows (~1 h 55 min on
+  # one H200), and the third finalist never won (replayed with 2, it still
+  # selects checkpoint-734).
+  selection_document_finalists: 2
+  # The reading modes that whole-document pass (and a near-tie) reads; empty =
+  # all three. The main mode only: a third of the rows. The sample above still
+  # ranks every candidate in all three modes, and the golden gate scores all three.
+  selection_document_modes: [ocr_plus_image]
   selection_guard_margin: 0.02
   metric_for_best_model: "eval_loss"
   greater_is_better: false

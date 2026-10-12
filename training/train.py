@@ -171,6 +171,20 @@ def _accumulation_steps(batch: dict[str, Any], gpus: int) -> int:
     return max(1, effective // per_step)
 
 
+def loss_sample_rows(evaluation: dict[str, Any]) -> int:
+    """Rows of the in-training loss checks: ``loss_sample_rows``, else the
+    selection sample (``validation_sample_rows``); 0 reads the whole split.
+
+    The loss only draws the progress curve - no early stopping is passed to
+    ms-swift and the best-loss weights are never loaded - while checkpoint
+    selection generates on its own, larger sample. So the curve can be read off
+    fewer rows: 160 instead of 400 took each of the CGL run's ten checks from
+    ~7.4 min to ~3 min.
+    """
+    selection = int(evaluation.get("validation_sample_rows") or 0)
+    return int(evaluation.get("loss_sample_rows") or selection)
+
+
 def _checkpoint_cadence(interval: int, evaluation: dict[str, Any], *, gpus: int = 1) -> dict[str, int]:
     """Save a resume point at least every ``checkpoint_every_steps``, evaluate on
     every n-th of them, and keep enough that the last evaluation checkpoints
@@ -449,8 +463,8 @@ def build_training_config(
         # The first N epoch files, read once each. Every file holds every train
         # document, in that epoch's modality draw, so the concatenation has the
         # CONTENT of an N-epoch run: each document N times, in N regimes. Not its
-        # ORDER — the Trainer shuffles the concatenated rows and groups them by
-        # length, so a document's passes can land next to each other, and an
+        # ORDER — the Trainer shuffles the concatenated rows, so a document's
+        # passes can land next to each other, and an
         # early stop can come after some documents have been seen more often
         # than others. Over a run that averages out; within one it does not.
         "dataset": list(corpus_paths[:epochs]),
@@ -511,7 +525,9 @@ def build_training_config(
         "padding_free": bool(memory.get("padding_free", True)),
         # The Hugging Face TrainingArguments name. "length_grouped_sampling" is
         # not an argument of either ms-swift or HF, and was refused at parsing.
-        "group_by_length": bool(memory.get("length_grouped_sampling", True)),
+        # Off by default: with one row per device and padding_free it saves no
+        # padding, and it made ms-swift encode every row before step 1.
+        "group_by_length": bool(memory.get("length_grouped_sampling", False)),
         # Frozen, both of them (arch v2.1 §9.4). `train_vit` is the §3 escalation
         # and remains LoRA-on-ViT, never a full fine-tune.
         "freeze_vit": not train_vit,
@@ -873,15 +889,14 @@ def train(
         prune_image_caches(paths.staging_train_images_dir(corpus_version, tenant_id))
         from evaluation.validation_sample import validation_sample
 
-        sample_rows = int(training_config(scope.training_config)["evaluation"].get(
-            "validation_sample_rows") or 0)
+        sample_rows = loss_sample_rows(training_config(scope.training_config)["evaluation"])
         staged = stage_training_data(
             view.epoch_files[:epochs], view.val_path, client,
             paths.staging_train_data_dir(scope.name, out_version),
             images_root=paths.staging_train_images_dir(corpus_version, tenant_id),
             max_pixels=int(swift.env["MAX_PIXELS"]),
-            # The in-training checks read the fixed validation sample, chosen on
-            # the corpus rows before staging strips the line and mode off them.
+            # The in-training checks read a fixed stratified validation sample,
+            # chosen on the corpus rows before staging strips the line and mode off them.
             val_filter=(lambda rows: validation_sample(rows, sample_rows)) if sample_rows else None,
         )
         swift.args["dataset"] = staged.epoch_files
@@ -955,6 +970,11 @@ def _masking_encoder(swift: SwiftConfig):  # pragma: no cover - needs ms-swift a
     )
     template = get_template(processor.model_meta.template, processor)
     template.set_mode("train")
+    # ms-swift's import raises the root log handlers; without this every later
+    # stage run in this process - checkpoint selection included - logs nothing.
+    from common.logging_setup import reassert
+
+    reassert()
     tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
     header = tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
     end = tokenizer.convert_tokens_to_ids("<|im_end|>")

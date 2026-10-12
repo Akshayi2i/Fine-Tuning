@@ -226,3 +226,61 @@ def test_a_windowed_policy_is_calibrated_as_one_served_document():
     assert "policy.policy_number" in paths and "coverages[0].coverage_name" in paths
     assert not any(path.startswith("additional_fields") for path in paths)
     assert all(correct for _, correct in samples)
+
+
+def test_within_a_call_the_longest_answer_goes_first_and_each_result_reaches_its_row(client):
+    """A call ends when its longest answer does, so that request starts first.
+    The rows keep their order in the output, each with its own answer."""
+    rows = _val_rows(3)
+    long_golden = {**GOLDEN, "notes": "x" * 400}
+    rows[1]["messages"][-1]["content"] = json.dumps(long_golden)
+    answers = {r["source_id"]: r["messages"][-1]["content"] for r in rows}
+    asked = []
+
+    def generate_batch(msgs, configs, adapter=None):
+        out = []
+        for messages, config in zip(msgs, configs, strict=True):
+            source = next(s for s in answers if s in json.dumps(messages))
+            asked.append(source)
+            out.append(EchoBackend(answers[source]).generate(messages, config, adapter))
+        return out
+
+    backend = EchoBackend("{}")
+    backend.generate_batch = generate_batch
+    generations = generate_validation(rows, load_model("base", client, backend_impl=backend), batch_rows=3)
+    assert asked[0] == rows[1]["source_id"]
+    assert [g.row["source_id"] for g in generations] == [r["source_id"] for r in rows]
+    # Dates are normalised on the way out (with_output_dates), so the marker tells the answers apart.
+    assert generations[1].extraction["notes"] == "x" * 400
+    assert "notes" not in generations[0].extraction and "notes" not in generations[2].extraction
+
+
+def test_the_rows_per_call_come_from_the_serving_config_and_the_pass_reports_its_cost(client, monkeypatch):
+    from evaluation import validation_generation as V
+
+    assert V.configured_batch_rows() == 96
+    backend = EchoBackend(json.dumps(GOLDEN, separators=(",", ":")))
+    calls = []
+    real = backend.generate_batch
+    backend.generate_batch = lambda msgs, configs, adapter=None: (calls.append(len(msgs)),
+                                                                   real(msgs, configs, adapter))[1]
+    monkeypatch.setattr(V, "configured_batch_rows", lambda: 2)
+    stats: dict = {}
+    generate_validation(_val_rows(3), load_model("base", client, backend_impl=backend), stats=stats)
+    assert calls == [2, 1]
+    assert stats["rows"] == 3 and stats["calls"] == 2 and stats["batch_rows"] == 2
+    assert stats["seconds"] >= 0 and stats["slowest_call_seconds"] >= 0
+
+
+def test_selection_records_what_each_generation_pass_cost(client):
+    from evaluation.checkpoint_eval import generation_cost
+
+    backend = EchoBackend(json.dumps(GOLDEN, separators=(",", ":")))
+    scorer = generation_scorer(_val_rows(3), load_model("base", client, backend_impl=backend))
+    scorer.full = generation_scorer(_val_rows(4), load_model("base", client, backend_impl=backend))
+    select_best(["/s/checkpoint-10", "/s/checkpoint-20"], scorer)
+    scorer.full("/s/checkpoint-20")
+    cost = generation_cost(scorer)
+    assert [p["checkpoint"] for p in cost["passes"]] == ["/s/checkpoint-10", "/s/checkpoint-20", "/s/checkpoint-20"]
+    assert cost["rows"] == 3 + 3 + 4 and cost["seconds"] >= 0
+    assert generation_cost(object()) == {}

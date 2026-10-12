@@ -45,6 +45,7 @@ def test_a_scoped_push_lands_where_the_manifest_points(client, tmp_path):
     adapter = tmp_path / "adapter"
     adapter.mkdir()
     (adapter / "adapter_model.safetensors").write_bytes(b"weights")
+    (adapter / "adapter_config.json").write_text('{"r": 64}', encoding="utf-8")
     prefix = push_scoped_adapter(adapter, "policy", "v2", client=client)
     assert prefix == paths.scoped_adapter_dir("policy", "v2")
     assert client.read_bytes(f"{prefix}/adapter_model.safetensors") == b"weights"

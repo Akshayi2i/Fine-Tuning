@@ -22,13 +22,14 @@ contract.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging as _logging
 import os
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,17 @@ from artifact_registry.paths import requires_raw_container
 # INFO. With the pipeline's INFO logging that buried a run's own progress under
 # thousands of lines per upload; its warnings and errors still come through.
 _logging.getLogger("azure").setLevel(_logging.WARNING)
+
+log = _logging.getLogger(__name__)
+
+
+def file_md5(path: str | Path, chunk: int = 8 << 20) -> bytes:
+    """A local file's MD5, read in chunks: model shards run to gigabytes."""
+    digest = hashlib.md5()
+    with Path(path).open("rb") as fh:
+        while block := fh.read(chunk):
+            digest.update(block)
+    return digest.digest()
 
 #: Contexts permitted to touch ``raw-documents/``. Anything else is refused.
 RAW_ALLOWED_CONTEXTS = frozenset({"ingestion", "ocr"})
@@ -77,6 +89,11 @@ class BlobBackend(ABC):
     @abstractmethod
     def delete(self, container: str, key: str) -> None: ...
 
+    def md5(self, container: str, key: str) -> bytes | None:
+        """The blob's recorded MD5, or ``None`` when it is missing or records
+        none. A backend that cannot tell says ``None``: then nothing is skipped."""
+        return None
+
 
 class InMemoryBackend(BlobBackend):
     """Dict-backed backend for tests. Same rules as the real one."""
@@ -105,6 +122,10 @@ class InMemoryBackend(BlobBackend):
     def delete(self, container: str, key: str) -> None:
         self._store.pop((container, key), None)
 
+    def md5(self, container: str, key: str) -> bytes | None:
+        data = self._store.get((container, key))
+        return None if data is None else hashlib.md5(data).digest()
+
 
 class AzureBackend(BlobBackend):
     """Real Azure Blob Storage. Imported lazily so CI needs no Azure SDK."""
@@ -129,10 +150,29 @@ class AzureBackend(BlobBackend):
             raise BlobError(f"failed reading {container}/{key}: {exc}") from exc
 
     def write(self, container: str, key: str, data: bytes) -> None:
+        from azure.storage.blob import ContentSettings
+
         try:
-            self._client(container, key).upload_blob(io.BytesIO(data), overwrite=True)
+            # The MD5 recorded with the blob: Azure stores one itself only for a
+            # single-shot upload, and a multi-gigabyte model shard goes up in
+            # blocks - without it a later push could not tell it is already there.
+            self._client(container, key).upload_blob(
+                io.BytesIO(data), overwrite=True,
+                content_settings=ContentSettings(content_md5=bytearray(hashlib.md5(data).digest())),
+            )
         except Exception as exc:
             raise BlobError(f"failed writing {container}/{key}: {exc}") from exc
+
+    def md5(self, container: str, key: str) -> bytes | None:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        try:
+            recorded = self._client(container, key).get_blob_properties().content_settings.content_md5
+        except ResourceNotFoundError:
+            return None
+        except Exception as exc:
+            raise BlobError(f"failed reading the properties of {container}/{key}: {exc}") from exc
+        return bytes(recorded) if recorded else None
 
     def exists(self, container: str, key: str) -> bool:
         try:
@@ -284,15 +324,42 @@ class BlobClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(self.read_bytes(key))
 
-    def upload_dir(self, local_dir: str | Path, prefix: str, **kwargs: Any) -> int:
+    def holds(self, local: str | Path, key: str) -> bool:
+        """Whether ``key`` already holds exactly the bytes of ``local``: by the
+        MD5 recorded with the blob. A blob that records none does not count."""
+        recorded = self._backend.md5(self._container_for(key), key)
+        return recorded is not None and recorded == file_md5(local)
+
+    def upload_dir(
+        self, local_dir: str | Path, prefix: str, *, names: Iterable[str] | None = None,
+        skip_identical: bool = False, **kwargs: Any,
+    ) -> int:
+        """Upload a folder under ``prefix``; returns the files written.
+
+        ``names``: only these paths, relative to the folder (each must exist).
+        ``skip_identical``: leave a blob that already holds the file's bytes
+        (:meth:`holds`) - a re-push of the same model sends nothing.
+        """
         root = Path(local_dir)
         if not root.is_dir():
             raise BlobError(f"not a directory: {root}")
-        count = 0
-        for path in sorted(p for p in root.rglob("*") if p.is_file()):
-            rel = path.relative_to(root).as_posix()
-            self.write_bytes(f"{prefix.rstrip('/')}/{rel}", path.read_bytes(), **kwargs)
+        if names is None:
+            files = sorted(p for p in root.rglob("*") if p.is_file())
+        else:
+            files = [root / name for name in names]
+            missing = [str(p) for p in files if not p.is_file()]
+            if missing:
+                raise BlobError(f"cannot upload {missing}: no such file")
+        count = skipped = 0
+        for path in files:
+            key = f"{prefix.rstrip('/')}/{path.relative_to(root).as_posix()}"
+            if skip_identical and self.holds(path, key):
+                skipped += 1
+                continue
+            self.write_bytes(key, path.read_bytes(), **kwargs)
             count += 1
+        if skipped:
+            log.info("%s: %d file(s) already held their bytes, %d written", prefix, skipped, count)
         return count
 
     def download_dir(self, prefix: str, local_dir: str | Path) -> int:

@@ -7,7 +7,8 @@ each ``--checkpoint`` in turn, and writes ``{checkpoint: {"metrics": ...}}`` (or
 ``{"error": ...}`` for one that could not be scored) to ``--out``.
 
     python -m evaluation.checkpoint_score_worker --val-path <key> --sample-rows 400 \\
-        --images-root <dir> --checkpoint <dir> [--checkpoint <dir> ...] --out scores.json [--full]
+        --images-root <dir> --checkpoint <dir> [--checkpoint <dir> ...] --out scores.json \\
+        [--full [--full-mode ocr_plus_image ...]]
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--images-root", default=None)
     parser.add_argument("--checkpoint", action="append", required=True)
     parser.add_argument("--full", action="store_true", help="every validation row, not the sample")
+    parser.add_argument("--full-mode", dest="full_modes", action="append", default=[],
+                        help="narrow --full to this reading mode (repeatable; none = all modes)")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     # Started by ParallelScorer with FIDEON_NO_DETACH=1, it scores in place; run by
@@ -34,13 +37,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if detach_module_if_needed("evaluation.checkpoint_score_worker", argv):
         return 0
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    from common.logging_setup import setup as setup_logging
+
+    setup_logging(logging.INFO)
 
     from artifact_registry.blob_client import BlobClient
     from evaluation.checkpoint_eval import vllm_scorer
 
     scorer = vllm_scorer(client=BlobClient(), val_path=args.val_path, images_root=args.images_root,
-                         sample_rows=args.sample_rows)
+                         sample_rows=args.sample_rows, full_modes=args.full_modes)
     target = (getattr(scorer, "full", None) or scorer) if args.full else scorer
     results: dict[str, dict] = {}
     try:

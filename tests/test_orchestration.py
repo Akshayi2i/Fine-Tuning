@@ -1126,6 +1126,34 @@ def test_a_transient_stage_failure_is_retried(client, controller):
     assert report.ok and calls["n"] == 2
 
 
+def test_every_stage_records_its_wall_time_and_the_run_report_is_written_after_each(client, controller,
+                                                                                    monkeypatch, tmp_path):
+    """A run's time is measured, not guessed: each stage's wall seconds go into
+    its result, and the report so far is written after every stage, so a run
+    that dies part-way still says what the finished stages took."""
+    import json
+
+    from orchestration.pipeline_dag import PROGRESS_DIR_ENV, Stage, StageResult
+
+    monkeypatch.setenv(PROGRESS_DIR_ENV, str(tmp_path))
+    written = []
+
+    def first(_ctx):
+        return StageResult("first", "completed", "done")
+
+    def second(_ctx):
+        written.append(json.loads((tmp_path / "run-finetune-v1.json").read_text(encoding="utf-8")))
+        raise PipelineError("cannot run")
+
+    ctx = make_context(client, controller, out_version="v1")
+    report = run_stages(ctx, [Stage(1, "first", "finetune", False, first),
+                              Stage(2, "second", "finetune", False, second)], command="finetune")
+    assert [r.data["wall_seconds"] >= 0 for r in report.results] == [True, True]
+    assert [s["stage"] for s in written[0]["stages"]] == ["first"]      # written before stage 2 ran
+    final = json.loads((tmp_path / "run-finetune-v1.json").read_text(encoding="utf-8"))
+    assert final["failed_at"] == "second" and "wall_seconds" in final["stages"][1]
+
+
 def test_a_blocked_gate_is_never_retried(client, controller):
     """Retrying a gate block would be an override path with extra steps."""
     from orchestration.pipeline_dag import Stage
@@ -1762,6 +1790,35 @@ def test_a_corpus_with_no_training_rows_is_refused(client, controller, monkeypat
     monkeypatch.setattr(build_jsonl, "build_corpus", no_train)
     ctx = make_context(client, controller)
     with pytest.raises(PipelineError, match="no train"):
+        pipeline_dag.stage_dataset_build(ctx)
+    assert not client.exists(paths.corpus_manifest(ctx.corpus, None))
+
+
+def test_a_corpus_that_set_aside_too_many_documents_is_refused_by_the_build(client, controller, monkeypatch):
+    """The chain runs `preflight --skip-corpus`, so the corpus is built once, in
+    stage_dataset_build, and preflight's set-aside guard has to hold there too."""
+    from data_pipeline.dataset_builder import build_jsonl
+    from orchestration import pipeline_dag, preflight
+
+    seed_corpus(client)
+    real = build_jsonl.build_corpus
+
+    def one_document_set_aside(*args, **kwargs):
+        # Every split filled from the fixture's 4 documents, and the 4th set aside.
+        built = real(*args, **kwargs)
+        rows = built.all_rows
+        ids = sorted({r["source_id"] for r in rows})
+        assert len(ids) == 4
+        of = {i: [r for r in rows if r["source_id"] == i] for i in ids}
+        built.rows_by_split = {"train": of[ids[0]], "val": of[ids[1]], "test": of[ids[2]]}
+        return built
+
+    monkeypatch.setattr(pipeline_dag, "build_corpus", one_document_set_aside, raising=False)
+    monkeypatch.setattr(build_jsonl, "build_corpus", one_document_set_aside)
+    # 1 of the fixture's 4 documents is 25%: lowered so one document crosses it.
+    monkeypatch.setattr(preflight, "FAIL_REJECTED_SHARE", 0.2)
+    ctx = make_context(client, controller, dry_run=False)
+    with pytest.raises(PipelineError, match="set aside 1 of 4"):
         pipeline_dag.stage_dataset_build(ctx)
     assert not client.exists(paths.corpus_manifest(ctx.corpus, None))
 

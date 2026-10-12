@@ -138,11 +138,30 @@ def split_prompt(row: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, A
     return messages[:-1], json.loads(content)
 
 
-#: Rows per ``generate_batch`` call. vLLM schedules a call's requests together
-#: (continuous batching); one row at a time left the GPU waiting on each answer,
-#: ~50 s a row - hours per checkpoint on the smoke set, days on the full corpus.
-#: Bounded so a call's opened page images stay a modest amount of memory.
+#: Rows per ``generate_batch`` call when the serving config names none. vLLM
+#: schedules a call's requests together (continuous batching); one row at a time
+#: left the GPU waiting on each answer, ~50 s a row - hours per checkpoint on the
+#: smoke set, days on the full corpus. Bounded so a call's opened page images
+#: stay a modest amount of memory.
 BATCH_ROWS = 32
+
+
+def configured_batch_rows() -> int:
+    """Rows per call: ``generation.validation_batch_rows`` in
+    configs/inference/vllm_serving.yaml, else :data:`BATCH_ROWS`."""
+    from common.config import serving_config
+
+    value = (serving_config().get("generation") or {}).get("validation_batch_rows")
+    return int(value) if value else BATCH_ROWS
+
+
+def _answer_length(row: dict[str, Any]) -> int:
+    """Characters of the row's assistant target - how long its answer should run."""
+    messages = row.get("messages") or []
+    content = messages[-1].get("content") if messages else ""
+    if isinstance(content, list):
+        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return len(content or "")
 
 
 def generate_validation(
@@ -151,14 +170,21 @@ def generate_validation(
     *,
     adapter: str | None = None,
     constrain: bool | None = None,
-    batch_rows: int = BATCH_ROWS,
+    batch_rows: int | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> list[ValidationGeneration]:
     """Generate every row once. A row that fails is recorded, never dropped.
 
     ``constrain`` defaults to what serving does. Calibration must read the
     distribution serving will produce; a calibrator fitted on unconstrained
     generations describes a model nobody serves.
+
+    ``batch_rows`` defaults to :func:`configured_batch_rows`. ``stats``, when
+    given, is filled with what the pass cost: rows, calls, seconds and the
+    slowest call - the numbers a stage reports, so a run's time is measured.
     """
+    import time
+
     from common.schemas import resolved_schema, with_page_bounds
     from inference_core.input_builder import page_total, shown_pages
     from inference_core.model_runner import generate, generate_batch
@@ -194,26 +220,38 @@ def generate_validation(
             _record_failure(entry, exc, "setup")
             continue
         # The row's own answer budget: a longer answer is a loop, not an answer.
-        pending.append((entry, messages, schema, answer_cap(row.get("task"), row.get("doc_type"))))
+        pending.append((entry, messages, schema, answer_cap(row.get("task"), row.get("doc_type")),
+                        _answer_length(row)))
 
-    size = max(1, batch_rows)
+    size = max(1, batch_rows if batch_rows is not None else configured_batch_rows())
+    started, calls, slowest = time.monotonic(), 0, 0.0
     for first in range(0, len(pending), size):
-        chunk = pending[first:first + size]
-        results = generate_batch(model, [(m, s, cap) for _e, m, s, cap in chunk], adapter=adapter)
+        # Longest expected answer first, within the call only: a call ends when
+        # its longest answer does, so started first it runs beside the short ones
+        # instead of after them. The chunks are the same for every checkpoint and
+        # each result goes back to its own row.
+        chunk = sorted(pending[first:first + size], key=lambda item: -item[4])
+        began = time.monotonic()
+        results = generate_batch(model, [(m, s, cap) for _e, m, s, cap, _n in chunk], adapter=adapter)
         if len(chunk) > 1 and all(isinstance(r, Exception) for r in results):
             # A whole call fails together (one unreadable page image refuses the
             # batch): retry its rows alone, so the bad one is the only loss.
             results = []
-            for _entry, messages, schema, cap in chunk:
+            for _entry, messages, schema, cap, _n in chunk:
                 try:
                     results.append(generate(model, messages, adapter=adapter, json_schema=schema,
                                             max_new_tokens=cap))
                 except Exception as exc:  # noqa: BLE001
                     results.append(exc)
-        for (entry, _messages, _schema, _cap), result in zip(chunk, results, strict=True):
+        for (entry, _messages, _schema, _cap, _n), result in zip(chunk, results, strict=True):
             _finish(entry, result)
+        calls += 1
+        slowest = max(slowest, time.monotonic() - began)
         log.info("validation generation: %d/%d row(s)%s", min(first + size, len(pending)),
                  len(pending), f" ({adapter})" if adapter else "")
+    if stats is not None:
+        stats.update(rows=len(out), generated=len(pending), batch_rows=size, calls=calls,
+                     seconds=round(time.monotonic() - started, 1), slowest_call_seconds=round(slowest, 1))
     return out
 
 

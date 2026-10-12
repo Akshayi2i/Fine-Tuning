@@ -115,3 +115,58 @@ def test_each_tenant_pushes_and_pulls_only_its_own_golden_eval_set(client, artif
 def test_an_uncached_base_model_does_not_silently_fall_back(client, tmp_path):
     with pytest.raises(transfer.TransferError, match="not cached"):
         transfer.pull_base_model(tmp_path / "base", client=client, allow_hf=False)
+
+
+def test_a_published_adapter_is_its_weights_and_config_without_the_resume_state(client, artifact):
+    """A training checkpoint also holds ~1.5 GB of optimizer and scheduler state a
+    resume needs; nothing that reads a published adapter opens it."""
+    (artifact / "optimizer.pt").write_bytes(b"x" * 64)
+    (artifact / "trainer_state.json").write_text("{}", encoding="utf-8")
+    prefix = transfer.push_scoped_adapter(artifact, "casualty_fleet", "v1", client=client)
+    assert sorted(k.rsplit("/", 1)[-1] for k in client.list(prefix)) == sorted(transfer.ADAPTER_FILES)
+
+
+def test_a_folder_without_the_adapter_files_is_refused(client, tmp_path):
+    folder = tmp_path / "checkpoint-9"
+    folder.mkdir()
+    (folder / "adapter_model.safetensors").write_bytes(b"weights")
+    with pytest.raises(transfer.TransferError, match="adapter_config.json"):
+        transfer.push_scoped_adapter(folder, "casualty_fleet", "v1", client=client)
+
+
+def test_a_repush_sends_only_what_blob_does_not_already_hold(client, tmp_path):
+    merged = tmp_path / "merged"
+    merged.mkdir()
+    (merged / "config.json").write_text("{}", encoding="utf-8")
+    (merged / "model-00001.safetensors").write_bytes(b"shard one")
+    writes = []
+    real = client._backend.write
+    client._backend.write = lambda c, k, d: (writes.append(k), real(c, k, d))[1]
+    transfer.push_merged_model(merged, "v1", client=client, scope="casualty_fleet")
+    assert len(writes) == 2
+    writes.clear()
+    transfer.push_merged_model(merged, "v1", client=client, scope="casualty_fleet")
+    assert writes == []                                                  # every byte already there
+    (merged / "model-00001.safetensors").write_bytes(b"shard ONE")       # same size, other bytes
+    transfer.push_merged_model(merged, "v1", client=client, scope="casualty_fleet")
+    assert [k.rsplit("/", 1)[-1] for k in writes] == ["model-00001.safetensors"]
+
+
+def test_a_blob_that_records_no_md5_is_sent_again(client, tmp_path):
+    from artifact_registry.blob_client import file_md5
+
+    path = tmp_path / "f.bin"
+    path.write_bytes(b"data")
+    client.write_bytes("merged-models/scope/x/v1/f.bin", b"data")
+    assert client.holds(path, "merged-models/scope/x/v1/f.bin")
+    assert file_md5(path) == __import__("hashlib").md5(b"data").digest()
+    client._backend.md5 = lambda container, key: None                    # e.g. a block upload with none
+    assert not client.holds(path, "merged-models/scope/x/v1/f.bin")
+    assert not client.holds(path, "merged-models/scope/x/v1/missing.bin")
+
+
+def test_upload_dir_refuses_a_named_file_that_is_not_there(client, tmp_path):
+    from artifact_registry.blob_client import BlobError
+
+    with pytest.raises(BlobError, match="no such file"):
+        client.upload_dir(tmp_path, "adapters/x", names=["absent.bin"])

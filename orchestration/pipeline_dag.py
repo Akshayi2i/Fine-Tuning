@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -946,6 +947,21 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
             f"document(s) ({why}). Training needs all three: train to learn from, val to select "
             "a checkpoint and fit calibration, test for the gate. Nothing was written."
         )
+    # Preflight's corpus guard, held here too: the one-command chain runs
+    # `preflight --skip-corpus` so the corpus is built once, in this stage, and a
+    # corpus that set a quarter of its documents aside must still stop before
+    # anything trains on it.
+    from orchestration.preflight import FAIL_REJECTED_SHARE
+
+    kept = {row["source_id"] for row in built.all_rows}
+    set_aside = len(documents) - len(kept)
+    if documents and not ctx.dry_run and set_aside / len(documents) > FAIL_REJECTED_SHARE:
+        why = built.cap_report.warning() or "see the build log for rejections"
+        raise PipelineError(
+            f"corpus {ctx.corpus} set aside {set_aside} of {len(documents)} document(s) "
+            f"({set_aside / len(documents):.0%}, more than {FAIL_REJECTED_SHARE:.0%}): {why} "
+            "Nothing was written."
+        )
 
     # Written where training reads them: one file per epoch, one per eval split,
     # all doc types together — one adapter trains on every type (§8.1).
@@ -959,7 +975,6 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
             write_jsonl(built.rows_by_split.get(split, [])),
         )
 
-    kept = {row["source_id"] for row in built.all_rows}
     first = documents[0]
     ocr_environment = ctx.client.read_json(
         paths.ocr_meta(first.doc_type, first.source_id, ctx.tenant_id)
@@ -1162,16 +1177,26 @@ def _rediscover_checkpoints(ctx: StageContext) -> None:
         ctx.checkpoints, ctx.best_loss_checkpoint = discover_checkpoints(staged)
 
 
-def _selection_settings(ctx: StageContext) -> dict[str, float]:
+def _selection_settings(ctx: StageContext) -> dict[str, Any]:
     """The validation cut's settings for checkpoint selection, from the scope's config."""
     from common.config import training_config
+    from common.constants import MODALITY_MODES
 
     evaluation = training_config(ctx.scope.training_config)["evaluation"]
+    # The reading modes the finalists' whole-document pass reads (none = all).
+    modes = [str(m) for m in (evaluation.get("selection_document_modes") or [])]
+    unknown = sorted(set(modes) - set(MODALITY_MODES))
+    if unknown:
+        raise PipelineError(
+            f"selection_document_modes names {unknown}, which no validation row is read in; "
+            f"the reading modes are {list(MODALITY_MODES)}"
+        )
     return {
         "validation_sample_rows": int(evaluation.get("validation_sample_rows") or 0),
         "selection_tie_break_margin": float(evaluation.get("selection_tie_break_margin") or 0.0),
         "selection_document_finalists": int(evaluation.get("selection_document_finalists") or 0),
         "selection_guard_margin": float(evaluation.get("selection_guard_margin") or 0.0),
+        "selection_document_modes": modes,
     }
 
 
@@ -1183,13 +1208,16 @@ def _checkpoint_scorer(ctx: StageContext) -> Any:
     from evaluation.checkpoint_eval import parallel_vllm_scorer, scoring_gpus, vllm_scorer
     from training.train import training_gpus
 
+    selection = _selection_settings(ctx)
     settings = {
         "client": ctx.client,
         # The scope's own validation view: scoring a policy checkpoint on
         # Loss Runs it never trained on measures the base model.
         "val_path": paths.corpus_scope_eval_split(ctx.corpus, "val", ctx.scope.name, ctx.tenant_id),
         "images_root": paths.staging_train_images_dir(ctx.corpus, ctx.tenant_id),
-        "sample_rows": int(_selection_settings(ctx)["validation_sample_rows"]),
+        "sample_rows": int(selection["validation_sample_rows"]),
+        # The finalists' whole-document pass (and a near-tie) reads these modes only.
+        "full_modes": selection["selection_document_modes"],
     }
     distributed = training_config(ctx.scope.training_config).get("distributed") or {}
     gpus = scoring_gpus()[: training_gpus(distributed)]
@@ -1239,7 +1267,8 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
             from evaluation.checkpoint_eval import choose_on_documents
 
             report = choose_on_documents(report, full, finalists=settings["selection_document_finalists"],
-                                         guard_margin=settings["selection_guard_margin"])
+                                         guard_margin=settings["selection_guard_margin"],
+                                         modes=settings["selection_document_modes"])
         elif full is not None:
             from evaluation.checkpoint_eval import break_tie
 
@@ -1261,8 +1290,13 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
     detail = f"selected {report.selected} (margin {report.margin:+.4f} field F1)"
     if report.loss_and_f1_disagreed:
         detail += f"; validation loss would have shipped {report.best_loss_checkpoint}"
+    from evaluation.checkpoint_eval import generation_cost
 
-    return StageResult("checkpoint_eval", "completed", detail, report.as_dict())
+    cost = generation_cost(scorer)
+    if cost:
+        detail += f"; {cost['rows']} row(s) generated in {cost['seconds']:.0f} s"
+    return StageResult("checkpoint_eval", "completed", detail,
+                       {**report.as_dict(), **({"generation": cost} if cost else {})})
 
 
 # --------------------------------------------------------------------------
@@ -1774,10 +1808,14 @@ def collect_calibration_samples(ctx: StageContext) -> dict[str, Any]:
         # One engine at a time: each format's model is freed before the next
         # loads, or the second format finds the card still full of the first.
         model = loader(ctx, fmt)
+        stats: dict[str, Any] = {}
         try:
-            generations = generate_validation(rows, model)
+            generations = generate_validation(rows, model, stats=stats)
         finally:
             release_model(model)
+        log.info("calibration (%s): %s row(s) in %s s, %s call(s) of up to %s, slowest %s s", fmt,
+                 stats.get("generated"), stats.get("seconds"), stats.get("calls"), stats.get("batch_rows"),
+                 stats.get("slowest_call_seconds"))
         assert_generations_usable(generations, what=f"calibration ({fmt})")
         halves = calibration_samples(generations)
         # Only a format with evidence gets an entry. An empty entry reads as
@@ -2685,7 +2723,12 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
             log.error("%s", exc)
             return report
 
+    from common.logging_setup import reassert
+
     for stage in stages:
+        # A library imported by the stage before (ms-swift, vLLM) may have
+        # silenced our log lines; every stage starts with them back on.
+        reassert()
         if _already_complete(stage, ctx):
             result = StageResult(stage.name, "skipped", "already complete — no-op")
             ctx.results[stage.name] = result
@@ -2694,6 +2737,7 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
             continue
 
         attempts = 0
+        began = time.monotonic()
         while True:
             attempts += 1
             log.info("stage %d %s%s%s", stage.number, stage.name,
@@ -2703,15 +2747,16 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
                 result = stage.run(ctx)
                 break
             except GateBlocked as blocked:
-                result = StageResult(
+                result = _timed(StageResult(
                     stage.name, "blocked", str(blocked),
                     {"failed_gates": list(getattr(blocked.gate_result, "failed_gates", []))},
-                )
+                ), began)
                 ctx.results[stage.name] = result
                 report.results.append(result)
                 report.blocked_at = stage.name
                 report.unlabeled_backlog = dict(ctx.unlabeled_backlog)
                 log.error("%s", blocked)
+                _write_progress(report)
                 return report
             except (PipelineError, paths.PathError) as exc:
                 # Deterministic: the stage cannot run at all with these inputs,
@@ -2720,11 +2765,12 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
                 # are for transient faults — a throttled Blob read, a pod that
                 # dropped — not for "below the day-zero floor" or a malformed
                 # --out-version.
-                result = StageResult(stage.name, "failed", str(exc))
+                result = _timed(StageResult(stage.name, "failed", str(exc)), began)
                 ctx.results[stage.name] = result
                 report.results.append(result)
                 report.failed_at = stage.name
                 log.error("stage %s cannot run: %s (not retried)", stage.name, exc)
+                _write_progress(report)
                 return report
             except Exception as exc:  # noqa: BLE001 - retried, then recorded and stops the run
                 if attempts < max(1, ctx.max_attempts) and not isinstance(
@@ -2738,16 +2784,53 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
                     if delay:
                         time.sleep(delay)
                     continue
-                result = StageResult(stage.name, "failed", str(exc))
+                result = _timed(StageResult(stage.name, "failed", str(exc)), began)
                 ctx.results[stage.name] = result
                 report.results.append(result)
                 report.failed_at = stage.name
                 report.unlabeled_backlog = dict(ctx.unlabeled_backlog)
                 log.error("stage %s failed after %d attempt(s): %s", stage.name, attempts, exc)
+                _write_progress(report)
                 return report
 
+        result = _timed(result, began)
         ctx.results[stage.name] = result
         report.results.append(result)
+        log.info("stage %d %s: %s in %s", stage.number, stage.name, result.status,
+                 _duration(result.data["wall_seconds"]))
+        _write_progress(report)
 
     report.unlabeled_backlog = dict(ctx.unlabeled_backlog)
     return report
+
+
+def _timed(result: StageResult, began: float) -> StageResult:
+    """``result`` with the stage's wall time since ``began`` - every attempt
+    included - in its data: what a run's time went on, measured, not guessed."""
+    result.data["wall_seconds"] = round(time.monotonic() - began, 1)
+    return result
+
+
+def _duration(seconds: float) -> str:
+    minutes, rest = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m {rest:02d}s" if hours else f"{minutes}m {rest:02d}s"
+
+
+#: Where the run report is written after every stage, on the pod's volume.
+PROGRESS_DIR_ENV = "FIDEON_LOG_DIR"
+
+
+def _write_progress(report: RunReport) -> None:
+    """The run report so far, written after every stage to
+    ``$FIDEON_LOG_DIR`` (default /workspace/logs) when that folder exists: a
+    run that dies part-way still says what each finished stage took."""
+    folder = Path(os.environ.get(PROGRESS_DIR_ENV) or "/workspace/logs")
+    if not folder.is_dir():
+        return
+    target = folder / f"run-{report.command}-{report.version}.json"
+    try:
+        target.write_text(json.dumps(report.as_dict(), indent=2, ensure_ascii=False, default=str),
+                          encoding="utf-8")
+    except OSError as exc:  # a report that cannot be written never stops the run
+        log.warning("run report not written to %s: %s", target, exc)

@@ -3,6 +3,8 @@ selection, and a near-tie broken on the full validation split."""
 
 from __future__ import annotations
 
+import pytest
+
 from evaluation.checkpoint_eval import CheckpointScore, SelectionReport, break_tie
 from evaluation.validation_sample import validation_sample
 
@@ -149,3 +151,105 @@ def test_one_candidate_needs_no_document_choice():
     report = _report([(280, 0.62)])
     choose_on_documents(report, lambda ck: 1 / 0, finalists=3, guard_margin=0.02)
     assert report.selected == "/ck/checkpoint-280" and report.document_choice is None
+
+
+def test_the_in_training_loss_reads_its_own_smaller_sample():
+    """The loss only draws the progress curve, so its checks read loss_sample_rows;
+    selection keeps validation_sample_rows. Unset, the loss reads the selection sample."""
+    from training.train import loss_sample_rows
+
+    assert loss_sample_rows({"validation_sample_rows": 400, "loss_sample_rows": 160}) == 160
+    assert loss_sample_rows({"validation_sample_rows": 400}) == 400
+    assert loss_sample_rows({}) == 0
+    sample = validation_sample(_rows(), 160)
+    assert len(sample) == 160
+    assert {r["modality_mode"] for r in sample} == {"ocr_plus_image", "noisy_ocr_image", "image_only"}
+
+
+def test_the_configured_loss_sample_is_no_larger_than_the_selection_sample():
+    from common.config import training_config
+
+    evaluation = training_config("unified")["evaluation"]
+    assert 0 < evaluation["loss_sample_rows"] <= evaluation["validation_sample_rows"]
+
+
+def test_the_finalists_whole_document_pass_reads_only_the_named_modes():
+    """selection_document_modes narrows .full by reading mode, never by row: every
+    document is scored whole in that mode, while the sample keeps all three."""
+    import json
+
+    from artifact_registry.blob_client import BlobClient, InMemoryBackend
+    from evaluation import checkpoint_eval as C
+
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="main")
+    rows = _rows()[:900]                                   # 300 documents x 3 modes
+    client.write_text("corpus/val.jsonl", "\n".join(json.dumps(r) for r in rows))
+    seen = []
+    original = C.generation_scorer
+
+    def recording(rows_, model):
+        seen.append(rows_)
+        return original(rows_, model)
+
+    C.generation_scorer = recording
+    try:
+        scorer = C.vllm_scorer(client=client, val_path="corpus/val.jsonl", model=object(), sample_rows=60,
+                               full_modes=["ocr_plus_image"])
+    finally:
+        C.generation_scorer = original
+    sample, full = seen
+    assert callable(scorer.full)
+    assert {r["modality_mode"] for r in sample} == {"ocr_plus_image", "noisy_ocr_image", "image_only"}
+    assert {r["modality_mode"] for r in full} == {"ocr_plus_image"}
+    assert sorted(r["source_id"] for r in full) == sorted({r["source_id"] for r in rows})
+
+
+def test_a_mode_filter_that_matches_no_row_is_refused():
+    from evaluation.checkpoint_eval import CheckpointEvalError, rows_in_modes
+
+    rows = _rows()[:9]
+    assert rows_in_modes(rows, None) == rows and rows_in_modes(rows, []) == rows
+    with pytest.raises(CheckpointEvalError, match="no validation row"):
+        rows_in_modes([r for r in rows if r["modality_mode"] != "image_only"], ["image_only"])
+
+
+def test_the_document_choice_records_the_modes_it_read():
+    from evaluation.checkpoint_eval import choose_on_documents
+
+    full = {"/ck/checkpoint-280": _document_metrics(0.55), "/ck/checkpoint-560": _document_metrics(0.58)}
+    report = _report([(280, 0.62), (560, 0.60)])
+    choose_on_documents(report, lambda ck: full[ck], finalists=2, guard_margin=0.02, modes=["ocr_plus_image"])
+    assert report.document_choice["modes"] == ["ocr_plus_image"]
+    report = _report([(280, 0.62), (560, 0.60)])
+    choose_on_documents(report, lambda ck: full[ck], finalists=2, guard_margin=0.02)
+    assert report.document_choice["modes"] == "all"
+
+
+def test_an_unknown_selection_mode_is_refused(monkeypatch):
+    import copy
+    from types import SimpleNamespace
+
+    import common.config as config
+    from common.scopes import get_scope
+    from orchestration import pipeline_dag
+
+    real = config.training_config
+
+    def with_fax(name):
+        cfg = copy.deepcopy(real(name))            # never the cached config itself
+        cfg["evaluation"]["selection_document_modes"] = ["fax"]
+        return cfg
+
+    monkeypatch.setattr(config, "training_config", with_fax)
+    with pytest.raises(pipeline_dag.PipelineError, match="fax"):
+        pipeline_dag._selection_settings(SimpleNamespace(scope=get_scope("casualty_fleet")))
+
+
+def test_the_configured_selection_judges_two_finalists_in_valid_modes():
+    from common.config import training_config
+    from common.constants import MODALITY_MODES
+
+    evaluation = training_config("unified")["evaluation"]
+    assert evaluation["selection_document_finalists"] == 2
+    assert evaluation["selection_document_modes"] == ["ocr_plus_image"]
+    assert set(evaluation["selection_document_modes"]) <= set(MODALITY_MODES)

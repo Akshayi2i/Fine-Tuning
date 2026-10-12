@@ -332,10 +332,9 @@ QUICK_COMMANDS = frozenset({"deploy-endpoint", "rollback-endpoint"})
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s %(name)s %(message)s",
-    )
+    from common.logging_setup import setup as setup_logging
+
+    setup_logging(logging.DEBUG if args.verbose else logging.INFO)
 
     # On the pod, every long command runs detached in tmux, so shutting the laptop
     # or losing Wi-Fi cannot stop it. Flipping the endpoint takes seconds.

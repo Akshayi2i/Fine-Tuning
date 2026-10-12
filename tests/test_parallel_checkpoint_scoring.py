@@ -180,5 +180,37 @@ def test_selection_scores_in_parallel_when_training_had_several_gpus(monkeypatch
     kind, kwargs = built[0]
     assert kind == ("parallel" if parallel else "single")
     assert kwargs["sample_rows"] == 400 and "smoke4x" in kwargs["val_path"]
+    assert kwargs["full_modes"] == ["ocr_plus_image"]
     if parallel:
         assert kwargs["gpus"] == gpus and kwargs["work_dir"].name == "checkpoint_scores"
+
+
+def test_the_full_pass_workers_are_told_which_modes_to_read(tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr(C, "_spawn", lambda c, e, p: started.append(_Worker(c, e, p, False)) or started[-1])
+    full = C.ParallelScorer(val_path="v", images_root=None, sample_rows=400, gpus=["0", "1"], work_dir=tmp_path,
+                            full_split=True, full_modes=["ocr_plus_image"], poll_seconds=0)
+    full.score_many(CHECKPOINTS[:2])
+    for worker in started:
+        assert worker.command[worker.command.index("--full-mode") + 1] == "ocr_plus_image"
+    started.clear()
+    sample = C.ParallelScorer(val_path="v", images_root=None, sample_rows=400, gpus=["0"], work_dir=tmp_path,
+                              full_modes=["ocr_plus_image"], poll_seconds=0)
+    sample.score_many(CHECKPOINTS[:1])
+    assert "--full-mode" not in started[0].command                   # the sample reads every mode
+
+
+def test_a_worker_narrows_its_full_pass_to_the_modes_it_is_given(monkeypatch, tmp_path):
+    from evaluation import checkpoint_score_worker as W
+
+    asked = []
+
+    def scorer(checkpoint):
+        return {"field_normalized_match": 0.7}
+
+    scorer.close = lambda: None
+    monkeypatch.setattr(C, "vllm_scorer", lambda **kwargs: asked.append(kwargs) or scorer)
+    monkeypatch.setattr("artifact_registry.blob_client.BlobClient", lambda: object())
+    W.main(["--val-path", "v", "--checkpoint", "/out/checkpoint-18", "--out", str(tmp_path / "s.json"),
+            "--full", "--full-mode", "ocr_plus_image"])
+    assert asked[0]["full_modes"] == ["ocr_plus_image"]

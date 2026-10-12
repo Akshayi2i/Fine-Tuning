@@ -421,7 +421,7 @@ def test_the_memory_settings_that_make_the_largest_cap_affordable_reach_the_trai
 
     assert swift.args["use_logits_to_keep"] is True
     assert swift.args["padding_free"] is True
-    assert swift.args["group_by_length"] is True
+    assert swift.args["group_by_length"] is False
     assert swift.args["gradient_checkpointing"] is True
 
 
@@ -792,9 +792,9 @@ def test_max_length_covers_the_per_doc_type_overrides():
     assert T.corpus_max_length() == 32768
 
 
-def test_the_length_pass_runs_on_several_processes_capped_at_the_cpu_count(monkeypatch):
-    """group_by_length makes ms-swift encode every row before step 1; on one
-    process that is ~5 hours for the full corpus."""
+def test_dataset_preprocessing_runs_on_several_processes_capped_at_the_cpu_count(monkeypatch):
+    """ms-swift's dataset preprocessing gets several processes, never more than
+    the pod has. (group_by_length, now off, made it encode every row before step 1.)"""
     import os
 
     monkeypatch.setattr(os, "cpu_count", lambda: 64)

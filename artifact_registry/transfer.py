@@ -63,13 +63,28 @@ def push_adapter(
     return prefix
 
 
+#: What serving, merging and the release read from an adapter folder. A
+#: training checkpoint also holds the optimizer and scheduler state a resume
+#: needs (~1.5 GB of a ~2 GB rank-64 checkpoint), which no reader of a published
+#: adapter opens.
+ADAPTER_FILES = ("adapter_config.json", "adapter_model.safetensors")
+
+
 def push_scoped_adapter(
     local_dir: str | Path, scope: str | None, version: str, *, client: BlobClient
 ) -> str:
     """Push one scope's adapter to :func:`paths.scoped_adapter_dir` — where the
-    run manifest and the release bundle say it is."""
+    run manifest and the release bundle say it is.
+
+    The adapter files only (:data:`ADAPTER_FILES`), and none whose bytes Blob
+    already holds: a re-push of the same release sends nothing.
+    """
     prefix = paths.scoped_adapter_dir(scope, version)
-    count = client.upload_dir(_require_dir(local_dir, "adapter"), prefix)
+    root = _require_dir(local_dir, "adapter")
+    missing = [name for name in ADAPTER_FILES if not (root / name).is_file()]
+    if missing:
+        raise TransferError(f"{root} holds no {', '.join(missing)}: it is not an adapter to publish")
+    count = client.upload_dir(root, prefix, names=ADAPTER_FILES, skip_identical=True)
     log.info("pushed %d adapter file(s) -> %s", count, prefix)
     return prefix
 
@@ -100,7 +115,8 @@ def push_merged_model(
     exists when the cycle was built ``--foundation-only``. ``scope`` addresses a
     scoped run's own model."""
     prefix = paths.merged_model_dir(version, doc_type, scope=scope)
-    count = client.upload_dir(_require_dir(local_dir, "merged model"), prefix)
+    # ~18 GB for an 8B bf16 model: a shard Blob already holds is not sent again.
+    count = client.upload_dir(_require_dir(local_dir, "merged model"), prefix, skip_identical=True)
     log.info("pushed %d merged-model file(s) -> %s", count, prefix)
     return prefix
 

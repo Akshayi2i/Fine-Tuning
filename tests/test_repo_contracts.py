@@ -282,7 +282,9 @@ def test_the_memory_settings_that_make_the_largest_cap_affordable_are_on():
     memory = config["memory"]
     assert memory["use_logits_to_keep"] is True
     assert memory["padding_free"] is True
-    assert memory["length_grouped_sampling"] is True
+    # Off: one row per device with padding_free leaves no padding to save, and it
+    # made ms-swift encode every row before step 1 (1.5 h on the CGL full run).
+    assert memory["length_grouped_sampling"] is False
 
 
 def test_deepspeed_is_not_the_first_reach_for_vram():

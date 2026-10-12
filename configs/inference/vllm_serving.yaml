@@ -58,6 +58,14 @@ generation:
   # again. Turn on for a run-to-run check, and measure the cost first.
   repeatable: false
 
+  # Rows per vLLM call when a whole split is generated (checkpoint selection,
+  # calibration; evaluation.validation_generation). A call ends when its longest
+  # answer does: at 32 rows about one call in four waited ~140 s on one long
+  # schedule while the GPU sat nearly idle (~25% of the CGL run's selection
+  # time). More rows per call, longest answer first, overlap those tails. Each
+  # call opens its rows' page images first, so this also bounds host memory.
+  validation_batch_rows: 96
+
 serving:
   backend: "vllm"              # vllm | hf | gguf
   served_model_tag: null       # resolved from the registry at deploy time
