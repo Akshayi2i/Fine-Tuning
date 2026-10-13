@@ -239,3 +239,21 @@ def test_imported_documents_are_what_the_labeling_stage_counts(tmp_path, client,
     import_batch(batch(tmp_path, ("a", "b")), "policy", client, raw_client)
 
     assert list_labeled_source_ids(client, "policy") == ["policy_0001", "policy_0002"]
+
+
+def test_the_deliverys_unseen_carrier_mark_reaches_the_label_metadata(tmp_path, client, raw_client):
+    """prepare_bundles marks a test document whose carrier no training document
+    has; dropped here, every delivered document read as a seen carrier's and the
+    gate could not report the unseen ones apart."""
+    root = tmp_path / "batch"
+    root.mkdir()
+    bundle(root, "unseen", pdf=b"%PDF-1.7 u", metadata={"lob": [LINE], "held_out_carrier": True})
+    bundle(root, "seen", pdf=b"%PDF-1.7 s", metadata={"lob": [LINE]})
+    report = import_batch(root, "policy", client, raw_client)
+    assert report.ok, report.describe()
+
+    def label_metadata(name):
+        return client.read_json(paths.label_metadata("policy", report.imported[name]))
+
+    assert label_metadata("unseen")["held_out_carrier"] is True
+    assert label_metadata("seen")["held_out_carrier"] is False

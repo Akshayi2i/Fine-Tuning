@@ -289,3 +289,62 @@ def test_a_root_manifest_naming_no_tenant_still_says_what_to_do(client):
     client.write_json("golden-eval-set/manifest.json", {"source_ids": ["policy_0001"]})
     with pytest.raises(FreezeError, match=r"golden-eval-set/\{tenant\}/, for the tenant it was frozen from"):
         is_frozen(client)
+
+
+def _test_documents(client, ctx):
+    import json
+
+    text = client.read_text(paths.corpus_eval_split(ctx.corpus, "test", None))
+    return sorted({(json.loads(line)["source_id"], json.loads(line)["doc_type"])
+                   for line in text.splitlines() if line.strip()})
+
+
+def _mark_in_label_metadata(client, source_id, doc_type):
+    key = paths.label_metadata(doc_type, source_id)
+    client.write_json(key, {**client.read_json(key), "held_out_carrier": True})
+
+
+def test_a_document_the_delivery_marks_as_an_unseen_carriers_is_frozen_as_one(client, controller):
+    ctx = _built_corpus(client, controller)
+    documents = _test_documents(client, ctx)
+    if not documents:
+        pytest.skip("the fixture corpus drew no test document")
+    source_id, doc_type = documents[0]
+    _mark_in_label_metadata(client, source_id, doc_type)
+
+    manifest = freeze_eval_set(client, ctx.corpus, allow_small=True)
+    root = paths.golden_eval_set_dir(None)
+    assert client.read_json(f"{root}/{source_id}/metadata.json")["held_out_carrier"] is True
+    assert manifest["held_out_source_ids"] == [source_id]
+
+
+def test_an_existing_frozen_set_is_marked_without_changing_anything_else(client, controller):
+    """A set frozen while the importer dropped the mark: re-import, then mark it.
+    Only the flag changes, so the yardstick stays the one every version was
+    scored on."""
+    from evaluation.freeze_eval_set import mark_held_out
+
+    ctx = _built_corpus(client, controller)
+    documents = _test_documents(client, ctx)
+    if not documents:
+        pytest.skip("the fixture corpus drew no test document")
+    freeze_eval_set(client, ctx.corpus, allow_small=True)
+    root = paths.golden_eval_set_dir(None)
+    source_id, doc_type = documents[0]
+    golden_before = client.read_json(f"{root}/{source_id}/golden.json")
+    assert client.read_json(f"{root}/{source_id}/metadata.json")["held_out_carrier"] is False
+
+    _mark_in_label_metadata(client, source_id, doc_type)       # what the re-import now writes
+    assert mark_held_out(client) == [source_id]
+    assert client.read_json(f"{root}/{source_id}/metadata.json")["held_out_carrier"] is True
+    assert client.read_json(f"{root}/{source_id}/golden.json") == golden_before
+    assert client.read_json(manifest_key())["held_out_source_ids"] == [source_id]
+    for other, _ in documents[1:]:
+        assert client.read_json(f"{root}/{other}/metadata.json")["held_out_carrier"] is False
+
+
+def test_marking_needs_a_frozen_set(client):
+    from evaluation.freeze_eval_set import mark_held_out
+
+    with pytest.raises(FreezeError, match="no frozen eval set"):
+        mark_held_out(client)

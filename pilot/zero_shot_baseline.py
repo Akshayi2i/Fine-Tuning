@@ -13,8 +13,9 @@ and one aggregate F1 hides which one you have.
 ``testing.run_extraction.run_document`` that the extraction command calls, which
 calls the serving pipeline::
 
-    python -m orchestration.run extract --model base \\
-           --input pilot/baseline_docs/ --ground-truth pilot/baseline_golden/
+    python -m data_pipeline.ingestion.import_labeled_pdfs --input pilot/baseline_docs \\
+           --doc-type policy --tenant pilot        # then OCR them (run_mineru --tenant pilot)
+    python -m orchestration.run extract --model base --tenant pilot --source-ids ...
 
 ``--model base`` and ``resolve_model_version("base")`` exist precisely so this
 experiment, day-zero pre-annotation (IMPL-04) and production all run one
@@ -328,20 +329,19 @@ def render(report: BaselineReport) -> str:
 
 def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin CLI
     parser = argparse.ArgumentParser(description="Experiment A — zero-shot baseline")
-    parser.add_argument("--input", type=Path, default=PILOT_ROOT / "baseline_docs")
-    parser.add_argument("--ground-truth", dest="ground_truth", type=Path,
-                        default=PILOT_ROOT / "baseline_golden")
     parser.add_argument("--reports", type=Path, default=REPORTS_DIR)
     parser.parse_args(list(argv) if argv is not None else None)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     raise SystemExit(
-        "Run this through the extraction command rather than here:\n"
-        "  python -m orchestration.run extract --model base "
-        "--input pilot/baseline_docs/ --ground-truth pilot/baseline_golden/\n"
-        "then feed its per-document metrics to summarise_baseline(). That command is still "
-        "waiting on a live model backend (the Phase 0 spike); the scoring and the decision table "
-        "in this module are complete and can be run against its output the moment it produces one."
+        "Run this through the extraction command rather than here. Import and OCR the baseline "
+        "documents into their own tenant, then extract them with the untuned model:\n"
+        "  python -m data_pipeline.ingestion.import_labeled_pdfs --input pilot/baseline_docs "
+        "--doc-type policy --tenant pilot\n"
+        "  /workspace/venv-ocr/bin/python -m data_pipeline.ocr.run_mineru --doc-type policy "
+        "--all-unprocessed --tenant pilot\n"
+        "  python -m orchestration.run extract --model base --tenant pilot --source-ids ...\n"
+        "then feed its per-document metrics (testing/metrics/base/) to summarise_baseline()."
     )
 
 

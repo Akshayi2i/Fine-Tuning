@@ -61,7 +61,7 @@ jobs:
         run: |
           pytest -q -m "not gpu and not azure" \
             --cov=training.data_collator \
-            --cov=data_pipeline.dataset_builder.split_train_val_test \
+            --cov=data_pipeline.dataset_builder.split_groups \
             --cov=inference_core.input_builder \
             --cov=inference_core.span_map \
             --cov=common.prompts \

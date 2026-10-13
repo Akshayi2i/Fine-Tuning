@@ -138,6 +138,9 @@ def test_the_extraction_command_runs_each_document_through_serving_with_the_adap
     assert every["policy.policy_number"]["result"] == "correct"
     assert (every["policy.effective_date"]["status"], every["policy.effective_date"]["result"]) == ("null", "empty")
     assert "all_fields" not in metrics
+    # Each written output is traced to what produced it; the failed document wrote none.
+    registry = json.loads((tmp_path / "out" / "extraction_registry.json").read_text(encoding="utf-8"))
+    assert [(e["document"], e["model_version"]) for e in registry["extractions"]] == [("policy_0001", model.tag)]
 
 
 def test_the_extract_subcommand_passes_the_adapter_through(monkeypatch):

@@ -61,6 +61,9 @@ class Criterion:
     diagnosis: str
     #: Derived criteria compare two metrics rather than reading one.
     derive: Callable[[dict[str, Any]], float | None] | None = None
+    #: The document types the criterion can be measured on; ``None`` for all. A
+    #: pilot holding none of them records it as not applicable, never as missed.
+    applies_to: frozenset[str] | None = None
 
     def value(self, metrics: dict[str, Any]) -> float | None:
         if self.derive is not None:
@@ -116,6 +119,10 @@ PILOT_CRITERIA: tuple[Criterion, ...] = (
         "lob_detection_accuracy", 0.85, "higher_is_better",
         "LoB corpus coverage (IMPL-05 corpus_manifest) — check the >=20%-per-value target before "
         "blaming the model.",
+        # Measured where the model writes the line. A policy takes its line from
+        # the request (detection ships off; scripts/measure_lob_detection.py
+        # measures it apart), so a policy-only pilot could never meet this.
+        applies_to=frozenset({"acord", "lossrun"}),
     ),
     Criterion(
         "alias_generalization_gap", RELATIVE_TOLERANCE, "lower_is_better",
@@ -172,6 +179,8 @@ class PilotReport:
     """Experiment C's output."""
 
     results: list[CriterionResult] = field(default_factory=list)
+    #: Criteria the pilot's document types cannot measure (Criterion.applies_to).
+    not_applicable: list[str] = field(default_factory=list)
     documents_by_doc_type: dict[str, int] = field(default_factory=dict)
     held_out_labels: dict[str, str] = field(default_factory=dict)
     run_ids: list[str] = field(default_factory=list)
@@ -200,6 +209,7 @@ class PilotReport:
             "run_ids": sorted(self.run_ids),
             "passed": self.passed,
             "criteria": [r.as_dict() for r in self.results],
+            "not_applicable": sorted(self.not_applicable),
             "caveat": (
                 "Pilot numbers are directional. At 3-4 test documents per type no single metric is "
                 "trustworthy alone; re-baseline properly at real scale and do not carry these "
@@ -221,7 +231,15 @@ def evaluate_pilot(
         held_out_labels=dict(held_out_labels or {}),
         run_ids=list(run_ids),
     )
-    report.results = [CriterionResult(c, c.value(metrics)) for c in PILOT_CRITERIA]
+    types = set(report.documents_by_doc_type)
+
+    def applies(criterion: Criterion) -> bool:
+        # With no document types given, every criterion counts: a pilot that
+        # does not say what it holds cannot excuse itself from one.
+        return not types or criterion.applies_to is None or bool(types & criterion.applies_to)
+
+    report.results = [CriterionResult(c, c.value(metrics)) for c in PILOT_CRITERIA if applies(c)]
+    report.not_applicable = [c.name for c in PILOT_CRITERIA if not applies(c)]
 
     for result in report.results:
         if result.unmeasured:

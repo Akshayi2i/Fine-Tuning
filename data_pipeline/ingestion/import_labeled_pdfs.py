@@ -245,6 +245,11 @@ def import_bundle(
         # Label values no page prints (prepare_bundles' label rules): the corpus
         # build leaves out the windows that hold them.
         "unprinted_values": list(bundle.metadata.get("unprinted_values") or []),
+        # A test document whose carrier no training document has, as the bundler
+        # marked it (prepare_bundles): the corpus build records it with the split
+        # (pipeline_dag.delivered_held_out_ids) and the frozen set reports it apart.
+        # Not copied, every delivered document read as a seen carrier's.
+        "held_out_carrier": bool(bundle.metadata.get("held_out_carrier", False)),
         "synthetic": bool(bundle.metadata.get("synthetic", False)),
         # The delivery's own split (train/val/test), when it was split upstream:
         # the corpus build then uses it as given (split_groups.assign_delivered_splits).

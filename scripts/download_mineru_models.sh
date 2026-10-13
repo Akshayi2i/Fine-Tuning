@@ -12,7 +12,9 @@
 # MinerU's downloader also fetches a config template from its master branch; this
 # script writes the config itself (data_pipeline.ocr.mineru_config --write).
 # The weights go to HF_HOME (on the volume), the config to MINERU_TOOLS_CONFIG_JSON
-# (on the volume), with model-source local: nothing is fetched at OCR time.
+# (on the volume). MINERU_MODEL_SOURCE=local, set in .env by pod_bootstrap.sh, is
+# what makes MinerU read them from there (the config carries no model-source key):
+# nothing is fetched at OCR time.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 WORKSPACE="${FIDEON_WORKSPACE:-/workspace}"

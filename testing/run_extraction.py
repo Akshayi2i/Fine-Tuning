@@ -391,6 +391,7 @@ def run_batch(
     images_root: Path = PAGE_CACHE,
     root: Path = TESTING_ROOT,
     score: bool = True,
+    quant_format: str | None = None,
 ) -> RunSummary:
     """Extract each document through the serving pipeline; write its JSON, metrics and a summary.
 
@@ -417,6 +418,8 @@ def run_batch(
             failed.append((source_id, f"{type(exc).__name__}: {exc}"[:300]))
             continue
         results_path, metrics_path = write_outputs(result, metrics, root=root)
+        # Each output traced to the model, format and mode that wrote it.
+        append_registry(result, results_path, metrics_path, root=root, quant_format=quant_format)
         results.append((result, metrics))
         log.info("[%d/%d] %s -> %s%s", index, len(source_ids), source_id, results_path,
                  f" (field match {metrics['field_normalized_match_rate']:.1%})"
@@ -496,7 +499,7 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
                        adapter=args.adapter, label=args.label)
     try:
         summary = run_batch(model, client, source_ids, doc_type=args.doc_type, tenant_id=args.tenant,
-                            mode=args.mode, score=args.score)
+                            mode=args.mode, score=args.score, quant_format=args.quant_format)
     finally:
         release_model(model)
     print(json.dumps(summary.as_dict(), indent=2))

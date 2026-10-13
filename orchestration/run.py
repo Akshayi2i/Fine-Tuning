@@ -315,12 +315,17 @@ def build_parser() -> argparse.ArgumentParser:
         "freeze-eval-set",
         help="copy a corpus's test split into its tenant's frozen golden eval set (once per tenant)",
     )
-    freeze.add_argument("--corpus", required=True, help="the corpus version whose test split to freeze")
+    freeze.add_argument("--corpus", default=None, help="the corpus version whose test split to freeze")
     freeze.add_argument("--tenant", default=None,
                         help="the tenant whose corpus is frozen into golden-eval-set/{tenant}/")
     freeze.add_argument(
         "--allow-small", dest="allow_small", action="store_true",
         help="freeze even when a document type has fewer than 150 test documents (a pilot)",
+    )
+    freeze.add_argument(
+        "--mark-held-out", dest="mark_held_out", action="store_true",
+        help="in the tenant's EXISTING frozen set, mark the documents the delivery calls unseen "
+             "carriers' (re-import the batch first); nothing else in the set changes",
     )
 
     return parser
@@ -348,9 +353,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         return run_extract(args)
 
     if args.command == "freeze-eval-set":
-        from evaluation.freeze_eval_set import freeze_eval_set
+        from evaluation.freeze_eval_set import freeze_eval_set, mark_held_out
         from registry_utils.write_run_manifest import capture_git_commit
 
+        if args.mark_held_out:
+            marked = mark_held_out(BlobClient(), tenant_id=args.tenant)
+            print(json.dumps({"held_out_source_ids": marked}, indent=2))
+            return 0
+        if not args.corpus:
+            build_parser().error("freeze-eval-set needs --corpus (or --mark-held-out on a frozen set)")
         manifest = freeze_eval_set(
             BlobClient(), args.corpus, tenant_id=args.tenant, git_commit=capture_git_commit(),
             allow_small=args.allow_small,

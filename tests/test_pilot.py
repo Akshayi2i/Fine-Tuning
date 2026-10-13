@@ -502,3 +502,22 @@ def test_an_empty_report_file_does_not_count_as_a_completed_experiment(tmp_path)
     assert decision.decision == "incomplete"
     assert not decision.go
     assert set(decision.missing) == {"zero_shot_baseline", "smoke_test", "pilot_run"}
+
+
+def test_a_policy_only_pilot_is_not_failed_on_line_detection_it_cannot_measure():
+    """A policy takes its line from the request, so a policy-only pilot never
+    measures lob_detection_accuracy; counted as missed, it could never pass."""
+    without = {k: v for k, v in PASSING_PILOT_METRICS.items() if k != "lob_detection_accuracy"}
+    report = evaluate_pilot(without, documents_by_doc_type={"policy": 28})
+    assert report.passed, [r.describe() for r in report.failed]
+    assert report.not_applicable == ["lob_detection_accuracy"]
+    assert report.as_dict()["not_applicable"] == ["lob_detection_accuracy"]
+
+
+def test_a_pilot_with_acord_still_needs_line_detection():
+    without = {k: v for k, v in PASSING_PILOT_METRICS.items() if k != "lob_detection_accuracy"}
+    report = evaluate_pilot(without, documents_by_doc_type={"policy": 28, "acord": 27})
+    assert not report.passed
+    assert [r.criterion.name for r in report.failed] == ["lob_detection_accuracy"]
+    # With no document types given, nothing is excused.
+    assert not evaluate_pilot(without).passed

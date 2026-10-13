@@ -14,7 +14,7 @@ in `schemas/` are those canonical models serialised to JSON Schema.
 
 | Where | What |
 |---|---|
-| `Documentation/finetuning-architecture-v2.1.docx` | The design and its rationale - the *why* (v2.1, with the v2.2 implementation update). v1 is kept for history only |
+| `Documentation/finetuning-architecture-v2.3.docx` | The design and its rationale - the *why* (v2.3, with the implementation update of 2026-10-13). v2.1 and v1 are kept for history only |
 | `Documentation/Implementation MDs/IMPL-00` .. `IMPL-15` | Module specs and acceptance criteria - the *how*; IMPL-00 §13 indexes what the code does now |
 | `Documentation/Implementation MDs/IMPL_ALL_COMBINED.md` | All specs in one file |
 
@@ -381,7 +381,6 @@ the reason and what unblocks it. They are the whole of what Phase 0 gates.
 
 | Where | Waiting on |
 |---|---|
-| `data_pipeline/ocr/run_mineru.py` (`MinerUEngine`, written against MinerU 1.x) | the Phase 0 spike running it on the GPU with MinerU's model weights |
 | `postprocessing/quantize.py` (FP8/AWQ export, GGUF export) | llm-compressor in its own environment; FP8 verified by the spike (bf16 needs no export) |
 | `artifact_registry/transfer.py` (`pull_base_model` from the Hub) | not needed on the pod: the base is read from `/workspace/models` |
 | `orchestration/runpod_controller.py` (`RunPodBackend`, endpoint deploy) | `RUNPOD_API_KEY` and the network volume; until then jobs run on the pod in tmux |

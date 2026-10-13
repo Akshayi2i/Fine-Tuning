@@ -11,8 +11,10 @@
 #   1. checks: a GPU (an H200 expected), /workspace mounted, >= 150 GB free
 #   2. .env: fills the pod's keys without touching any value already set
 #   3. /workspace/venv      training + serving (torch 2.8, ms-swift, vLLM 0.11, flash-attn)
-#   4. /workspace/venv-ocr  OCR (MinerU 1.x). Two environments because MinerU 1.x
-#                           cannot share one with vLLM 0.11 / torch 2.8.
+#   4. /workspace/venv-ocr  OCR (MinerU 3.4.5, pipeline backend). Two environments
+#                           because MinerU's dependency set (its own transformers,
+#                           onnxruntime, layout and OCR runtimes) is kept apart from
+#                           vLLM 0.11 / torch 2.8.
 #   5. MinerU's config onto the volume, device-mode cuda
 #   6. the base model at the pinned revision into /workspace/models
 #   7. the Phase 0 spike (plus the MinerU checks when --pdf is given)

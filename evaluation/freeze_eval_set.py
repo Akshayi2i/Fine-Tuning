@@ -201,6 +201,7 @@ def freeze_eval_set(
 
     split = corpus_manifest.get("split_assignment") or {}
     held_out_ids = set(split.get("held_out_source_ids") or [])
+    frozen_held_out: list[str] = []
 
     by_type: dict[str, int] = {}
     by_line: dict[str, int] = {}
@@ -230,11 +231,14 @@ def freeze_eval_set(
             # reports the real documents' scores apart (golden_eval "real_only").
             "synthetic": bool(metadata.get("synthetic", False)),
             "frozen_from_corpus": corpus_version,
-            # Whether the split held this document's carrier out of train and val
-            # (Fideon SPEC_09 amendment item 4): evaluation reports these apart.
+            # Whether this document's carrier is absent from train and val (Fideon
+            # SPEC_09 amendment item 4): held out by the split, or marked so by the
+            # delivery. Evaluation reports these apart.
             "carrier": metadata.get("carrier"),
-            "held_out_carrier": source_id in held_out_ids,
+            "held_out_carrier": held_out_carrier(source_id, metadata, held_out_ids),
         })
+        if held_out_carrier(source_id, metadata, held_out_ids):
+            frozen_held_out.append(source_id)
         # Written last: a document counts as part of the set once golden.json
         # exists (eval_set_source_ids), so an interrupted freeze leaves no
         # half-copied document that the gate would try to score.
@@ -259,6 +263,9 @@ def freeze_eval_set(
         # only while no document of theirs trains; the build warns when one does.
         "held_out_carriers": split.get("held_out_carriers", {}),
         "held_out_carriers_by_line": split.get("held_out_carriers_by_line", {}),
+        # The frozen documents reported apart as unseen carriers' (the split's own
+        # hold-out and the delivery's marks alike).
+        "held_out_source_ids": sorted(frozen_held_out),
     }
     client.write_json(manifest_key(tenant_id=tenant_id), manifest)
     log.info(
@@ -266,3 +273,39 @@ def freeze_eval_set(
         len(documents), corpus_version, root, manifest["documents_by_doc_type"],
     )
     return manifest
+
+
+def held_out_carrier(source_id: str, metadata: dict[str, Any], held_out_ids: set[str]) -> bool:
+    """Whether a frozen document is an unseen carrier's: the split held its carrier
+    out, or the delivery marked it so (label metadata ``held_out_carrier``)."""
+    return source_id in held_out_ids or bool(metadata.get("held_out_carrier", False))
+
+
+def mark_held_out(client: BlobClient, *, tenant_id: str | None = None) -> list[str]:
+    """Mark, in an existing frozen set, the documents the delivery calls unseen
+    carriers'. Returns them.
+
+    For a set frozen while the importer still dropped the delivery's
+    ``held_out_carrier`` flag: re-import the batch so the label metadata carries
+    it, then run this. Only that flag changes - never the documents, labels or
+    pages - so the yardstick stays the one every version was scored on; the gate
+    can now report these documents apart.
+    """
+    from data_pipeline.labeling.export_golden_labels import load_golden_label
+
+    root = paths.golden_eval_set_dir(tenant_id)
+    manifest = frozen_manifest(client, tenant_id=tenant_id)
+    if not manifest:
+        raise FreezeError(f"no frozen eval set at {root}/ to mark")
+    marked: list[str] = []
+    for source_id in manifest.get("source_ids") or []:
+        key = f"{root}/{source_id}/metadata.json"
+        frozen = client.read_json(key)
+        _label, metadata = load_golden_label(source_id, frozen["doc_type"], client, tenant_id)
+        if held_out_carrier(source_id, metadata, set()) or frozen.get("held_out_carrier"):
+            marked.append(source_id)
+            if not frozen.get("held_out_carrier"):
+                client.write_json(key, {**frozen, "held_out_carrier": True})
+    client.write_json(manifest_key(tenant_id=tenant_id), {**manifest, "held_out_source_ids": sorted(marked)})
+    log.info("marked %d frozen document(s) in %s as unseen carriers': %s", len(marked), root, marked)
+    return marked
