@@ -327,7 +327,9 @@ class BlobClient:
     def holds(self, local: str | Path, key: str) -> bool:
         """Whether ``key`` already holds exactly the bytes of ``local``: by the
         MD5 recorded with the blob. A blob that records none does not count."""
-        recorded = self._backend.md5(self._container_for(key), key)
+        # Retried as reads and writes are: one throttled properties call must not
+        # fail an 18 GB push.
+        recorded = self._retry(self._backend.md5, self._container_for(key), key)
         return recorded is not None and recorded == file_md5(local)
 
     def upload_dir(

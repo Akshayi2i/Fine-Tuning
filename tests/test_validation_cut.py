@@ -253,3 +253,59 @@ def test_the_configured_selection_judges_two_finalists_in_valid_modes():
     assert evaluation["selection_document_finalists"] == 2
     assert evaluation["selection_document_modes"] == ["ocr_plus_image"]
     assert set(evaluation["selection_document_modes"]) <= set(MODALITY_MODES)
+
+
+def test_a_split_between_one_and_three_samples_still_gets_its_whole_document_pass():
+    """900 rows, 300 per mode, sample 400: the sample is not the whole split, so the
+    finalists are still judged on whole documents - the 300 rows of the main mode."""
+    import json
+
+    from artifact_registry.blob_client import BlobClient, InMemoryBackend
+    from evaluation import checkpoint_eval as C
+
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="main")
+    rows = _rows()[:900]
+    client.write_text("corpus/val.jsonl", "\n".join(json.dumps(r) for r in rows))
+    seen = []
+    original = C.generation_scorer
+
+    def recording(rows_, model):
+        seen.append(rows_)
+        return original(rows_, model)
+
+    C.generation_scorer = recording
+    try:
+        scorer = C.vllm_scorer(client=client, val_path="corpus/val.jsonl", model=object(), sample_rows=400,
+                               full_modes=["ocr_plus_image"])
+    finally:
+        C.generation_scorer = original
+    assert callable(scorer.full)
+    assert [len(r) for r in seen] == [400, 300]
+    assert {r["modality_mode"] for r in seen[1]} == {"ocr_plus_image"}
+
+
+def test_a_mode_filter_that_matches_nothing_is_refused_before_an_engine_loads(monkeypatch):
+    import json
+
+    from artifact_registry.blob_client import BlobClient, InMemoryBackend
+    from evaluation import checkpoint_eval as C
+    from inference_core import model_runner
+
+    loaded = []
+    monkeypatch.setattr(model_runner, "load_model", lambda *a, **k: loaded.append(True))
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="main")
+    rows = [r for r in _rows()[:900] if r["modality_mode"] != "image_only"]
+    client.write_text("corpus/val.jsonl", "\n".join(json.dumps(r) for r in rows))
+    with pytest.raises(C.CheckpointEvalError, match="no validation row"):
+        C.vllm_scorer(client=client, val_path="corpus/val.jsonl", sample_rows=400, full_modes=["image_only"])
+    assert loaded == []                                   # no engine left holding the card
+
+
+def test_a_decision_made_on_the_sample_says_so():
+    from evaluation.checkpoint_eval import choose_on_documents
+
+    report = _report([(280, 0.62), (560, 0.60)])
+    report.scores[0].metrics.update(_document_metrics(0.50))
+    report.scores[1].metrics.update(_document_metrics(0.58))
+    choose_on_documents(report, None, finalists=2, guard_margin=0.02, modes=["ocr_plus_image"])
+    assert report.document_choice["modes"] == "sample (all modes)"

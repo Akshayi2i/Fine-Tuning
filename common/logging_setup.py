@@ -20,18 +20,39 @@ FORMAT = "%(levelname)s %(name)s %(message)s"
 #: This repository's top-level packages: their loggers are never left disabled.
 OWN_PACKAGES = frozenset({
     "artifact_registry", "calibration", "common", "data_pipeline", "evaluation", "inference_core",
-    "orchestration", "pilot", "registry_utils", "serving", "testing", "training",
+    "orchestration", "pilot", "postprocessing", "registry_utils", "scripts", "serving", "testing",
+    "training",
 })
 
 _level = logging.INFO
+
+
+class ConsoleHandler(logging.StreamHandler):
+    """The run's console handler - a subclass on purpose.
+
+    ms-swift's and modelscope's ``get_logger`` silence the root logger's console
+    by raising every handler whose type *is* ``logging.StreamHandler`` (what
+    ``basicConfig`` installs) to ERROR. A subclass is not that type, so ours is
+    left alone at the source; :func:`reassert` stays as the backstop for any
+    other library.
+    """
 
 
 def setup(level: int = logging.INFO) -> None:
     """The run's logging: ``level`` and up, to the console, in :data:`FORMAT`."""
     global _level
     _level = level
-    logging.basicConfig(level=level, format=FORMAT)
+    root = logging.getLogger()
+    if not any(isinstance(handler, ConsoleHandler) for handler in root.handlers):
+        root.addHandler(_console())
+    root.setLevel(level)
     reassert()
+
+
+def _console() -> ConsoleHandler:
+    handler = ConsoleHandler()
+    handler.setFormatter(logging.Formatter(FORMAT))
+    return handler
 
 
 def reassert() -> None:
@@ -46,9 +67,7 @@ def reassert() -> None:
     if root.level > _level:
         root.setLevel(_level)
     if not root.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(FORMAT))
-        root.addHandler(handler)
+        root.addHandler(_console())
     for handler in root.handlers:
         if handler.level > _level:
             handler.setLevel(_level)

@@ -214,3 +214,35 @@ def test_a_worker_narrows_its_full_pass_to_the_modes_it_is_given(monkeypatch, tm
     W.main(["--val-path", "v", "--checkpoint", "/out/checkpoint-18", "--out", str(tmp_path / "s.json"),
             "--full", "--full-mode", "ocr_plus_image"])
     assert asked[0]["full_modes"] == ["ocr_plus_image"]
+
+
+def test_the_workers_report_what_their_passes_cost(monkeypatch, tmp_path):
+    from evaluation import checkpoint_score_worker as W
+
+    def scorer(checkpoint):
+        scorer.passes.append({"checkpoint": checkpoint, "generated": 400, "seconds": 12.5})
+        return {"field_normalized_match": 0.7}
+
+    scorer.passes = []
+    scorer.close = lambda: None
+    monkeypatch.setattr(C, "vllm_scorer", lambda **kwargs: scorer)
+    monkeypatch.setattr("artifact_registry.blob_client.BlobClient", lambda: object())
+    out = tmp_path / "scores.json"
+    W.main(["--val-path", "v", "--checkpoint", "/out/checkpoint-18", "--out", str(out)])
+    assert json.loads(out.read_text())["/out/checkpoint-18"]["stats"] == {"generated": 400, "seconds": 12.5}
+
+    def spawn(command, env, log_path):
+        # A finished worker that reports its pass's cost with its score.
+        worker = _Worker(command, env, log_path, False)
+        out = Path(command[command.index("--out") + 1])
+        shares = [command[i + 1] for i, a in enumerate(command) if a == "--checkpoint"]
+        out.write_text(json.dumps({c: {"metrics": {"field_normalized_match": 0.5},
+                                       "stats": {"generated": 400, "seconds": 9.0}} for c in shares}))
+        return worker
+
+    monkeypatch.setattr(C, "_spawn", spawn)
+    parallel = C.ParallelScorer(val_path="v", images_root=None, sample_rows=400, gpus=["0"], work_dir=tmp_path,
+                                poll_seconds=0)
+    parallel.score_many(CHECKPOINTS[:1])
+    cost = C.generation_cost(parallel)
+    assert cost["rows"] == 400 and cost["seconds"] == 9.0 and cost["passes"][0]["gpu"] == "0"

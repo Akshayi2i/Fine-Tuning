@@ -146,8 +146,15 @@ def stage_subset(folders: list[Path], out: Path) -> int:
 
 
 def commands(*, batch_dir: Path, subset_dir: Path, tenant: str, version: str,
-             check_out: Path, scope: str = "personal_lines") -> dict[str, list[str]]:
-    """The command each step runs, with the interpreter of its environment."""
+             check_out: Path, scope: str = "personal_lines",
+             steps: tuple[str, ...] | list[str] = STEPS) -> dict[str, list[str]]:
+    """The command each step runs, with the interpreter of its environment.
+
+    When ``finetune`` runs too, preflight skips its in-memory corpus build:
+    finetune builds the same corpus and refuses the same >25% set-aside before
+    anything trains, so the corpus is built once. A preflight run on its own
+    keeps the build - there it is the point.
+    """
     py = sys.executable
     return {
         "import": [py, "-m", "data_pipeline.ingestion.import_labeled_pdfs", "--input", str(subset_dir),
@@ -161,7 +168,8 @@ def commands(*, batch_dir: Path, subset_dir: Path, tenant: str, version: str,
         # both steps refused it; it only ever passed on the twins' numbers.
         "preflight": [py, "-m", "orchestration.preflight", "--scope", scope, "--tenant", tenant,
                       "--corpus-version", version, "--out-version", version, "--ocr-check", str(check_out),
-                      "--out", str(check_out / "preflight.json"), "--min-labels-per-type", "1"],
+                      "--out", str(check_out / "preflight.json"), "--min-labels-per-type", "1",
+                      *(["--skip-corpus"] if "finetune" in steps else [])],
         "finetune": [py, "-m", "orchestration.run", "finetune", "--scope", scope, "--skip-ingest",
                      "--corpus-version", version, "--out-version", version, "--tenant", tenant,
                      "--min-labels-per-type", "1"],
@@ -230,7 +238,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
         print(f"smoke subset: {stage_subset(folders, subset_dir)} document(s) in {subset_dir}", flush=True)
     env = {**os.environ, "FIDEON_DETACHED": "1"}          # already in tmux: steps run in place
     for step, command in commands(batch_dir=batch_dir, subset_dir=subset_dir, tenant=args.tenant,
-                                  version=args.version, check_out=check_out, scope=args.scope).items():
+                                  version=args.version, check_out=check_out, scope=args.scope,
+                                  steps=steps).items():
         if step not in steps:
             continue
         print(f"\n=== smoke: {step} ===\n{' '.join(command)}", flush=True)

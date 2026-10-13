@@ -54,6 +54,10 @@ def main(argv: list[str] | None = None) -> int:
                 results[checkpoint] = {"metrics": dict(target(checkpoint))}
             except Exception as exc:  # noqa: BLE001 - recorded per checkpoint, as select_best does
                 results[checkpoint] = {"error": f"{type(exc).__name__}: {exc}"}
+            # What the pass cost (rows, calls, seconds), for the parent's report.
+            passes = getattr(target, "passes", None)
+            if passes and passes[-1].get("checkpoint") == checkpoint:
+                results[checkpoint]["stats"] = {k: v for k, v in passes[-1].items() if k != "checkpoint"}
             # Written after each, so a worker that dies later keeps what it scored.
             args.out.write_text(json.dumps(results), encoding="utf-8")
     finally:

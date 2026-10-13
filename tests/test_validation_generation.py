@@ -284,3 +284,30 @@ def test_selection_records_what_each_generation_pass_cost(client):
     assert [p["checkpoint"] for p in cost["passes"]] == ["/s/checkpoint-10", "/s/checkpoint-20", "/s/checkpoint-20"]
     assert cost["rows"] == 3 + 3 + 4 and cost["seconds"] >= 0
     assert generation_cost(object()) == {}
+
+
+def test_a_failed_call_is_retried_in_halves_so_only_the_bad_row_goes_alone(client):
+    """One unreadable page refuses the whole call. Halving finds its row in a few
+    batched rounds; one row at a time would make every row of the call a call."""
+    rows = _val_rows(8)
+    bad = rows[5]["source_id"]
+    text = json.dumps(GOLDEN, separators=(",", ":"))
+    singles = []
+
+    def generate_batch(msgs, configs, adapter=None):
+        if any(bad in json.dumps(m) for m in msgs):
+            return [RuntimeError("bad page")] * len(msgs)
+        return [EchoBackend(text).generate(m, c, adapter) for m, c in zip(msgs, configs, strict=True)]
+
+    def generate(messages, config, adapter=None):
+        singles.append(next(r["source_id"] for r in rows if r["source_id"] in json.dumps(messages)))
+        if bad in json.dumps(messages):
+            raise RuntimeError("bad page")
+        return EchoBackend(text).generate(messages, config, adapter)
+
+    backend = EchoBackend(text)
+    backend.generate_batch = generate_batch
+    backend.generate = generate
+    generations = generate_validation(rows, load_model("base", client, backend_impl=backend), batch_rows=8)
+    assert [g.error is None for g in generations] == [r["source_id"] != bad for r in rows]
+    assert len(singles) <= 2 and bad in singles            # the bad row's pair, not all eight

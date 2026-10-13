@@ -918,6 +918,15 @@ def modality_mix_of(ctx: StageContext) -> dict[str, float]:
         raise PipelineError(str(exc)) from exc
 
 
+def corpus_set_aside(documents: Sequence[Any], built: Any) -> tuple[int, float]:
+    """``(documents set aside, their share)``: loaded, yet in no row of the built
+    corpus. The one figure preflight's corpus check and the build's own guard
+    both read, so the two cannot disagree on what >25% means."""
+    kept = {row["source_id"] for row in built.all_rows}
+    set_aside = len(documents) - len(kept)
+    return set_aside, (set_aside / len(documents) if documents else 0.0)
+
+
 def stage_dataset_build(ctx: StageContext) -> StageResult:
     """Split, expand into modality variants, write JSONL, and pin the corpus.
 
@@ -954,13 +963,12 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
     from orchestration.preflight import FAIL_REJECTED_SHARE
 
     kept = {row["source_id"] for row in built.all_rows}
-    set_aside = len(documents) - len(kept)
-    if documents and not ctx.dry_run and set_aside / len(documents) > FAIL_REJECTED_SHARE:
+    set_aside, share = corpus_set_aside(documents, built)
+    if not ctx.dry_run and share > FAIL_REJECTED_SHARE:
         why = built.cap_report.warning() or "see the build log for rejections"
         raise PipelineError(
             f"corpus {ctx.corpus} set aside {set_aside} of {len(documents)} document(s) "
-            f"({set_aside / len(documents):.0%}, more than {FAIL_REJECTED_SHARE:.0%}): {why} "
-            "Nothing was written."
+            f"({share:.0%}, more than {FAIL_REJECTED_SHARE:.0%}): {why} Nothing was written."
         )
 
     # Written where training reads them: one file per epoch, one per eval split,
@@ -1141,10 +1149,13 @@ def stage_training(ctx: StageContext) -> StageResult:
         # little and means a reclaimed volume loses only the merged model. The
         # adapter itself — the checkpoint that loss preferred, or the last one —
         # not the placeholder note this used to write in its place.
+        # The adapter files only, as package publishes them - never the
+        # checkpoint's resume state, which would stay in the published prefix.
+        from artifact_registry.transfer import push_scoped_adapter
+
         adapter = ctx.best_loss_checkpoint or ctx.checkpoints[-1]
-        blob_dir = paths.scoped_adapter_dir(ctx.scope.name, ctx.out_version)
-        pushed = ctx.client.upload_dir(adapter, blob_dir)
-        log.info("pushed %d adapter file(s) from %s -> %s", pushed, adapter, blob_dir)
+        blob_dir = push_scoped_adapter(adapter, ctx.scope.name, ctx.out_version, client=ctx.client)
+        log.info("pushed the adapter from %s -> %s", adapter, blob_dir)
 
     return StageResult(
         "training", "completed",
@@ -1255,7 +1266,12 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
     # meaning the same thing is one that can disagree with the first.
     scorer = ctx.checkpoint_scorer
     if scorer is None:  # pragma: no cover - needs a GPU
-        scorer = _checkpoint_scorer(ctx)
+        try:
+            scorer = _checkpoint_scorer(ctx)
+        except CheckpointEvalError as exc:
+            # A split or setting the scorer cannot use fails identically on a
+            # retry - after loading another engine - so it is not retried.
+            raise PipelineError(f"checkpoint selection cannot start for {ctx.out_version}: {exc}") from exc
 
     settings = _selection_settings(ctx)
     try:
@@ -2756,7 +2772,7 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
                 report.blocked_at = stage.name
                 report.unlabeled_backlog = dict(ctx.unlabeled_backlog)
                 log.error("%s", blocked)
-                _write_progress(report)
+                _write_progress(report, ctx)
                 return report
             except (PipelineError, paths.PathError) as exc:
                 # Deterministic: the stage cannot run at all with these inputs,
@@ -2770,7 +2786,7 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
                 report.results.append(result)
                 report.failed_at = stage.name
                 log.error("stage %s cannot run: %s (not retried)", stage.name, exc)
-                _write_progress(report)
+                _write_progress(report, ctx)
                 return report
             except Exception as exc:  # noqa: BLE001 - retried, then recorded and stops the run
                 if attempts < max(1, ctx.max_attempts) and not isinstance(
@@ -2790,7 +2806,7 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
                 report.failed_at = stage.name
                 report.unlabeled_backlog = dict(ctx.unlabeled_backlog)
                 log.error("stage %s failed after %d attempt(s): %s", stage.name, attempts, exc)
-                _write_progress(report)
+                _write_progress(report, ctx)
                 return report
 
         result = _timed(result, began)
@@ -2798,7 +2814,7 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
         report.results.append(result)
         log.info("stage %d %s: %s in %s", stage.number, stage.name, result.status,
                  _duration(result.data["wall_seconds"]))
-        _write_progress(report)
+        _write_progress(report, ctx)
 
     report.unlabeled_backlog = dict(ctx.unlabeled_backlog)
     return report
@@ -2821,14 +2837,21 @@ def _duration(seconds: float) -> str:
 PROGRESS_DIR_ENV = "FIDEON_LOG_DIR"
 
 
-def _write_progress(report: RunReport) -> None:
+def progress_report_name(report: RunReport, ctx: StageContext) -> str:
+    """``run-<command>-<scope>-<tenant>-<version>.json``: two scopes or tenants
+    trained under one version tag (CGL v1, personal-lines v1) keep their own."""
+    scope = ctx.scope.name if getattr(ctx, "scope", None) is not None else "unified"
+    return f"run-{report.command}-{scope}-{paths._tenant(ctx.tenant_id)}-{report.version}.json"
+
+
+def _write_progress(report: RunReport, ctx: StageContext) -> None:
     """The run report so far, written after every stage to
     ``$FIDEON_LOG_DIR`` (default /workspace/logs) when that folder exists: a
     run that dies part-way still says what each finished stage took."""
     folder = Path(os.environ.get(PROGRESS_DIR_ENV) or "/workspace/logs")
     if not folder.is_dir():
         return
-    target = folder / f"run-{report.command}-{report.version}.json"
+    target = folder / progress_report_name(report, ctx)
     try:
         target.write_text(json.dumps(report.as_dict(), indent=2, ensure_ascii=False, default=str),
                           encoding="utf-8")

@@ -304,8 +304,8 @@ def generation_scorer(rows: list[dict[str, Any]], model: Any) -> Scorer:
 
 def generation_cost(scorer: Any) -> dict[str, Any]:
     """The generation passes a selection made - the sample's and ``.full``'s -
-    and their totals: what selection's time went on. Empty for a scorer that
-    keeps none (the parallel one: each worker generates in its own process)."""
+    and their totals: what selection's time went on. The parallel scorer's come
+    back from its workers. Empty for a scorer that keeps none."""
     passes = [*getattr(scorer, "passes", []), *getattr(getattr(scorer, "full", None), "passes", [])]
     if not passes:
         return {}
@@ -429,7 +429,9 @@ def choose_on_documents(
                                      for k in (DOCUMENT_ACCURACY, *DOCUMENT_GUARDS) if k in metrics[c.checkpoint]}
                       for c in scored},
         "guard_margin": guard_margin,
-        "modes": list(modes) if modes else "all",
+        # What the decision read: the whole-document pass's modes, or - when the
+        # split is its own sample and no pass ran - the sample, in every mode.
+        "modes": (list(modes) if modes else "all") if full_scorer is not None else "sample (all modes)",
         "excluded_by_guard": excluded,
         "decided": winner.checkpoint,
         "changed_choice": winner.checkpoint != report.selected,
@@ -456,29 +458,33 @@ def vllm_scorer(
     """
     from evaluation.validation_generation import read_rows
 
-    if model is None:  # pragma: no cover - needs a GPU
-        from inference_core.model_runner import load_model
-
-        model = load_model("base", client)
     rows = read_rows(client.read_text(val_path))
+    # Checked before the engine loads: a mode filter that matches no row is a
+    # configuration error, and an engine loaded first was never released.
+    if sample_rows:
+        rows_in_modes(rows, full_modes)
     if images_root is not None:
         # vLLM opens images by path; the rows hold Blob keys.
         from training.stage_data import localize_rows
 
         rows = localize_rows(rows, client, images_root)
+    if model is None:  # pragma: no cover - needs a GPU
+        from inference_core.model_runner import load_model
+
+        model = load_model("base", client)
     if not sample_rows:
         return generation_scorer(rows, model)
-    # Candidates are ranked on the fixed validation sample, the rows the training
-    # checks read; ``.full`` scores every row, for the near-tie (break_tie). One
-    # engine serves both. A split no bigger than the sample has no ``.full``: the
-    # near-tie would be scored again on the very rows that tied.
+    # Candidates are ranked on the fixed validation sample; ``.full`` - the
+    # finalists' whole-document pass and the near-tie (break_tie) - scores every
+    # row of the named modes. One engine serves both. Only a split that is its
+    # own sample has no ``.full``: its finalists are judged on the sample, which
+    # holds every row already.
     from evaluation.validation_sample import validation_sample
 
     sample = validation_sample(rows, sample_rows)
     score = generation_scorer(sample, model)
-    full_rows = rows_in_modes(rows, full_modes)
-    if len(sample) < len(full_rows):
-        score.full = generation_scorer(full_rows, model)  # type: ignore[attr-defined]
+    if len(sample) < len(rows):
+        score.full = generation_scorer(rows_in_modes(rows, full_modes), model)  # type: ignore[attr-defined]
     return score
 
 
@@ -539,6 +545,9 @@ class ParallelScorer:
     #: The reading modes the full split is narrowed to (:func:`rows_in_modes`).
     full_modes: list[str] = field(default_factory=list)
     poll_seconds: float = 15.0
+    #: What each worker's generation passes cost, as the workers report them
+    #: (:func:`generation_cost`).
+    passes: list[dict[str, Any]] = field(default_factory=list)
 
     def __call__(self, checkpoint: str) -> dict[str, float]:
         outcome = self.score_many([checkpoint])[checkpoint]
@@ -592,6 +601,8 @@ class ParallelScorer:
                     results = {}
                 for checkpoint in share:
                     result = results.get(checkpoint)
+                    if result and result.get("stats"):
+                        self.passes.append({"checkpoint": checkpoint, "gpu": gpu, **result["stats"]})
                     if result and "metrics" in result:
                         outcomes[checkpoint] = result["metrics"]
                         log.info("scored %s on GPU %s: field F1 %.4f", checkpoint, gpu,
@@ -620,6 +631,8 @@ def parallel_vllm_scorer(
     from evaluation.validation_sample import validation_sample
 
     rows = read_rows(client.read_text(val_path))
+    if sample_rows:
+        rows_in_modes(rows, full_modes)        # refused here, before any worker starts
     if images_root is not None:
         from training.stage_data import localize_rows
 
@@ -627,7 +640,7 @@ def parallel_vllm_scorer(
     settings = dict(val_path=val_path, images_root=images_root, sample_rows=sample_rows,
                     gpus=list(gpus), work_dir=Path(work_dir), full_modes=list(full_modes or []))
     scorer = ParallelScorer(**settings)
-    if sample_rows and len(validation_sample(rows, sample_rows)) < len(rows_in_modes(rows, full_modes)):
+    if sample_rows and len(validation_sample(rows, sample_rows)) < len(rows):
         scorer.full = ParallelScorer(**settings, full_split=True)  # type: ignore[attr-defined]
     return scorer
 

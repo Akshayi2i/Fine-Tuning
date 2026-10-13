@@ -1136,22 +1136,34 @@ def test_every_stage_records_its_wall_time_and_the_run_report_is_written_after_e
     from orchestration.pipeline_dag import PROGRESS_DIR_ENV, Stage, StageResult
 
     monkeypatch.setenv(PROGRESS_DIR_ENV, str(tmp_path))
+    ctx = make_context(client, controller, out_version="v1")
+    name = f"run-finetune-{ctx.scope.name}-{paths._tenant(ctx.tenant_id)}-v1.json"
     written = []
 
     def first(_ctx):
         return StageResult("first", "completed", "done")
 
     def second(_ctx):
-        written.append(json.loads((tmp_path / "run-finetune-v1.json").read_text(encoding="utf-8")))
+        written.append(json.loads((tmp_path / name).read_text(encoding="utf-8")))
         raise PipelineError("cannot run")
 
-    ctx = make_context(client, controller, out_version="v1")
     report = run_stages(ctx, [Stage(1, "first", "finetune", False, first),
                               Stage(2, "second", "finetune", False, second)], command="finetune")
     assert [r.data["wall_seconds"] >= 0 for r in report.results] == [True, True]
     assert [s["stage"] for s in written[0]["stages"]] == ["first"]      # written before stage 2 ran
-    final = json.loads((tmp_path / "run-finetune-v1.json").read_text(encoding="utf-8"))
+    final = json.loads((tmp_path / name).read_text(encoding="utf-8"))
     assert final["failed_at"] == "second" and "wall_seconds" in final["stages"][1]
+
+
+def test_two_scopes_under_one_version_keep_their_own_run_reports(client, controller):
+    from common.scopes import get_scope
+    from orchestration.pipeline_dag import RunReport, progress_report_name
+
+    report = RunReport(command="finetune", version="v1")
+    cgl = make_context(client, controller, scope=get_scope("casualty_fleet"), tenant_id="cgl")
+    personal = make_context(client, controller, scope=get_scope("personal_lines"), tenant_id="personal")
+    assert progress_report_name(report, cgl) != progress_report_name(report, personal)
+    assert progress_report_name(report, cgl) == "run-finetune-casualty_fleet-cgl-v1.json"
 
 
 def test_a_blocked_gate_is_never_retried(client, controller):

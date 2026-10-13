@@ -192,3 +192,17 @@ def test_an_empty_workspace_setting_means_the_default(monkeypatch):
         monkeypatch.delenv("FIDEON_WORKSPACE")
         importlib.reload(smoke)
         importlib.reload(preflight)
+
+
+
+def test_the_smoke_preflight_skips_the_corpus_build_only_when_finetune_builds_it():
+    from pathlib import Path
+
+    from orchestration.smoke_run import commands
+
+    tmp = Path("/tmp")
+    chained = commands(batch_dir=tmp, subset_dir=tmp, tenant="smoke", version="v0", check_out=tmp)
+    assert "--skip-corpus" in chained["preflight"]
+    alone = commands(batch_dir=tmp, subset_dir=tmp, tenant="smoke", version="v0", check_out=tmp,
+                     steps=["preflight"])
+    assert "--skip-corpus" not in alone["preflight"]

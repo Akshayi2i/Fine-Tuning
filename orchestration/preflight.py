@@ -216,7 +216,7 @@ def check_ocr_report(path: Path, results: list[Check]) -> None:
 
 
 def check_corpus(ctx, results: list[Check]) -> dict[str, Any]:
-    from orchestration.pipeline_dag import plan_corpus
+    from orchestration.pipeline_dag import corpus_set_aside, plan_corpus
 
     plan = plan_corpus(ctx)
     built = plan.built
@@ -227,8 +227,7 @@ def check_corpus(ctx, results: list[Check]) -> dict[str, Any]:
     kept = len({r["source_id"] for r in built.all_rows})
     skipped = Counter(reason.split(":")[0][:80] for _, reason in built.skipped)
     cap = built.cap_report.as_dict()
-    set_aside = documents - kept
-    share = set_aside / documents if documents else 0.0
+    set_aside, share = corpus_set_aside(plan.documents, built)
     facts = {"documents": documents, "kept": kept, "rows": rows, "delivered_split": plan.delivered,
              "frozen_eval_set": plan.frozen, "set_aside_reasons": dict(skipped.most_common(10)), "cap_report": cap}
     detail = (f"{documents} documents, {kept} kept; rows train {rows['train']}, val {rows['val']}, "

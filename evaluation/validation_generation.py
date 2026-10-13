@@ -223,6 +223,24 @@ def generate_validation(
         pending.append((entry, messages, schema, answer_cap(row.get("task"), row.get("doc_type")),
                         _answer_length(row)))
 
+    def _retry_in_halves(part: list[Any]) -> list[Any]:
+        """Results for ``part``, a call that failed together, retried half by half."""
+        if len(part) == 1:
+            _entry, messages, schema, cap, _n = part[0]
+            try:
+                return [generate(model, messages, adapter=adapter, json_schema=schema, max_new_tokens=cap)]
+            except Exception as exc:  # noqa: BLE001 - the one bad row is recorded, not raised
+                return [exc]
+        out: list[Any] = []
+        middle = len(part) // 2
+        for half in (part[:middle], part[middle:]):
+            if len(half) == 1:
+                out += _retry_in_halves(half)
+                continue
+            got = generate_batch(model, [(m, s, cap) for _e, m, s, cap, _n in half], adapter=adapter)
+            out += _retry_in_halves(half) if all(isinstance(r, Exception) for r in got) else got
+        return out
+
     size = max(1, batch_rows if batch_rows is not None else configured_batch_rows())
     started, calls, slowest = time.monotonic(), 0, 0.0
     for first in range(0, len(pending), size):
@@ -235,14 +253,10 @@ def generate_validation(
         results = generate_batch(model, [(m, s, cap) for _e, m, s, cap, _n in chunk], adapter=adapter)
         if len(chunk) > 1 and all(isinstance(r, Exception) for r in results):
             # A whole call fails together (one unreadable page image refuses the
-            # batch): retry its rows alone, so the bad one is the only loss.
-            results = []
-            for _entry, messages, schema, cap, _n in chunk:
-                try:
-                    results.append(generate(model, messages, adapter=adapter, json_schema=schema,
-                                            max_new_tokens=cap))
-                except Exception as exc:  # noqa: BLE001
-                    results.append(exc)
+            # batch): retried in halves until the bad row is alone - the only
+            # loss - in a few batched rounds, not one call per row (at ~50 s a
+            # row, 96 rows one by one cost over an hour).
+            results = _retry_in_halves(chunk)
         for (entry, _messages, _schema, _cap, _n), result in zip(chunk, results, strict=True):
             _finish(entry, result)
         calls += 1
