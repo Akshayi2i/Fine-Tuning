@@ -1,58 +1,70 @@
 # SPEC 12 — Testing / Extraction Routine (CLI Harness)
 
+> Aligned with the code at commit f5668a4 (2026-10-13).
+
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-03 (OCR), IMPL-07 (inference core), IMPL-08 (metrics), IMPL-09 (calibration), IMPL-11 (serving pipeline).
 >
 > **Naming hazard (master §0.1):** the architecture's "**Fideon SPEC_12**" is the external multi-tenant deployment spec. This file is our testing harness. Different documents.
 >
-> **Architecture refs:** `finetuning-architecture-v2.1.docx` §17 (**extraction/testing routine**), §19 (folder placement), §13a (quantized-format validation consumer), §5 (confidence without ground truth).
+> **Architecture refs:** `finetuning-architecture-v2.3.docx` §17 (**extraction/testing routine**), §19 (folder placement), §13a (quantized-format validation consumer), §5 (confidence without ground truth).
 
 ## Goal
 
-A CLI harness to test any fine-tuned model version on real PDFs post-training, producing structured JSON + per-field/overall confidence + quality metrics, with version-organized outputs and provenance. **It mirrors the exact production inference path (MinerU → model → JSON) by reusing the serving pipeline (IMPL-11), so what you test is what you ship.**
+A CLI harness to test any fine-tuned model version — or the base model with a training checkpoint applied — on real documents post-training, producing structured JSON + per-field/overall confidence + quality metrics, with version-organized outputs. The documents are ones the pipeline has already imported and OCR'd, read exactly as serving reads one (page images + MinerU page text). **It mirrors the exact production inference path (MinerU text → model → JSON) by reusing the serving pipeline (IMPL-11), so what you test is what you ship.**
 
 ## Deliverables
 
-### 1. Folder layout under `testing/` (create dirs with `.gitkeep`)
+### 1. Folder layout under `testing/`
 ```
 testing/
-├── run_extraction.py            # CLI entrypoint
-├── test_data/                   # INPUT: drop test PDFs here (scanned or digital, mixed)
-├── prompts/                     # one prompt file per doc type
-│   ├── acord.prompt.txt
-│   ├── policy.prompt.txt
-│   └── lossrun.prompt.txt
-├── ocr_cache/                   # cached MinerU output per doc: {doc_stem}/page_*.md, page_*.png
-├── results/{version}/           # OUTPUT: extracted JSON, organized BY MODEL VERSION
-│   └── v2/abcLossRun.json
-├── metrics/{version}/           # OUTPUT: per-doc metrics + _run_summary.json
-└── extraction_registry.json     # provenance: which doc → which model version, when
+├── run_extraction.py            # CLI entrypoint (also reached as `orchestration.run extract`)
+├── compare_models.py            # base vs base + adapter vs gold, per document (§6)
+├── comparison.py                # field-by-field comparison, the all-fields report, Excel workbooks
+├── render_prompts.py            # writes prompts/ from common.prompts
+├── prompts/                     # reference renders of the prompts serving sends (generated)
+│   ├── acord_25.prompt.txt, acord_125.prompt.txt, acord_140.prompt.txt
+│   ├── lossrun.prompt.txt
+│   ├── policy.prompt.txt, policy_<line>.prompt.txt               # + *.image_only.prompt.txt
+│   └── policy_<line>.{decl,arrays,lineblk}.prompt.txt            # window prompts, common-model lines
+├── ocr_cache/                   # page images fetched from processed/ in Blob, kept between runs
+├── results/{version}/           # OUTPUT: canonical JSON per document, organized BY MODEL VERSION
+│   └── v2/policy_0001.json
+├── results/comparisons/         # compare_models runs, downloaded from Blob (§6)
+├── metrics/{version}/           # OUTPUT: per-doc metrics + summary.json
+└── test_data/                   # git-ignored; read by no code: documents enter by import + OCR
 ```
+`extraction_registry.json` (§5) is appended by `run_batch` (through `append_registry`) after each document's
+results and metrics are written; a document that failed writes no entry.
 
 ### 2. `testing/prompts/*.prompt.txt`
-One per active doc type. Each contains the role framing, the **injected JSON schema for that type pulled from the IMPL-01 registry** (so it stays in sync), the extraction rules (null-handling, date formats, repeating table rows), and the modality-mode instruction line.
+One per ACORD form (25, 125, 140), one for Loss Runs, one for the bare `policy` (a package policy, an unclassified line) and one per policy line of business registered in the canonical family — each in `ocr_plus_image` and `image_only` — plus, for every common-model line, one per section group (`decl`, `arrays`, `lineblk`): the window prompts serving actually sends. Each contains the role framing, the **injected JSON schema for that selection pulled from the IMPL-01 registry** (so it stays in sync), the extraction rules (null-handling, date formats, repeating table rows), and the modality-mode instruction line. They are generated (`python -m testing.render_prompts --write`), never hand-edited.
 
-**Why one file per type (arch §17):** each document type has a different schema, different field semantics (a Loss Run's "valuation date" vs. an ACORD's "policy effective date"), and different edge cases. Separate files mean the doc-type detection step maps directly to a prompt file, and one type's prompt can be tuned without risk to the others.
+**Why one file per type, form and line (arch §17):** each has a different schema, different field semantics (a Loss Run's "valuation date" vs. an ACORD's "policy effective date"), and different edge cases. Separate files let a reviewer read exactly what each is asked, and one prompt can be tuned without risk to the others.
 
-**These are the same prompts serving uses.** They must resolve to the identical rendered prompt as `common.prompts` — testing and production must not drift. Assert this equality in a test rather than maintaining it by discipline.
+**These are the same prompts serving uses.** The harness does not read the files: it renders through `common.prompts` inside `serving.pipeline.extract`, as serving does. The files must resolve to the identical rendered prompt — `test_prompt_files_match_the_renderer` asserts this equality in a test rather than maintaining it by discipline.
 
 **Canonical field mapping needs no change here** (master §1.4): the semantic glosses are schema `description` fields, so they propagate automatically through the existing schema injection. The one requirement is negative — **the extraction path must never import `common.aliases`**. Mapping surface labels to canonical keys is the model's job; a runtime lookup would cap the system at a hand-written list. `test_no_runtime_aliases` (IMPL-14) enforces this.
 
 ### 3. `testing/run_extraction.py` — the CLI
 
 ```bash
-# User decides which model to run — base, v1, v2, v3, ...
-python testing/run_extraction.py --model v2   --input testing/test_data/
-python testing/run_extraction.py --model base --input testing/test_data/   # zero-shot baseline
+# User decides which model to run — base, v1, v2, v3, ... — on imported, OCR'd documents
+python -m testing.run_extraction --model v2   --tenant T --split test --corpus v1
+python -m testing.run_extraction --model base --tenant T --split test --corpus v1   # zero-shot baseline
+
+# The base model with a training checkpoint applied per request, not merged
+python -m testing.run_extraction --model base \
+       --adapter /workspace/staging/adapters/scope/personal_lines/v1/<run>/checkpoint-280 \
+       --tenant T --split val --corpus v1
 
 # Or through the operator command surface (IMPL-13), which wraps this:
-python -m orchestration.run extract --model v2 --input testing/test_data/
+python -m orchestration.run extract --model v2 --tenant T --source-ids policy_0001 policy_0002
 
-# Single file, image-only mode (no OCR), to test the no-OCR pathway
-python testing/run_extraction.py --model v2 --input testing/test_data/abcLossRun.pdf --mode image_only
+# Image-only mode (no OCR text), to test the no-OCR pathway
+python -m testing.run_extraction --model v2 --tenant T --source-ids policy_0001 --mode image_only
 
-# Full batch with OCR (default), with ground truth for metric scoring
-python testing/run_extraction.py --model v3 --input testing/test_data/ \
-       --mode ocr_plus_image --ground-truth testing/golden/
+# Extract without scoring against the gold labels
+python -m testing.run_extraction --model v2 --tenant T --split test --corpus v1 --no-score
 ```
 
 - `--model` resolves via IMPL-02 `resolve_model_version` — **the user never has to know paths, just the tag.** Accepted values:
@@ -60,114 +72,160 @@ python testing/run_extraction.py --model v3 --input testing/test_data/ \
   | Value | Resolves to |
   |---|---|
   | `base` | Untuned `Qwen/Qwen3-VL-8B-Instruct` at the pinned revision, **no adapter** |
+  | `base` + `--adapter <folder>` | The base with that LoRA applied on every request, **not merged** — a `checkpoint-N` folder or a run's adapter folder, local or a Blob prefix (copied once to `/workspace/adapters`). Refused with any other `--model`, without `adapter_config.json`, above the engine's `max_lora_rank`, or with `enable_lora: false` |
   | `v1`, `v2`, … | The merged model, plus a graduated per-type adapter where the routed type has one |
-  | `v2` + `--format fp8` | That version's FP8 serving weights. A GGUF format here is a category error: llama.cpp loads those, and the endpoint runs vLLM |
+  | `v2` + `--format fp8` | That version's FP8 serving weights (refused while the version is still staged). A GGUF format here is a category error: llama.cpp loads those, and the endpoint runs vLLM |
 
   **`base` is not a curiosity** — it is the zero-shot baseline of the pilot protocol (IMPL-15) and the day-zero pre-annotation path (IMPL-04). Supporting it here means those two have one implementation, not three.
+- **Which documents:** `--source-ids …` or `--split train|val|test` with `--corpus vN` (that corpus manifest's `source_ids_by_split`) — mutually exclusive; with neither, every labelled document of `--doc-type` (default `policy`) for `--tenant`. `--limit N` keeps the first N.
 - `--mode ocr_plus_image` (default) | `image_only` — both production pathways testable from one harness.
-- `--ground-truth` is **optional**: if supplied, metrics are computed against golden JSON; if omitted, the routine still runs and produces JSON + confidence scores.
-- Additional: `--format` (to test a specific quantized GGUF — the IMPL-10 `validate_quant` entry point when that ships), `--limit`, `--tenant` (optional, defaults from env).
+- **Scoring is on by default**: a document with a gold label in `golden-labels/` is scored against it; one without is extracted and not scored. `--no-score` extracts without comparing.
+- Additional: `--label` (the name results are filed under; default the tag, or `base+<run>-<checkpoint>` with `--adapter`), `--format`, `--limit`, `--tenant`.
 
 **What it does, step by step (arch §17):**
 ```
-For each PDF in --input:
-  1. OCR              → MinerU produces markdown + rendered page image(s) → ocr_cache/
-                        (skipped if --mode image_only; the image is still rendered)
-  2. Doc-type detect  → classify as acord | policy | lossrun (+ ACORD form)
-  3. Prompt select    → load the matching prompts/{doc_type}.prompt.txt
+For each source_id:
+  1. Read             → page count from processed/…/ocr_meta.json; every page image (cached in
+                        ocr_cache/) and MinerU's per-page markdown as page_texts (none under
+                        image_only); the label metadata (acord_form, lob) and the gold label
+  2. Doc type         → known: --doc-type with the label's ACORD form (StaticClassifier);
+                        the policy's line from the label metadata (classic auto → personal auto)
+  3. Prompt select    → rendered by common.prompts for that type, form, line and window group
   4. Assemble input   → system = prompt (schema + instructions)
-                        user   = [image] (+ OCR markdown, unless image_only)
-  5. Model inference  → selected --model version generates JSON + token logprobs
-  6. Confidence       → per-field confidence from logprobs, calibration applied
-  7. Validate         → JSON parses + conforms to that doc type's schema
-  8. Write result     → results/{version}/{doc_stem}.json
-  9. Metrics          → if ground truth available → metrics/{version}/{doc_stem}.metrics.json
- 10. Register         → append to extraction_registry.json
+                        user   = [page image + page marker (+ OCR markdown, unless image_only)] per page
+  5. Model inference  → the selected model generates JSON + token logprobs (policies: in windows, merged)
+  6. Confidence       → per-field confidence from logprobs; no release calibrators are loaded, so the
+                        identity transform applies and every field is flagged for review
+  7. Validate         → JSON parses + conforms to that selection's schema (strict_schema=False:
+                        an invalid answer is kept and flagged schema:invalid)
+  8. Write result     → results/{version}/{source_id}.json, with all_fields
+  9. Metrics          → scored against the gold label → metrics/{version}/{source_id}.metrics.json
+ 10. Summarise        → metrics/{version}/summary.json; a failed document is listed, the batch carries on
 ```
 
-**Steps 2–7 are executed by calling `serving/pipeline.py` (IMPL-11)** — the routine is a thin CLI wrapper over the serving pipeline plus OCR and metrics. It must **NOT re-implement inference**; doing so breaks test == prod, which is the entire point of the harness.
+**Steps 2–7 are executed by calling `serving/pipeline.py` (IMPL-11)** — the routine is a thin CLI wrapper over the serving pipeline plus document reading and metrics. It must **NOT re-implement inference**; doing so breaks test == prod, which is the entire point of the harness.
 
 ### 4. Metrics output
+
+**Results `results/{version}/{doc}.json`** — the serving output contract (`ExtractionResult.as_dict()`: `extraction` is the answer — for a policy, the canonical JSON with every key of its line's schema — then `fields`, `list_fields`, `line_of_business`, `pages_used`, `review_flags`, `route`, and `reconciliation` for a Loss Run) with **`all_fields`** inserted after `list_fields`: every field of the selection's schema (`testing.comparison.field_report`) — those neither the answer nor the gold holds too — each with its `value` and `status` (`extracted`, `null`, `no_rows`, `not_in_output`, `system`, `structural`), a written value's `confidence` and `page_ref`, its review `flags`, and against a gold label its `gold` value and `result` (`correct`, `wrong`, `missed`, `invented`, `empty`); plus a `summary` of counts and the `document_flags`.
 
 **Per-doc `metrics/{version}/{doc}.metrics.json`** (arch §17):
 ```json
 {
-  "document": "abcLossRun.pdf",
+  "document": "policy_0001",
   "model_version": "v2",
-  "doc_type": "loss_run",
+  "doc_type": "policy",
+  "mode": "ocr_plus_image",
   "schema_valid": true,
   "overall_confidence": 0.88,
-  "line_of_business": {"value": "workers_comp", "confidence": 0.92, "correct": true},
+  "pages_used": [1, 2, 3, 4, 5, 9],
+  "review_flags": ["coverages[3].limit:merge_conflict", "window_failed:arrays:p9"],
   "fields": {
-    "carrier":          {"value": "...", "confidence": 0.97, "correct": true},
-    "policy_number":    {"value": "...", "confidence": 0.94, "correct": true},
-    "valuation_date":   {"value": "...", "confidence": 0.71, "correct": false},
-    "claims[0].amount": {"value": 12000, "confidence": 0.63, "correct": true}
+    "policy.policy_number":   {"value": "...", "confidence": 0.94, "correct": true},
+    "policy.expiration_date": {"value": "...", "confidence": 0.71, "correct": false}
   },
+  "reference_accuracy": 0.91,
+  "coverage_code_accuracy": 0.95,
   "field_exact_match_rate": 0.91,
-  "list_field_f1": 0.88,
-  "list_field_recall": 0.83,
-  "row_completeness_flag": false,
-  "pages_used": [1, 2]
+  "field_normalized_match_rate": 0.93,
+  "field_accuracy_by_field": {"...": "..."},
+  "list_field_f1": {"coverages": 0.88},
+  "list_field_recall": {"coverages": 0.83},
+  "missed_rows": {"coverages": 2},
+  "failures": [{"field": "policy.expiration_date", "expected": "...", "got": "..."}]
 }
 ```
-All correctness uses IMPL-08 metrics and **`common.normalize`** — the same definition of "correct" as the promotion gate.
+All correctness uses IMPL-08 metrics — `score_fields`, `score_all_list_fields`, and `values_agree` for each field's `correct` (dates, amounts and names normalised, numbers compared by their declared type) — the same definition of "correct" as the promotion gate. The gold label is narrowed to what the line's schema can hold (`common.canonical.schema_label`) and the system-filled fields are left out of both sides. On a **common-model line** both sides are narrowed, ids are compared through what their links name (`common.structural_ids.comparable_for`), table values are scored (`core_for_scoring`, as `run_eval.score_subset` does), and links, codes and overflow get numbers of their own (`CommonModelTally`: `reference_accuracy`, `coverage_code_accuracy`, `coverage_code_recall`, `additional_fields_recall`, `additional_fields_precision`). Without a gold label the file says `"ground_truth": "not supplied — confidence reported, accuracy not measurable"`.
 
-**Batch summary `metrics/{version}/_run_summary.json`** — aggregates across all test docs for that model version: mean field-exact-match, mean list-field F1, **list-field recall**, schema-validity rate, ECE, **LoB detection accuracy per value**, per-doc-type breakdown, per-mode breakdown, and mean latency/document. **This is the file compared across model versions to answer "did v3 beat v2?"** — the testing-time mirror of the IMPL-08 promotion gate.
+**Batch summary `metrics/{version}/summary.json`** — aggregates across the batch for that model version: document count, schema-validity rate, mean confidence, mean latency per document, documents needing review, per-doc-type and per-mode counts, the failed documents with their errors, and — over the scored documents — mean field normalized match and mean list-field recall. **This is the file compared across model versions to answer "did v3 beat v2?"** — the testing-time mirror of the IMPL-08 promotion gate.
 
-**On the confidence-without-ground-truth case (arch §17):** even with no golden JSON — a brand-new unknown document — the routine still emits `overall_confidence` and per-field calibrated confidence. That is the whole payoff of the calibration work: confidence is available at inference time on documents you have never labeled, which is exactly what routes low-confidence extractions to human review in production.
+**On the confidence-without-ground-truth case (arch §17):** even with no golden JSON — a brand-new unknown document — the routine still emits `overall_confidence` and per-field confidence. That is the whole payoff of the calibration work: confidence is available at inference time on documents you have never labeled, which is exactly what routes low-confidence extractions to human review in production. (The harness loads no release calibrators, so its numbers are the identity transform of the raw signal, and every field is flagged; a release's calibrated confidence is measured by the golden eval, IMPL-08.)
 
 ### 5. `testing/extraction_registry.json`
-One entry per extraction, so an output JSON is never ambiguous about its origin:
+One entry per extraction, so an output JSON is never ambiguous about its origin — written by `append_registry`, which `run_batch` does not call today; until it does, provenance is the `results/{version}/` path and the `model_version` inside each result:
 ```json
 {
   "extractions": [
     {
-      "document": "abcLossRun.pdf",
-      "doc_type": "loss_run",
+      "document": "policy_0001",
+      "doc_type": "policy",
       "model_version": "v2",
       "quant_format": "fp8",
       "mode": "ocr_plus_image",
-      "result_path": "results/v2/abcLossRun.json",
-      "metrics_path": "metrics/v2/abcLossRun.metrics.json",
+      "result_path": "results/v2/policy_0001.json",
+      "metrics_path": "metrics/v2/policy_0001.metrics.json",
       "overall_confidence": 0.88,
       "schema_valid": true,
+      "review_flags": [],
       "extracted_at": "2026-02-15T11:03:00Z"
     }
   ]
 }
 ```
-Combined with the `results/{version}/` layout, anyone can see at a glance that `results/v2/abcLossRun.json` came from model v2 — from the path *and* the registry. `model_version` here is the same tag that resolves to a `run_manifest.json` (IMPL-02), so an extracted result traces all the way back to the corpus version and git commit that produced the model that generated it.
+Combined with the `results/{version}/` layout, anyone can see at a glance that `results/v2/policy_0001.json` came from model v2 — from the path *and* the registry. `model_version` here is the same tag that resolves to a `run_manifest.json` (IMPL-02), so an extracted result traces all the way back to the corpus version and git commit that produced the model that generated it.
+
+### 6. `testing/compare_models.py` — base vs base + adapter
+```bash
+python -m testing.compare_models --input policy.pdf --gold policy_gold.json --lob homeowners --adapter <checkpoint-N>
+python -m testing.compare_models --input data/bundles/<document>/ --adapter <adapter folder>
+python -m testing.compare_models --input <folder of document folders> --adapter <adapter folder>
+```
+- `--input` is a PDF (with `--gold` and `--lob`), a bundle folder (`document.pdf` + `golden.json` + `metadata.json`), or a folder of them. Each document is imported and OCR'd (in `/workspace/venv-ocr`) under its own tenant — `compare` by default, never `default` or the real data's — and a re-run finds it by checksum.
+- One model load (`load_model("base", adapter=…)`, and `without_adapter` for the base on the same engine); each document is extracted twice through `serving.pipeline.extract`, by the base alone and with the adapter applied, not merged. No calibrators: every field is flagged in both.
+- Per document under `--out` (default `testing/results/comparisons/<label>-<stamp>/`): `document.pdf`, `gold.json`, `base.json`, `adapter.json` (canonical JSON, every schema key), `base.all_fields.json`, `adapter.all_fields.json`, and `comparison.xlsx` (Summary and Fields sheets: each field's gold, base and adapter values, results, and `fixed`/`broke`). Table rows are matched by their identifier (a VIN, a form number, a coverage name), not by position. Across documents: `summary.xlsx` (one row per document, pooled totals) and `errors.json` when a route failed.
+- The finished folder is uploaded to Blob under `exports/{tenant}/comparisons/{run}/` (the raw container: it holds policy data), checked file by file, and removed from the pod (`--keep-on-pod` keeps it). The command prints the `azcopy` line that downloads it to the laptop, by default into `D:\Fine-Tuning\testing\results\comparisons` (git-ignored; `--download-to` changes it).
 
 ## Constraints
 - Confidence emitted even without ground truth.
 - **Same prompts and same pipeline as serving — reuse, never reimplement.**
-- MinerU version parity with the training corpus asserted (IMPL-03).
-- No PII in logs; `results/`, `metrics/`, and `ocr_cache/` are gitignored.
+- Documents are read from the OCR the pipeline wrote (`processed/`), produced by the pinned MinerU (IMPL-03); the corpus build refuses documents read by more than one MinerU. The harness does not re-check the pin.
+- No PII in logs; `results/`, `metrics/`, `ocr_cache/` and `test_data/` are gitignored, and comparison runs leave the pod through the raw container only.
 
 ## Acceptance checklist
-- [ ] `run_extraction --model v2 --input test_data/` writes `results/v2/*.json`.
+- [ ] `run_extraction --model v2 --split test --corpus v1` writes `results/v2/*.json`.
 - [ ] `--model base` runs the untuned base model with no adapter and writes `results/base/*.json`.
+- [ ] `--model base --adapter <checkpoint>` applies the LoRA per request without merging, and files results under `base+<run>-<checkpoint>` (or `--label`); `--adapter` with any other `--model` is refused.
 - [ ] `orchestration.run extract` produces byte-identical output to calling `run_extraction.py` directly.
 - [ ] `--mode image_only` runs with no OCR and still extracts.
 - [ ] Per-field + overall confidence present **with and without** ground truth.
 - [ ] `line_of_business` present in every result, with confidence, `null` when undetermined.
-- [ ] With `--ground-truth`, per-doc + summary metrics computed, including list-field recall and per-value LoB accuracy.
-- [ ] `--format q4_k_m` runs a quantized GGUF (feeds IMPL-10 `validate_quant` once that is built).
+- [ ] With a gold label, per-doc + summary metrics computed, including list-field recall; `--no-score` skips them.
+- [ ] Every result carries `all_fields`: every field of its schema, with its value and, against gold, its result.
+- [ ] `--format fp8` runs that version's FP8 serving weights once packaged (a GGUF format is a category error here: the harness runs vLLM).
 - [ ] `extraction_registry.json` links result → model version → run manifest.
 - [ ] `testing/prompts/*.prompt.txt` render identically to `common.prompts` for the same inputs (asserted, not assumed).
 - [ ] **Output equals the serving pipeline's output on the same input** (parity test).
+- [ ] `compare_models` writes base and adapter JSON, both `all_fields` reports and `comparison.xlsx` per document, `summary.xlsx` across them, under its own tenant, and uploads the run to `exports/{tenant}/comparisons/`.
 
 ---
 
-## Current implementation (2026-09-27)
+## Current implementation (2026-10-13)
 
-- `testing/run_extraction.py` validates its arguments and points to the operator command, which is the
-  supported entry: `python -m orchestration.run extract --model base|vN --input ... [--mode image_only]`.
-  Extraction goes through `serving.pipeline.extract` — windows and merge for canonical policies, calibrated
-  confidence, dates in `MM/DD/YYYY` — so test output is production output.
-- A policy request should carry its line of business (`lob`); without it the fallback canonical schema is
-  used.
-- On the pod `extract` runs detached in tmux like every long job; it survives a closed laptop.
-- The gate's numbers no longer come from this harness: they come from the frozen golden eval set
+- Both entries run the extraction: `python -m testing.run_extraction …` and
+  `python -m orchestration.run extract …`, which passes the same arguments to `run_extraction.main`. Extraction
+  goes through `serving.pipeline.extract` — windows and the window merge for policies, the serving guards,
+  every-key output, dates in `MM/DD/YYYY` — so test output is production output.
+- Documents are read from Blob as the pipeline wrote them (`document_request`): `processed/` page images and
+  MinerU markdown, `golden-labels/` gold and metadata. A document not yet OCR'd is refused with what to run;
+  one failing document is recorded in `summary.json` and the batch carries on (exit 1 only when every document
+  failed).
+- A policy's line comes from its label metadata (`lob`); without it the fallback canonical schema (the common
+  model) is used. No serving plan is passed, so nothing is refused for its line.
+- No calibrators are loaded: confidence is the identity transform and every field is flagged for review. This
+  run measures extraction, not a release's review thresholds.
+- On the pod `run_extraction` and `compare_models` run detached in tmux like every long job; they survive a
+  closed laptop.
+- The gate's numbers do not come from this harness: they come from the frozen golden eval set
   (IMPL-08 `golden_eval.evaluate_version`), through the same serving pipeline.
+
+## Changes since 2026-10-05
+
+- Added the alignment line and dated *Current implementation* 2026-10-13.
+- Goal and §1: documents are imported and OCR'd ones read from Blob, not PDFs dropped into `test_data/` (now unread); added `compare_models.py`, `comparison.py`, `render_prompts.py`, `results/comparisons/`, `summary.json`; the registry file is not written by the CLI.
+- §2: real prompt file names (per ACORD form, per line, image-only variants, window prompts per group); the harness renders through `common.prompts` rather than reading the files.
+- §3: replaced `--input`/`--ground-truth` with `--source-ids` / `--split` + `--corpus` / `--tenant` / `--doc-type` / `--no-score` / `--label`; added `--model base --adapter <checkpoint>`; corrected `--format` (FP8 serving weights, not GGUF); rewrote the step list (read from Blob, static classification, identity calibration, `strict_schema=False`, all_fields, summary).
+- §4: results JSON carries `all_fields`; per-doc metrics keys as written (typed `values_agree`, common-model scoring and tally metrics); summary is `summary.json` with the aggregates actually computed (no ECE or per-value LoB accuracy).
+- §5: noted that `append_registry` is not called by `run_batch`.
+- §6 (new): `compare_models` — inputs, compare tenant, outputs (`base/adapter.json`, `*.all_fields.json`, `comparison.xlsx`, `summary.xlsx`), upload to `exports/{tenant}/comparisons/{run}/` and the azcopy download.
+- Constraints and acceptance checklist updated to match.
+- `run_batch` now writes `extraction_registry.json` (commit f5668a4).

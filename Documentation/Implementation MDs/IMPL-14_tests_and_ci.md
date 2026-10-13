@@ -1,8 +1,10 @@
 # SPEC 14 — Unit Tests + CI Fixtures
 
+> Aligned with the code at commit f5668a4 (2026-10-13).
+
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: all prior specs (01–13).
 >
-> **Architecture refs:** `finetuning-architecture-v2.1.docx` §0a/§0b (schema + LoB contracts), §5 (list-field recall), §7 (prompt identity, split leakage), §8a/§8b (MinerU pin, tenancy), §10 (collator masking), §15 (gating).
+> **Architecture refs:** `finetuning-architecture-v2.3.docx` §0a/§0b (schema + LoB contracts), §5 (list-field recall), §7 (prompt identity, split leakage), §8a/§8b (MinerU pin, tenancy), §10 (collator masking), §15 (gating).
 
 ## Goal
 
@@ -11,14 +13,16 @@ A test suite + CI that verifies the correctness-critical pieces without GPUs or 
 ## Deliverables
 
 ### 1. `tests/fixtures/`
-- 2–3 tiny sample PDFs per active doc type (or synthetic stand-ins), MinerU-style OCR markdown, and matching golden JSON — CI-small, **containing no real PII**.
-- Fixtures covering the required corpus edge cases (arch §7): a multi-page document, a scanned/low-quality page, a document with a legitimately-absent field, and a Loss Run with a variable-length `claims` array.
-- Golden JSON fixtures **all carry `line_of_business`**, including at least one `null` case and coverage of more than one LoB value.
-- Golden JSON fixtures carry **`field_provenance`**, with the same canonical field appearing under **two different surface labels** across fixtures (e.g. `insured_name` as "Named Insured" in one, "Applicant" in another) so alias slicing has something to slice.
+- Tiny synthetic stand-ins per active doc type, MinerU-style OCR markdown, and matching golden JSON — CI-small, **containing no real PII** (`tests/fixtures/golden/`, `tests/fixtures/ocr/`). Test PDFs are drawn at test time with PyMuPDF rather than committed.
+- Fixtures covering the required corpus edge cases (arch §7): a multi-page document, a scanned/low-quality page, a document with a legitimately-absent field, and a Loss Run with a variable-length `claims` array. A 6-page common-model personal auto document (`tests/fixtures/schema2/personal_auto_6page.json`) splits vehicles from their coverages across windows.
+- Flat golden fixtures (ACORD, Loss Run) **carry `line_of_business`** as a list, covering more than one LoB value; canonical policy fixtures carry none (their line is the label metadata's `lob`); the empty-list case is built inline by the schema tests.
+- Label-metadata fixtures carry **`field_provenance`**, with the same canonical field appearing under **two different surface labels** across fixtures (`named_insured.primary_name` as "Applicant" in `policy_0001`, "Named Insured" in `policy_0002`) so alias slicing has something to slice.
 - At least one **confusable co-occurrence** fixture: a policy page carrying both a named insured and a certificate holder, with the golden JSON resolving them to different canonical keys.
 - Seeded synthetic logprob/generation samples for calibration + confidence tests.
-- An **in-memory mock Blob backend** (no live Azure).
+- An **in-memory mock Blob backend** (`artifact_registry.blob_client.InMemoryBackend`; no live Azure).
 - A seeded fake corpus manifest with `mineru_version`, `schema_version`, `prompt_template_version` for the pinning tests.
+- `tests/fixtures/old_style_prompt_fingerprints.json` — the frozen prompts, decoding schemas and required fields of every self-contained line, ACORD form and Loss Run slice.
+- `tests/conftest.py` — the `no_window_overlap` fixture, for tests of what happens at a window boundary (the configured one-page overlap moves the boundaries; the mechanisms remain).
 
 ### 2. Core tests (mirror each spec's acceptance checks)
 
@@ -30,37 +34,41 @@ A test suite + CI that verifies the correctness-critical pieces without GPUs or 
 | `test_dataset_builder.py`, `test_split_by_line.py` | No `source_id` crosses train/val/test; modality expansion happens **after** the split (IMPL-05). Leakage inflates every eval number the project trusts. |
 | `test_inference_core.py` | `build_messages` identical across eval/serving/testing contexts; `map_field_spans` correct for scalar, `null`, and list-row fields (IMPL-07). **Guards test == prod at the primitive level.** |
 | `test_parity.py` | Testing output == serving pipeline output on the same fixture (IMPL-11/12). Since testing reuses `serving/pipeline.py`, this asserts they don't diverge. |
-| `test_parity.py`, `test_serving_parity.py` | The rendered prompt at corpus-build time (IMPL-05) is **byte-identical** to the one at inference time (IMPL-07) and to `testing/prompts/*.prompt.txt` (IMPL-12), for every doc_type × modality mode. Training/inference prompt drift is the most common cause of post-fine-tuning degradation and shows up in no training metric. |
+| `test_parity.py`, `test_serving_parity.py` | The rendered prompt at corpus-build time (IMPL-05) is **byte-identical** to the one at inference time (IMPL-07) and to `testing/prompts/*.prompt.txt` (IMPL-12), for every doc_type × modality mode and every common-model window prompt. Training/inference prompt drift is the most common cause of post-fine-tuning degradation and shows up in no training metric. |
+| `test_old_style_prompts_frozen.py` | The self-contained lines, ACORD forms and Loss Run render exactly as frozen in `old_style_prompt_fingerprints.json`: common-model work runs through code every policy uses and must not move their prompts. |
+| `test_schema2_serving.py` | **Replay**: every window serving asks for is answered with the target training built for it, and the served answer is the gold label back — values, units and links, renumbered in printed order. Guards that training targets, the merge and serving agree. |
 
 **Contract and correctness:**
 
 | Test | Guards |
 |---|---|
 | `test_schema_contract.py` | Schemas load; valid examples pass; malformed/wrong-type fail (IMPL-01/08) |
-| `test_schema_contract.py`, `test_labeling.py` | Every schema requires `line_of_business`; out-of-enum values rejected; `null` accepted; a golden label missing the key is rejected by IMPL-04; per-value LoB accuracy computed correctly by IMPL-08 |
+| `test_schema_contract.py`, `test_labeling.py` | Every flat schema requires `line_of_business` as a list of enum values; out-of-enum values rejected; an empty list accepted (undetermined); a golden label missing the key is rejected by IMPL-04; per-value LoB accuracy computed correctly by IMPL-08 |
+| `test_schema_resolver.py`, `test_schema2_model_view.py` | Each SPEC_21 overlay bundles into one self-contained schema, and a bundle naming another file, another common-model version or an unlisted coverage code is refused; the model view holds what the model writes (no pipeline-filled field, codes from the line's list, no alias text) |
 | `test_dataset_builder.py` | 50/20/30 holds; `image_only` rows omit OCR; `noisy_ocr_image` renders the same prompt as `ocr_plus_image` (IMPL-05) |
 | `test_dataset_builder.py` | No corpus file mixes tenants — the one live tenancy rule, because corpus composition is training data (IMPL-05) |
-| `test_ingestion_ocr.py` | A MinerU version mismatch between corpus manifest and runtime raises in dataset build, serving, and testing (IMPL-03) |
+| `test_ingestion_ocr.py` | A MinerU version mismatch between corpus manifest and runtime raises in dataset build, serving, and testing; a corpus read by two MinerU versions is refused; a document another MinerU read counts as unprocessed (IMPL-03) |
 | `test_evaluation_calibration.py`, `test_eval_integrity.py` | Normalized match (dates/currency/names), list F1, and **list recall** correct (IMPL-08) |
 | `test_evaluation_calibration.py` | A regression on **any single** metric blocks promotion — including LoB accuracy alone; an override needs a named approver and a written reason; a `--continue-from` candidate lacking cross-type regression evidence is blocked (IMPL-08) |
 | `test_evaluation_calibration.py` | Temperature + isotonic reduce ECE; params persist/reload; `apply_calibration` **raises** on missing params; list-completeness flags dropped rows even when per-value confidence is high (IMPL-09) |
-| `test_registry.py` | `RunManifest` validates; `adapters_depending_on` + `resolve_model_version` + `diff_manifests` correct (IMPL-02) |
-| `test_serving_pipeline.py`, `test_release_router.py` | Low classifier confidence → Foundation-only fallback + review flag; ACORD returns doc_type **and** form; deterministic selection (IMPL-11) |
-| `test_serving_pipeline.py`, `test_policy_windows.py` | Documents over the page threshold route and record `pages_used`; short docs skip; the declarations-page conflict rule resolves duplicates (IMPL-11) |
+| `test_registry.py` | `RunManifest` validates; `adapters_depending_on` + `resolve_model_version` + `diff_manifests` correct; each tenant has its own golden eval set path (IMPL-02) |
+| `test_serving_pipeline.py`, `test_release_router.py` | Low classifier confidence → an extraction for both candidates, each against its own schema, flagged `routing:low_confidence`; an unclassifiable document refused unless a fallback is configured (then flagged `routing:unclassified`); ACORD returns doc_type **and** form; deterministic release selection (IMPL-11) |
+| `test_layout_family_routing.py`, `test_lob_detection.py`, `test_schema2_review_lob.py`, `test_lob_classifier_wiring.py` | A policy reaches its line's layout-family release, else an unrestricted release, else the base model against `_fallback.json` with `lob_fallback_used` and a flag; the family table agrees with the delivered `lob_schema_map.yaml`; line detection never fails a request, ships off, and builds its classifier at cold start only when on and the engine holds the base (IMPL-11) |
+| `test_serving_pipeline.py`, `test_policy_windows.py` | Long documents are read as section windows and record `pages_used`; the declarations-page conflict rule resolves duplicates (IMPL-11) |
 | `test_training.py` | Fires on perception-type errors below target; **does not** fire on schema/reasoning errors; no code path enables full ViT fine-tuning (IMPL-06) |
 | `test_ids_and_run_ids.py` | id build/parse/validate round-trips (IMPL-01) |
 | `test_schema_contract.py` | Registry loads for every doc type; **every schema field has a non-empty `description`**; no string appears in both `aliases` and `confusables` for one field; the rendered prompt contains descriptions and **contains no alias strings** (IMPL-01) |
 | `test_labeling.py` | A label whose `field_provenance` names a registered confusable is **rejected** by `export_golden_labels`; provenance round-trips through review-tool export (IMPL-04) |
 | `test_evaluation_calibration.py` | Misattribution scored correctly on synthetic cases and distinguished from an ordinary wrong value; a regression on it alone blocks promotion (IMPL-08) |
 | `test_no_runtime_aliases.py` | **No module under `serving/`, `inference_core/`, or `testing/` imports `common.aliases`** — the master §1.4 anti-pattern, enforced by an import check rather than by discipline |
-| `test_orchestration.py` | `all` = `finetune` + `package` and **never** invokes extraction; a failed gate stops `finetune` before merge and `all` before `package`; `--from-stage` resumes and a completed stage re-runs as a no-op (IMPL-13) |
-| `test_registry.py` | `resolve_model_version("base")` returns the pinned base with no adapter; `"v2"` returns Foundation + per-type; a `staged` manifest resolves to volume paths and a `published` one to Blob paths (IMPL-02/13) |
+| `test_orchestration.py` | `all` = `finetune` + `package` and **never** invokes extraction; `finetune` ends at merge and `package` owns the gate (quantize → calibrate → gate → push), so a failed gate stops before anything is pushed; no CLI flag can override the gate; `--from-stage` resumes and a completed stage re-runs as a no-op; every stage records its wall time and the run report is written after each, named per scope and tenant; a corpus that set aside more than 25% is refused by the build (IMPL-13) |
+| `test_registry.py` | `resolve_model_version("base")` returns the pinned base with no adapter; a unified run resolves by its tag; a `staged` manifest resolves to volume paths and a `published` one to Blob paths (IMPL-02/13) |
 | `test_orchestration.py` | `finetune` writes a Blob manifest with `status: "staged"` even though weights stay on the volume; `package` flips it to `"published"` with real paths and fails loudly when the version is not staged (IMPL-13) |
 
 ### 3. CI
-- `.github/workflows/ci.yml`: install `[dev]` extras, run `ruff`, `mypy`, `pytest` on every push. Mark GPU + live-Azure tests to skip so CI is **CPU-only and fast**.
-- **Coverage gate on the correctness-critical modules**: collator masking, split, inference core, prompt rendering, metrics, calibration, gating, registry.
-- A **secret/PII scan** over fixtures so no real document data enters the repo.
+- `.github/workflows/ci.yml`, on every push and pull request: install `.[data,eval,dev]`, `ruff check .`, `mypy` over the code packages (`common artifact_registry registry_utils data_pipeline inference_core training evaluation calibration serving postprocessing testing orchestration pilot`), `python -m testing.render_prompts --check` (the checked-in reference prompts are current), then `pytest -q -m "not gpu and not azure"` with coverage. GPU and live-Azure tests are marked (`gpu`, `azure` in `pyproject.toml`) so CI is **CPU-only and fast**.
+- **Coverage gate on the correctness-critical modules** (`--cov-fail-under=85`): `training.data_collator`, `inference_core.input_builder`, `inference_core.span_map`, `common.prompts`, `common.normalize`, `evaluation.gating`, `calibration.apply_calibration`, `registry_utils.models` and the split code, `data_pipeline.dataset_builder.split_groups`.
+- A **secret/PII scan** job: SSN-shaped strings in `tests/fixtures/` and `schemas/examples/`, and credential-shaped strings (`AccountKey=`, SAS signatures, private keys) anywhere in the repo, fail the build.
 
 ## Constraints
 - Runs without GPU or live Azure (mock/stub heavy deps).
@@ -69,16 +77,16 @@ A test suite + CI that verifies the correctness-critical pieces without GPUs or 
 
 ## Acceptance checklist
 - [ ] `pytest` passes green on CPU-only CI.
-- [ ] Collator masking test **fails** when masking is deliberately broken (mutation-checked).
+- [ ] Collator masking test **fails** when masking is deliberately broken (mutation-checked: `test_training.py::test_masking_out_assistant_tokens_is_caught` and its neighbours; `test_stage_data.py::test_a_run_whose_masking_supervises_the_prompt_is_refused`).
 - [ ] Split-leakage test **fails** if expansion is moved before the split.
-- [ ] `test_prompt_parity` fails when the corpus-build prompt and the inference prompt diverge by a single character.
-- [ ] `test_inference_core` + `test_test_prod_parity` pass on fixtures.
-- [ ] `test_lob_contract` fails when a schema drops `line_of_business`.
-- [ ] `test_corpus_tenancy` fails when a corpus mixes tenants.
-- [ ] `test_gating` fails if any override path is introduced.
-- [ ] `test_command_surface` fails if `all` ever reaches `package` on a failed gate, or if it invokes extraction.
-- [ ] `test_staging_contract` fails if `finetune` can complete without writing a manifest to Blob.
-- [ ] `test_alias_registry` fails when any schema field is missing a `description`, or when an alias string leaks into a rendered prompt.
+- [ ] The prompt-parity tests (`test_parity.py::test_the_serving_prompt_is_the_corpus_prompt`, `test_the_reference_prompts_match_the_renderer`) fail when the corpus-build prompt and the inference prompt diverge by a single character.
+- [ ] `test_inference_core.py` + `test_parity.py` pass on fixtures.
+- [ ] `test_schema_contract.py::test_line_of_business_is_a_required_list_of_enum_values` fails when a flat schema drops `line_of_business`.
+- [ ] `test_dataset_builder.py::test_cross_tenant_mixing_is_refused` fails when a corpus mixes tenants.
+- [ ] `test_orchestration.py::test_no_cli_flag_can_override_the_gate` fails if a CLI override path is introduced; the only override is a recorded written one (named approver, reason, waived gates — `test_evaluation_calibration.py::test_an_override_must_be_attributable`).
+- [ ] `test_orchestration.py::test_all_never_reaches_package_on_a_failed_gate` and `test_all_never_includes_extraction` fail if `all` ever pushes past a failed gate, or invokes extraction.
+- [ ] `test_orchestration.py::test_finetune_writes_a_blob_manifest_while_weights_stay_staged` fails if `finetune` can complete without writing a manifest to Blob.
+- [ ] `test_schema_contract.py` fails when any schema field is missing a `description` (`test_every_field_has_a_description`, `test_every_canonical_field_has_a_description`), or when an alias string leaks into a rendered prompt (`test_no_alias_string_reaches_the_prompt`).
 - [ ] `test_no_runtime_aliases` fails the moment a serving or inference module imports `common.aliases`.
 - [ ] `tests/test_module_seams.py` passes — **the seam suite**.
 - [ ] `ruff` + `mypy` clean.
@@ -91,29 +99,75 @@ A unit test proves a module is self-consistent. Only a test that runs both sides
 
 ---
 
-## Current implementation (2026-09-27)
+## Current implementation (commit f5668a4, 2026-10-13)
 
-~1,460 tests, CPU-only, no live Azure (`pytest -q`). Test files added since this spec, each guarding a
-failure that was real:
+2,765 tests collected in 122 test modules, CPU-only, no live Azure (`pytest -q`). Test files added since this
+spec, each guarding a failure that was real:
 
 | Test | Guards |
 |---|---|
 | `test_eval_integrity.py` | invented fields scored wrong; nested tables; per-document pooling; failure-rate refusal; image localisation; calibration features on canonical paths; engine release; carrier normalisation; digit-aware estimate; per-window noise spread |
 | `test_serving_parity.py` | `lob` on the request; page/image pairing; one blank-page text; one pixel budget; **every date field in every LOB schema** formatted; no serving page threshold; prompt hash over every prompt input, refused at cold start |
-| `test_freeze_eval_set.py` | freeze layout the gate reads; refused twice; refused below 150/type without `--allow-small`; a rebuild after freezing trains on none of the eval set or its families |
+| `test_freeze_eval_set.py` | freeze layout the gate reads; refused twice; refused below 150/type without `--allow-small`; a rebuild after freezing trains on none of the eval set or its families; two tenants freeze independently and read only their own set; an id frozen in one tenant is not frozen in another; a set at the old unscoped root is refused with where to move it |
 | `test_split_by_line.py` | band per type, placement per line; small lines train whole; measured lines reach val and test; bands only raise edges; crossing a band never moves a trained family into evaluation |
 | `test_release_weights.py` | merge refusals; scoped push paths; off-pod refusal; the base found under `/workspace/models` in all three layouts |
 | `test_dependencies.py` | every third-party import installed by some group; requirements files name real groups; the training pod has vLLM |
 | `test_detach.py`, `test_pod_run.py` | on the pod every long entry point detaches; already-safe jobs do not re-detach; every entry point classified; the launcher never stops the pod or a run unasked; LF line endings |
 | `test_personal_lines_scope.py` | a scope narrowed by line: coverage rules, corpus view, golden eval and serving route by line and refuse other lines |
-| `test_mineru_engine.py` | one markdown string per page from MinerU's content list; HTML table rows counted; OCR vs text mode; GPU only |
-| `test_review_fixes.py` | both end-to-end reviews: MinerU config device, mixed PDFs OCR'd whole, serving OCR pin, policy-only line counts, resumable freeze, narrow keeps lines, audit layout / malformed page_ref / unreadable PDF; serving through the chosen release (adapter + calibrators, LoRA when several), rollback pin, freeze guard on types with no test documents, scanned from MinerU's classification, HTML row headers and nested tables, explicit threshold targets, scoped pulls, classify in every scope |
+| `test_mineru_engine.py` | one markdown string per page from MinerU 3.4's content list (a 1.x content list still reads); HTML table rows counted; OCR vs text mode; the engine reads in one pinned way; GPU only |
+| `test_review_fixes.py` | both end-to-end reviews: MinerU runs only on the pinned weights and on the GPU, a MinerU 1.x config refused and replaced, mixed PDFs OCR'd whole, serving OCR pin, policy-only line counts, resumable freeze, narrow keeps lines, audit layout / malformed page_ref / unreadable PDF; serving through the chosen release (adapter + calibrators, LoRA when several), rollback pin, freeze guard on types with no test documents, scanned from MinerU's classification, HTML row headers and nested tables, explicit threshold targets, scoped pulls, classify in every scope |
 | `test_data_audit.py` | the pre-upload audit on real synthetic PDFs: every blocker, wrong-page and missing values, scans left for OCR, format and period checks, totals, report files, audit output git-ignored |
 | `test_gpu_only.py` | model loaders require CUDA; no `device_map="cpu"`/`"auto"`; OCR refuses CPU; pod detection without `RUNPOD_POD_ID`, and look-alikes rejected |
+
+Test files added for Schema 2, the CGL adapter, MinerU 3.4, the accuracy plan and the time cuts:
+
+| Test | Guards |
+|---|---|
+| `test_schema_resolver.py` | SPEC_21 overlays bundle into one self-contained schema; what a bundle refuses |
+| `test_schema2_model_view.py` | the model view: what the model never writes, the rules and codes it is held to, what it must never see |
+| `test_schema2_targets.py`, `test_schema2_review_targets.py`, `test_schema2_review2_targets.py` | common-model window targets: rows a window can see, ids from 1, no reference to an unseen row, every target fits its slice; a split coverage's values taught somewhere; a two-part or off-line label refused |
+| `test_schema2_serving.py`, `test_schema2_review_merge.py`, `test_schema2_review2_merge.py` | the replay (served answer = gold); the unit merge independent of page order (naming keys before describing keys); the every-key fill never breaks the client's schema; self-contained merges unchanged |
+| `test_schema2_eval.py`, `test_schema2_review_eval.py`, `test_schema2_review2_eval.py` | common-model scoring: rows paired by what the page prints, ids never scored, links, codes and overflow scored apart; schema validity on the answer as produced; self-contained lines score as before |
+| `test_schema2_review_lob.py`, `test_lob_detection.py`, `test_lob_classifier_wiring.py`, `test_schema2_review2_misc.py` | line detection: never fails a request, ships off, confidence from the line's own token, cold-start classifier only when on; a section written empty fails; the detection measurement corrupts the pages the classifier reads |
+| `test_schema2_review_scripts.py` | the alias and field-type scripts read a common-model line through its bundle |
+| `test_old_style_prompts_frozen.py` | self-contained lines, ACORD and Loss Run prompts unchanged |
+| `test_layout_family_routing.py` | layout-family routing, base-model fallback, the table against `lob_schema_map.yaml` |
+| `test_release_measurements_and_routing.py`, `test_release_tier.py` | latency per adapter and peak GPU memory on every release; a routing table that routes as the endpoint will (rollback pins included), stops a release whose own lines would not reach it or that sits on another base; production at field match ≥ 0.92, interim below |
+| `test_lossrun_windows_and_table_f1.py` | long Loss Runs read by window, merged and reconciled; `table_f1` |
+| `test_carrier_holdout_and_twin_cap.py`, `test_data_mix_and_model_card.py`, `test_render_rotation.py` | carrier and twin index on rows, carrier hold-out, twin cap per seed and render mode; per-line data mix and the model card; one render per twin per epoch |
+| `test_twin_bundles.py`, `test_cgl_originals.py` | SPEC_21 delivery → bundles (two renders, one corrected gold); CGL real documents → bundles with a delivered split, `held_out_carrier`, the `casualty_fleet` scope covering only `gl`, the smoke run taking `--scope` |
+| `test_label_rules.py`, `test_grounding.py` | the label conventions applied at bundling (each value once, every page that prints it, wording dropped, unprinted values listed); one matcher for printed values |
+| `test_additional_fields_and_page_trim.py`, `test_window_rows_and_prompts.py`, `test_window_home_pages.py` | window targets cite only their pages; additional fields placed by page; `text_sections` never taught; form numbers only where printed; a coverage row taught only on windows showing its home (`HOME_FIELDS`) |
+| `test_page_router_signals.py`, `test_answer_token_count.py` | router signals for continuation and deductible pages; answers counted with the real tokenizer at corpus build |
+| `test_scoring_types.py`, `test_eval_measures.py`, `test_field_report.py`, `test_serving_conventions.py` | typed comparison; page-aware hallucination and the new reported measures; `all_fields` in test outputs; served answers held to the label conventions (`not_printed`, `likely_missed`) |
+| `test_mineru_force_ocr_and_timeouts.py`, `test_inspect_pdf_fallback.py` | MinerU takes modality and `force_ocr` from its caller, drawn figures force OCR (a table of thin border rectangles does not), a searchable scan reads as a scan, time budgets, every failure a `MinerUError`; a PDF pypdf cannot read is read with PyMuPDF |
+| `test_parallel_checkpoint_scoring.py`, `test_validation_cut.py`, `test_validation_generation.py` | one worker and vLLM engine per GPU; in-training loss on its own 160-row sample; two finalists judged on whole documents in the named modes, a mode filter matching nothing refused before an engine loads, a small split still getting its whole-document pass; 96 rows per call, longest answer first, failed calls retried in halves, each pass's cost reported |
+| `test_logging_setup.py` | our log lines survive a library silencing the root handlers; one console however often `setup()` runs; every package of the repository is one of ours |
+
+Tests changed with the time cuts as well: `test_transfer.py` (a published adapter is its weights and config;
+a re-push sends only what Blob does not hold, by MD5), `test_orchestration.py` (per-stage wall time, run reports
+per scope and tenant, the build's >25% set-aside refusal) and `test_ocr_check_and_smoke.py` (the smoke chain's
+preflight skips its corpus build only when `finetune` builds it).
 
 Contract tests also check that `.env.example` documents every variable the code reads (and nothing it
 does not), and that `IMPL_ALL_COMBINED.md` is regenerated, never hand-edited
 (`python -m scripts.combine_specs --write`).
 
+**The coverage gate covers the split code.** It names `data_pipeline.dataset_builder.split_groups` (98% at
+commit f5668a4; 95.9% over all the gated modules), where it used to name the removed
+`split_train_val_test`, which pytest-cov only warned about.
+
 **Not testable off the pod**, and left to the Phase 0 spike: real tmux across a disconnect, a real merge, the
-masking encoder on ms-swift's template, vLLM 0.11 loading Qwen3-VL with the pixel budget, and a real upload.
+masking encoder on ms-swift's template, vLLM 0.11 loading Qwen3-VL with the pixel budget, MinerU 3.4.5's
+pipeline backend reading a page on the GPU with its pinned weights, the multi-GPU checkpoint-scoring workers on
+real vLLM engines (the tests fake the engine), and a real upload.
+
+## Changes since 2026-10-05
+
+- Added the alignment line.
+- §1: fixtures described as they are (PDFs drawn at test time, flat vs canonical goldens, provenance in label metadata, the 6-page common-model fixture, frozen prompt fingerprints, `no_window_overlap`).
+- §2: added the frozen-prompt and replay guards, the SPEC_21 bundle/model-view tests and the routing tests; corrected rows that described the old behaviour (`line_of_business` as a list; low classifier confidence extracts both candidates; the gate sits in `package`; no "Foundation + per-type" resolution).
+- §3: CI described as in `ci.yml` (install groups, mypy scope, `render_prompts --check`, the gate's module list, the secrets scan).
+- Acceptance checklist: placeholder test names replaced by the real test functions; the gate check is "no CLI override", with the recorded written override as the only exception.
+- Current implementation: 2,765 tests in 122 modules; MinerU 3.4 and per-tenant freeze rows; a table of the test files added since; the stale split module in the coverage gate; MinerU 3.4.5 and multi-GPU scoring added to what only the pod can test.
+- The CI coverage gate names `split_groups` instead of the removed `split_train_val_test` (commit f5668a4).

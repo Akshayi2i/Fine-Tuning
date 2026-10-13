@@ -1,8 +1,10 @@
 # SPEC 04 — Labeling, Golden JSON, and the Day-Zero Bootstrap
 
+> Aligned with the code at commit f5668a4 (2026-10-13).
+
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01 (schemas, alias registry, `common.normalize`, `common.aliases`), IMPL-02, IMPL-03 (MinerU output — `derive_aliases` reads it).
 >
-> **Architecture refs:** `finetuning-architecture-v2.1.docx` §0a (schema contract), §0b (LoB in every label), §4c (**day-zero bootstrap**), §7 "Golden JSON Generation Mechanism", §13 step 11 (feedback loop).
+> **Architecture refs:** `finetuning-architecture-v2.3.docx` §0a (schema contract), §0b (LoB in every label), §4c (**day-zero bootstrap**), §7 "Golden JSON Generation Mechanism", §13 step 11 (feedback loop).
 
 ## Goal
 
@@ -140,7 +142,7 @@ Once a model version exists (arch §7 step 6, §13 step 11):
 
 ## Constraints
 - External pre-annotation OFF unless explicitly permitted by flag **and** env.
-- Golden labels must be schema-valid and must carry `line_of_business`.
+- Golden labels must be schema-valid and must carry `line_of_business` (for a canonical policy label, whose schema has no such key, the line is `lob` in its label metadata).
 - Day-zero: 100% human review until ≥25 labeled examples per doc type.
 - Store provenance for every label.
 - Labels are tenant-scoped; never mix tenants in a review batch.
@@ -165,37 +167,119 @@ Once a model version exists (arch §7 step 6, §13 step 11):
 - [ ] Double-annotation path produces an agreement score on the sampled subset.
 - [ ] `label_metadata.json` captures full provenance including draft backend and the review requirement in force.
 - [ ] `active_learning` orders a queue by ascending confidence, surfaces row-completeness flags, and refuses to run while `review_requirement` is `"full"`.
+- [ ] At bundling, a document-level value lists every page that prints it, a table value keeps to the pages it cites, and a form number cites every page whose header or footer prints it.
+- [ ] An extra field repeating a field folds into it; wording and drafting notes filed as extra fields are dropped while captions stay; an extra field naming an empty field moves into it, and stays when the field is filled or two entries name it.
+- [ ] A value with figures no page prints is listed in `unprinted_values`, never changed, and the corpus build leaves out the windows holding it; the OCR text over a scanned page never settles that a value is missing.
+- [ ] A coverage code in no list of its line is re-coded (code file's `replaces_codes`, then the repository's table, which wins); a package policy filed under one common-model line is left out with the reason.
 
 ---
 
-## Current implementation (2026-09-27)
+## Current implementation (2026-10-13)
 
-- **Policy labels are the client's canonical JSON** (`configs/canonical schema/LOB Schema/{line}.json`, 34
-  files; the fallback is used when the line is unknown or the policy spans several lines). Every leaf is a
-  FieldValue envelope `{raw, parsed, confidence{score,source}, page_ref, flagged}`; `raw` is the text as
-  printed, `parsed` the normalised value, `page_ref` the page(s) it was read from. The training target
-  (`common.canonical.to_model_target`) keeps only `raw`, `parsed`, `page_ref` and drops what the document
-  does not state.
+- **Policy labels are the client's canonical JSON** (`configs/canonical schema/LOB Schema/`, 34 `.json`
+  files: 31 lines are registered, plus `_fallback`; `_common` is merged by the client's own registry and
+  `classic_auto` is read as `personal_auto`). Nine of them — the seven personal-lines overlays (homeowners,
+  personal_auto, dwelling_fire, ocean_marine, motorcycle, recreational_vehicle, personal_umbrella), `gl` and
+  `_fallback` — are thin SPEC_21 overlays on the **common model**
+  (`configs/canonical schema/common schema/common_model.json`, `fideon:common_model_version` **1.1.0**), each
+  loaded as one self-contained bundle (`common.schemas._bundle`; an overlay written against another
+  common-model version is refused). The other lines are self-contained files read as they are. The fallback
+  is used when the line is unknown or the policy spans several lines, and is itself a common-model schema
+  with no line part of its own. Every leaf is a FieldValue envelope `{raw, parsed, confidence{score,source},
+  page_ref, flagged}` (typed variants on the common model: `DateValue`, `MoneyValue`, `PercentValue` …);
+  `raw` is the text as printed, `parsed` the normalised value, `page_ref` every page that prints it. On the
+  common model, units carry their own ids (`unit_id`, e.g. `bldg_1`), entries link to them through
+  `applies_to`, a coverage row's `coverage_code` comes from the line's list (`fideon:coverage_codes`,
+  `<line>.coverage_codes.yaml`), and `additional_fields` is the overflow tier (`label`, `value`) for printed
+  values with no field of their own. The training target (`common.canonical.to_model_target`) keeps only
+  `raw`, `parsed`, `page_ref` and drops what the document does not state; for a common-model line it is read
+  against the model view, so ids, references and codes stay bare strings as the schema declares them.
 - **Dates are written `MM/DD/YYYY`** in `parsed` — in the training target and in every output
-  (`with_output_dates`). A field is a date when a whole word of its name is `date`, `dates`, `dated` or
-  `dob` (so `date_of_birth`, `date_licensed`, `report_due_dates` are; `candidate`, `update_reason` are not);
+  (`with_output_dates`). On a common-model line a field is a date when the schema types it `DateValue` (whose
+  `parsed` pattern is MM/DD/YYYY), so a form edition printed `05 11` is never read as a date because of its
+  name. On a self-contained line a field is a date when a whole word of its name is `date`, `dates`, `dated`
+  or `dob` (so `date_of_birth`, `date_licensed`, `report_due_dates` are; `candidate`, `update_reason` are not);
   `tests/test_serving_parity.py` checks every date field in all LOB schemas.
 - **`page_ref` matters now**: long policies are trained and served as page windows, and a value is taught
-  only in the window that holds its page. A value with no `page_ref` in a multi-window group is reported
-  as *unplaced* and a value on pages no window reads as *unread* — both logged per document at corpus build.
+  only in the window that holds its page. The agreed convention (applied at bundling, below) is that a value
+  appears **once**, in its proper field, citing **every page that prints it** — and a form number cites every
+  page whose header or footer prints it, so a window over a form's fourth page is taught the form it shows. A
+  value with no `page_ref` in a multi-window group is reported as *unplaced* and a value on pages no window
+  reads as *unread* — both logged per document at corpus build. A window whose target would hold a value no
+  page prints (`unprinted_values`) is left out of training whole (`build_jsonl._held_unprinted`).
 - **Line of business** for a policy comes from `label_metadata.json` (`lob`), not from the label; it
-  selects the canonical schema and is what the corpus manifest's LoB coverage counts.
-- **Synthetic documents** (`metadata.synthetic: true`) pin their whole family to train (IMPL-05).
+  selects the canonical schema and is what the corpus manifest's LoB coverage counts. Merged lines are read
+  as the line they belong to wherever a line is read (`common.lob.MERGED_LINES`: `classic_auto` →
+  `personal_auto`, `watercraft` → `ocean_marine`), and other spellings map to the schema's file name
+  (`common.schemas.LOB_SCHEMA_ALIASES`: `cgl` and `general_liability` → `gl`, `workers_comp` → `wc`,
+  `commercial_auto` → `auto`).
+- **Synthetic documents** (`metadata.synthetic: true`) pin their whole family to train (IMPL-05) — unless the
+  delivery carries its own split, which the corpus build then takes as given; synthetic twins may then sit in
+  val and test, and the gate reports real documents apart.
+- **What the importer records** (`import_labeled_pdfs.import_bundle` → `label_metadata.json`): `source_id`,
+  `doc_type`, `acord_form`, `lob` (merged), `field_provenance`, `document_kind`, `policy_number`,
+  `template_id` (the family), `carrier`, `twin_index` (a synthetic twin's number, from `sample`),
+  `render_mode`, `unprinted_values`, `synthetic`, `split` (the delivery's, when it has one), `labeled_at`,
+  `imported_from`, `awaiting_ocr: true` and `held_out_carrier` (the bundler's unseen-carrier mark, which the
+  corpus build and the freeze read; IMPL-03).
+
+**Labels corrected at bundling** (`data_pipeline/ingestion/prepare_bundles.py::corrected_gold`, for SPEC_21
+twins and seeds and for real documents alone). On a common-model line, in this order, each change listed in
+the bundles' `corrections.csv` and the delivery itself never changed:
+
+- **coverage code** in no list of the line → the listed code that replaces it: the `replaces_codes` of the
+  line's `<line>.coverage_codes.yaml` (gl 3.0.0 moved three endorsement codes to shared `X_` codes) and this
+  repository's table, `configs/coverage_code_recodes.yaml` (27 codes from the overlays' changelogs), which
+  wins where both name a code. The decoder only writes listed codes;
+- **premium written twice** — a `premium.items` entry for a coverage whose own `premium` holds the same amount
+  (or, for a code on several rows, their sum) is dropped, so a coverage premium has one home;
+- **carrier missing** (SPEC_21) — filled with the delivery's carrier as the document prints it, citing those
+  pages;
+- the **label rules** (`data_pipeline/ingestion/label_rules.py::apply_label_rules`), on the digital render's
+  text layer:
+  - *page list* — a value's pages become the pages that print it; a document-level value printed as itself
+    (a policy number in every header) lists them all; a table row's value keeps to the pages it cites; a name
+    or phrase keeps every page it cites (it may be only in a logo) and gains a page only where it heads a line;
+    a form number gains every page whose first or last four lines print it, carriers' short codes included;
+  - *extra field repeats a field* — an extra field holding a distinctive value that exactly one field holds is
+    folded into that field (its pages join the field's `page_ref`, except for a table row); the same label and
+    value twice becomes one entry; page counters and prose filed as labels are dropped;
+  - *extra field from wording* — policy wording filed as an extra field is dropped: drafting notes ("Form
+    boilerplate amount (context: …)", "Invisible text-layer remnant …", "Form wording, page 15: …"), clauses
+    after a list marker, figures of standard wording and notices (bail bonds, the terrorism act's thresholds,
+    toll-free lines, URLs — a label naming a premium stays), and sentences picked up mid-way (a label starting
+    lowercase; a camel-case name is a caption);
+  - *extra field moved to its field* — into its own **empty** field when exactly one entry names it: business
+    description, entity type, bill type, claims phone, authorized representative (only where the gold has a
+    countersignature block) and the minimum earned premium (amount or percent); also Protection Class (one
+    location) and a "Paid By: Mortgagee" line (`interested_parties[].is_payor`);
+  - *link names the building* — an `applies_to` link to a location with one building names the building;
+  - *number not printed* — a location or building number no page prints as one is removed (never taken from a
+    street address);
+  - *printed nowhere* — a value with figures that no page prints, in a field or an extra field, is listed, not
+    changed: the bundle's metadata carries it in `unprinted_values`.
+
+  Only what the text can settle is settled: a page counts only when it prints nearly every figure its label
+  cites there (`RELIABLE_PAGE_SHARE` 0.9), the OCR text laid invisibly over a scanned page shows where a value
+  is printed but never that it is not (`scanned_pages`), a name is never "printed nowhere", and a PDF with no
+  text layer gets only the rules that need none. Matching is `common.grounding` (an amount matches the same
+  figure in another format; short codes only as a phrase).
+
+A gold still outside its line's schema afterwards, or a package policy (two parts, or a part of another line)
+filed under one common-model line, is not bundled; the reason is listed.
 
 **A policy's line** (`label_metadata.lob`) is validated against the lines that have a canonical schema
 (`common.scopes.known_lines`, schema spellings and enum spellings both accepted) — not against the 13-value
 LOB enum, which rejected `flood`, `cyber`, `professional_eo`, `gl`, `wc` and failed real labels.
 
 **Pre-upload data audit** (`python -m data_pipeline.audit [--input <folder>] [--scope personal_lines]`, default
-input `data/training data`): read-only, on the laptop, before anything is uploaded. Five layers — structure
+input `data/bundles`, the `prepare_bundles` output; `--scope casualty_fleet` for the CGL bundles): read-only, on
+the laptop, before anything is uploaded. Five layers — structure
 (one PDF + `golden.json` + `metadata.json` per folder, PDF opens, no duplicate PDFs), label shape (the
-importer's own `check_bundle`, `lob` has a schema and is in scope, `page_ref` inside the PDF), values against
-the PDF (each `raw` found on the page its `page_ref` names; wrong page / not found / needs OCR for scans),
+importer's own `check_bundle`, `lob` has a schema and is in scope, `page_ref` inside the PDF, a delivered split
+that keeps each source in one split), values against
+the PDF (each `raw` found on the page its `page_ref` names, with the `common.grounding` matcher the label rules
+and the evaluation also use; wrong page / not found / needs OCR for scans),
 formats (readable dates — the build rewrites them MM/DD/YYYY — amounts agreeing with `raw`, period order) and
 totals (documents per line, digital vs scanned, page spread, lines under 5, whether the test split reaches the
 150 needed to freeze), plus a 5%-per-line spot-check sample. Output in `data/audit_report/` (git-ignored: the
@@ -205,3 +289,14 @@ The audit reads the **importer's layout**: each immediate subfolder of the input
 the input folder, or nested below a subfolder (e.g. `<input>/homeowners/<doc>/`), are blockers — the importer
 would never see them. A malformed `page_ref` is one blocker, never a crash; an unreadable PDF is one cause, not a
 row per value. Page text is normalised once per page.
+
+## Changes since 2026-10-05
+
+- Canonical schemas: documented the common model 1.1.0 (`configs/canonical schema/common schema/common_model.json`) and the nine overlays loaded as bundles (seven personal lines, `gl`, `_fallback`); the fallback is a common-model schema; unit ids, `applies_to`, coverage-code lists and the `additional_fields` overflow tier; corrected the "34 files" line (31 registered lines plus the fallback).
+- Dates: on common-model lines a date is a `DateValue` by schema type, not by field name.
+- `page_ref`: the value-once-on-every-page convention, form numbers on every header/footer page, and windows holding an unprinted value left out of training.
+- Line of business: merged lines (`classic_auto`, `watercraft`) and spelling aliases (`cgl` → `gl` …).
+- Synthetic documents: train-only unless the delivery carries its own split.
+- Added what the importer writes to `label_metadata.json` (`carrier`, `twin_index`, `render_mode`, `unprinted_values`, `split`, `awaiting_ocr` …), and `held_out_carrier`, which the importer carries since commit f5668a4.
+- New section on labels corrected at bundling: `corrected_gold` (recodes incl. `replaces_codes`, premium written twice, carrier missing) and `label_rules` (page lists, folded extra fields, wording dropped, extra field moved into its empty field, building links, unprinted numbers, printed nowhere).
+- Audit: default input is `data/bundles` (not `data/training data`), split check, shared `common.grounding` matcher; new acceptance items for the label rules.

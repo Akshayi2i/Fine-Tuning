@@ -1,8 +1,10 @@
 # SPEC 02 — Azure Blob I/O + Training Run Registry
 
+> Aligned with the code at commit f5668a4 (2026-10-13).
+
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01. This is the ONLY module that talks to the Azure SDK directly. Everything else goes through it.
 >
-> **Architecture refs:** `finetuning-architecture-v2.1.docx` §8b (tenant isolation per Fideon SPEC_12), §12 (versioning + training run registry), §13b (quantization thresholds recorded), §15 (metrics recorded), §18/§18a (Blob layout, raw-document access control).
+> **Architecture refs:** `finetuning-architecture-v2.3.docx` §8b (tenant isolation per Fideon SPEC_12), §12 (versioning + training run registry), §13b (quantization thresholds recorded), §15 (metrics recorded), §18/§18a (Blob layout, raw-document access control).
 
 ## Goal
 
@@ -12,27 +14,32 @@ Provide a clean, typed interface for all Azure Blob reads/writes, and implement 
 
 ### 1. `artifact_registry/paths.py` (build this first)
 - The **single place** the Blob layout (master §4) is expressed. Every other function builds paths through it.
-- **Reserves the tenant prefix** (arch §8b): `raw-documents/`, `processed/`, `golden-labels/`, and `corpus/` are `{tenant_id}`-prefixed; `base-models/`, `adapters/`, `registry/`, `golden-eval-set/` are never prefixed. `tenant_id` **defaults from `DEFAULT_TENANT_ID`** — the build is single-tenant and the prefix exists so no migration is needed later.
+- **Reserves the tenant prefix** (arch §8b): `TENANT_SCOPED` — `raw-documents/`, `processed/`, `golden-labels/`, `corpus/`, `releases/`, `exports/` and `golden-eval-set/` — are `{tenant_id}`-prefixed; `SHARED` — `base-models/`, `adapters/`, `merged-models/`, `quantized-models/`, `registry/`, `eval-reports/`, `calibration/` — are never prefixed (the module records that trained weights are tenant data under v2.1 and that moving `adapters/`, `merged-models/` and `quantized-models/` under the tenant is still a pending migration). `tenant_id` **defaults from `DEFAULT_TENANT_ID`** (else `default`) and is validated by `paths._tenant` (lowercase alphanumeric, `-`/`_`, at most 63 characters: it becomes a path segment). Every ingestion, OCR, import and pipeline CLI takes `--tenant`, and separate tenants are in real use: the CGL documents train under a tenant of their own, smoke runs under `smoke` / `smoke-cgl`. Each tenant has its own documents, labels, corpus versions, frozen eval set (`golden-eval-set/{tenant}/`) and releases.
 - Distinguishes the adapter lineages: `adapters/foundation/v{n}/` (unified), `adapters/scope/{scope}/v{n}/` (a scoped run) and `adapters/{doc_type}/v{n}/` (a §4.2 graduated per-type adapter). A per-tenant lineage is **not built** until a broker requires one.
 - **Also expresses the RunPod staging paths** (master §12a) — `/runpod-volume/staging/{adapters,merged-models,eval-reports,run_manifests}/` — deliberately mirroring the Blob layout so `package` (IMPL-13 command 2) copies rather than translates. Staging paths and Blob paths are built by separate functions that must never be interchanged: one is working storage, the other is the artifact of record.
 
 ### 2. `artifact_registry/blob_client.py`
-- Thin wrapper around `azure-storage-blob`, initialized from env (`AZURE_STORAGE_CONNECTION_STRING`, `AZURE_BLOB_CONTAINER`).
-- Methods: `upload_file`, `download_file`, `upload_dir`, `download_dir`, `exists`, `list(prefix)`, `read_json`, `write_json`.
-- Retries with backoff; clear errors on auth/missing-container.
-- **Separate-container support (arch §18a):** an optional `container` override so `raw-documents/` points at the separately-permissioned `AZURE_RAW_CONTAINER`. Reading `raw-documents/` from a training or serving context must be refused, not merely discouraged — expose it only to the ingestion/OCR callers.
-- **Immutability guard:** writing to an existing `raw-documents/.../original.pdf` raises. Raw documents are write-once (arch §18a).
+- Thin wrapper around `azure-storage-blob`, initialized from env (`AZURE_STORAGE_CONNECTION_STRING`, `AZURE_BLOB_CONTAINER`, `AZURE_RAW_CONTAINER`). Two backends behind `BlobBackend`: `AzureBackend` (SDK imported lazily) and `InMemoryBackend` (tests; same write-once and container rules). The Azure SDK's own logger is held at WARNING.
+- Methods: `read_bytes` / `write_bytes`, `read_text` / `write_text`, `read_json` / `write_json`, `exists`, `list(prefix)`, `delete`, `upload_file`, `download_file`, `upload_dir`, `download_dir`, `holds`.
+  - `upload_dir(local_dir, prefix, *, names=None, skip_identical=False)` returns the files written. `names` uploads only those paths relative to the folder (a missing one raises `BlobError`); `skip_identical` leaves any blob that already holds the file's bytes.
+  - `holds(local, key)` compares the MD5 recorded with the blob (`BlobBackend.md5`) with the local file's (`file_md5`, read in 8 MB chunks). A blob that records no MD5 does not count, so it is sent again. The properties call is retried like any read.
+  - `AzureBackend.write` records `Content-MD5` on every upload (Azure stores one itself only for a single-shot upload, and a multi-gigabyte shard goes up in blocks); `AzureBackend.md5` reads it back from the blob properties, `InMemoryBackend.md5` computes it, the base class returns `None` (nothing is then skipped).
+  - `download_dir` matches the prefix at a `/` boundary, so `corpus/default/v1` never pulls `v10`.
+- Retries with exponential backoff (`max_retries`, default 3); a rule violation (`ImmutableBlobError`, `AccessDeniedError`) is never retried; clear errors on auth/missing-container.
+- **Separate-container support (arch §18a):** keys under `raw-documents/`, `intake/` and `exports/` (`paths.requires_raw_container`) are routed to the raw container automatically, and only a client built with context `ingestion` or `ocr` (`for_ingestion()`, `for_ocr()`) may touch them; any other context gets `AccessDeniedError`, including for the bare prefix.
+- **Immutability guard:** writing to (or deleting) an existing `raw-documents/.../original.pdf` raises `ImmutableBlobError`. Raw documents are write-once (arch §18a).
 
 ### 3. `artifact_registry/transfer.py`
 *(One module, not the `push_to_blob.py` / `pull_from_blob.py` pair originally sketched: a push and its pull must agree on the path, and two files are two places for them to drift.)*
 - High-level, path-aware helpers keyed to the Blob layout. Tenant-scoped helpers accept an optional `tenant_id` that defaults from env:
-  - `push_adapter(local_dir, kind, doc_type, version)` → foundation / per-type path
-  - `pull_adapter(kind, doc_type, version, local_dir)`
-  - `push_merged_model(...)`, `push_quantized(local_dir, doc_type, version, fmt)`
+  - `push_adapter(local_dir, kind, version, doc_type=None)` → foundation / per-type path; `pull_adapter(kind, version, local_dir, doc_type=None)`
+  - `push_scoped_adapter(local_dir, scope, version)` → `paths.scoped_adapter_dir` (see Current implementation)
+  - `push_merged_model(local_dir, version, doc_type=None, scope=None)` / `pull_merged_model(...)`, `push_quantized(local_dir, version, fmt, doc_type=None, scope=None)` / `pull_quantized(...)`
   - `pull_base_model(local_dir)` (from `base-models/`, or from HF at the pinned revision if absent, then cache to Blob)
-  - `push_corpus_version(...)`, `pull_corpus_version(version, ..., tenant_id=None)`
-  - `push_calibration(version, doc_type, params)` / `pull_calibration(...)` (IMPL-09 store)
-  - `push_eval_report(...)`, `push_golden_eval_set` / `pull_golden_eval_set`
+  - `push_corpus_version(local_dir, version, tenant_id=None)`, `pull_corpus_version(version, local_dir, tenant_id=None)`
+  - `push_calibration(version, doc_type, params)` / `pull_calibration(...)` (IMPL-09 store; a missing calibration raises)
+  - `push_eval_report(...)` / `pull_eval_report(...)`, `push_golden_eval_set(local_dir, tenant_id=None)` / `pull_golden_eval_set(local_dir, tenant_id=None)` — one frozen set per tenant, under `golden-eval-set/{tenant}/`
+- Every push refuses a missing source directory (`TransferError`) rather than creating an empty prefix that would read as a published artifact.
 - No standalone pull CLI: the pipeline stages call these helpers directly (training stages its own data through `training/stage_data.py`). `pull_base_model` from the Hub is not wired; the pod reads the base from `/workspace/models` (`configs/base_model.yaml` `local_dir`).
 
 **Reading the index is not optional.** `_index` raises `RegistryQueryError` when the index blob exists but cannot be read. It must never degrade to an empty list: an empty registry and an unreadable one are different facts, and conflating them makes a throttled or 403'd Azure call look like a first-ever run — `latest_promoted` returns `None`, the promotion gate sets `is_first_version` and has nothing to regress against, and a candidate whose accuracy collapsed is promoted. The same swallow silently cleared the arch §12 Foundation cascade block.
@@ -40,29 +47,30 @@ Provide a clean, typed interface for all Azure Blob reads/writes, and implement 
 ### 4. `registry_utils/models.py`
 Pydantic model `RunManifest` capturing the arch §12 manifest **plus the v1 additions**:
 
-- `run_id`, `run_type` (`foundation` | `per_type_adapter`), `doc_type` (nullable), `tenant_id` (nullable, defaulted), `status` (`training|trained|evaluated|promoted|archived|failed`), `created_at`.
-  - **`training` exists because the manifest is written *before* ms-swift is launched** — the run_id has to be reserved and the configuration captured even for a run that dies. Without it the pre-launch manifest defaulted to `trained`, so a pod that OOM'd at step 40 left a registry entry asserting a trained adapter over a staging path holding nothing, and `package` published Blob locations for weights that were never written. `training.train_foundation.launch_and_record` flips it to `trained` when ms-swift returns and to `failed` when it does not; **`stage_push` publishes only `trained`, `evaluated` or `promoted` runs.**
+- `run_id`, `run_type` (`unified` | `foundation` | `per_type_adapter` | `scoped`), `doc_type` (nullable — the §4.2 graduated adapter a run *is*), `scope` (nullable, reads as `unified`) and `doc_types` (what a scoped run covers; required for `scoped`), `tenant_id` (nullable, defaulted), `status` (`training|trained|evaluated|promoted|archived|failed`), `created_at`, `continued_from` (a Foundation run continued from a checkpoint).
+  - `unified` / `foundation` runs may name neither a `doc_type` nor a narrower scope; a `scoped` run must name its scope and `doc_types` and no `doc_type`.
+  - **`training` exists because the manifest is written *before* ms-swift is launched** — the run_id has to be reserved and the configuration captured even for a run that dies. Without it the pre-launch manifest defaulted to `trained`, so a pod that OOM'd at step 40 left a registry entry asserting a trained adapter over a staging path holding nothing, and `package` published Blob locations for weights that were never written. `training.train.launch_and_record` flips it to `trained` when ms-swift returns and to `failed` when it does not; **`stage_push` publishes only `trained`, `evaluated` or `promoted` runs.**
 - **`is_sweep_run`** (bool) + `sweep_id` / `sweep_phase` — reserved fields so sweep runs are first-class registry entries when sweeps are run (arch §11a; deferred past the IMPL-15 pilot).
 - `dependencies`:
   - `base_model` (`qwen3-vl-8b-instruct@<hf_revision_pin>`)
   - `foundation_version` (nullable — which Foundation this adapter sits on)
   - `corpus_version`
   - `code_git_commit`
-  - **`mineru_version`** (arch §8a)
+  - **`mineru_version`** and `ocr_device` (arch §8a) — read from the corpus manifest the run trains on (`training/train.py`), so the run records the MinerU that read its documents (the corpus build refuses documents read by more than one version, IMPL-03)
   - **`schema_version`** and **`prompt_template_version`** (arch §7)
-- `training_config`: **`technique` (`LoRA` | `QLoRA`) and `base_quantization` (`bf16_frozen_base`, or `<quant_type>_<double|single>_quant_<dtype>_compute` under 4-bit) — both REQUIRED, never defaulted**. They previously carried QLoRA/NF4 defaults on the model, so a bf16 run that did not pass them recorded a technique it never used; base precision is exactly the kind of change that causes a regression, and the manifest is what makes one attributable. Then lora_rank/alpha/dropout, bias, lr, lr_scheduler, warmup_ratio, epochs, **optimizer (`adamw_torch`, also required)**, betas, eps, weight_decay, max_grad_norm, per_device_batch, grad_accum, effective_batch_size, gradient_checkpointing, mixed_precision, target_modules, **`vit_trainable`** (and, when true, that it is **LoRA-on-ViT, never full fine-tune** — arch §3), resolution_cap_px, max_seq_len, **`seed`**.
-- `data_stats`: train/val/test counts, `modality_mix`, **`lob_coverage`** (per-LoB-value share, arch §0b), `tenant_ids` contributing, `deidentified: true|false` (recorded; the enforcement rule is **suspended while de-identification is blocked** — see IMPL-00 §8 and IMPL-05).
+- `training_config`: **`technique` (`LoRA` | `QLoRA`) and `base_quantization` (`bf16_frozen_base`, or `<quant_type>_<double|single>_quant_<dtype>_compute` under 4-bit) — both REQUIRED, never defaulted**. They previously carried QLoRA/NF4 defaults on the model, so a bf16 run that did not pass them recorded a technique it never used; base precision is exactly the kind of change that causes a regression, and the manifest is what makes one attributable. Then lora_rank/alpha/dropout, bias, lr, lr_scheduler, warmup_ratio, epochs, **optimizer (`adamw_torch`, also required)**, betas, eps, weight_decay, max_grad_norm, per_device_batch, grad_accum, effective_batch_size, gradient_checkpointing, mixed_precision, target_modules, **`vit_trainable`** with `vit_method` (`frozen` | `lora`; when trainable it must be **LoRA-on-ViT, never full fine-tune** — arch §3), resolution_cap_px, `pixel_budget` (the image resize budget the trainer was actually given), max_seq_len, **`seed`**.
+- `data_stats`: train/val/test counts, `modality_mix` and `modality_mix_target`, **`lob_coverage`** (per-LoB-value share, arch §0b), `alias_coverage`, `confusable_example_count`, `tenant_ids` contributing, `split_policy` (carriers held out per line, single-carrier lines, families moved into test, twins dropped by the per-seed cap), `data_mix` (the scope's configured `synthetic_fraction` / `scanned_share` and what each line's train documents came to), `examples_by_line` (split → line → documents, real, synthetic, rows; scoped runs), `deidentified: true|false` and `image_redaction` (recorded; the enforcement rule is **suspended while de-identification is blocked** — see IMPL-00 §8 and IMPL-05).
 - `eval_metrics` (all against the frozen golden eval set, arch §15):
-  `field_exact_match`, `field_normalized_match`, `field_f1_list_fields`, `list_field_recall`, `schema_validity_rate`, `ece_confidence`, `ocr_arbitration_accuracy`, `image_only_accuracy`, `scanned_accuracy`, `doc_type_classifier_accuracy`, **`lob_detection_accuracy`** (overall **and per LoB value**), `latency_ms_per_doc`.
+  `field_exact_match`, `field_normalized_match`, `field_f1_list_fields`, `list_field_recall`, `schema_validity_rate`, `ece_confidence`, `ocr_arbitration_accuracy`, `image_only_accuracy`, `scanned_accuracy`, `doc_type_classifier_accuracy`, **`lob_detection_accuracy`** (overall, and `lob_accuracy_by_value`), `alias_accuracy` (reported), **`confusable_misattribution_rate`** (gating), `table_f1` and `lossrun_totals_reconciliation_rate` (Loss Runs), `held_out_carrier_match` (reported, not gated), `latency_ms_per_doc`.
 - `artifacts`: **`status`** (`staged` | `published`), **`staging_path`** (set while `staged`), `adapter_weights`, `merged_model`, `quantized_model`, `quantized_formats[]`, `eval_report`, `calibration_params`.
   - `finetune` (IMPL-13 command 1) writes the manifest with `status: "staged"` and weights still on the RunPod volume; `package` (command 2) flips it to `"published"` and fills the Blob paths. A manifest is written **either way**, so a reclaimed staging volume never means an untracked training run.
-- `promotion`: `gated_against`, `beat_previous_on_all_gates`, `promoted_by`, `promoted_at`.
+- `promotion`: `gated_against`, `beat_previous_on_all_gates`, `failed_gates`, `promoted_by`, `promoted_at`, `tier` (`production` | `interim`, `None` when not gated or blocked).
 
 ### 5. `registry_utils/write_run_manifest.py`
-- `write_manifest(manifest: RunManifest)` → writes `registry/{foundation|adapters/{doc_type}}/{run_id}/run_manifest.json` to Blob, and updates `registry/registry_index.json` (a flat table: run_id, type, status, key metrics, created_at, is_sweep_run).
-- `capture_git_commit()` to fill `code_git_commit`; `capture_mineru_version()` reads the pin from the corpus manifest (IMPL-05).
+- `write_manifest(manifest: RunManifest)` → writes `registry/foundation/{run_id}/run_manifest.json` (unified and foundation runs share the slot), `registry/adapters/{doc_type}/{run_id}/…` or `registry/scope/{scope}/{run_id}/…` (`paths.run_manifest`) to Blob, rewrites the run's **model card** beside it (`model_card.md`, `registry_utils/model_card.py`, rendered from the manifest alone; a card that fails to write is logged, never fails the run), and updates `registry/registry_index.json` (a flat table: run_id, run_type, doc_type, scope, doc_types, status, artifact_status, corpus/foundation version, commit, created_at, is_sweep_run, key metrics).
+- `capture_git_commit()` to fill `code_git_commit`, `is_dirty_worktree()` so callers can warn; `mineru_version` comes from the corpus manifest the training stage reads (IMPL-05), not from a capture here. `mark_promoted` and `mark_published` (below and IMPL-13).
 - `data_stats.deidentified` is **recorded but not enforced** while de-identification is blocked (IMPL-00 §8). Reinstate the refusal here — it is the right enforcement point — once the image-redaction question is resolved.
-- MLflow/W&B logging hook (guarded by env; no-op if unset) — the tracker gives the queryable UI, the Blob manifest is the durable record that travels with the artifacts (arch §12).
+- `log_to_tracker` mirrors params and numeric metrics to MLflow when `MLFLOW_TRACKING_URI` is set (no-op otherwise; W&B is not wired) — the tracker gives the queryable UI, the Blob manifest is the durable record that travels with the artifacts (arch §12).
 
 ### 6. `registry_utils/query_registry.py`
 CLI + functions:
@@ -79,7 +87,7 @@ CLI + functions:
 ## Constraints
 - Only this package imports `azure-storage-blob`.
 - All Blob paths built via `paths.py` — the layout lives in one place and the tenant prefix is not optional.
-- `raw-documents/` is write-once and reachable only from ingestion/OCR.
+- `raw-documents/` is write-once; it, `intake/` and `exports/` sit in the raw container and are reachable only from ingestion/OCR clients.
 - No PII in logs.
 - Every training/eval/quantize job writes a manifest — **no silent runs, sweeps included**.
 
@@ -114,31 +122,61 @@ CLI + functions:
 - [ ] A `staged` manifest resolves to staging-volume paths; a `published` one resolves to Blob paths.
 - [ ] `diff_manifests` surfaces a changed `corpus_version` / `mineru_version` / hyperparameter.
 - [ ] Unit tests mock the Blob client (no live Azure needed for CI).
+- [ ] A published scoped adapter holds `adapter_config.json` and `adapter_model.safetensors` only; a folder missing either is refused.
+- [ ] A re-push of the same adapter or merged model writes nothing; a blob that records no MD5 is sent again; `upload_dir(names=...)` refuses a named file that is not there.
+- [ ] Each tenant pushes and pulls only its own golden eval set (`golden-eval-set/{tenant}/`).
 
 ---
 
-## Current implementation (2026-09-27)
+## Current implementation (2026-10-13)
 
-**Paths added since this spec** (all in `artifact_registry/paths.py`):
+**Paths beyond the original layout** (all in `artifact_registry/paths.py`):
 
 | Path | Holds |
 |---|---|
-| `merged-models/scope/{scope}/v{n}/`, `quantized-models/scope/{scope}/v{n}/vllm/{format}/` | a scoped run's own models |
-| `eval-reports/v{n}/scope/{scope}/{summary,gate_decision,checkpoint_selection}.json` | a scope's report, verdict and chosen checkpoint |
+| `adapters/scope/{scope}/v{n}/`, `merged-models/scope/{scope}/v{n}/`, `quantized-models/scope/{scope}/v{n}/vllm/{format}/` | a scoped run's own adapter and models (the unified scope keeps the pre-scope keys: `adapters/foundation/`, `merged-models/unified/`) |
+| `eval-reports/v{n}/scope/{scope}/{summary,gate_decision,checkpoint_selection}.json` | a scope's report, verdict and chosen checkpoint (`paths.eval_report`, `gate_decision`, `checkpoint_selection`; not tenant-prefixed) |
+| `registry/{foundation\|adapters/{doc_type}\|scope/{scope}}/{run_id}/model_card.md` | the run's model card, beside its `run_manifest.json` (`paths.model_card`) |
 | `releases/{tenant}/{release_id}/bundle.json`, `.../calibration/{format}/calibrators.json`, `.../gate/{format}/gate_decision.json`, `releases/{tenant}/release_index.json` | the release bundle — the unit of promotion |
-| `golden-eval-set/{source_id}/{golden.json,metadata.json,page_N.png,page_N.md}`, `golden-eval-set/manifest.json` | the frozen eval set (IMPL-08) |
+| `golden-eval-set/{tenant}/{source_id}/{golden.json,metadata.json,page_N.png,page_N.md}`, `golden-eval-set/{tenant}/manifest.json` | one tenant's frozen eval set (IMPL-08). A set left at the old root (`paths.legacy_golden_eval_manifest()`, `golden-eval-set/manifest.json`) is refused by `evaluation.freeze_eval_set` with the move to make, never read |
+| `intake/{batch}/{document}/` (raw container) | a delivered batch of bundle folders, staged with azcopy before import (`paths.intake_batch_dir`, IMPL-03) |
+| `exports/{tenant}/{kind}/{name}` (raw container) | result sets made for download to a laptop, e.g. a model comparison (`paths.export_dir`) |
 | staging: `{mount}/staging/train-data/{scope}/v{n}/`, `{mount}/staging/train-images/{tenant}/{corpus}/` | a run's staged JSONL; one page-image cache per corpus version, shared by every run on it |
 
 The staging root is `$RUNPOD_VOLUME_MOUNT/staging` (default `/runpod-volume`; set `/workspace` when the pod
 mounts its volume there).
 
-**`transfer.py`** gained scope-aware helpers — `push_scoped_adapter(local, scope, version)`,
+**`transfer.py`** has scope-aware helpers — `push_scoped_adapter(local, scope, version)`,
 `push_merged_model(..., scope=)`, `push_quantized(..., scope=)` — which `package` uses to upload the real
 adapter, merged model and quantized formats. Each refuses a missing source directory instead of creating
 an empty prefix that would read as a published model.
 
-**Run manifest** records `tenant_id` (the field existed and nothing set it) and the manifest's
-`quantized_model` points at the first *quantized* format — bf16 is the merged model, never an export.
+- **A published adapter is its weights and config only.** `push_scoped_adapter` uploads
+  `ADAPTER_FILES` = (`adapter_config.json`, `adapter_model.safetensors`) — never a checkpoint's optimizer and
+  scheduler state (~1.5 GB of a ~2 GB rank-64 checkpoint) — and refuses a folder missing either file. Both
+  `package` and the training stage's `--push-adapters` publish through it.
+- **A re-push sends nothing it does not have to.** `push_scoped_adapter` and `push_merged_model` (~18 GB of
+  bf16 shards) call `upload_dir(..., skip_identical=True)`: a file whose MD5 matches the one recorded with the
+  blob is left in place. Blobs written before MD5s were recorded are sent once more. `push_quantized`,
+  `push_adapter`, `push_corpus_version` and `push_golden_eval_set` upload everything.
+
+**Run manifest** records `tenant_id` and the manifest's `quantized_model` points at the first *quantized*
+format — bf16 is the merged model, never an export.
+
+**Release bundle** (`registry_utils/models.py::ReleaseBundle`) also records `tier` (`production` at field
+match ≥ 0.92, `interim` when it passed every floor below that; `evaluation.gating.release_tier`), and —
+recorded, not gated — `latency_p95_ms_by_adapter`, `peak_gpu_memory_mb`, `measured_with`, and `routing` (where
+every line of business routes once the release is promoted), plus `scope`, `doc_types` and `lines` (empty
+means every type / every line).
 
 **Blob `upload_dir`/`download_dir`** are what staging, localisation and package use; images are fetched
 into the per-corpus cache atomically (unique `.part` names, renamed into place).
+
+## Changes since 2026-10-05
+
+- Tenant prefix: `golden-eval-set/` is now tenant-scoped (one frozen set per tenant, legacy root set refused); listed the full `TENANT_SCOPED` / `SHARED` sets and `paths._tenant` validation; replaced "single-tenant" with the tenants in real use (CGL, smoke).
+- `BlobClient`: documented `holds()`, `upload_dir(names=, skip_identical=)`, `file_md5`, `Content-MD5` recorded on every Azure write, `BlobBackend.md5()`, and the raw-container routing of `intake/` and `exports/`.
+- `transfer.py`: `push_scoped_adapter` publishes only `ADAPTER_FILES` and skips identical files; `push_merged_model` skips shards Blob already holds; corrected helper signatures; golden eval set push/pull take `tenant_id`.
+- `RunManifest`: added `unified`/`scoped` run types, `scope`, `doc_types`, `ocr_device`, `vit_method`, `pixel_budget`, the new `data_stats` fields (`split_policy`, `data_mix`, `modality_mix_target`, `examples_by_line`), new metrics (`table_f1`, `lossrun_totals_reconciliation_rate`, `held_out_carrier_match`) and `promotion.tier`.
+- `write_manifest`: scope manifest path, model card written beside every manifest; removed the non-existent `capture_mineru_version()` (the MinerU pin comes from the corpus manifest); tracker is MLflow only.
+- Current implementation: paths table gained model cards, per-tenant eval set, `intake/`, `exports/`; release bundle tier, latency, GPU memory and routing fields.

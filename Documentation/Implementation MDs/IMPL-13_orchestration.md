@@ -1,8 +1,10 @@
 # SPEC 13 — Orchestration (Command Surface + RunPod Controller + Pipeline DAG)
 
+> Aligned with the code at commit f5668a4 (2026-10-13).
+
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: all prior specs (01–12).
 >
-> **Architecture refs:** `finetuning-architecture-v2.1.docx` §13 (**end-to-end pipeline, 13 stages, idempotency, the gate**), §13c (**operator command surface**), §14 (**RunPod: ephemeral training pods vs. persistent serving endpoint**), §12 (every cycle recorded), §17 (extraction routine), §11a (sweep orchestration — deferred).
+> **Architecture refs:** `finetuning-architecture-v2.3.docx` §13 (**end-to-end pipeline, 13 stages, idempotency, the gate**), §13c (**operator command surface**), §14 (**RunPod: ephemeral training pods vs. persistent serving endpoint**), §12 (every cycle recorded), §17 (extraction routine), §11a (sweep orchestration — deferred).
 
 ## Goal
 
@@ -10,11 +12,11 @@ Expose the whole lifecycle through **three operator commands plus one umbrella c
 
 ## 1. The command surface
 
-Single entrypoint, `orchestration/run.py`, with four subcommands:
+Single entrypoint, `orchestration/run.py`, with four lifecycle subcommands (plus `deploy-endpoint`, `rollback-endpoint` and `freeze-eval-set`; see *Current implementation*):
 
 | # | Command | Covers arch §13 stages | Ends with |
 |---|---|---|---|
-| **1** | `finetune` | 1 → 7 (ingest, OCR, dataset build, train, evaluate, **gate**, merge) | Adapters + merged model on the **RunPod staging volume** |
+| **1** | `finetune` | 1 → 7 (ingest, OCR, labeling, dataset build, train, checkpoint eval, merge) | Adapters + merged model on the **RunPod staging volume** |
 | **2** | `package` | 8 → 11 (quantize, calibrate, **gate**, bundle) | A promoted **release bundle** in Azure Blob |
 | **3** | `extract` | §17 extraction routine | Extracted JSON + confidence + metrics, locally |
 | **—** | `all` | `finetune` then `package` | Same as command 2 |
@@ -25,25 +27,25 @@ Single entrypoint, `orchestration/run.py`, with four subcommands:
 # 1 — ingest through merge. Artifacts staged on RunPod, not yet in Blob.
 python -m orchestration.run finetune \
        --input ./intake \
-       --doc-types acord policy lossrun \
+       --scope personal_lines \
        --corpus-version v2 \
-       --out-version v2 \
-       --gpu a100-80
+       --out-version v2
 
 # 2 — quantize, calibrate, gate, then publish the release bundle.
 python -m orchestration.run package \
        --version v2 \
+       --scope personal_lines \
        --release-id release-2026.11.1 \
-       --formats bf16 fp8
+       --formats bf16
 
-# 3 — extraction, model chosen by the operator.
-python -m orchestration.run extract --model base --input testing/test_data/
-python -m orchestration.run extract --model v2   --input testing/test_data/ \
-       --mode ocr_plus_image --ground-truth testing/golden/
+# 3 — extraction on imported, OCR'd documents, model chosen by the operator.
+python -m orchestration.run extract --model base --tenant T --split test --corpus v2
+python -m orchestration.run extract --model v2   --tenant T --source-ids policy_0001 policy_0002
+python -m orchestration.run extract --model base --adapter <staged checkpoint-N> --tenant T --split val --corpus v2
 
 # all — commands 1 and 2 back to back. Extraction excluded by design.
 python -m orchestration.run all \
-       --input ./intake --out-version v2 --release-id release-2026.11.1 --formats bf16 fp8
+       --input ./intake --scope personal_lines --out-version v2 --release-id release-2026.11.1 --formats bf16
 ```
 
 Each subcommand is a thin argument-parsing shell over `pipeline_dag.py` stage functions (§4). No orchestration logic lives in the CLI layer.
@@ -52,26 +54,28 @@ Each subcommand is a thin argument-parsing shell over `pipeline_dag.py` stage fu
 
 **`finetune` produces artifacts; `package` judges and publishes them.** The gate moved into `package` under arch v2.1 §13, because it scores the merged model in each serving format — and neither the merge nor the formats exist until `finetune` has finished.
 
-Runs, in order: **ingest → OCR → labeling → dataset build → train (ONE unified adapter) → select checkpoint → merge.**
+Runs, in order: **ingest → OCR → labeling → dataset build → train (ONE adapter per scope) → select checkpoint → merge.**
 
 **The human-labeling precondition.** Stage 3 (labeling) is human work and cannot be inside an automated command. `finetune` therefore:
 
-1. Ingests and OCRs **everything** in `--input`.
+1. Ingests and OCRs **everything** in `--input` (OCR in practice runs first, in the OCR environment; see *Current implementation*).
 2. Builds the corpus from **only the source_ids that have a validated `golden.json`** (IMPL-04).
 3. **Reports the unlabeled backlog** — a count and a `source_id` list written to the run report — and continues with what is labeled.
 4. Aborts before training only if the labeled set is empty, or below `--min-labels-per-type` (default 25, matching the day-zero rule in IMPL-04).
 
 This is the honest shape: you ingest 500 documents, 200 are labeled, you train on 200, and the command tells you 300 are waiting for a reviewer.
 
-**No training fan-out.** One `finetune` run launches **one** training job. v1 launched 1 + N sequentially — a Foundation, then one adapter per document type stacked on it — and that topology is unservable: vLLM applies one LoRA per request, so the two could never both be active (arch v2.1 §4.1). A per-type adapter returns only through the §4.2 graduation gate, trained on the merged foundation and never stacked.
+**The corpus is refused before anything trains on too little of it.** `stage_dataset_build` refuses, with nothing written, a corpus that set aside more than 25% of its loaded documents (`FAIL_REJECTED_SHARE`, measured by `corpus_set_aside` — the same helper preflight's corpus check reads), a corpus missing a split it needs, and documents read by more than one MinerU version.
 
-**Where the gate's numbers come from.** `finetune` reads the candidate's scores from the frozen-eval-set report (`eval-reports/{version}/summary.json`, IMPL-08) and the baseline from the currently promoted version's own report. Neither is optional and neither is fabricated: with no report the command fails rather than gating on nothing, and with no promoted version the baseline is genuinely `None` — a first version — rather than a lookup that quietly failed.
+**No training fan-out.** One `finetune` run launches **one** training job per scope. v1 launched 1 + N sequentially — a Foundation, then one adapter per document type stacked on it — and that topology is unservable: vLLM applies one LoRA per request, so the two could never both be active (arch v2.1 §4.1). A per-type adapter returns only through the §4.2 graduation gate, trained on the merged foundation and never stacked. With several `--scope`s, stages 1–4 build the corpus once over the union of their document types and stages 5–11 run once per scope, each with its own context (`run_multi_scope`); a block in one scope does not stop the others, and the exit code is non-zero if any failed.
 
-**The gate is a hard stop inside `package`.** It runs after merge, quantize and calibrate (arch v2.1 §13), so a regression stops the **release**, not the build: merging still happens, nothing is packaged, and the staged artifacts sit on a volume that will be reclaimed. It exits non-zero with the per-metric verdicts — floor, interval and basis, not a bare delta.
+**Where the gate's numbers come from.** The gate (in `package`) reads the candidate's scores from this scope's frozen-eval-set report (`eval-reports/v{n}/[scope/{scope}/]summary.json`, IMPL-08) — producing it, when absent, by serving the frozen set through the serving pipeline with the merged bf16 model and the release's bf16 calibrators — and the baseline from the currently promoted version's own report for the same scope. Neither is optional and neither is fabricated: with no report a dry run fails rather than gating on nothing, and with no promoted version the baseline is genuinely `None` — a first version — rather than a lookup that quietly failed.
+
+**The gate is a hard stop inside `package`.** It runs after merge, quantize and calibrate (arch v2.1 §13), so a regression stops the **release**, not the build: merging still happens, nothing is packaged, and the staged artifacts sit on a volume that will be reclaimed. It exits non-zero with the per-metric verdicts — floor, interval and basis, not a bare delta. A passing release is classed **production** (field normalized match ≥ 0.92) or **interim** (`tier`, recorded in the gate decision and the bundle).
 
 There is no `--force`. There **is** an override (§15.5), requiring a named person and a written reason, both recorded in the gate decision and the release bundle. v1 had none at all, on the reasoning that a waivable gate is a suggestion — which was right about the risk and wrong about the remedy, because the v1 gate demanded improvement on twelve metrics within 0.001 and could not be passed at pilot volume at all.
 
-**Flags:** `--input`, `--doc-types`, `--corpus-version`, `--out-version`, `--gpu`, `--commit <sha>`, `--from-stage <name>` (resume), `--skip-ingest`, `--min-labels-per-type`, `--push-adapters` (see §3), `--tenant` (optional, defaults from env). `--foundation-only` is gone: one unified adapter is the only topology.
+**Flags:** `--input`, `--doc-types`, `--corpus-version`, `--out-version`, `--scope NAME` (repeatable; `configs/scopes.yaml`, default the unified scope), `--gpu`, `--commit <sha>`, `--from-stage <name>` (resume), `--skip-ingest`, `--train-vit`, `--min-labels-per-type`, `--push-adapters` (see §3), `--tenant` (optional, defaults from env), `--dry-run`. `--foundation-only` is gone: one adapter per scope is the only topology.
 
 ## 3. The RunPod staging volume
 
@@ -80,14 +84,16 @@ There is no `--force`. There **is** an override (§15.5), requiring a named pers
 RunPod **pods are ephemeral** — a pod clones the repo, works, pushes, and terminates (arch §14). Persistence between commands 1 and 2 therefore comes from a **RunPod network volume**, mounted at `/runpod-volume` and attached to every pod the controller launches.
 
 ```
-$RUNPOD_VOLUME_MOUNT/staging/            # default /runpod-volume; /workspace when mounted there
-  adapters/foundation/v{n}/              # unified run: ms-swift output, checkpoint-* inside
-  adapters/scope/{scope}/v{n}/           # a scoped run
+$RUNPOD_VOLUME_MOUNT/staging/            # default /runpod-volume; /workspace on the pod (pod_bootstrap.sh)
+  adapters/foundation/v{n}/              # unified run: ms-swift output, v*-<timestamp>/checkpoint-* inside
+  adapters/scope/{scope}/v{n}/           # a scoped run (personal_lines, casualty_fleet, ...)
+    checkpoint_scores/                   # multi-GPU checkpoint selection's worker output
   merged-models/{unified|scope/{scope}}/v{n}/
   quantized-models/{unified|scope/{scope}}/v{n}/vllm/{format}/
   train-data/{scope}/v{n}/               # the run's staged ms-swift JSONL
-  train-images/{tenant}/{corpus}/        # page images, one cache per corpus version
-  eval-reports/v{n}/
+  train-images/{tenant}/{corpus}/        # page images, one cache per tenant and corpus version
+  eval-reports/v{n}/[scope/{scope}/]
+  serving-adapters/{release_id}/         # a serving cold start's release LoRAs
 ```
 
 The layout deliberately mirrors the Blob layout (master §4) so `package` copies rather than translates.
@@ -96,71 +102,75 @@ The layout deliberately mirrors the Blob layout (master §4) so `package` copies
 
 **Durability rule — the one thing command 1 always sends to Blob.** A network volume is working storage, not an artifact of record. If command 2 never runs, or the volume is reclaimed, an untracked training run has happened. So `finetune` **always writes the run manifest to Blob** (IMPL-02) even though the weights stay staged, with `artifacts.status: "staged"` and `artifacts.staging_path` set. `package` later flips it to `"published"` and fills the real Blob paths. The manifest is a few KB; the lineage guarantee in arch §12 is worth that.
 
-**Optional belt-and-braces:** `finetune --push-adapters` also pushes the LoRA adapters (tens of MB) to Blob immediately, leaving only the merged model staged. Off by default, per the staging design; recommended if a cycle's commands 1 and 2 may be separated by more than a day.
+**Optional belt-and-braces:** `finetune --push-adapters` also pushes the LoRA adapter to Blob right after training — `adapter_config.json` and `adapter_model.safetensors` of the best-loss checkpoint (or the last), never the checkpoint's resume state — leaving only the merged model staged. `package` later publishes the selected checkpoint's two files to the same prefix, skipping any file Blob already holds. Off by default, per the staging design; recommended if a cycle's commands 1 and 2 may be separated by more than a day.
 
 **Config:** `RUNPOD_VOLUME_ID` and `RUNPOD_VOLUME_MOUNT` (default `/runpod-volume`) in `.env`. The controller attaches the volume to every pod it launches; a launch without it is refused rather than silently writing to pod-local disk.
 
 ## 4. `package` — command 2 (stages 8 → 11)
 
-Runs: **quantize → push adapters + merged model + quantized model(s) to Azure Blob → update the run manifest.**
+Runs: **quantize → calibrate → evaluation & gate → release bundle (with its routing check) → push the adapter, merged model and quantized model(s) to Azure Blob → update the run manifests → write the bundle.**
 
 - Reads `--version v{n}` from the staging volume. If that version is not staged, **fail loudly** naming the expected path and the remediation (re-run `finetune --from-stage merge`, or `--from-blob` if adapters were pushed with `--push-adapters`).
-- Quantizes per `--formats` (default: **bf16 alone** — it is the merged model; FP8 only once the spike has verified it, per IMPL-10). GGUF, and its `mmproj`, is an on-request edge export, never a `package` output.
-- Pushes **all three artifact classes** to their respective Blob locations (master §4):
+- Quantizes per `--formats` (default: **bf16 alone** — it is the merged model, so quantize is a no-op; FP8 only once the spike has verified it, per IMPL-10). GGUF, and its `mmproj`, is an on-request edge export, never a `package` output.
+- Pushes **all three artifact classes** to their respective Blob locations (master §4), through `artifact_registry/transfer.py`:
 
 | Artifact | Blob destination |
 |---|---|
-| Foundation + per-type LoRA adapters | `adapters/foundation/v{n}/`, `adapters/{doc_type}/v{n}/` |
-| Merged fp16/bf16 model | `merged-models/{doc_type\|unified}/v{n}/` |
-| Quantized GGUF, one subfolder per format | `quantized-models/{doc_type\|unified}/v{n}/gguf/{format}/` |
-| Eval report | `eval-reports/v{n}/` |
+| The scope's LoRA adapter — `adapter_config.json` + `adapter_model.safetensors` of the selected checkpoint only | `adapters/foundation/v{n}/` (unified), `adapters/scope/{scope}/v{n}/` |
+| Merged bf16 model | `merged-models/{unified\|scope/{scope}}/v{n}/` |
+| Each quantized (non-bf16) serving format | `quantized-models/{unified\|scope/{scope}}/v{n}/vllm/{format}/` |
+| Eval report | `eval-reports/v{n}/[scope/{scope}/]` |
 
+  The adapter and merged-model pushes skip every file whose bytes Blob already holds (the MD5 recorded with each upload), so re-packaging a release sends nothing.
 - Updates the run manifest: `artifacts.status` → `"published"`, real Blob paths, `quantized_formats[]`.
-- `--keep-staging` retains the volume copy (default: clear it after a verified push, so the volume doesn't fill).
-- Quantization threshold validation (IMPL-10 / arch §13b) is **deferred this cycle** — the serving path is merged fp16/bf16 via vLLM. When it ships it becomes a gate inside `package`, between quantize and push.
+- `--keep-staging` retains the volume copy (default: clear **this scope's** staged paths after at least one manifest was published, so the volume doesn't fill).
+- Quantization threshold validation (IMPL-10 / arch §13b) runs inside the quantize stage when per-format metrics are supplied (`StageContext.quant_metrics`); no CLI path supplies them yet, so a bf16-only cycle — bf16 *is* the reference — passes with a warning.
 
-**Flags:** `--version`, **`--release-id release-YYYY.M.N`** (required), `--formats`, `--skip-quantize` (push adapters + merged only), `--keep-staging`, `--from-blob`, `--dtype`, **`--foundation-only`**, **`--doc-types`**, **`--tenant`**.
+**Flags:** `--version`, **`--release-id release-YYYY.M.N`** (required; repeatable as `scope=release-YYYY.M.N` pairs when several scopes are named), `--formats`, `--skip-quantize` (push adapters + merged only), `--keep-staging`, `--from-blob`, `--dtype`, and on a standalone `package` **`--scope`**, **`--doc-types`**, **`--tenant`**, `--corpus-version` (read from the run manifest when omitted).
 
-**`--release-id` is checked before any stage runs** — under `all`, before training. Calibrators, gate decisions and the bundle are all addressed by it, and an invalid one used to surface only when calibrate tried to save what it had already fitted. It is named by the operator, never derived: a derived id would move between a failed run and its `--from-stage` resume and split one release across two ids. A missing or malformed id fails with the next free id for the month as the suggested fix; pass the same id when resuming.
+**`--release-id` is checked before any stage runs** — under `all`, before training. Calibrators, gate decisions and the bundle are all addressed by it, and an invalid one used to surface only when calibrate tried to save what it had already fitted. It is named by the operator, never derived: a derived id would move between a failed run and its `--from-stage` resume and split one release across two ids. A missing or malformed id fails with the next free id for the month as the suggested fix; pass the same id when resuming. Each scope produces its own release, so one bare id given for several scopes is refused (`release_id_for`).
 
 **Where the package stages get their inputs.** Nothing is hand-supplied in a real cycle:
 
-- **Checkpoints** — after training, `discover_checkpoints` reads the `checkpoint-*` directories ms-swift wrote under the staged adapter directory (the most recent `v*-<timestamp>/` run), and the best-loss one from `trainer_state.json`. Selection scores each as a decoder LoRA over `val/val.jsonl` through `evaluation/validation_generation.py`, whose metrics are the gate's own `build_report`.
-- **Calibration samples** — when none are supplied, calibrate generates the validation split **with each staged serving format**, constrained as serving is, and labels every field's features correct or not against the golden label, split by the `val_half` the dataset build stamped. There is no shared or wildcard sample set.
+- **Checkpoints** — after training, `discover_checkpoints` reads the `checkpoint-*` directories ms-swift wrote under the staged adapter directory (the most recent `v*-<timestamp>/` run), and the best-loss one from `trainer_state.json`. Selection (`stage_checkpoint_eval`) scores each as a decoder LoRA by generated field accuracy on a stratified sample of the scope's own validation view (`validation_sample_rows`: 400) through `evaluation/validation_generation.py`, whose metrics are the gate's own `build_report`. The best `selection_document_finalists` (2) are then generated on every validation row in `selection_document_modes` (`[ocr_plus_image]`) and judged on whole documents — windows merged as serving merges them — among finalists whose rates of invented and of missed printed values are within `selection_guard_margin` (0.02) of the best one's; with 0 or 1 finalists the near-tie rule (`selection_tie_break_margin`) decides. With several GPUs, one vLLM engine per GPU scores the candidates at once (`parallel_vllm_scorer`). Generation sends `validation_batch_rows` (96) rows per vLLM call. The stage result carries the selection and the generation cost (`generation`: rows and seconds); the choice is written to `eval-reports/v{n}/[scope/{scope}/]checkpoint_selection.json`.
+- **Calibration samples** — when none are supplied, calibrate generates the validation split **with each staged serving format**, constrained as serving is, and labels every field's features correct or not against the golden label, split by the `val_half` the dataset build stamped. There is no shared or wildcard sample set. The stage records the expected calibration error per field type and overall.
 - **Gate decision** — written under `releases/{tenant}/{release_id}/gate/bf16/`. The candidate metrics are the merged bf16 model's, so that is bf16's gate run and no other format's.
 
-**The release bundle** (`releases/{tenant}/{release_id}/bundle.json`, plus a row in `release_index.json`) pins the adapter run, merged and per-format model paths, per-format calibrators and gate decisions, a hash of the prompt templates, schema versions, the OCR pin, and hashes of `configs/shared/vision.yaml`, `configs/inference/vllm_serving.yaml` and the dependency pins. Its status is **`promoted` only when every serving format has its own calibrator and its own gate run**; otherwise it is written as **`gated`** with the missing pieces listed in the stage result. Until a per-format gate run exists for quantized formats, an FP8 release is `gated`. The dependency hash reads `pyproject.toml` because the repo has no lockfile yet — declared ranges, not resolved versions.
+**The release bundle** (`releases/{tenant}/{release_id}/bundle.json`, plus a row in `release_index.json`) pins the scope, its `lines` and served `doc_types`, the adapter run, merged and per-format model paths, per-format calibrators and gate decisions, the release `tier`, a hash of every prompt input (`common.prompts.prompt_hash`: templates, schemas, the section map), schema versions, the OCR pin, and hashes of `configs/shared/vision.yaml`, `configs/inference/vllm_serving.yaml` and the dependency lock (`requirements-train.lock`; `pyproject.toml` only when the lock is missing). It also records the p95 latency per adapter and the peak GPU memory from the eval report's `release_measurements`, and the **routing table**. Its status is **`promoted` only when every serving format has its own calibrator and its own gate run**; otherwise it is written as **`gated`** with the missing pieces listed in the stage result. Until a per-format gate run exists for quantized formats, an FP8 release is `gated`.
 
-The last three must match the `finetune` run that produced the version. `finetune` decides *which* models get built; `package` publishes their locations, so without them a standalone `package` fell back to `foundation_only=False` and all three doc types however finetune had actually run — writing three adapter prefixes and three merged-model prefixes into Blob for artifacts that were never built. An empty Blob prefix later reads as a published model. (Under `all` they come from the finetune flag set; adding them twice is an argparse conflict.)
+**The bundle is built, and its routing check run, before anything is pushed** (`record_release_measurements`, `serving/routing_check.py`): every line in `configs/layout_families.yaml` is routed through the serving plan as it would stand with this release promoted (with the serving config's `release_pins`). A line that cannot be routed, or one this release was trained for that would not reach it, stops the release with a `PipelineError` — no weights in Blob, no manifest marked published.
+
+`--scope`, `--doc-types` and `--tenant` must match the `finetune` run that produced the version. `finetune` decides *which* models get built; `package` publishes their locations, so packaging with the wrong ones publishes paths for artifacts that were never built — an empty Blob prefix that later reads as a published model — or another scope's paths under this one's release. (Under `all` they come from the finetune flag set; adding them twice is an argparse conflict.)
 
 **`stage_push` publishes only runs that finished.** Manifests are selected by version *and status*: a run left at `training` or marked `failed` has no weights, and flipping it to `published` advertises a Blob path that serving will fetch and find empty.
 
 ## 5. `extract` — command 3 (arch §17)
 
-A wrapper over `testing/run_extraction.py` (IMPL-12), which itself wraps the serving pipeline (IMPL-11) so test == prod.
+A wrapper over `testing/run_extraction.py` (IMPL-12), which itself wraps the serving pipeline (IMPL-11) so test == prod. It reads documents already imported and OCR'd, from Blob.
 
 **Model selection is the point of this command.** `--model` accepts:
 
 | Value | Resolves to |
 |---|---|
 | `base` | Untuned `Qwen/Qwen3-VL-8B-Instruct` at the pinned revision, **no adapter** |
+| `base --adapter <folder>` | The base with that LoRA (a training `checkpoint-N`, or a run's adapter folder; local or Blob) applied per request, **not merged** |
 | `v1`, `v2`, … | That version's merged model, plus a graduated per-type adapter where the routed type has one |
 | `v2 --format fp8` | That version's FP8 serving weights |
 
-`--model base` is not a curiosity — it is the **zero-shot baseline** of the pilot protocol (IMPL-15) and the day-zero pre-annotation path (IMPL-04). `pilot/zero_shot_baseline.py` is a thin wrapper over this command rather than a parallel implementation.
+`--model base` is not a curiosity — it is the **zero-shot baseline** of the pilot protocol (IMPL-15) and the day-zero pre-annotation path (IMPL-04). `pilot/zero_shot_baseline.py` calls the same `testing.run_extraction.run_document` rather than a parallel implementation.
 
-**Flags:** `--model`, `--input <file|dir>`, `--mode ocr_plus_image|image_only`, `--ground-truth <dir>`, `--format`, `--limit`, `--tenant`.
+**Flags:** `--model`, `--adapter`, `--label`, `--source-ids …` | `--split train|val|test` (with `--corpus`), `--doc-type` (default `policy`), `--mode ocr_plus_image|image_only`, `--no-score`, `--format`, `--limit`, `--tenant`.
 
-Outputs are unchanged from IMPL-12: `results/{version}/`, `metrics/{version}/`, `extraction_registry.json`.
+Outputs are those of IMPL-12: `results/{version}/` (each result with `all_fields`), and `metrics/{version}/` (per-document metrics and `summary.json`).
 
 ## 6. `all` — commands 1 + 2
 
-Runs `finetune`, then `package`, sharing `--out-version`. Halts if the gate fails; `package` is never reached on a failed gate. Accepts the union of both flag sets. **Does not run `extract`.**
+Runs `finetune`, then `package`, sharing `--out-version`. Halts if the gate fails; nothing is published on a failed gate. Accepts the union of both flag sets; `--release-id` is checked before training starts. **Does not run `extract`.**
 
 ## 7. `orchestration/runpod_controller.py`
 
 **Training — ephemeral pods (arch §14):**
-- **Deployment (2026-09-28): one RunPod H200 SXM (141 GB) pod runs every GPU stage in process** — OCR, training, checkpoint selection, merge, calibration and the gate share the card, each vLLM engine released before the next loads. Classes per stage stay configurable (`orchestration/config/pipeline.yaml`) for a future per-stage launcher; the original plan put OCR on a cheaper L4/L40S card.
+- **Deployment: one RunPod H200 SXM pod runs every GPU stage in process**, inside tmux — OCR, training, checkpoint selection, merge, calibration and the gate share the cards, each vLLM engine released before the next loads. On a multi-GPU pod training is data-parallel over every GPU (`distributed.gpus: auto`, the effective batch unchanged), checkpoint selection runs one vLLM engine per GPU, and OCR can be sharded (`run_mineru --shard I/N`). Classes per stage stay configurable (`orchestration/config/pipeline.yaml`) for a future per-stage launcher; the original plan put OCR on a cheaper L4/L40S card.
 - **Stages 2, 4 and 5 all want a GPU**, so `finetune` provisions **one pod for the whole command** rather than shuttling a corpus between machines. That is cheaper than three pod launches and removes two Blob round trips.
 - **Training code lives in the private git repo; the pod clones it fresh at job start** at a pinned commit — code is never permanently resident on a pod.
 - Every launched pod has the staging volume attached (§3).
@@ -170,8 +180,7 @@ Runs `finetune`, then `package`, sharing `--out-version`. Halts if the gate fail
 **Serving — persistent endpoint (arch §14):**
 - Manage the **RunPod Serverless vLLM endpoint** (IMPL-11): deploy/update to a promoted version, health-check, roll back.
 
-**Direct CLI** (the lower-level surface `run.py` calls; still available for single steps):
-`train-foundation`, `train-adapter`, `evaluate`, `merge`, `quantize`, `push`, `deploy-endpoint`, `rollback-endpoint`.
+**No separate controller CLI.** Single steps run through `orchestration.run <command> --from-stage <stage>`; the endpoint through `orchestration.run deploy-endpoint` / `rollback-endpoint`.
 
 ## 8. `orchestration/pipeline_dag.py`
 
@@ -180,16 +189,16 @@ The 13 stages (arch v2.1 §13) as reusable, individually addressable stage funct
 | # | Stage | Command | Writes to |
 |---|---|---|---|
 | 1 | **Ingestion** — checksum-deduped, immutable | `finetune` | `raw-documents/` (Blob) |
-| 2 | **Preprocessing (GPU)** — MinerU OCR + page rendering at the resolution cap | `finetune` | `processed/` (Blob) |
+| 2 | **Preprocessing (GPU)** — MinerU OCR (3.4.5, pipeline backend, in the OCR environment) + page rendering at the resolution cap | `finetune` | `processed/` (Blob) |
 | 3 | **Labeling** — human review | *(outside the CLI)* | `golden-labels/` (Blob) |
 | 4 | **Dataset build** — compile JSONL, inject schema, modality split, train/val/test split | `finetune` | `corpus/v{n}/` (Blob) |
-| 5 | **Training** — ONE unified LoRA on a bf16 base | `finetune` | staging volume |
-| 6 | **Checkpoint eval** — vLLM generation on validation, selected by field F1 | `finetune` | staging volume |
-| 7 | **Merge** — PEFT `merge_and_unload()`, one adapter | `finetune` | staging volume |
-| 8 | **Quantize** — bf16 reference + FP8, vLLM-native | `package` | staging volume |
+| 5 | **Training** — ONE LoRA per scope on a bf16 base | `finetune` | staging volume |
+| 6 | **Checkpoint eval** — vLLM generation on a validation sample, finalists judged on whole documents | `finetune` | staging volume + `checkpoint_selection.json` (Blob) |
+| 7 | **Merge** — PEFT `merge_and_unload()`, the selected checkpoint into bf16 | `finetune` | staging volume |
+| 8 | **Quantize** — no-op for `[bf16]`; FP8/AWQ, vLLM-native, once verified | `package` | staging volume |
 | 9 | **Calibrate** — per-field-type calibrators and risk-controlled thresholds, per serving format | `package` | release bundle |
-| 10 | **Evaluation & gate** — frozen golden eval set, per serving format | `package` | gate decision |
-| 11 | **Package** — release bundle pinning adapter, prompt, schema, calibrators, OCR pin and serving config | `package` | Blob |
+| 10 | **Evaluation & gate** — frozen golden eval set, per serving format; production or interim tier | `package` | gate decision |
+| 11 | **Package** — release bundle pinning adapter, prompt, schema, calibrators, OCR pin, serving config and the routing table; adapter files, merged model and formats pushed | `package` | Blob |
 | 12 | **Serving** — endpoint pulls the promoted release bundle | `deploy-endpoint` | endpoint |
 | 13 | **Feedback loop** — low-confidence output, human corrections, and a random 5% of auto-accepted documents → labeling queue | `extract` + IMPL-04 | next corpus version |
 
@@ -199,14 +208,15 @@ The 13 stages (arch v2.1 §13) as reusable, individually addressable stage funct
 - **Stages are idempotent and resumable.** `--from-stage` re-enters mid-pipeline; a completed stage re-run is a no-op, not a duplicate.
   - **Ingestion is the exception, and always runs.** There is no cheap correct completion check for it — comparing an input directory against ingested checksums costs the same as ingesting — and the approximate one that used to be here ("has anything ever been ingested?") was true from cycle two onward, so a second `finetune --input ./new_batch` skipped the stage and built the corpus from the previous batch. `ingest_directory` is checksum-deduped, so re-running it writes nothing and reports duplicates. An approximate guard on cheap idempotent work buys nothing and can be wrong in the direction that loses documents.
 - **The gate (stage 10) is a hard stop.** Promotion requires every gating metric to pass. There is no `--force-deploy`; the only exception is the recorded written override (§2). `package` reads the recorded gate decision and refuses a version whose gate did not pass — running `package` after a blocked gate used to publish it.
+- **Every run says where its time went.** Each stage that runs records its `wall_seconds` (every attempt included) in its result, and the run report is written after every stage (*Current implementation*).
 
 ## 9. `orchestration/config/`
-- GPU class per stage, corpus/version tags, staging volume id and mount, schedule, notification hooks, retry policy.
+- GPU class per stage, corpus/version tags, staging volume id and mount, schedule, notification hooks, retry policy (`retry.max_attempts: 2`, `backoff_seconds: 30` × the attempt number).
 - **Sweep orchestration (arch §11a) — deferred with IMPL-06 `sweep.py`:** when enabled, the 3-phase sweep runs as a scheduled job sequence (~9–12 runs before the first **production** run), each writing a manifest, winner promoted to the production training config. Not part of the first cycle.
 - **Foundation-upgrade cascade (arch §12):** when a new unified major version passes its gate, generate the re-validation work list from `query_registry.adapters_depending_on()` (IMPL-02) and schedule retraining of every dependent GRADUATED adapter (§4.2) **before** it becomes production. Dormant until a type graduates — the default topology produces no dependents at all. The DAG produces the work list and waits for it to pass rather than silently promoting.
 
 ## Constraints
-- Four subcommands, one entrypoint. `all` = `finetune` + `package`, never `extract`.
+- Four lifecycle subcommands, one entrypoint. `all` = `finetune` + `package`, never `extract`.
 - Training pods **ephemeral**; the staging volume is the only thing that persists between them, and it is not an artifact of record.
 - `finetune` always writes its run manifest to Blob even when weights stay staged.
 - Orchestration runs on cheap CPU infra **outside** RunPod; only GPU-bound work runs on RunPod (arch §14).
@@ -216,19 +226,22 @@ The 13 stages (arch v2.1 §13) as reusable, individually addressable stage funct
 ## Acceptance checklist
 - [ ] `run finetune` executes stages 1→7 on a tiny fixture set and leaves adapters + merged model on the staging volume.
 - [ ] `finetune` reports the unlabeled backlog and trains on the labeled subset; it aborts when labels are below `--min-labels-per-type`.
-- [ ] `finetune` launches **one** training job (one unified adapter, or one scope).
+- [ ] `finetune` launches **one** training job per scope (one unified adapter, or one per named scope).
+- [ ] The dataset build refuses a corpus that set aside more than 25% of its documents, before writing anything — also when preflight ran with `--skip-corpus`.
 - [ ] **A failed gate stops `package` before anything is published, exits non-zero, and prints per-metric deltas;** `package` run on its own refuses a version whose recorded gate did not pass.
 - [ ] `finetune` writes a run manifest to Blob with `artifacts.status: "staged"` even though weights are not pushed.
-- [ ] `run package --version v2` pushes the **real** selected adapter, the merged model and each non-bf16 serving format to their Blob paths, then flips the manifest to `"published"`.
+- [ ] `run package --version v2` pushes the **real** selected adapter (its `adapter_config.json` and `adapter_model.safetensors` only), the merged model and each non-bf16 serving format to their Blob paths, then flips the manifest to `"published"`.
+- [ ] A release whose routing check fails pushes nothing.
 - [ ] `package` fails loudly with remediation when the requested version is not on the staging volume.
-- [ ] `run extract --model base` runs the untuned base model with no adapter; `--model v2` resolves that version's merged model, plus a graduated per-type adapter where the routed type has one.
+- [ ] `run extract --model base` runs the untuned base model with no adapter; `--model base --adapter <checkpoint>` applies it per request; `--model v2` resolves that version's merged model, plus a graduated per-type adapter where the routed type has one.
 - [ ] `run all` chains 1 and 2, **never runs extraction**, and does not reach `package` when the gate fails.
 - [ ] `--from-stage` resumes mid-pipeline; re-running a completed stage is a no-op — **except ingestion**, which always runs and relies on checksum dedup.
 - [ ] A completion check covers **every** target it claims to, not just the first: a quantize run that failed halfway must not read as complete on resume.
 - [ ] The staging volume is cleared only after at least one manifest was actually published.
 - [ ] A pod launched without the staging volume attached is refused.
+- [ ] Each stage that runs records `wall_seconds`, and the run report is rewritten after every stage.
 - [ ] **Cross-type regression evidence carries both sides.** `StageContext` exposes `cross_type_evidence` as `{doc_type: {"current": {...}, "candidate": {...}}}` — the shape `promotion_gate` reads — and it is passed through verbatim. It is a **separate field** from `revalidation_evidence`, which holds per-doc-type booleans for the arch §12 cascade; reusing one field for both produced an entry with no `"current"` key, which the gate correctly rejected as empty. A continued Foundation could then not pass by any input: supply metrics and it read as empty evidence, supply the booleans and it read as no evidence at all.
-- [ ] **A deterministic failure is not retried.** The retry policy exists for transient faults — a throttled Blob read, a pod that dropped. `PipelineError` and `PathError` mean the stage cannot run at all with these inputs (below the day-zero label floor, missing `--input`, a malformed `--out-version`), so a second attempt re-lists everything and fails with the identical message after a pointless backoff. They stop the run immediately, like a gate block.
+- [ ] **A deterministic failure is not retried.** The retry policy exists for transient faults — a throttled Blob read, a pod that dropped. `PipelineError` and `PathError` mean the stage cannot run at all with these inputs (below the day-zero label floor, missing `--input`, a malformed `--out-version`, a checkpoint scorer that cannot start), so a second attempt re-lists everything and fails with the identical message after a pointless backoff. They stop the run immediately, like a gate block.
 - [ ] **A dry-run `rollback-endpoint` does not move the endpoint.** Popping the deployment history before checking `dry_run` meant a preview permanently rewrote the recorded live version: `health_check` reported the previous version while the current one was still serving, and the next real rollback refused with "nothing to roll back to".
 - [ ] A pod leaves no persistent process after completion.
 - [ ] `deploy-endpoint --model vN` updates the serving endpoint; `rollback-endpoint` restores the previous promoted version.
@@ -237,65 +250,143 @@ The 13 stages (arch v2.1 §13) as reusable, individually addressable stage funct
 
 ---
 
-## Current implementation (2026-09-27)
+## Current implementation (2026-10-13)
 
 **Commands** (`orchestration/run.py`): `finetune`, `package`, `all`, `extract`, `deploy-endpoint`,
-`rollback-endpoint`, and **`freeze-eval-set --corpus vN [--allow-small]`** (IMPL-08).
+`rollback-endpoint`, and **`freeze-eval-set --corpus vN [--tenant T] [--allow-small]`**, or **`freeze-eval-set --tenant T --mark-held-out`**
+on an already frozen set (marks the documents the delivery calls unseen carriers', after a re-import; nothing else
+changes) (IMPL-08): the first copies that
+tenant's corpus test split into `golden-eval-set/{tenant}/` — each tenant freezes its own, from its own corpus,
+and is gated on it. It refuses fewer than 150 test documents per type unless `--allow-small`, refuses a second
+freeze, and refuses while a set frozen before sets were per tenant still sits at the root. After a freeze the
+tenant's corpus builds leave the frozen documents and their families out and split into train and val only.
+
+**Scopes** (`configs/scopes.yaml`, `--scope`, repeatable): `unified`, `policy`, `lossrun`, `personal_lines`
+(policies of the seven personal lines) and `casualty_fleet` — the casualty-and-fleet family's adapter, trained
+for now on commercial general liability alone (`lines: [gl]`), from the CGL source documents under a tenant of
+its own (`--tenant`). Training refuses a scope that would train a layout family on two output shapes
+(`common.scopes.assert_one_output_shape`): `auto` and `wc` are still self-contained schemas while `gl` is on the
+common model, so they join `casualty_fleet` only once they move. The run report and staged paths are per scope,
+so two scopes or tenants can share a version tag.
 
 **Every long job survives a disconnect** (`orchestration/detach.py`, `scripts/pod_run.sh`):
 - On the pod — `RUNPOD_POD_ID` set, or RunPod's `/etc/rp_environment`, or Linux with `/workspace` mounted
   and a GPU present (a laptop with a GPU and a `workspace` folder is not the pod) — every long entry point
-  re-launches itself in a tmux session and returns at once with the job's name. Covered: every
-  `orchestration.run` command except the endpoint switches, `training.train`, `training.sweep`,
-  `evaluation.run_eval`, OCR and rendering, the three importers, pre-annotation, active learning, the
-  Phase 0 spike and `setup_pod.sh`. The guard runs after argument parsing, so `--help` and bad arguments
-  answer at once.
+  re-launches itself in a tmux session through `pod_run.sh start <name> -- <command>` and returns at once with
+  the job's name. Covered: every `orchestration.run` command except the endpoint switches,
+  `orchestration.preflight`, `orchestration.smoke_run`, `training.train`, `training.sweep`, `evaluation.run_eval`,
+  the checkpoint-score workers, OCR and rendering, `data_pipeline.ocr_check`, the audit, the intake pull, the
+  importers and bundle preparation, pre-annotation, active learning, `testing.run_extraction`,
+  `testing.compare_models`, the Phase 0 spike, `setup_pod.sh` and `pod_bootstrap.sh`. The guard runs after
+  argument parsing, so `--help` and bad arguments answer at once.
 - Inside tmux, or inside a `pod_run.sh` run (`FIDEON_DETACHED=1`), a command runs in place — never a second
   copy. Off the pod nothing changes. `FIDEON_NO_DETACH=1` opts one command out.
-- `pod_run.sh start|attach|status|tail|list|stop`: logs and exit codes in `/workspace/logs`; one run per
-  name; nothing ends a run except `stop`, which asks for the run's name. It cannot survive the pod itself
-  stopping — `status` then reports the run as interrupted and `--from-stage` resumes.
+- `pod_run.sh start <name> -- <command>` (or `start <name> <orchestration.run arguments>`),
+  `attach <name>`, `status [<name>]`, `tail <name>`, `list`, `stop <name>`: logs and exit codes in
+  `$FIDEON_LOG_DIR` (default `/workspace/logs`); one run per name; nothing ends a run except `stop`, which asks
+  for the run's name while it is still running. It cannot survive the pod itself stopping — `status` then reports
+  the run as interrupted and `--from-stage` resumes.
 - `tests/test_detach.py` fails if a new entry point is neither guarded nor listed as quick.
-- **A run keeps its caller's environment**: each run records the caller's `PATH` and `VIRTUAL_ENV`, because a
-  tmux session otherwise takes them from the tmux server (started by whichever job came first); training finds
-  `swift` next to the running Python before searching `PATH`. The bootstrap builds its venvs with Python >= 3.11
-  (`FIDEON_PYTHON` overrides), since `python3` on Ubuntu 22.04 can be the system 3.10.
+- **A run keeps its caller's environment**: each run sources the repo's `.env` and records the caller's `PATH`,
+  `VIRTUAL_ENV` and `CUDA_VISIBLE_DEVICES` (set or unset), because a tmux session otherwise takes them from the
+  tmux server (started by whichever job came first); training finds `swift` next to the running Python before
+  searching `PATH`. The bootstrap builds its venvs with Python >= 3.11 (`FIDEON_PYTHON` overrides), since
+  `python3` on Ubuntu 22.04 can be the system 3.10.
 
-**Stage behaviour added since this spec**:
-- **Deterministic failures are not retried** (`TrainingError`, `StagingError`, `LengthCheckError`,
-  `CorpusViewError`, `CalledProcessError`); only transient faults are.
+**One command, OCR to frozen eval set.** On the pod, with the training environment active, one detached run
+chains the steps, each running in place inside it:
+
+```bash
+bash scripts/pod_run.sh start cgl-v1 -- bash -c '
+  /workspace/venv-ocr/bin/python -m data_pipeline.ocr.run_mineru --doc-type policy --all-unprocessed --tenant T &&
+  python -m data_pipeline.ocr_check --doc-type policy --tenant T &&
+  python -m orchestration.preflight --scope casualty_fleet --tenant T --corpus-version v1 --out-version v1 --skip-corpus &&
+  python -m orchestration.run finetune --scope casualty_fleet --skip-ingest --tenant T --corpus-version v1 --out-version v1 &&
+  python -m orchestration.run freeze-eval-set --corpus v1 --tenant T --allow-small'
+```
+
+`preflight --skip-corpus` because `finetune` builds the same corpus and refuses the same >25% set-aside itself, so
+the corpus is built once.
+
+**Stage behaviour** (`orchestration/pipeline_dag.py::run_stages`):
+- **Logging is re-asserted before every stage** (`common/logging_setup.py`): `orchestration.run` installs a
+  `ConsoleHandler` — a `StreamHandler` subclass, which ms-swift's and modelscope's logger setup leave alone — and
+  `reassert()` lowers whatever a library raised and re-enables this repository's loggers.
+- **Each stage that runs records `wall_seconds`** (every attempt included) in its `StageResult` data; a stage
+  skipped as already complete records none.
+- **A progress report is written after every stage** — and on a block or failure — to `$FIDEON_LOG_DIR`
+  (default `/workspace/logs`) when that folder exists, as `run-<command>-<scope>-<tenant>-<version>.json`
+  (`progress_report_name`), so a run that dies part-way still says what each finished stage took. A report that
+  cannot be written never stops the run.
+- **Retries**: a failed stage is retried up to `retry.max_attempts` (2) after `backoff_seconds` × attempt. Never
+  a gate block; never a `PipelineError` or `PathError` (the run stops at once); never the deterministic training
+  errors (`TrainingError`, `StagingError`, `LengthCheckError`, `CorpusViewError`, `CalledProcessError`). A
+  checkpoint scorer that cannot start (a split or setting it cannot use) raises `PipelineError` and is not retried.
+- `checkpoint_eval`'s result includes the generation cost (`generation`: rows and seconds).
 - Training raises when a real run leaves no checkpoint; `checkpoint_eval` rediscovers checkpoints on a
   resumed run; merge reads the selection from Blob when resuming, and refuses a real run with none.
 - Engines are released between stages (checkpoint selection → merge → calibration per format → golden eval),
   so each finds the card free.
-- `package` requires a passed recorded gate, finds calibrators in Blob on resume, and uploads real weights
-  through `artifact_registry/transfer.py` (IMPL-10).
-- `--push-adapters` uploads the real best-loss adapter after training (non-dry runs), not a placeholder.
-- The dataset build excludes frozen eval documents and their families once the set is frozen (IMPL-05).
+- `package` requires a passed recorded gate, finds calibrators in Blob on resume, builds the bundle and its
+  routing check before pushing, and uploads real weights through `artifact_registry/transfer.py` (IMPL-10):
+  adapter files only, identical files skipped by MD5.
+- `--push-adapters` uploads the best-loss checkpoint's `adapter_config.json` and `adapter_model.safetensors`
+  after training (non-dry runs), not a placeholder and not the checkpoint's resume state.
+- The dataset build excludes the tenant's frozen eval documents and their families once its set is frozen
+  (IMPL-05), refuses documents read by more than one MinerU, and refuses a >25% set-aside.
+
+**Preflight** (`python -m orchestration.preflight --scope S [--tenant T] [--skip-corpus]`): PASS/WARN/FAIL per
+check, exit 1 on any FAIL, report in `/workspace/logs/preflight.json`; detached on the pod. Checks: every visible
+GPU at least 90% free and the training GPU count dividing the batch; packages (torch, transformers 4.57, vLLM,
+flash-attn, ms-swift, peft, deepspeed; `swift` next to the Python); the base model verified at the pinned revision;
+config invariants; 100 GB free; Azure write, overwrite, read and delete; every labelled document OCR'd and at
+least `--min-labels-per-type`; the **post-OCR report** (`--ocr-check`, default `/workspace/ocr_check`) passed; and
+the **corpus**, built in memory by `plan_corpus` (rows per split, documents set aside and why, WARN above 5%,
+FAIL above 25% via `corpus_set_aside`). `--skip-corpus` skips that build, for a chain in which `finetune` follows.
 
 **Pod setup** (`scripts/setup_pod.sh ocr|train|serve|quantize|dev`): installs the role's requirements file,
 builds flash-attn against the installed torch, installs tmux, checks packages and CUDA.
 
 **Pod bootstrap** (`scripts/pod_bootstrap.sh [--pdf <policy.pdf>]`): one command for a fresh H200 SXM pod,
-detached in tmux and safe to re-run. In order: GPU (warns if not an H200), `/workspace` mounted, the repo on
-the volume, 150 GB free (`FIDEON_MIN_FREE_GB`); `.env` keys `RUNPOD_VOLUME_MOUNT=/workspace`, `HF_HOME`,
-`MINERU_TOOLS_CONFIG_JSON=/workspace/magic-pdf.json`, filled only when unset, blank or the template's
-default, and a refusal if the connection string is unquoted; `/workspace/venv` (`setup_pod.sh train`) and
-`/workspace/venv-ocr` (`setup_pod.sh ocr`); MinerU's config onto the volume and to cuda; the base model at
-the pinned revision into `/workspace/models`; the spike in the training environment (`--skip-mineru`) and,
-with `--pdf`, its MinerU checks in the OCR environment (`--only-mineru`). It ends with what is still to do.
+detached in tmux and safe to re-run. In order: GPU (warns if not an H200; reads every card of a multi-GPU pod),
+a driver supporting CUDA 12.8, `/workspace` mounted, the repo on the volume, Python >= 3.11, 150 GB free
+(`FIDEON_MIN_FREE_GB`); `.env` keys `RUNPOD_VOLUME_MOUNT=/workspace`, `HF_HOME`,
+`MINERU_TOOLS_CONFIG_JSON=/workspace/mineru.json` (replacing a MinerU 1.x `magic-pdf.json` value),
+`MINERU_DEVICE_MODE=cuda`, `MINERU_MODEL_SOURCE=local` and `HF_HUB_ENABLE_HF_TRANSFER=0`, filled only when unset,
+blank or the template's default, and a refusal if the connection string is unquoted; `/workspace/venv`
+(`setup_pod.sh train`) and `/workspace/venv-ocr` (`setup_pod.sh ocr`, MinerU 3.4.5), rebuilt only when their
+requirements change; MinerU's pinned pipeline weights and config (`scripts/download_mineru_models.sh`, checked by
+`data_pipeline.ocr.mineru_config`); the base model at the pinned revision into `/workspace/models` (an existing
+copy is verified by size and SHA-256, not re-downloaded); the spike in the training environment
+(`--skip-mineru`) and, with `--pdf`, its MinerU checks in the OCR environment (`--only-mineru`). It ends with
+what is still to do.
 
 **OCR before `finetune`**: `stage_preprocessing` refuses with a `PipelineError` naming the OCR environment's
-command when documents still need OCR and MinerU is not importable (the training environment). With nothing
-pending it needs no MinerU.
+command when documents still need OCR and MinerU (`mineru`) is not importable (the training environment). With
+nothing pending it needs no MinerU.
 
-**RunPod backend**: `RunPodBackend` (launching pods through the API) is still unimplemented;
-`LocalBackend` runs the DAG in-process on whatever machine starts it — on the pod, inside tmux.
+**RunPod backend**: `RunPodBackend` (launching pods through the API) is still unimplemented, and so is the
+endpoint update behind `deploy-endpoint` / `rollback-endpoint` (a dry run records only); `LocalBackend` runs the
+DAG in-process on whatever machine starts it — on the pod, inside tmux.
 
-**Post-OCR check and smoke run (2026-09-29).** `data_pipeline/ocr_check.py` checks every labelled value against
-its page's OCR text in `processed/` (the audit's matching), reporting `fideon:filled` fields apart from the
-generator's own, real apart from synthetic and per line; it exits non-zero when added fields are found on their
-page more than `--max-gap` (default 0.05) less often than original ones. `orchestration/smoke_run.py` runs a few
-whole source families (4 train, 1 val, 1 test by default) through import, OCR (in `/workspace/venv-ocr`), the
-post-OCR check and `finetune`, under tenant `smoke` and version `v0`, never freezing or packaging (the frozen set
-is not tenant-scoped). Both detach into tmux on the pod.
+**Post-OCR check and smoke run.** `data_pipeline/ocr_check.py` checks every labelled value against its page's OCR
+text in `processed/` (the audit's matching), reporting `fideon:filled` fields apart from the generator's own, real
+apart from synthetic and per line; it exits non-zero when added fields are found on their page more than
+`--max-gap` (default 0.05) less often than original ones. `orchestration/smoke_run.py` runs a few whole source
+families (4 train, 1 val, 1 test by default, one per line first) through the steps `select`, `import`, `ocr` (in
+`/workspace/venv-ocr`), `check`, `preflight` and `finetune` (`--steps` picks them), under its own tenant (`smoke`
+by default; never the real data's) and version (`v0`), with `--scope` choosing the adapter (`personal_lines`, or
+`casualty_fleet` for the CGL batch) and `--min-labels-per-type 1`. Its preflight gets `--skip-corpus` only when
+`finetune` runs too. A run starting at `select` refuses a tenant or version an earlier smoke run used; a failed run
+resumes from the failed step. It never freezes an eval set or packages a release: a smoke subset is no yardstick.
+
+## Changes since 2026-10-05
+
+- Added the alignment line and dated *Current implementation* 2026-10-13.
+- §1: `finetune` covers ingest → merge with checkpoint eval and no gate; examples use `--scope` and `--formats bf16`; `extract` examples use `--tenant` with `--split`/`--corpus`, `--source-ids` or `--adapter` instead of `--input`/`--ground-truth`.
+- §2: one job per scope and `run_multi_scope`; the dataset build's >25% set-aside guard; the gate's report is per scope and produced through the serving pipeline; production/interim tier; flags gained `--scope`, `--train-vit`, `--dry-run`.
+- §3: staging layout per scope and tenant (`checkpoint_scores/`, `serving-adapters/`); `--push-adapters` pushes the two adapter files only.
+- §4: package stage order with bundle and routing check before the push; Blob table corrected (scope paths, `vllm/{format}`, no GGUF, adapter files only, MD5 skip); quant-threshold gate runs only on supplied metrics; flags (`scope=id` release ids, `--scope`, `--corpus-version`, no `--foundation-only`); checkpoint selection (sample, whole-document finalists, guard margin, one engine per GPU, generation cost); bundle contents (tier, lines, prompt-input hash, lock-file hash, latency/memory, routing table).
+- §5–§8: extract flags and outputs; `all` checks the release id before training; multi-GPU deployment note; removed the non-existent controller CLI; stage table rows 2, 5–8, 10, 11; per-stage wall time.
+- *Current implementation*: freeze-eval-set per tenant; scopes incl. CGL-only `casualty_fleet` in its own tenant; detach coverage, `pod_run.sh` usage and `CUDA_VISIBLE_DEVICES`; the one-command chain; logging re-assert, `wall_seconds`, progress report naming, retries and deterministic errors; preflight checks and `--skip-corpus`; bootstrap for MinerU 3.4.5 (`mineru.json`, pinned weights); endpoint deploy not wired; smoke-run steps and the `--skip-corpus` rule; the smoke run's reason for not freezing.
+- `freeze-eval-set --mark-held-out` (commit f5668a4).

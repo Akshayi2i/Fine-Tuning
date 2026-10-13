@@ -1,8 +1,10 @@
 # SPEC 03 — Ingestion + MinerU OCR (GPU, with Version + Device Pinning)
 
+> Aligned with the code at commit f5668a4 (2026-10-13).
+
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02.
 >
-> **Architecture refs:** `finetuning-architecture-v2.1.docx` §7 (page images, multi-page), §8a (**MinerU version pinning**), §11 (resolution cap), §13 steps 1–2, §18a (raw-document storage, dedup, retention, access pattern).
+> **Architecture refs:** `finetuning-architecture-v2.3.docx` §7 (page images, multi-page), §8a (**MinerU version pinning**), §11 (resolution cap), §13 steps 1–2, §18a (raw-document storage, dedup, retention, access pattern).
 
 ## Goal
 
@@ -14,38 +16,40 @@ This is the front of both the training-data pipeline and (reused) the inference 
 
 ### 1. `data_pipeline/ingestion/pull_raw_pdfs.py`
 For each PDF from a local folder or source location:
-- Assign/validate a `source_id` (`{doc_type}_{index}`; doc_type either provided or deferred — allow an `--unclassified` bucket resolved later by the classifier). **`build_source_id` and `paths.raw_pdf` must accept it**, not only the guard in `ingest_directory` — accepting it in one place and rejecting it in the others made every document fail one at a time into `failed`, so a broken mode read as bad input.
+- Assign/validate a `source_id` (`{doc_type}_{index}`, four digits: `policy_0001`; doc_type either provided or deferred — allow an `--unclassified` bucket resolved later by the classifier). **`build_source_id` and `paths.raw_pdf` must accept it**, not only the guard in `ingest_directory` — accepting it in one place and rejecting it in the others made every document fail one at a time into `failed`, so a broken mode read as bad input. Ids are numbered per tenant and doc type, past every id already in use in `raw-documents/`, `processed/` or `golden-labels/` (`taken_source_ids`), so the PDF importer and the prepared importer never hand out the same id.
 - Compute a **SHA-256 checksum** and **dedup** (arch §18a): if the checksum was already ingested, skip and log. Insurance documents — Loss Runs and renewal policies especially — are frequently re-submitted with only minor changes; de-duping prevents redundant labeling effort and corpus bloat.
 - Write `raw-documents/{tenant_id}/{doc_type}/{source_id}/original.pdf` — **immutable, exactly as received, never overwritten**. A corrected version of a document is ingested as a **new `source_id`**, so historical training runs remain reproducible against the exact bytes they trained on.
-- Write `metadata.json`: ingestion timestamp, `tenant_id`, source system, checksum, page count, **digital-vs-scanned flag** (detect via presence of an embedded text layer — this flag feeds the scanned-PDF eval subset in IMPL-08 and the ViT gate in IMPL-06), PII flags placeholder, retention class.
-- Idempotent and re-runnable. CLI: `--input`, `--doc-type`, `--dest-container` (`--tenant` optional, defaults from env).
-- Uses the tighter-RBAC container for `raw-documents/` (master §8). **This is the only pipeline component that writes this layer.**
+- Write `metadata.json`: ingestion timestamp, `tenant_id`, source system, original filename, checksum, size, page count, a first **digital-vs-scanned flag**, PII flags placeholder (`not_assessed`), retention class. The ingest flag (`inspect_pdf`) reads the extractable text of up to three pages with pypdf — PyMuPDF when pypdf cannot read the file, so only a PDF neither library opens is refused — and calls a document scanned below 50 characters per page. It counts any extractable text, a searchable scan's invisible OCR layer included, so it is a first look only: the flag the scanned eval subset (IMPL-08) and the ViT gate (IMPL-06) read is the OCR stage's `ocr_meta.is_scanned` (§3), which counts visible text only.
+- Idempotent and re-runnable. CLI: `--input`, `--doc-type` (an active type or `unclassified`), `--tenant` (optional, defaults from env), `--source-system`, `--purge-plan SOURCE_ID` (prints the downstream cascade a purge must reach, deletes nothing). There is no container flag: the raw container is `AZURE_RAW_CONTAINER`, reached through `for_ingestion()`.
+- Uses the tighter-RBAC container for `raw-documents/` (master §8). **This is the only pipeline component that writes this layer** (the labeled-PDF importer stores its PDFs through `ingest_pdf`).
 
 
 ### 2. `data_pipeline/ocr/mineru_version.py` *(new — arch §8a)*
-- `get_mineru_version()` → the exact installed MinerU version string (e.g. `"1.4.2"`).
-- `assert_version_matches(corpus_manifest)` → raises when the running MinerU version **or device** differs from what a corpus manifest pins. Device is included because §8a's rule is about the *output distribution*, and GPU and CPU MinerU can format differently — confirm empirically and relax the device check if they prove identical.
+- `get_mineru_version()` → the exact installed MinerU version string (`"3.4.5"`), from the `mineru` package's metadata (else `mineru.version.__version__`, else `"unknown"`, which is recorded rather than raised). A corpus read by MinerU 1.x (`magic-pdf`) records a 1.x version — another distribution.
+- `assert_version_matches(corpus_manifest)` → raises when the running MinerU version **or device** differs from what a corpus manifest pins. Device is included because §8a's rule is about the *output distribution*, and GPU and CPU MinerU can format differently — confirm empirically and relax the device check (`DEVICE_AFFECTS_OUTPUT`) if they prove identical.
 - **Serving a model trained on MinerU v{n} output against documents processed by MinerU v{n+1} is distribution shift, and is treated as a regression trigger — not a routine dependency bump.** This helper is called by the dataset builder (IMPL-05), the serving pipeline (IMPL-11), and the testing harness (IMPL-12); a mismatch is a loud failure with the remediation stated (reprocess affected documents, increment the corpus version, retrain).
 
 ### 3. `data_pipeline/ocr/run_mineru.py`
 Batch-process documents from `raw-documents/` (or a passed list of source_ids):
-- Run **MinerU on GPU** to produce per-page markdown/text. GPU is the **only** execution mode (arch §14): layout detection, table/formula recognition and the OCR models are GPU-bound, and the CPU path falls back to lighter model variants that are both slower and less accurate. `cpu` is refused (`mineru_version.resolve_device`), and the device is **recorded** in `ocr_meta.json`, never assumed.
-- Render each page to PNG at the **resolution cap from `configs/base_model.yaml`** — identical in training data prep and production inference. This consistency is mandatory (arch §11): image token count is a direct function of page resolution and is the single biggest cost/latency lever.
+- Run **MinerU 3.4.5's pipeline backend on GPU** to produce per-page markdown. GPU is the **only** execution mode (arch §14): layout detection, table recognition and the OCR models are GPU-bound, and the CPU path falls back to lighter model variants that are both slower and less accurate. `cpu` is refused (`mineru_version.resolve_device`), and the device is **recorded** in `ocr_meta.json`, never assumed.
+- Choose how each document is read: from its **text layer** (`parse_method="txt"`) when every page carries visible text and its figures are typed, through **OCR** (`parse_method="ocr"`) when any page lacks a text layer, when a native PDF draws its figures as vector outlines, or — offline — when MinerU's own classification says OCR (`data_pipeline.ocr.modality.reads_by_ocr`, below).
+- Render each page to PNG at the **resolution cap from `configs/base_model.yaml`** (`vision.max_image_long_side_px`) — identical in training data prep and production inference. This consistency is mandatory (arch §11): image token count is a direct function of page resolution and is the single biggest cost/latency lever.
 - Write `processed/{tenant_id}/{doc_type}/{source_id}/page_{n}.md` and `page_{n}.png`.
 - **Preserve page order explicitly** — Interleaved-MRoPE means multi-page ordering is positionally meaningful (arch §3). Page numbering must be stable and 1-based.
-- Write per-doc `ocr_meta.json`: page count, **`mineru_version`**, **`ocr_device`** (`cuda`; `cpu` appears only on corpora predating the GPU-only rule), **`preprocessing_date`** (ISO 8601, arch §8a), resolution cap used, per-page OCR failure/low-confidence flags, and **detected table row counts per page** (consumed by the list-completeness signal in IMPL-09).
-- Idempotent — skip if processed output exists, the source checksum is unchanged, **and** the MinerU version and device match; a change to either forces reprocessing.
-- Make MinerU invocation configurable (subprocess or library call); keep the interface swappable.
-- CLI: `--source-ids ... | --all-unprocessed`, `--doc-type`, `--force-reprocess`.
+- Write per-doc `ocr_meta.json`: `page_count`, **`mineru_version`**, **`ocr_device`** (`cuda`; `cpu` appears only on corpora predating the GPU-only rule), `gpu_name`, **`preprocessing_date`** (ISO 8601, arch §8a), `resolution_cap_px`, `source_checksum`, `failed_pages` (pages OCR read nothing from), **`table_row_counts` per page** (consumed by the list-completeness signal in IMPL-09), `is_scanned` (any page without a visible text layer), `read_by_ocr` (the document went through OCR mode), and `drawn_check` / `ocr_rules` (the version of the reading rules it was read under).
+- Idempotent — skip if the meta exists, is not render-only, and the source checksum, MinerU version, device **and** resolution cap all match, and the reading stands under the current reading rules (`OCR_RULES_VERSION`, see Current implementation); a change to any of them forces reprocessing.
+- The MinerU invocation sits behind the `OcrEngine` protocol (`MinerUEngine` in production, a stand-in in tests), so it stays swappable.
+- CLI: `--doc-type`, `--source-ids ... | --all-unprocessed`, `--tenant`, `--force-reprocess`, `--shard I/N`. `--all-unprocessed` lists documents with no OCR meta, a render-only meta, or a meta from another MinerU version.
 
 ### 4. `data_pipeline/ocr/render_only.py` (helper)
-- Renders page images without requiring OCR text, at the same resolution cap — the `image_only` mode path (arch §6) for both corpus build and inference.
-- Writes the same `ocr_meta.json` skeleton (page count, resolution, version) minus OCR content, so `image_only` rows are still traceable.
+- Renders page images without requiring OCR text, at the same resolution cap — the `image_only` mode path (arch §6) for both corpus build and inference. `render_pdf_pages` is also the renderer `MinerUEngine` uses, so OCR'd and image-only documents are the same pixels.
+- Writes the same `ocr_meta.json` skeleton (page count, resolution, version, `render_only: true`) minus OCR content, so `image_only` rows are still traceable.
 
 ## Constraints
 - `raw-documents/` is write-once and tenant-prefixed; assert before writing.
 - Resolution cap MUST come from config, never hardcoded, and be logged and recorded in `ocr_meta.json`.
-- MinerU version MUST be recorded on every processed document.
+- MinerU version MUST be recorded on every processed document, and a corpus is read by one MinerU version.
+- MinerU reads only the pinned model weights, on the GPU.
 - No PII in logs (never print OCR text).
 - All Blob I/O via IMPL-02.
 
@@ -68,6 +72,10 @@ Consequences, all enforced in code:
   silent fallback would finish the job, write markdown from the wrong
   distribution, and report success — invisible until accuracy is unexplainably
   poor.
+- MinerU's own device setting is forced too: `MINERU_DEVICE_MODE` is set to
+  `cuda` before MinerU is imported, and any other value is refused
+  (`mineru_config.assert_on_cuda`) — a GPU being present does not make MinerU
+  use it.
 - `ocr_device` is still recorded on every document. It is now always `cuda`, and
   that is provenance rather than a variable.
 - `assert_gpu_only` refuses to *extend* a corpus that records `cpu` — such a
@@ -80,93 +88,204 @@ Consequences, all enforced in code:
 - [ ] Ingesting the same PDF twice results in one stored copy (dedup by checksum).
 - [ ] Ingesting a corrected document creates a **new `source_id`**; the original is untouched.
 - [ ] Digital vs scanned flag is set correctly on sample inputs.
+- [ ] A **searchable scan** (page image with invisible OCR text) is a scan: it is read by OCR and recorded `is_scanned`; a blank page does not make a digital PDF a scan.
+- [ ] A native PDF whose figures are drawn as outlines goes through OCR; a typed table drawn from thin border rectangles, or a vector logo beside typed text, does not.
 - [ ] MinerU output produces `page_*.md` + `page_*.png` at the configured resolution, 1-based and ordered.
-- [ ] `ocr_meta.json` records page count, `mineru_version`, **`ocr_device`**, `preprocessing_date`, resolution cap, OCR failures, and per-page table row counts.
+- [ ] `ocr_meta.json` records page count, `mineru_version`, **`ocr_device`**, `preprocessing_date`, resolution cap, OCR failures, per-page table row counts, `is_scanned`, `read_by_ocr` and the reading-rules version.
 - [ ] The row count discounts **one header per table**, not one per page: a page with two tables otherwise over-reports by one, and the IMPL-09 cross-check then raises a false row-completeness flag — which active learning treats as an unconditional override to full manual review.
 - [ ] A **render-only** `ocr_meta.json` (written by `render_only.py` at the same key) does not satisfy the OCR idempotence check. Otherwise a document rendered first is never OCR'd, no markdown is ever produced, and the CLI reports it as processed.
 - [ ] `process_batch` reports genuinely skipped documents as skipped rather than counting them as processed.
 - [ ] **OCR runs on GPU only.** There is no `--device` flag and no CPU fallback: `resolve_device` refuses `cpu`, and refuses to run at all when no CUDA device is visible.
+- [ ] MinerU refuses to run without its config, on a MinerU 1.x config, without pinned pipeline weights on disk, or with `MINERU_MODEL_SOURCE` other than `local`.
 - [ ] GPU throughput is measured per document (`benchmark_gpu`), for pod sizing and cost per document. There is no CPU comparison, because there is no CPU path.
-- [ ] Re-running OCR on already-processed docs is a no-op; **changing the MinerU version forces reprocessing**.
+- [ ] Re-running OCR on already-processed docs is a no-op; **changing the MinerU version forces reprocessing**, and `--all-unprocessed` lists documents another MinerU read.
+- [ ] A text-layer reading stored under older reading rules is read again when the current rules send it through OCR, and recorded as checked when they do not.
+- [ ] `--shard I/N` over N processes covers every document exactly once, whatever order each process lists them in.
 - [ ] `assert_version_matches` raises on a seeded version mismatch with a remediation message.
 - [ ] `render_only` produces images with no OCR dependency.
 - [ ] Running `render_only` over an **already-OCR'd** document re-renders its images but **preserves the OCR metadata** — `table_row_counts` survives and the document is not relabelled `render_only`. Overwriting it silently switched off the IMPL-09 detected-row cross-check while the `page_*.md` files still sat there.
 - [ ] `find_unprocessed` applies the same render-only test `process_document` does. Counting a render-only `ocr_meta.json` as done filtered the document out of `--all-unprocessed`, so it was never OCR'd and the CLI reported nothing to do.
 - [ ] The `_reprocessed` marker is added to the **returned** metadata only, never written to Blob — persisting it made the skip path read it straight back, so `process_batch` reported every skipped document as processed.
+- [ ] The serving-side `run_mineru` raises `MinerUError` on a timeout, any engine failure, or fewer than 10 characters read.
 
 ---
 
-## Current implementation (2026-09-27)
+## Current implementation (2026-10-13)
 
-- **MinerU 1.x**, installed by the `ocr` dependency group as `magic-pdf[full]>=1.3,<2` — the code imports
-  `magic_pdf` and records the `magic-pdf` version, and MinerU 2.x renamed the package. Model weights are a
-  separate download (MinerU's `download_models_hf.py`); `setup_pod.sh ocr` prints the step.
-- **Delivered batches travel through Blob** (the ~20 GB training folder cannot go through git): staged by
-  azcopy under `intake/{batch}/` in the **raw container** (`paths.intake_batch_dir`; `requires_raw_container`
-  covers `intake/`, so only an ingestion or OCR client can read it), pulled onto the volume by
-  `python -m data_pipeline.ingestion.pull_intake --batch <batch>` (to `/workspace/intake/<batch>`, 16 parallel
-  downloads, `.part` then rename, PDFs already present skipped, labels always re-fetched, `--refresh` for
-  everything), then imported from that folder. `import_labeled_pdfs --from-blob <batch>` pulls and imports in
-  one command. Both run detached on the pod.
-- **Its own environment.** MinerU 1.x cannot share an environment with vLLM 0.11 / torch 2.8, so on the pod
-  it is installed in `/workspace/venv-ocr` (`scripts/pod_bootstrap.sh`) and OCR runs there first:
-  `/workspace/venv-ocr/bin/python -m data_pipeline.ocr.run_mineru --doc-type policy --all-unprocessed`.
+- **MinerU 3.4.5, pipeline backend**: the `ocr` dependency group installs `mineru[pipeline]>=3.4.5,<3.5`
+  (plus `six`, which its OCR text system imports, and the training stack's torch 2.8), locked in
+  `requirements-ocr.lock` with the same PyMuPDF and pillow as every other environment, so page images are
+  drawn identically. Layout, PP-OCRv6 OCR and table models; no vision-language model. The code imports
+  `mineru` and records its version in every `ocr_meta.json`.
+- **Pinned weights.** Left to itself MinerU downloads the latest weights on first use, so a pod set up next
+  month would read pages differently. `scripts/download_mineru_models.sh` downloads the pipeline backend's
+  model paths from `opendatalab/PDF-Extract-Kit-1.0` at a fixed revision (`MINERU_MODELS_REVISION`, default
+  `ed6b654c018d742e65a17671e379c5e6ecc87ec9`) into `HF_HOME` on the volume, then runs
+  `python -m data_pipeline.ocr.mineru_config --write <dir>`, which points `models-dir.pipeline` in MinerU's
+  config at them and removes any `model-source` key (MinerU 3.4's config takes only huggingface or
+  modelscope there). Reading the local weights is `MINERU_MODEL_SOURCE=local`: the engine sets it and
+  `MINERU_DEVICE_MODE=cuda` before importing MinerU (`mineru_config.apply_run_environment`) and refuses
+  (`assert_on_cuda`) when either is set to anything else, when the config is missing, when it is a MinerU
+  1.x `magic-pdf` config, or when `models-dir.pipeline` names no folder that exists.
+  `python -m data_pipeline.ocr.mineru_config` runs the same check and exits 1 when MinerU is not ready.
+- **Its config on the volume**: `MINERU_TOOLS_CONFIG_JSON=/workspace/mineru.json` (an absolute path wins over
+  MinerU's home-directory default, which a pod stop wipes). `scripts/pod_bootstrap.sh` writes it into `.env`
+  (replacing a MinerU 1.x `magic-pdf.json` value), with `MINERU_DEVICE_MODE=cuda`, `MINERU_MODEL_SOURCE=local`,
+  `HF_HOME` on the volume and `HF_HUB_ENABLE_HF_TRANSFER=0`, and runs the weight download itself when the
+  check fails (step 5). `setup_pod.sh ocr` installs the locked OCR set and runs the check.
+- **Its own environment.** MinerU's dependency set (its own transformers, onnxruntime, layout and OCR
+  runtimes) is kept apart from the training stack (ms-swift, vLLM 0.11): on the pod it is installed in `/workspace/venv-ocr` (`scripts/pod_bootstrap.sh`) and OCR runs
+  there first: `/workspace/venv-ocr/bin/python -m data_pipeline.ocr.run_mineru --doc-type policy --all-unprocessed`.
   The pipeline's preprocessing stage then finds every document done (`find_unprocessed` checks for
   `ocr_meta.json`). Run from the training environment with documents still pending, it raises a
-  `PipelineError` naming that command instead of failing on `import magic_pdf`.
-- **Its config on the volume**: MinerU's download writes `~/magic-pdf.json` on the container disk, which a
-  pod stop wipes. The bootstrap moves it to `/workspace/magic-pdf.json` and sets
-  `MINERU_TOOLS_CONFIG_JSON` to that absolute path (MinerU joins it to the home directory, and an absolute
-  path wins); `HF_HOME` on the volume keeps the weights.
+  `PipelineError` naming that command (`_assert_ocr_runnable` looks for the `mineru` package).
+- **One MinerU per corpus.** `run_mineru --all-unprocessed` re-reads documents another MinerU version read
+  (`find_unprocessed(..., mineru_version=...)`), and the corpus build refuses documents read by more than one
+  version (`orchestration.pipeline_dag.assert_one_mineru_version`) — the manifest records one version, taken
+  from a single document, so a mix would not show there.
+- **One MinerU per GPU.** `--shard I/N` keeps the documents whose `crc32(source_id) % N == I`; N processes,
+  each with its own `CUDA_VISIBLE_DEVICES`, split one batch with every document in exactly one shard, however
+  many are already done.
+- **Delivered batches travel through Blob** (the training folders cannot go through git): bundle folders
+  (`prepare_bundles` output, below) are staged by azcopy under `intake/{batch}/` in the **raw container**
+  (`paths.intake_batch_dir`; `requires_raw_container` covers `intake/`, so only an ingestion or OCR client can
+  read it) — `personal-v1` for personal lines, `cgl-v1` for the CGL documents in the smoke run's example —
+  pulled onto the volume by `python -m data_pipeline.ingestion.pull_intake --batch <batch>` (to
+  `/workspace/intake/<batch>` or `$FIDEON_INTAKE_DIR`, 16 parallel downloads, `.part` then rename, PDFs already
+  present skipped, labels and metadata always re-fetched, `--refresh` for everything), then imported from that
+  folder. `import_labeled_pdfs --from-blob <batch>` pulls and imports in one command (and imports nothing if
+  any file failed to download). Both run detached on the pod.
+- **The import** (`import_labeled_pdfs`): every bundle is checked first (`check_bundle`: one PDF and a
+  `golden.json` per folder, the label against its line's schema, a valid split; a missing line or
+  `field_provenance` only warns),
+  then each PDF goes through `ingest_pdf` — a re-import of a corrected batch refreshes the label of a document
+  already stored and keeps its PDF — and its label and `label_metadata.json` are written with
+  `awaiting_ocr: true` (IMPL-04 lists the metadata). A PDF that cannot be read fails its own document; the
+  rest of the batch goes on.
 - **GPU only**, with no CPU option (see the GPU section above and `common/gpu.py` for the same rule on every
   other model step).
 - **Render-only documents** (`ocr_meta.render_only: true`, rendered for labeling without OCR) and documents
   whose meta records **no pages** are skipped by the corpus build with a logged reason; they are never
   built into `ocr_plus_image` rows with blank text.
-- On the pod, `run_mineru`, `render_only` and all three importers run **detached in tmux**
-  (`orchestration/detach.py`) — a closed laptop does not stop an OCR batch.
+- On the pod, `run_mineru`, `render_only`, `pull_intake`, `prepare_bundles` and all three importers run
+  **detached in tmux** (`orchestration/detach.py`) — a closed laptop does not stop an OCR batch.
 
-**MinerU engine, wired** (`data_pipeline/ocr/run_mineru.py::MinerUEngine`, MinerU 1.x public API):
-- refuses anything but CUDA; renders page images with the shared renderer (`render_only.render_pdf_pages`)
-  at the configured cap, so OCR'd and image-only documents are the same pixels;
-- `PymuDocDataset(pdf).classify()` picks OCR mode for scans and text mode for a text layer; the result's
-  **content list** becomes **one markdown string per page** (`pages_from_content_list`: headings by
-  `text_level`, tables as MinerU's HTML with captions and footnotes, image captions only, equations as text).
-  MinerU's own `get_markdown` returns one blob per document, which cannot be split back into pages;
-- **table rows are counted in HTML tables** as well as pipe tables (`count_table_rows`) — MinerU 1.x writes
-  HTML, and counting pipe tables alone read every page as row-less, so the row-completeness check never fired;
-- a page MinerU returns nothing for is kept and flagged `ocr_failed`.
+**MinerU engine, wired** (`data_pipeline/ocr/run_mineru.py::MinerUEngine`, MinerU 3.x pipeline API):
+- refuses anything but CUDA (`common.gpu.require_cuda`), applies and checks MinerU's run environment, and
+  renders page images with the shared renderer (`render_only.render_pdf_pages`) at the configured cap, so
+  OCR'd and image-only documents are the same pixels;
+- decides the reading path with `modality.reads_by_ocr`, plus — offline only — MinerU's own
+  `mineru.utils.pdf_classify.classify` returning `ocr`; then calls `doc_analyze_streaming` with
+  `parse_method` `ocr` or `txt`, OCR language `ch` (`OCR_LANG`: the PP-OCRv6 small pair, which covers English),
+  formula recognition off (policies carry no equations) and tables on. Figures MinerU crops go to a temporary
+  folder and are dropped: the page image the model sees is the shared renderer's;
+- the result's **content list** (`union_make(..., MakeMode.CONTENT_LIST, ...)`) becomes **one markdown string
+  per page** (`pages_from_content_list`): headings by `text_level`, list items one per line, tables as MinerU's
+  HTML with captions and footnotes, image and chart captions and footnotes only, code, equations as text — and
+  the page's **header at its head, its footer, page number, page footnote and margin text at its foot** (MinerU
+  1.x dropped them, so a form number printed in a footer reached no page's text). MinerU's own markdown is
+  one blob per document, which cannot be split back into pages;
+- **table rows are counted in HTML tables** as well as pipe tables (`count_table_rows`) — MinerU writes HTML;
+  HTML rows are parsed, not regex-matched: a row is a header only when it has header cells and no data cells
+  (so row-header schedules count), and nested tables do not cut the outer table short;
+- a page MinerU returns nothing for is kept, and flagged `ocr_failed` when it was read by OCR or has no text
+  layer (an empty text-layer page is a blank or picture-only page, not a failure).
 
-Verified here with a stand-in MinerU on a real PDF (`tests/test_mineru_engine.py`); the real library, its model
-weights and GPU output are verified on the pod by the Phase 0 spike (`check_mineru_gpu`). Serving callers that
-supply `page_texts` must produce them with this engine, or the model reads a formatting it never trained on.
+Verified here with a stand-in MinerU on a real PDF (`tests/test_mineru_engine.py`,
+`tests/test_mineru_force_ocr_and_timeouts.py`); the real library, its pinned weights and GPU output are verified
+on the pod by the Phase 0 spike (`check_mineru_gpu`, `check_mineru_determinism`). Serving callers that supply
+`page_texts` must produce them with this engine, or the model reads a formatting it never trained on.
 
-**Scanned is MinerU's classification**, recorded as `ocr_meta.is_scanned` (OCR mode = scan). An empty page
-is an OCR failure only on a scan; on a text layer it is a blank or picture-only page, and no longer makes the
-document count as scanned (older metas fall back to "any failed page"). **HTML table rows are parsed**, not
-regex-matched: a row is a header only when it has header cells and no data cells (so row-header schedules
-count), and nested tables no longer cut the outer table short.
+**What counts as a text layer, and as a scan** (`run_mineru.text_layer_pages`): a page is digital when it
+draws at least 30 visible characters (`TEXT_LAYER_MIN_CHARS`; text render modes 3 and 7 — invisible and
+clip-only — and fully transparent text do not count), or when nothing is on it at all (no text, image or
+drawing: an empty page has nothing to OCR). Only visible text counts, so a **searchable scan** — a page image
+with the scanner's OCR text laid invisibly under it — is a scan, read by MinerU's OCR rather than the scanner's.
+`scanned` is recorded per page, `is_scanned` is true when any page is a scan, and any such page sends the
+whole document through OCR mode (text mode left scanned endorsement pages of a typed policy unread and
+unflagged). `read_by_ocr` records the reading path separately: a native document read by OCR because its
+figures are drawn is `read_by_ocr` but not `is_scanned`.
 
-**MinerU's own device setting** (`data_pipeline/ocr/mineru_config.py`): MinerU 1.x takes its device from
-`device-mode` in `~/magic-pdf.json` (file name overridable by `MINERU_TOOLS_CONFIG_JSON`), whose shipped default
-is `cpu` — a GPU being present does not make MinerU use it. The engine refuses unless the config says `cuda`;
-`python -m data_pipeline.ocr.mineru_config --cuda` sets it, and `setup_pod.sh ocr` runs that once the weights
-are downloaded. **Mixed documents**: any page without a text layer sends the whole document through OCR mode
-(text mode left scanned endorsement pages of a typed policy unread and unflagged); `scanned` is recorded per
-page and `is_scanned` is true when any page is a scan.
+**Drawn figures** (`modality.data_is_drawn`, Fideon SPEC_05 §4.1): a native PDF whose text layer carries the
+headings but not the numbers. A page draws its data when it holds at least 100 glyph-sized filled outlines
+(0.5–24 pt, at least 1.5 pt thick, curves or five or more segments — rectangles, cell borders and checkboxes
+excluded) and at least two per text span. Such a document keeps its modality (`native_pdf`) and is read with
+`force_ocr`.
 
-### Synthetic deliveries (2026-09-29)
+**Readings stored under older rules** (`OCR_RULES_VERSION` = 2; 1 added drawn figures, 2 visible text only).
+A stored text-layer reading made under older rules is re-checked on the next run (`_needs_ocr_now`): read
+again through OCR when the PDF is now a scan, or (rules < 1) draws its figures; when it stands, its meta gains
+`drawn_check` / `ocr_rules` so the PDF is not fetched to check it again. A reading made by OCR, or one whose
+check cannot run, is kept as it is.
 
-`python -m data_pipeline.ingestion.prepare_bundles --input "<delivery>" --out data/bundles` converts a fideon_synth
-delivery (`Train|Val|Test/pdfs`, `Train|Val|Test/gold json`, `manifest.csv`) into import bundles, hard-linking
-the files (copying across drives; `--mode copy|move`). Rows outside the scope's lines, rows with `ok` false and
-rows whose files are missing are skipped and counted; a document named twice is refused. The audit
-(`data_pipeline/audit.py`, default input `data/bundles`) blocks a source document found in two splits and a
-delivery where only some documents carry a split, and reports the delivered Train/Val/Test counts (real and
-synthetic) with the test count checked against the freeze minimum. Every document of the first delivery is a
-scan without a text layer, so the value-against-page check runs after OCR.
+**Modality, and the serving-side entry point.** `data_pipeline/ocr/modality.py` holds the two modalities
+(`native_pdf`, `scanned_pdf`), `detect_modality`, `data_is_drawn` and `reads_by_ocr`: in serving the caller's
+`modality` and `force_ocr` are trusted as given (a page without a text layer read in text mode is logged and
+flagged), offline they are detected. `data_pipeline/ocr/mineru_runner.py::run_mineru(pdf_bytes, modality,
+force_ocr=False)` is the async entry point for a caller that has a PDF rather than page texts: 30 s budget on
+the native path, 90 s on the scanned or forced one; a timeout, any engine failure, an unknown modality or fewer
+than 10 characters read raises `MinerUError` (the document goes to review). The call runs in a worker thread,
+so a timeout stops the wait, not MinerU. This repository's own serving endpoint runs no OCR: its requests carry
+page texts.
 
-### Completing synthetic labels (2026-09-29)
+**After OCR** (`python -m data_pipeline.ocr_check --doc-type policy [--tenant T]`): every labelled value is
+compared with its page's OCR text, with the audit's matching, and reported per line, real apart from synthetic,
+and fields the fill-in added (`fideon:filled`) apart from the generator's own. It fails when fewer than half of
+all values are found on a page they cite, or when added fields are found more than `--max-gap` (0.05) less
+often than original ones. Report and CSVs in `/workspace/ocr_check` (they quote label values).
+
+### Deliveries into bundles (`prepare_bundles`)
+
+`python -m data_pipeline.ingestion.prepare_bundles --input "<delivery>" --out <folder>` converts a delivery into
+import bundles — `<out>/<document>/{document.pdf, golden.json, metadata.json}` — hard-linking the files
+(copying across drives; `--mode link|copy|move`). It reads three shapes, chosen by what the input holds:
+
+1. **fideon_synth, first delivery** (`Train|Val|Test/pdfs`, `Train|Val|Test/gold json`, `manifest.csv`):
+   metadata from the manifest row — `lob` (after `data/bundle_lob_overrides.csv` and the merged lines),
+   `synthetic`, `template_id` (the source), `split`, `carrier`, `sample`, `render_mode` (the manifest's `mode`
+   column, else the gold's `fideon:provenance.mode`). Rows outside the scope's lines, rows with `ok` false and
+   rows whose files are missing are skipped and counted; a document named twice is refused. Every document of
+   this delivery is a scan without a text layer, so the value-against-page check runs after OCR.
+2. **SPEC_21** (`split_manifest.csv`: split, lob, carrier, seed, twin, digital, scanned, gold): each twin
+   becomes two documents — `render_mode` digital and scanned, `sample` the twin's number, `template_id`
+   `<line>/<seed>` — both reading one corrected gold; a twin whose two renders are the same file (the scanned
+   or drawn seeds) is one scanned document. With `--originals` (default `data/source data`: `pdfs/` and
+   `gold json/`; `none` leaves them out) each seed is bundled as a real document,
+   `<line>__<carrier>__<seed>__original`, in its twins' family and split; a seed with twins in two splits is
+   refused. The delivery's `motorcyle` reads as motorcycle (`delivery_line` also applies the merged lines and
+   reads `cgl` as `gl`).
+3. **Real documents alone, one line** (`--lob <line>`; `<input>/PDFs/<carrier>/<name>.pdf` with
+   `<input>/Gold JSON/<carrier>/<name>.gold.json` — the CGL source data, bundled with
+   `--lob gl --scope casualty_fleet --out data/cgl_bundles`): `--out` is required; each pair becomes
+   `<line>__<carrier folder>__<name>`, with `carrier` left to the gold (a folder is not always one carrier). A
+   family is one insured (`named_insured.primary_name` without case, punctuation or legal-form words, hashed),
+   so a declarations page, the policy and its renewals stay on one side. The split is drawn as the corpus build
+   draws one (`split_groups.assign_group_splits`, seed 42) and delivered in each document's metadata, the same
+   on every re-run; `--frozen` (the tenant's eval set is frozen) draws train and val only. A test document whose
+   carrier no train document has is marked `held_out_carrier: true`. `<out>/split.csv` lists document, family,
+   split and `held_out_carrier`. Never `move`: a re-run removes the folder of a document left out, which would be
+   the only copy of a moved PDF.
+
+For shapes 2 and 3 every gold goes through `corrected_gold` (coverage-code recodes, a premium written twice,
+a missing carrier, then the label rules — IMPL-04); a gold still outside its line's schema, or a package
+policy filed under one common-model line, is left out with the reason, and every change is listed in
+`<out>/corrections.csv`. Bundle metadata carries `unprinted_values` (values no page prints). A corrected gold
+and every `metadata.json` are written as new files, never through a hard link to the delivery or to a batch
+linked to the bundles. A re-run leaves `<out>` holding exactly what it bundles: folders an earlier run made for
+documents now left out are removed and `corrections.csv` is rewritten. `--dry-run` reports everything and
+writes nothing. Documents the audit rejected stay out through `data/bundle_exclusions.csv` (`--exclude`).
+
+`held_out_carrier` reaches the bundle's `metadata.json`, and `import_labeled_pdfs.import_bundle` copies it into
+`label_metadata.json`: the corpus build reads it (`delivered_held_out`) and records the document with the split's
+held-out ids, and the freeze also reads it directly. A set frozen before the importer carried the flag is marked
+after a re-import with `freeze-eval-set --tenant T --mark-held-out` (IMPL-08, IMPL-13).
+
+The audit (`data_pipeline/audit.py`, default input `data/bundles`, `--scope personal_lines` by default,
+`--scope casualty_fleet` for the CGL bundles) blocks a source document found in two splits and a delivery where
+only some documents carry a split, and reports the delivered Train/Val/Test counts (real and synthetic) with
+the test count checked against the freeze minimum.
+
+### Completing synthetic labels (first delivery)
 
 The generator's labels held ~29% of the fields in their sources' reviewed gold (90,050 of ~300,000 across 1,560
 twins; coverages, forms and endorsements, premiums, vehicles almost entirely missing). Trained on them, the model
@@ -181,4 +300,17 @@ values, and no row is added while the twin has rows that did not match, so none 
 that fails the schema is not written. Result on the first delivery: 90,050 → 295,082 fields; 30,268 deliberately
 left out. The originals take their reviewed gold through fideon_synth's `use_reviewed_gold.py`. The audit accepts
 the reviewed gold's conventions: month/year edition dates in any layout (`05 11`, `0699`, `(06/99)`) and split
-limits (several amounts in one field).
+limits (several amounts in one field). A SPEC_21 delivery needs none of this: its golds arrive complete and are
+corrected at bundling instead.
+
+## Changes since 2026-10-05
+
+- OCR engine: MinerU 1.x (`magic-pdf`, `PymuDocDataset.classify`, `~/magic-pdf.json` `device-mode`, `mineru_config --cuda`) replaced throughout by MinerU 3.4.5's pipeline backend (`doc_analyze_streaming`, `parse_method` txt/ocr, OCR language `ch`), `mineru.json`, `MINERU_DEVICE_MODE` / `MINERU_MODEL_SOURCE`, and the pinned PDF-Extract-Kit-1.0 weights (`download_mineru_models.sh`, `mineru_config --write`).
+- Page text now includes header, footer and page number; reading path decided by `modality.reads_by_ocr` (drawn figures force OCR); added `modality.py` and the serving-side `mineru_runner.run_mineru` (timeouts, `MinerUError`).
+- Scanned is no longer "MinerU's classification": a text layer is visible text only, so a searchable scan is a scan; `is_scanned` and `read_by_ocr` recorded separately; `OCR_RULES_VERSION` re-check of older readings.
+- Corrected the `ocr_meta.json` field list (no low-confidence flags; added `read_by_ocr`, `ocr_rules`, `gpu_name`, `source_checksum`), the idempotence rule (resolution cap too), and the CLIs (`--tenant`, `--shard I/N`; no `--dest-container` on ingestion; `--purge-plan`).
+- Ingest flag: documented the pypdf/PyMuPDF fallback and that the ingest flag is a first look, the OCR meta's `is_scanned` the one evaluation reads; per-tenant source-id allocation.
+- One MinerU version per corpus (re-read by `--all-unprocessed`, refused by the corpus build).
+- Bundles: "Synthetic deliveries" became "Deliveries into bundles" covering the SPEC_21 delivery (two renders per twin, one corrected gold, seeds via `--originals`) and the originals mode (`--lob gl`, insured families, split delivered in metadata, `held_out_carrier`, `split.csv`, `corrections.csv`); noted that the importer does not yet carry `held_out_carrier` into label metadata.
+- Added the post-OCR check (`ocr_check`), the importer's behaviour, the `cgl-v1` batch, and `prepare_bundles` / `pull_intake` running detached.
+- The importer now copies `held_out_carrier` into `label_metadata.json` (commit f5668a4); `freeze-eval-set --mark-held-out` marks a set frozen before that.

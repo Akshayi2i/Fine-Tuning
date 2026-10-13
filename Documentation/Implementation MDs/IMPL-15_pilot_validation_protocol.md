@@ -1,10 +1,12 @@
 # SPEC 15 — Pilot Validation Protocol (De-Risking Before Full Annotation)
 
+> Aligned with the code at commit f5668a4 (2026-10-13).
+
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01–IMPL-14 built.
 >
 > **This spec is executed, not imported.** It is an operational runbook, not a library — nothing else in the repo depends on it. It exists because architecture v1 added §16, which has no home in the module specs.
 >
-> **Architecture refs:** `finetuning-architecture-v2.1.docx` §16 (**pilot validation protocol**), §16a/§16b/§16c, §8 (pilot split ratios), §4c (day-zero bootstrap), §15 (metrics).
+> **Architecture refs:** `finetuning-architecture-v2.3.docx` §16 (**pilot validation protocol**), §16a/§16b/§16c, §8 (pilot split ratios), §4c (day-zero bootstrap), §15 (metrics).
 
 ## Goal
 
@@ -16,14 +18,16 @@ Before committing to full corpus annotation, run three sequential experiments th
 
 ### 1. `pilot/zero_shot_baseline.py` — Experiment A (Week 1, no annotation cost)
 
-Run the **base, untuned** `Qwen3-VL-8B-Instruct` against **10 real documents per document type**, using the IMPL-01 prompt template with the Fideon SPEC_00 schema injected. Compute field-level F1 against ground-truth annotations.
+Run the **base, untuned** `Qwen3-VL-8B-Instruct` against **10 real documents per document type**, using the IMPL-01 prompt template with the Fideon SPEC_00 schema injected (for a policy, its line's canonical schema). Compute field-level F1 against ground-truth annotations.
 
-**Implement this as a thin wrapper over the existing extraction command**, not as a parallel path:
+**Implement this as a thin wrapper over the existing extraction command**, not as a parallel path. The documents are imported and OCR'd first (under their own tenant, with their labels); `extract` then reads them by source id and scores them against those labels:
 
 ```bash
-python -m orchestration.run extract --model base --input pilot/baseline_docs/ \
-       --ground-truth pilot/baseline_golden/
+python -m orchestration.run extract --model base --tenant pilot \
+       --source-ids policy_0001 policy_0002 ...        # or: --split test --corpus v1
 ```
+
+`pilot/zero_shot_baseline.py` holds the scoring and the decision table (`run_baseline`, `summarise_baseline`, `classify_baseline`) over `testing.run_extraction.run_document`; its own CLI only points to the extraction command (it prints the import, OCR and `extract --model base --tenant pilot --source-ids …` commands to run).
 
 IMPL-13's `--model base` and IMPL-02's `resolve_model_version("base")` exist precisely so the baseline, day-zero pre-annotation (IMPL-04), and this experiment all run the same code. A separate implementation here would measure something subtly different from what production runs.
 
@@ -58,7 +62,7 @@ Confirm all of:
 
 ### 3. Experiment C — Pilot Training Run (Weeks 2–6, 25–30 documents per type)
 
-Annotate 25–30 documents per document type per IMPL-04, using the **pilot split ratios (~70/18/12)** from IMPL-05. Train ONE unified adapter with the §11.1 pilot hyperparameters. Evaluate on the pilot test split, in every modality regime.
+Annotate 25–30 documents per document type per IMPL-04, using the **pilot split ratios (~70/18/12)** from IMPL-05 (or the split a delivery arrives with — master §10). Train ONE adapter for the pilot's scope with the §11.1 pilot hyperparameters (`configs/training/unified.yaml`). Evaluate on the pilot test split, in every modality regime.
 
 This is the **minimum experiment that tests the architecture's generalisation claim**: whether one adapter captures cross-type behaviour without the types interfering, whether modality-dropout arbitration functions, whether totals reconciliation catches a missed row on unseen documents, and whether the per-field-type calibrators have enough data to be enforced at all — at pilot volume several field types will not clear the 300-instance floor and will route everything to review, which is the system working rather than failing.
 
@@ -71,9 +75,11 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 | JSON schema validity | 100% |
 | Image-only field F1 | Within 15% of OCR-plus-image F1 |
 | Row-completeness detection accuracy | > 80% of documents with missing rows flagged |
-| LoB detection accuracy | > 0.85 |
+| LoB detection accuracy | > 0.85 (flat document types; see below for policies) |
 | **Alias generalization** | Field accuracy on a **held-out surface label** within 15% of accuracy on that field's dominant label |
 | **Confusable misattribution rate** | < 5% |
+
+**LoB detection on a policy-only pilot.** A canonical policy label carries no `line_of_business` — the line comes with the request — so `lob_detection_accuracy` is structurally not applicable to policy-only scopes (`personal_lines`, `casualty_fleet`, `policy`) and the gate does not ask for it. `pilot/pilot_run.py` records it as not applicable when the pilot holds no ACORD or Loss Run documents (`Criterion.applies_to`; listed under `not_applicable` in the report), so it neither passes nor fails; for such a pilot, read it from `scripts/measure_lob_detection.py --corpus vN [--tenant T]` (the base model reading the line of each policy in the tenant's frozen eval set zero-shot, its line withheld, at serving's thresholds, against the 0.85 floor), and record that it stands in. Line detection stays off in serving until that measurement passes (master §1.3).
 
 **A failed criterion signals a specific architectural issue to diagnose — not a reason to abandon the architecture.** Diagnose the failure-mode distribution, expand corpus coverage for the failing case, and re-run the pilot. Map each failure to its likely cause:
 
@@ -84,7 +90,7 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 | Schema validity < 100% | Prompt rules (no fences, null-handling); JSON structural discipline in the Foundation corpus |
 | Image-only F1 gap > 15% | **The ViT escalation gate (IMPL-06 `vit_gate`)** — but only if errors are perception-type, not schema/reasoning |
 | Row-completeness misses | Cross-check sources in IMPL-09: is MinerU's table row count reaching the signal? |
-| LoB accuracy low | **LoB corpus coverage (IMPL-05 `corpus_manifest`)** — check the ≥20%-per-value target before blaming the model |
+| LoB accuracy low | **LoB corpus coverage (IMPL-05 `corpus_manifest`)** — check the ≥20%-per-value target before blaming the model. For a policy's line (the zero-shot measurement): the line meanings in `configs/lob_meanings.yaml`, and the per-line floor in the measurement's report |
 | Alias generalization gap > 15% | **`alias_coverage` in the corpus manifest** — the held-out label is probably under-represented. Also check the field's semantic gloss: a vague `description` gives the model nothing to generalise from |
 | Confusable misattribution ≥ 5% | **`confusable_example_count`** — near zero means the corpus taught the mapping but never the boundary. Also check the gloss carries an explicit exclusion clause (IMPL-01) |
 
@@ -110,24 +116,63 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 - [ ] The baseline decision table produces the correct proceed/review recommendation on seeded scores.
 - [ ] `smoke_test` trains to overfit on 5 docs/type and reports loss < 0.05 by epoch 2 and train F1 > 0.95.
 - [ ] The smoke test exercises and reports pass/fail for every listed pipeline component, including Blob push and vLLM hot-swap.
-- [ ] Pilot run evaluates against all six pilot criteria and names any that fail with its diagnosis path.
+- [ ] Pilot run evaluates against all eight pilot criteria (`pilot.pilot_run.PILOT_CRITERIA`) and names any that fail, or were not measured, with its diagnosis path.
 - [ ] Every pilot training run produces a `RunManifest`.
 - [ ] `pilot_report` renders the three experiments as one go/no-go summary.
 
 ---
 
-## Current implementation (2026-09-27)
+## Current implementation (commit f5668a4, 2026-10-13)
 
 - **Pilot split**: under 200 documents per type the band is 70/18/12, applied **per line of business**; a
   line with fewer than 5 documents trains whole and is not measured (listed in the manifest's
   `train_only_lines`). At pilot volume many lines fall below that — their pilot numbers do not exist, by
   design, rather than being noise.
+- **A delivered split is used as given** (`split_groups.assign_delivered_splits`): the SPEC_21 delivery puts
+  each seed and its twins in one split, so test layouts are ones the model never trained on, and the gate
+  report adds a `real_only` section (the same metrics over the real documents alone). The per-line carrier
+  hold-out is off for a delivered split; the CGL bundler marks a test document of a carrier no training
+  document has as `held_out_carrier`, and evaluation reports such documents apart (`held_out_carrier_match`,
+  not gated).
 - **Alias hold-out** (above) is still done by choosing documents deliberately; it is not automatic — the
-  hash split does not know which surface label to hold out.
-- **Freezing a pilot eval set** needs `freeze-eval-set --allow-small`: under 150 test documents per type the
-  set is directional, and once frozen it is the yardstick for every later version. Prefer to freeze from the
-  first build at real scale; if a pilot set is frozen, replacing it later is a deliberate delete-and-refreeze
-  after which older scores are not comparable.
+  hash split does not know which surface label to hold out. For common-model lines,
+  `scripts/check_alias_coverage.py` lists the recorded labels no training document prints, and evaluation
+  splits field accuracy into labels training showed and labels it never did (`unseen_labels`, reported).
+- **Freezing a pilot eval set** is per tenant: `freeze-eval-set --corpus vN [--tenant T]` writes
+  `golden-eval-set/{tenant}/`, and needs `--allow-small` under 150 test documents per type: the set is then
+  directional, and once frozen it is the yardstick for every later version of that tenant. Prefer to freeze
+  from the first build at real scale; if a pilot set is frozen, replacing it later is a deliberate
+  delete-and-refreeze after which older scores are not comparable.
+- **A pilot whose eval set holds no scans** (the CGL originals are all digital) is not blocked on
+  `scanned_accuracy`: it is a conditional gate metric, required only when the eval set holds scanned documents
+  — and required whenever the frozen baseline measured it, since its absence then means something broke.
+- **Pilots by scope and tenant**: `personal_lines` trains on the SPEC_21 personal-lines delivery;
+  `casualty_fleet` trains on the CGL documents alone (`gl`, real documents, no twins), in their own tenant,
+  bundled with `python -m data_pipeline.ingestion.prepare_bundles --input <PDFs/ + Gold JSON/> --lob gl --out <dir>`
+  (`cgl` reads as `gl`; one family per insured; split drawn once and delivered in the metadata). Each tenant has its
+  own corpus, frozen set and releases.
+- **Before the pilot's `finetune`**: `python -m data_pipeline.ocr_check` (labelled values against the OCR
+  text), `python -m orchestration.preflight --scope <scope>` (add `--skip-corpus` when `finetune` follows in the
+  same chain: the build then runs once, and refuses a >25% set-aside itself), and
+  `python -m orchestration.smoke_run --scope <scope>` (tenant `smoke`, version `v0`, 4 train / 1 val / 1 test
+  sources with their twins; never freezes or packages). The smoke run proves the plumbing; it is not
+  Experiment B.
+- **Reading the results**: `extract` writes per-document JSON (with `all_fields`: every schema field, its value
+  and its result against gold) and metrics; `python -m testing.compare_models` runs the same documents through
+  the base model and base + adapter and writes both, with a workbook per document. Every stage of a run records
+  its wall time in `run-<command>-<scope>-<tenant>-<version>.json` under `/workspace/logs`.
 - **Pod runs**: every pilot command started on the pod runs detached in tmux (IMPL-13); install each pod with
-  `bash scripts/pod_bootstrap.sh` (both environments, the base model and the spike), and run OCR in
-  `/workspace/venv-ocr` before any pipeline command.
+  `bash scripts/pod_bootstrap.sh` (both environments, MinerU 3.4.5's pinned pipeline weights, the base model
+  and the spike), and run OCR in `/workspace/venv-ocr` (MinerU 3.4.5, pipeline backend) before any pipeline
+  command. A corpus read by two MinerU versions is refused, so documents read under MinerU 1.x are re-read
+  first (`run_mineru --all-unprocessed`).
+
+## Changes since 2026-10-05
+
+- Added the alignment line.
+- Experiment A: the extraction command as it exists (`--tenant`, `--source-ids` or `--split`/`--corpus`, documents imported and OCR'd first); where the baseline's scoring lives, and that its CLI hint is stale.
+- Experiment C: one adapter per pilot scope; a delivered split may replace the drawn one.
+- Criteria: LoB detection is not applicable to policy-only scopes; how to stand in `scripts/measure_lob_detection.py` for it, and that `pilot_run` records it as not applicable; diagnosis row for a policy's line.
+- Acceptance: eight criteria, not six.
+- Current implementation: delivered split and held-out carriers, alias coverage for common-model lines, per-tenant freeze, conditional `scanned_accuracy`, the `personal_lines` and `casualty_fleet` pilots, the pre-`finetune` checks (OCR check, preflight `--skip-corpus`, smoke run), result tools (`all_fields`, `compare_models`, run report), and MinerU 3.4.5 on the pod.
+- `pilot_run` records a criterion the pilot's document types cannot measure as not applicable, and the zero-shot baseline prints the current commands (commit f5668a4).
