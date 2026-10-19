@@ -159,6 +159,18 @@ def plan_windows(
     return windows
 
 
+def lossrun_schema_has_totals() -> bool:
+    """Whether the Loss Run schema declares printed totals to extract.
+
+    It does not today (no ``totals``, no ``row_type``), so serving's
+    reconciliation is always "unverifiable" and a totals example would teach
+    the model to answer ``{}`` for pages that print totals.
+    """
+    from common.schemas import load_schema
+
+    return "totals" in (load_schema("lossrun").get("properties") or {})
+
+
 def expand_lossrun(
     *,
     source_id: str,
@@ -169,11 +181,12 @@ def expand_lossrun(
 ) -> list[TaskExample]:
     """Header, row windows and totals for one Loss Run (arch v2.1 §7b).
 
-    Totals come from **two** sources and both are produced: total and subtotal
-    rows captured inside row windows, and the dedicated ``lossrun_totals`` task on
-    the last two pages. v2.0 looked for printed totals on pages 1-2, where they
-    are not: they sit at the end of the report and per policy period (v2.1
-    correction).
+    Totals come from **two** sources: total and subtotal rows captured inside
+    row windows, and the dedicated ``lossrun_totals`` task on the last two pages
+    - produced only once the schema declares totals
+    (:func:`lossrun_schema_has_totals`). v2.0 looked for printed totals on pages
+    1-2, where they are not: they sit at the end of the report and per policy
+    period (v2.1 correction).
     """
     if not page_markdown:
         raise ExpansionError(f"{source_id}: a Loss Run needs at least one page")
@@ -222,13 +235,16 @@ def expand_lossrun(
             },
         ))
 
-    examples.append(TaskExample(
-        task=Task.LOSSRUN_TOTALS,
-        source_id=source_id,
-        doc_type="lossrun",
-        pages=list(range(max(1, total_pages - 1), total_pages + 1)),
-        target=golden_label.get("totals") or {},
-    ))
+    # Only when the schema has totals to extract: otherwise every target is {}
+    # and the example teaches the model to ignore printed totals.
+    if lossrun_schema_has_totals():
+        examples.append(TaskExample(
+            task=Task.LOSSRUN_TOTALS,
+            source_id=source_id,
+            doc_type="lossrun",
+            pages=list(range(max(1, total_pages - 1), total_pages + 1)),
+            target=golden_label.get("totals") or {},
+        ))
     return examples
 
 

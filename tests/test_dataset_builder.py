@@ -838,13 +838,10 @@ def test_the_planner_shrinks_a_window_the_page_count_alone_would_allow():
     assert plan_windows([30, 30, 30], output_budget=4000) == [[1], [2], [3]]
 
 
-def test_a_lossrun_expands_into_header_windows_and_totals():
-    """Printed totals sit at the END of the report and per policy period, not on
-    pages 1-2 where v2.0 looked for them (v2.1 correction)."""
-    from common.tasks import Task
+def _lossrun_examples():
     from data_pipeline.dataset_builder.expand_tasks import expand_lossrun
 
-    examples = expand_lossrun(
+    return expand_lossrun(
         source_id="lr_001",
         golden_label={
             "carrier": "Acme",
@@ -854,6 +851,27 @@ def test_a_lossrun_expands_into_header_windows_and_totals():
         page_markdown=["| a | b |\n|---|---|\n" + "| 1 | 2 |\n" * 10] * 4,
         output_budget=8000,
     )
+
+
+def test_a_lossrun_with_no_totals_in_its_schema_gets_no_totals_example():
+    """The schema declares no totals, so a totals target would always be {}:
+    it would teach the model to ignore printed totals."""
+    from common.tasks import Task
+
+    tasks = [e.task for e in _lossrun_examples()]
+    assert tasks[0] == Task.LOSSRUN_HEADER
+    assert Task.LOSSRUN_ROWS in tasks
+    assert Task.LOSSRUN_TOTALS not in tasks
+
+
+def test_a_lossrun_expands_into_header_windows_and_totals(monkeypatch):
+    """Printed totals sit at the END of the report and per policy period, not on
+    pages 1-2 where v2.0 looked for them (v2.1 correction)."""
+    from common.tasks import Task
+    from data_pipeline.dataset_builder import expand_tasks
+
+    monkeypatch.setattr(expand_tasks, "lossrun_schema_has_totals", lambda: True)
+    examples = _lossrun_examples()
     tasks = [e.task for e in examples]
     assert tasks[0] == Task.LOSSRUN_HEADER
     assert tasks[-1] == Task.LOSSRUN_TOTALS
