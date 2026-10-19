@@ -66,8 +66,9 @@ TENANT_SCOPED: Final[frozenset[str]] = frozenset(
 #: ``quantized-models`` are still listed here and still unscoped. Under v2.1 they
 #: are tenant data and belong above, but their path helpers take no ``tenant_id``
 #: and 18 modules call them — that move lands with the serving topology change,
-#: not here. Until then the deletion cascade does not reach trained weights, and
-#: that limitation is stated rather than left implicit.
+#: not here. Until then a tenant deletion cannot remove trained weights by
+#: prefix: the purge plans (``pull_raw_pdfs.purge_plan`` / ``tenant_purge_plan``)
+#: name each run trained on the tenant's corpora, its weights and its releases.
 SHARED: Final[frozenset[str]] = frozenset(
     {"base-models", "adapters", "merged-models", "quantized-models",
      "registry", "eval-reports", "calibration"}

@@ -267,36 +267,146 @@ def ingest_directory(
     return result
 
 
-def purge_plan(source_id: str, doc_type: str, tenant_id: str | None = None) -> dict[str, list[str]]:
+def purge_plan(
+    source_id: str, doc_type: str, tenant_id: str | None = None, *,
+    client: BlobClient | None = None,
+) -> dict[str, list[Any]]:
     """The full downstream cascade for a purge request (arch §18a).
 
     Returns the plan; it never deletes. Retaining derived data from a document
     that no longer legally exists is a real audit gap, so a purge has to reach
-    ``processed/``, ``golden-labels/`` and any corpus entries built from it — but
-    corpus files are shared across documents, so removing a row from one is a
-    rebuild, not a delete. That is why this reports rather than acts.
+    ``processed/``, ``golden-labels/``, the frozen eval set and any corpus
+    entries built from it — but corpus files are shared across documents, so
+    removing a row from one is a rebuild, not a delete. That is why this reports
+    rather than acts.
+
+    A model trained on the document is the tenant's data too (arch §8b). With a
+    ``client``, every run whose corpus listed the document is named, with its
+    weights and the releases serving it: each needs a retrain or a delete. The
+    weights' prefixes are not tenant-scoped yet, so the plan names them.
     """
-    return {
+    plan: dict[str, list[Any]] = {
         "raw": [paths.raw_document_dir(doc_type, source_id, tenant_id)],
         "processed": [paths.processed_dir(doc_type, source_id, tenant_id)],
         "golden_labels": [paths.golden_label_dir(doc_type, source_id, tenant_id)],
+        "golden_eval_set": [f"{paths.golden_eval_set_dir(tenant_id)}/{source_id}"],
+        # Result sets hold many documents' outputs; each one must be checked.
+        "exports": [f"{paths.EXPORTS_PREFIX}/{paths._tenant(tenant_id)}"],
         "corpus_action": [
             f"rebuild any corpus version whose manifest lists source_id {source_id!r} — "
             "corpus files are shared, so the row cannot simply be deleted"
         ],
+        "golden_eval_set_action": [
+            "if the frozen eval set holds the document: remove it and update the set's "
+            "manifest - the yardstick changes, so later scores are not comparable with earlier ones"
+        ],
     }
+    if client is None:
+        plan["trained_weights"] = [
+            "pass a client to list the runs trained on this document: each one's weights and "
+            "releases need a retrain or a delete"
+        ]
+    else:
+        plan["trained_weights"] = runs_trained_on(client, tenant_id=tenant_id, source_id=source_id)
+    return plan
+
+
+def tenant_purge_plan(tenant_id: str, client: BlobClient | None = None) -> dict[str, list[Any]]:
+    """Everything a tenant deletion has to reach. Reports; never deletes.
+
+    Built from :data:`artifact_registry.paths.TENANT_SCOPED`, so a prefix added
+    there cannot be forgotten here, plus every run trained on the tenant's
+    corpora - whose weights live under prefixes that are not tenant-scoped yet.
+    """
+    tenant = paths._tenant(tenant_id)
+    plan: dict[str, list[Any]] = {
+        "prefixes": sorted(f"{prefix}/{tenant}" for prefix in paths.TENANT_SCOPED),
+    }
+    if client is None:
+        plan["trained_weights"] = [
+            "pass a client to list the runs trained on this tenant: each one's weights and "
+            "releases need a retrain or a delete"
+        ]
+    else:
+        plan["trained_weights"] = runs_trained_on(client, tenant_id=tenant)
+    return plan
+
+
+def runs_trained_on(
+    client: BlobClient, *, tenant_id: str | None = None, source_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """The runs whose corpus held the tenant's data (or one document of it).
+
+    Read from the run registry: a run of this tenant whose corpus manifest lists
+    ``source_id`` in any split (any of the tenant's runs when ``source_id`` is
+    None), with its weights and the tenant's releases built on it. A run that
+    records no tenant, or whose corpus manifest is gone, is listed to check by
+    hand rather than skipped: absent evidence is not a clean model.
+    """
+    from registry_utils.query_registry import RegistryQueryError, get, list_runs
+
+    tenant = paths._tenant(tenant_id)
+    releases: dict[str, list[str]] = {}
+    index_key = paths.release_index(tenant)
+    if client.exists(index_key):
+        for row in client.read_json(index_key) or []:
+            releases.setdefault(str(row.get("adapter")), []).append(str(row.get("release_id")))
+
+    found: list[dict[str, Any]] = []
+    for row in list_runs(client, include_sweeps=True):
+        run_id = str(row.get("run_id"))
+        try:
+            manifest = get(run_id, client)
+        except (RegistryQueryError, KeyError, FileNotFoundError):
+            found.append({"run_id": run_id, "action": "check by hand: the manifest cannot be read"})
+            continue
+        if manifest.tenant_id is None:
+            found.append({"run_id": run_id, "action": "check by hand: the run records no tenant"})
+            continue
+        if paths._tenant(manifest.tenant_id) != tenant:
+            continue
+        corpus = str(manifest.dependencies.corpus_version or "").removeprefix("corpus/")
+        action = "needs retrain or delete"
+        if source_id is not None:
+            try:
+                key = paths.corpus_manifest(corpus, tenant)
+            except paths.PathError:
+                key = None
+            listed = client.read_json(key).get("source_ids_by_split") if key and client.exists(key) else None
+            if listed is None:
+                action = "check by hand: the run's corpus manifest is missing"
+            elif not any(source_id in ids for ids in listed.values()):
+                continue
+        found.append({
+            "run_id": run_id,
+            "corpus_version": manifest.dependencies.corpus_version,
+            "adapter_weights": manifest.artifacts.adapter_weights,
+            "merged_model": manifest.artifacts.merged_model,
+            "quantized_model": manifest.artifacts.quantized_model,
+            "releases": sorted(releases.get(run_id, [])),
+            "action": action,
+        })
+    return found
 
 
 def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin CLI
     parser = argparse.ArgumentParser(description="Ingest raw PDFs into raw-documents/")
-    parser.add_argument("--input", required=True, type=Path)
-    parser.add_argument("--doc-type", required=True,
-                        choices=[*ACTIVE_DOC_TYPES, UNCLASSIFIED])
+    parser.add_argument("--input", type=Path, help="directory of PDFs (required to ingest)")
+    parser.add_argument("--doc-type", choices=[*ACTIVE_DOC_TYPES, UNCLASSIFIED],
+                        help="required to ingest and for --purge-plan")
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--source-system", default="manual")
     parser.add_argument("--purge-plan", metavar="SOURCE_ID",
                         help="print the downstream cascade for a purge request and exit")
+    parser.add_argument("--tenant-purge-plan", dest="tenant_purge_plan", action="store_true",
+                        help="print everything a deletion of --tenant must reach, and exit")
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.tenant_purge_plan and not args.tenant:
+        parser.error("--tenant-purge-plan needs --tenant")
+    if not args.tenant_purge_plan and not args.doc_type:
+        parser.error("--doc-type is required")
+    if not (args.purge_plan or args.tenant_purge_plan or args.input):
+        parser.error("--input is required to ingest")
     # On the pod, run detached in tmux: a closed laptop must not stop this job.
     from orchestration.detach import detach_module_if_needed
 
@@ -305,8 +415,12 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+    if args.tenant_purge_plan:
+        print(json.dumps(tenant_purge_plan(args.tenant, BlobClient()), indent=2))
+        return 0
     if args.purge_plan:
-        print(json.dumps(purge_plan(args.purge_plan, args.doc_type, args.tenant), indent=2))
+        print(json.dumps(
+            purge_plan(args.purge_plan, args.doc_type, args.tenant, client=BlobClient()), indent=2))
         return 0
 
     result = ingest_directory(

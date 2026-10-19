@@ -251,10 +251,58 @@ def test_checksum_is_stable_and_content_addressed(tmp_path):
 def test_purge_plan_reports_the_full_cascade_without_deleting():
     """Retaining derived data from a purged document is a real audit gap, but
     corpus files are shared, so a purge is a rebuild rather than a delete."""
-    plan = ingest.purge_plan("policy_0001", "policy")
+    plan = ingest.purge_plan("policy_0001", "policy", "broker_a")
     assert plan["raw"] and plan["processed"] and plan["golden_labels"]
     assert "rebuild" in plan["corpus_action"][0]
     assert "policy_0001" in plan["corpus_action"][0]
+    # The frozen eval set is a copy of the document; a purge must reach it.
+    assert plan["golden_eval_set"] == ["golden-eval-set/broker_a/policy_0001"]
+    assert plan["exports"] == ["exports/broker_a"]
+
+
+def _trained_run(client, run_id, tenant, corpus):
+    from registry_utils.models import RunManifest
+    from registry_utils.write_run_manifest import write_manifest
+    from tests.test_registry import _DS, _deps, _tc
+
+    manifest = RunManifest(
+        run_id=run_id, run_type="foundation", tenant_id=tenant,
+        dependencies=_deps(corpus_version=f"corpus/{corpus}"), training_config=_tc(), data_stats=_DS,
+    )
+    manifest.artifacts.adapter_weights = f"adapters/{run_id}"
+    write_manifest(manifest, client)
+
+
+def test_purge_plan_names_every_model_trained_on_the_document():
+    """A model trained on the document is the tenant's data too (arch §8b): the
+    plan names its weights and the releases built on it."""
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    client.write_json(paths.corpus_manifest("v1", "broker_a"),
+                      {"source_ids_by_split": {"train": ["policy_0001"], "val": ["policy_0002"]}})
+    client.write_json(paths.corpus_manifest("v2", "broker_a"),
+                      {"source_ids_by_split": {"train": ["policy_0003"]}})
+    _trained_run(client, "extractor-v1", "broker_a", "v1")
+    _trained_run(client, "extractor-v2", "broker_a", "v2")
+    _trained_run(client, "extractor-v9", "broker_b", "v1")
+    client.write_json(paths.release_index("broker_a"),
+                      [{"release_id": "release-2026.9.1", "adapter": "extractor-v1"}])
+
+    plan = ingest.purge_plan("policy_0001", "policy", "broker_a", client=client)
+    [run] = plan["trained_weights"]
+    assert run["run_id"] == "extractor-v1"
+    assert run["adapter_weights"] == "adapters/extractor-v1"
+    assert run["releases"] == ["release-2026.9.1"]
+    assert run["action"] == "needs retrain or delete"
+
+
+def test_a_tenant_purge_reaches_every_tenant_scoped_prefix_and_its_runs():
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    _trained_run(client, "extractor-v1", "broker_a", "v1")
+    _trained_run(client, "extractor-v9", "broker_b", "v1")
+
+    plan = ingest.tenant_purge_plan("broker_a", client)
+    assert plan["prefixes"] == sorted(f"{p}/broker_a" for p in paths.TENANT_SCOPED)
+    assert [r["run_id"] for r in plan["trained_weights"]] == ["extractor-v1"]
 
 
 def test_unknown_doc_type_is_refused(tmp_path, ingestion_client):
