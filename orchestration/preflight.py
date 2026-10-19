@@ -203,6 +203,56 @@ def check_ocr_done(ctx, results: list[Check]) -> None:
             results.append(Check(f"data {doc_type}", "PASS", f"{len(labelled)} labelled, all OCR'd"))
 
 
+def _label_metadata(ctx) -> list[tuple[str, str, dict[str, Any]]]:
+    """``(doc_type, source_id, metadata)`` for every labelled document in scope."""
+    from artifact_registry import paths
+    from data_pipeline.labeling.export_golden_labels import list_labeled_source_ids
+
+    found = []
+    for doc_type in ctx.scope.doc_types:
+        for source_id in list_labeled_source_ids(ctx.client, doc_type, ctx.tenant_id):
+            key = paths.label_metadata(doc_type, source_id, ctx.tenant_id)
+            metadata = ctx.client.read_json(key) if ctx.client.exists(key) else {}
+            found.append((doc_type, source_id, metadata))
+    return found
+
+
+def check_label_agreement(ctx, results: list[Check], labels=None) -> None:
+    """How far two annotators agree on the documents both labelled (arch §7).
+
+    Agreement is the noise in the labelling process and a ceiling on what the
+    model can score. No spec states a minimum, so this warns and reports it
+    (``common.constants.MIN_INTER_ANNOTATOR_AGREEMENT`` makes it a blocker).
+    """
+    from common.constants import MIN_INTER_ANNOTATOR_AGREEMENT
+
+    labels = _label_metadata(ctx) if labels is None else labels
+    scores = {
+        source_id: float(m["agreement_score"])
+        for _doc_type, source_id, m in labels
+        if m.get("double_annotated") and isinstance(m.get("agreement_score"), (int, float))
+    }
+    if not scores:
+        results.append(Check(
+            "label agreement", "WARN",
+            f"none of {len(labels)} labelled documents is double-labelled, so label noise is "
+            "unmeasured", "double-label 10-20% of documents (IMPL-04) and record agreement_score"))
+        return
+    detail = (f"{len(scores)} double-labelled: mean agreement {sum(scores.values()) / len(scores):.3f}, "
+              f"lowest {min(scores.values()):.3f}")
+    if MIN_INTER_ANNOTATOR_AGREEMENT is None:
+        results.append(Check("label agreement", "WARN", f"{detail}; no minimum set",
+                             "set MIN_INTER_ANNOTATOR_AGREEMENT in common/constants.py to block on it"))
+        return
+    below = sorted(s for s, v in scores.items() if v < MIN_INTER_ANNOTATOR_AGREEMENT)
+    if below:
+        results.append(Check("label agreement", "FAIL",
+                             f"{detail}; {len(below)} below {MIN_INTER_ANNOTATOR_AGREEMENT}: {below[:5]}",
+                             "reconcile those labels before training"))
+    else:
+        results.append(Check("label agreement", "PASS", detail))
+
+
 def check_ocr_report(path: Path, results: list[Check]) -> None:
     summary = path / "summary.json"
     if not summary.is_file():
@@ -264,6 +314,7 @@ def run_preflight(args: argparse.Namespace) -> tuple[list[Check], dict[str, Any]
     ctx.doc_types = list(ctx.scope.doc_types)
     _run("azure", lambda r: check_blob(ctx.client, r), results)
     _run("data", lambda r: check_ocr_done(ctx, r), results)
+    _run("label agreement", lambda r: check_label_agreement(ctx, r), results)
     _run("post-OCR check", lambda r: check_ocr_report(args.ocr_check, r), results)
     facts: dict[str, Any] = {}
     if not args.skip_corpus:

@@ -107,3 +107,36 @@ def test_the_dataset_build_and_the_preflight_share_one_corpus_function():
     source = (Path(__file__).resolve().parent.parent / "orchestration/pipeline_dag.py").read_text("utf-8")
     stage = source[source.index("def stage_dataset_build"):]
     assert "plan = plan_corpus(ctx)" in stage[:3000]
+
+
+def _labels(*scores):
+    return [("policy", f"policy_{i:04d}",
+             {"double_annotated": score is not None, "agreement_score": score})
+            for i, score in enumerate(scores)]
+
+
+def test_agreement_is_reported_and_only_warns_with_no_minimum_set():
+    from orchestration import preflight
+
+    results = []
+    preflight.check_label_agreement(None, results, labels=_labels(0.91, 0.72, None))
+    [check] = results
+    assert check.status == "WARN"
+    assert "2 double-labelled" in check.detail and "lowest 0.720" in check.detail
+
+    results = []
+    preflight.check_label_agreement(None, results, labels=_labels(None, None))
+    assert results[0].status == "WARN" and "unmeasured" in results[0].detail
+
+
+def test_agreement_below_a_set_minimum_fails(monkeypatch):
+    import common.constants as constants
+    from orchestration import preflight
+
+    monkeypatch.setattr(constants, "MIN_INTER_ANNOTATOR_AGREEMENT", 0.8)
+    results = []
+    preflight.check_label_agreement(None, results, labels=_labels(0.91, 0.72))
+    assert results[0].status == "FAIL" and "policy_0001" in results[0].detail
+    results = []
+    preflight.check_label_agreement(None, results, labels=_labels(0.91))
+    assert results[0].status == "PASS"

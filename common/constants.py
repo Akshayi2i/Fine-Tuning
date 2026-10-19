@@ -229,3 +229,10 @@ LORA_TARGET_MODULES: Final[tuple[str, ...]] = (
 TRAINER_SPECIAL_TAGS: Final[tuple[str, ...]] = (
     "<image>", "<video>", "<audio>", "<bbox>", "<ref-object>",
 )
+
+
+#: The lowest inter-annotator agreement (``export_golden_labels.
+#: inter_annotator_agreement``, field level) a double-labelled document may show
+#: before training refuses to start. None: no spec states one, so the preflight
+#: reports agreement and warns, and it blocks once the product owner sets it.
+MIN_INTER_ANNOTATOR_AGREEMENT: float | None = None
