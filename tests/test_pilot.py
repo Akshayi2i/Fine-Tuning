@@ -18,7 +18,7 @@ from pilot.smoke_test import ComponentResult, evaluate_smoke
 from pilot.zero_shot_baseline import classify_baseline, summarise_baseline
 
 PASSING_PILOT_METRICS = {
-    "field_f1": 0.86,
+    "field_normalized_match": 0.86,
     "list_field_recall": 0.81,
     "schema_validity_rate": 1.0,
     "ocr_plus_image_field_f1": 0.88,
@@ -213,17 +213,36 @@ def test_a_passing_pilot_meets_every_criterion():
 def test_every_spec_criterion_is_evaluated():
     names = {c.name for c in PILOT_CRITERIA}
     assert names == {
-        "field_f1", "list_field_recall", "schema_validity_rate", "image_only_gap",
+        "field_normalized_match", "list_field_recall", "schema_validity_rate", "image_only_gap",
         "row_completeness_detection", "lob_detection_accuracy",
         "alias_generalization_gap", "confusable_misattribution_rate",
     }
 
 
-def test_schema_validity_below_one_hundred_percent_fails():
-    """Anything short of 100% means the model is improvising structure."""
-    report = evaluate_pilot({**PASSING_PILOT_METRICS, "schema_validity_rate": 0.98})
+def test_schema_validity_below_the_gate_floor_fails():
+    """The pilot holds schema validity to the gate's floor, not to a second number."""
+    report = evaluate_pilot({**PASSING_PILOT_METRICS, "schema_validity_rate": 0.97})
     assert not report.passed
     assert [r.criterion.name for r in report.failed] == ["schema_validity_rate"]
+    assert evaluate_pilot({**PASSING_PILOT_METRICS, "schema_validity_rate": 0.98}).passed
+
+
+def test_pilot_floors_are_the_gates_floors():
+    """§0d is the single source: every pilot criterion the gate also floors has
+    the gate's threshold, direction and inclusive comparison."""
+    from evaluation.gating import GATING_METRICS, PILOT_FLOORS
+
+    shared = [c for c in PILOT_CRITERIA if c.name in PILOT_FLOORS]
+    assert {c.name for c in shared} == {
+        "field_normalized_match", "list_field_recall", "schema_validity_rate",
+        "lob_detection_accuracy", "confusable_misattribution_rate",
+    }
+    for c in shared:
+        assert c.threshold == PILOT_FLOORS[c.name], c.name
+        assert c.direction == GATING_METRICS[c.name], c.name
+        assert c.inclusive, c.name
+        # A value exactly at the floor passes the gate, so it meets the pilot too.
+        assert c.met(PILOT_FLOORS[c.name]), c.name
 
 
 def test_an_unmeasured_criterion_does_not_pass_by_default():

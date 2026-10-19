@@ -34,6 +34,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from evaluation.gating import GATING_METRICS, PILOT_FLOORS
+
 log = logging.getLogger(__name__)
 
 PILOT_ROOT = Path(__file__).resolve().parent
@@ -64,6 +66,10 @@ class Criterion:
     #: The document types the criterion can be measured on; ``None`` for all. A
     #: pilot holding none of them records it as not applicable, never as missed.
     applies_to: frozenset[str] | None = None
+    #: A value exactly at the threshold meets it. True for every criterion taken
+    #: from the gate's floors, which the gate itself compares with >= / <=: a
+    #: model at the floor must not pass the gate and miss the pilot.
+    inclusive: bool = False
 
     def value(self, metrics: dict[str, Any]) -> float | None:
         if self.derive is not None:
@@ -74,7 +80,16 @@ class Criterion:
     def met(self, value: float | None) -> bool:
         if value is None:
             return False
-        return value > self.threshold if self.direction == "higher_is_better" else value < self.threshold
+        if self.direction == "higher_is_better":
+            return value >= self.threshold if self.inclusive else value > self.threshold
+        return value <= self.threshold if self.inclusive else value < self.threshold
+
+    @property
+    def comparator(self) -> str:
+        higher = self.direction == "higher_is_better"
+        if self.inclusive:
+            return ">=" if higher else "<="
+        return ">" if higher else "<"
 
 
 def _relative_gap(metrics: dict[str, Any], numerator: str, reference: str) -> float | None:
@@ -85,23 +100,35 @@ def _relative_gap(metrics: dict[str, Any], numerator: str, reference: str) -> fl
     return (b - a) / b
 
 
+def _from_floor(name: str, diagnosis: str, **kw: Any) -> Criterion:
+    """A criterion whose threshold and direction are the gate's own (§0d).
+
+    The pilot-exit floors live once, in ``evaluation.gating.PILOT_FLOORS``; a
+    second copy here drifted before (field F1 0.80 and schema validity 0.9999
+    against the gate's 0.85 and 0.98).
+    """
+    return Criterion(
+        name, PILOT_FLOORS[name], GATING_METRICS[name], diagnosis, inclusive=True, **kw
+    )
+
+
 PILOT_CRITERIA: tuple[Criterion, ...] = (
-    Criterion(
-        "field_f1", 0.80, "higher_is_better",
+    _from_floor(
+        "field_normalized_match",
         "Prompt and schema design first, then corpus coverage for the weak doc type, then a "
         "targeted per-type retrain on LR/epochs — not the deferred sweep, which measures noise at "
         "this volume.",
     ),
-    Criterion(
-        "list_field_recall", 0.75, "higher_is_better",
+    _from_floor(
+        "list_field_recall",
         "Loss Run corpus row-length variety, and whether MinerU's table row count is reaching the "
         "row-completeness signal (IMPL-09). Consider list-specific prompt rules.",
     ),
-    Criterion(
-        "schema_validity_rate", 0.9999, "higher_is_better",
+    _from_floor(
+        "schema_validity_rate",
         "Prompt rules — no fences, explicit null handling — and JSON structural discipline in the "
-        "Foundation corpus. This one is 100% or it is a defect; anything else means the model is "
-        "improvising structure.",
+        "Foundation corpus. Below the floor the model is improvising structure: read the "
+        "validation errors before anything else.",
     ),
     Criterion(
         "image_only_gap", RELATIVE_TOLERANCE, "lower_is_better",
@@ -115,10 +142,10 @@ PILOT_CRITERIA: tuple[Criterion, ...] = (
         "Cross-check the IMPL-09 sources: is MinerU's per-page table row count present in "
         "ocr_meta, and is the document-stated count being parsed?",
     ),
-    Criterion(
-        "lob_detection_accuracy", 0.85, "higher_is_better",
-        "LoB corpus coverage (IMPL-05 corpus_manifest) — check the >=20%-per-value target before "
-        "blaming the model.",
+    _from_floor(
+        "lob_detection_accuracy",
+        "LoB corpus coverage (IMPL-05 corpus_manifest) — check the per-value coverage floor "
+        "(common.lob) before blaming the model.",
         # Measured where the model writes the line. A policy takes its line from
         # the request (detection ships off; scripts/measure_lob_detection.py
         # measures it apart), so a policy-only pilot could never meet this.
@@ -130,8 +157,8 @@ PILOT_CRITERIA: tuple[Criterion, ...] = (
         "Also check the field's semantic gloss — a vague description gives the model nothing to "
         "generalise from.",
     ),
-    Criterion(
-        "confusable_misattribution_rate", 0.05, "lower_is_better",
+    _from_floor(
+        "confusable_misattribution_rate",
         "confusable_example_count: near zero means the corpus taught the mapping but never the "
         "boundary. Also check the gloss carries an explicit exclusion clause (IMPL-01).",
     ),
@@ -154,7 +181,7 @@ class CriterionResult:
         return self.value is None
 
     def describe(self) -> str:
-        comparator = ">" if self.criterion.direction == "higher_is_better" else "<"
+        comparator = self.criterion.comparator
         if self.value is None:
             return f"{self.criterion.name}: NOT MEASURED (target {comparator} {self.criterion.threshold})"
         return (

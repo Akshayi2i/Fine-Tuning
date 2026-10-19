@@ -172,10 +172,13 @@ def floors_for(scope: Any) -> dict[str, float]:
 #: no-OCR production path while the gate kept passing. scanned_accuracy is
 #: conditional (above): scans are not always there to hold.
 
-#: Absolute floors (arch v2.1 §0d, pilot-exit column). The single source of
-#: targets: §16.3's pilot criteria reference the same table. Production values
-#: are set by the product owner at pilot exit, which is why these are named
-#: pilot floors rather than hardcoded forever.
+#: Absolute floors (arch §0d, pilot-exit column). The single source for the
+#: thresholds the gate and the pilot share: ``pilot.pilot_run`` derives field
+#: match, list recall, schema validity, LoB detection and confusable rate from
+#: this table, with the same >= / <= comparison; its relative criteria (image-only
+#: gap, alias gap, row completeness) have no floor here. Production values are
+#: set by the product owner at pilot exit, which is why these are named pilot
+#: floors rather than hardcoded forever.
 PILOT_FLOORS: dict[str, float] = {
     "field_exact_match": 0.85,
     "field_normalized_match": 0.85,
