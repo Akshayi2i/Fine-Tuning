@@ -393,6 +393,10 @@ class GateResult:
     #: ``cross_type:`` gate left the release blocked with the waiver recorded.
     blocks: list[tuple[str, str]] = field(default_factory=list)
 
+    #: What the decision rests on that a reader must know, without blocking:
+    #: an eval set accepted below its minimum size, for one.
+    warnings: list[str] = field(default_factory=list)
+
     @property
     def improved_metrics(self) -> list[str]:
         return [v.name for v in self.verdicts if v.improved]
@@ -413,6 +417,7 @@ class GateResult:
             for v in self.verdicts if v.unmeasured and not v.applicable
         )
         lines.extend(f"  BLOCKED: {reason}" for reason in self.blocking_reasons)
+        lines.extend(f"  WARNING: {warning}" for warning in self.warnings)
         if self.override:
             lines.append(
                 f"  OVERRIDE by {self.override.approver}: {self.override.reason} "
@@ -434,6 +439,7 @@ class GateResult:
             "improved_metrics": self.improved_metrics,
             "verdicts": [v.as_dict() for v in self.verdicts],
             "override": self.override.as_dict() if self.override else None,
+            "warnings": list(self.warnings),
         }
 
 
@@ -449,6 +455,7 @@ def promotion_gate(
     fixes_defect: str | None = None,
     override: GateOverrideRecord | None = None,
     scope: Any = None,
+    small_eval_set: bool = False,
 ) -> GateResult:
     """Decide whether a candidate release may be promoted.
 
@@ -469,6 +476,9 @@ def promotion_gate(
             to fix something rather than to score higher.
         override: a named, written waiver. Validated — an override that cannot be
             attributed is refused.
+        small_eval_set: the frozen eval set was accepted below its minimum size
+            (``freeze-eval-set --allow-small``). Its scores say too little to call
+            a release production, so a pass is capped at ``interim`` and warned.
     """
     result = GateResult(passed=True, is_first_version=current_metrics is None)
     baseline = current_metrics or {}
@@ -551,8 +561,16 @@ def promotion_gate(
                 "covers nothing there.", unused,
             )
 
+    if small_eval_set:
+        result.warnings.append(
+            "the frozen eval set was accepted below its minimum size per document type "
+            "(freeze-eval-set --allow-small): its intervals are wide, so a pass is capped at "
+            "interim until the set is re-frozen at full size."
+        )
     result.passed = not result.blocking_reasons
-    result.tier = release_tier(candidate_metrics) if result.passed else None
+    result.tier = (
+        release_tier(candidate_metrics, small_eval_set=small_eval_set) if result.passed else None
+    )
     log.info("%s", result.report())
     return result
 
@@ -563,13 +581,16 @@ def promotion_gate(
 PRODUCTION_FIELD_MATCH = 0.92
 
 
-def release_tier(metrics: dict[str, Any]) -> str:
+def release_tier(metrics: dict[str, Any], *, small_eval_set: bool = False) -> str:
     """``production`` or ``interim`` for a release that passed the gate.
 
     Field match is ``field_normalized_match``, the metric the 0.85 floor is on.
     A release carries one adapter, so its metric is that adapter's. A missing
-    value is interim: production has to be shown, not assumed.
+    value is interim: production has to be shown, not assumed - and so is one
+    measured on an eval set accepted below its minimum size.
     """
+    if small_eval_set:
+        return "interim"
     value = metrics.get("field_normalized_match")
     if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= PRODUCTION_FIELD_MATCH:
         return "production"

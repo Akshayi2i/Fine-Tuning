@@ -32,6 +32,17 @@ def test_field_match_084_is_blocked_with_no_tier():
     assert not result.passed and result.tier is None
 
 
+def test_a_small_eval_set_caps_a_production_score_at_interim_with_a_warning():
+    """An eval set frozen with --allow-small says too little to call a release
+    production, whatever it scores."""
+    result = promotion_gate(_metrics(0.95), None, small_eval_set=True)
+    assert result.passed and result.tier == "interim"
+    assert any("allow-small" in w for w in result.warnings)
+    assert "WARNING" in result.report()
+    assert result.as_dict()["warnings"] == result.warnings
+    assert release_tier({"field_normalized_match": 0.95}, small_eval_set=True) == "interim"
+
+
 def test_the_production_bar_is_092_and_a_missing_value_is_interim():
     assert PRODUCTION_FIELD_MATCH == 0.92
     assert release_tier({"field_normalized_match": 0.92}) == "production"

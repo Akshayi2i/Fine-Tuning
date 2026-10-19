@@ -1570,6 +1570,7 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
     written override (``ctx.gate_override``, §15.5), recorded in the gate decision
     and the bundle.
     """
+    from evaluation.freeze_eval_set import frozen_manifest
     from evaluation.gating import apply_to_manifest, promotion_gate
 
     provider = ctx.metrics_provider or eval_report_metrics
@@ -1604,9 +1605,13 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
                 "one must show cross-type regression evidence before promotion (arch §12). "
                 f"Re-run training for this version rather than gating blind ({exc})."
             ) from exc
+    # The set the candidate was scored on. One accepted below its minimum size
+    # (--allow-small) caps the release at interim, with a warning.
+    eval_set = frozen_manifest(ctx.client, tenant_id=ctx.tenant_id)
     result = promotion_gate(
         candidate,
         baseline,
+        small_eval_set=bool(eval_set.get("small_set_accepted")),
         # Per-document scores turn non-inferiority into a paired bootstrap and
         # let the improvement rule be enforced (arch §15.5).
         per_document=per_document,
@@ -1650,6 +1655,12 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         # compared point estimates (a first release, or reports without them).
         "paired_documents": {name: len(pair[0]) for name, pair in sorted((per_document or {}).items())},
         "fixes_defect": ctx.fixes_defect,
+        "eval_set": {
+            "small_set_accepted": bool(eval_set.get("small_set_accepted")),
+            "documents_by_doc_type": eval_set.get("documents_by_doc_type", {}),
+            "frozen_from_corpus": eval_set.get("frozen_from_corpus"),
+        },
+        "warnings": list(result.warnings),
         # Fideon SPEC_09 §6: production (field match >= 0.92) or interim; None if
         # blocked, by the gate or by the cascade.
         "tier": result.tier if not cascade_blocked else None,

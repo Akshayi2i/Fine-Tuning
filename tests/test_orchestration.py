@@ -555,6 +555,24 @@ def test_per_document_scores_in_both_reports_gate_on_a_paired_bootstrap(client, 
     assert client.read_json(paths.gate_decision("v1.2"))["fixes_defect"].startswith("TICKET-12")
 
 
+def test_an_eval_set_accepted_small_caps_the_release_at_interim(client, controller):
+    from artifact_registry import paths
+    from evaluation.freeze_eval_set import manifest_key
+
+    seed_corpus(client)
+    client.write_json(manifest_key(), {
+        "small_set_accepted": True, "documents_by_doc_type": {"policy": 9},
+        "frozen_from_corpus": "corpus/v1",
+    })
+    production = {**PASSING_METRICS, "field_normalized_match": 0.97}
+    ctx = make_context(client, controller, metrics_provider=lambda _c: dict(production))
+    assert run_stages(ctx, stages_for("all"), command="all").ok
+    decision = client.read_json(paths.gate_decision("v1"))
+    assert decision["tier"] == "interim"
+    assert decision["eval_set"]["small_set_accepted"] is True
+    assert decision["warnings"]
+
+
 def test_no_promoted_version_means_no_baseline_not_a_lookup_failure(client, controller):
     from orchestration.pipeline_dag import default_baseline_metrics
 
