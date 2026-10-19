@@ -21,6 +21,7 @@ it is a counter and a threshold, and it belongs beside the thing it gates.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -160,6 +161,57 @@ def validate_golden_label(
             + (f"/{acord_form}" if acord_form else "")
             + " rejected:\n  - " + "\n  - ".join(problems)
         )
+
+
+#: A gold's own notes (``fideon:provenance``) naming a model as its drafter.
+_MODEL_DRAFTED = re.compile(
+    r"\b(?:drafted|generated|written|labell?ed|annotated|pre-annotated|extracted)\b[^.;|]{0,40}?"
+    r"\bby\s+(?:an?\s+)?(?:claude|gpt|chatgpt|openai|anthropic|gemini|llama|mistral|copilot|qwen"
+    r"|(?:ai|llm|language model)\b)",
+    re.IGNORECASE,
+)
+#: ... or saying, in so many words, that nobody reviewed it.
+_NOT_REVIEWED = re.compile(r"\bnot\s+reviewed\b|\bunreviewed\b", re.IGNORECASE)
+#: ``draft_backend`` values that name no model: a person wrote the label.
+_NO_MODEL = frozenset({"", "unknown", "human", "manual", "none"})
+
+
+def review_problem(label: Any, metadata: dict[str, Any]) -> str | None:
+    """Why a gold may not train or score yet; ``None`` when it may.
+
+    A gold a model drafted counts only once a person has reviewed it: its
+    metadata records ``reviewer_id`` and ``review_date`` (decision 2026-10-19 -
+    frontier models are never used for gold, synthetic or training data, and a
+    draft is never trusted as-is). Model-drafted is read from the metadata's
+    ``draft_backend`` and from the gold's own notes: one naming a model as the
+    drafter, or saying it was not reviewed (a synthetic twin's ``seed_review``).
+    """
+    if metadata.get("reviewer_id") and metadata.get("review_date"):
+        return None
+    evidence = _model_drafted(label, metadata)
+    if evidence is None:
+        return None
+    return (f"{evidence}, and no reviewer is recorded: a person must review it and record "
+            "reviewer_id and review_date in its metadata before it trains or scores")
+
+
+def has_review_record(metadata: dict[str, Any]) -> bool:
+    return bool(metadata.get("reviewer_id") and metadata.get("review_date"))
+
+
+def _model_drafted(label: Any, metadata: dict[str, Any]) -> str | None:
+    backend = str(metadata.get("draft_backend") or "").strip()
+    if backend.lower() not in _NO_MODEL:
+        return f"drafted by {backend}"
+    notes = label.get("fideon:provenance") if isinstance(label, dict) else None
+    values = notes.values() if isinstance(notes, dict) else [notes]
+    texts = [value for value in values if isinstance(value, str)]
+    if any(_NOT_REVIEWED.search(text) for text in texts):
+        return "its notes say it was not reviewed"
+    for text in texts:
+        if match := _MODEL_DRAFTED.search(text):
+            return f"its notes say it was {' '.join(match.group(0).split())}"
+    return None
 
 
 def export_golden_label(

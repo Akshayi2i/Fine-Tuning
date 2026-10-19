@@ -185,6 +185,18 @@ def check_bundle(bundle: LabeledPdf, doc_type: str) -> DocumentCheck:
     split = bundle.metadata.get("split")
     if split is not None and str(split).lower() not in ("train", "val", "test"):
         check.errors.append(f"metadata split {split!r} is not train, val or test")
+
+    # A model-drafted gold trains only once a person reviewed it (decision
+    # 2026-10-19); one with no record either way is named, not blocked.
+    from data_pipeline.labeling.export_golden_labels import has_review_record, review_problem
+
+    problem = review_problem(bundle.golden, bundle.metadata)
+    if problem:
+        check.errors.append(problem)
+    elif not has_review_record(bundle.metadata):
+        check.warnings.append(
+            "no review record (reviewer_id, review_date) in metadata.json: nothing says a person "
+            "checked this label")
     return check
 
 
@@ -254,6 +266,11 @@ def import_bundle(
         # The delivery's own split (train/val/test), when it was split upstream:
         # the corpus build then uses it as given (split_groups.assign_delivered_splits).
         "split": str(bundle.metadata["split"]).lower() if bundle.metadata.get("split") else None,
+        # Who reviewed the label and what drafted it: a model-drafted gold
+        # without a reviewer is refused before training (review_problem).
+        "reviewer_id": bundle.metadata.get("reviewer_id"),
+        "review_date": bundle.metadata.get("review_date"),
+        "draft_backend": bundle.metadata.get("draft_backend"),
         "labeled_at": datetime.now(UTC).isoformat(),
         "imported_from": bundle.directory.name,
         # OCR has NOT run: MinerU runs on the GPU pod as stage 2. Recorded so a

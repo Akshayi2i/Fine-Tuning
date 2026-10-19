@@ -5,22 +5,19 @@ consistent than a blank form, and the draft improves every cycle as the model
 does — which is what makes labeling cost fall over successive corpus versions
 instead of staying flat.
 
-Three backends, in the order a project actually uses them:
+Two backends, both self-hosted, in the order a project uses them:
 
-======================  =========================================  ==============
-backend                 when                                       guard
-======================  =========================================  ==============
-``base_qwen3vl``        day zero, before any Foundation exists     none, self-hosted
-``own_finetuned``       once v1 is promoted                        resolves the promoted version
-``external_frontier``   one-time bootstrap, if base is too rough   **two permissions**
-======================  =========================================  ==============
+======================  =========================================
+backend                 when
+======================  =========================================
+``base_qwen3vl``        day zero, before any Foundation exists
+``own_finetuned``       once v1 is promoted (the promoted version)
+======================  =========================================
 
-**The external backend refuses rather than warns.** Insurance documents carry
-names, TINs and SSNs, addresses and financials; sending them to a third-party API
-may breach the compliance posture or the data-processing agreement. It runs only
-with ``--allow-external`` *and* ``ALLOW_EXTERNAL_PREANNOTATION=true`` *and* a
-configured zero-retention endpoint. A warning would be dismissed once and then
-never seen again; a refusal cannot be.
+**No frontier model, ever** (decision 2026-10-19): frontier models are never
+used for gold, synthetic or training data. There is no external backend, and
+asking for one by name is refused - it is not a missing permission that a flag
+could grant.
 
 **The draft is never trusted as-is.** On day zero every draft is corrected by a
 human — see :func:`export_golden_labels.review_requirement`, which is a counter
@@ -39,32 +36,35 @@ from typing import Any, Literal
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
-from common.config import env
 from common.constants import ACTIVE_DOC_TYPES
 
 log = logging.getLogger(__name__)
 
-Backend = Literal["base_qwen3vl", "own_finetuned", "external_frontier"]
+Backend = Literal["base_qwen3vl", "own_finetuned"]
 
-BACKENDS: tuple[Backend, ...] = ("base_qwen3vl", "own_finetuned", "external_frontier")
+BACKENDS: tuple[Backend, ...] = ("base_qwen3vl", "own_finetuned")
 DEFAULT_BACKEND: Backend = "base_qwen3vl"
-
-#: Both of these must be present before a document leaves the tenancy boundary.
-EXTERNAL_ENV_FLAG = "ALLOW_EXTERNAL_PREANNOTATION"
-EXTERNAL_ENDPOINT_ENV = "EXTERNAL_PREANNOTATION_ENDPOINT"
 
 
 class PreAnnotationError(RuntimeError):
     """Raised when a draft cannot be produced."""
 
 
-class ExternalBackendRefused(PreAnnotationError):
-    """Raised when external pre-annotation is attempted without both permissions.
+def check_backend(backend: str) -> None:
+    """Refuse any backend but the two self-hosted ones.
 
-    A distinct type because it is a compliance refusal, not a technical failure:
-    callers must not retry it, and a batch loop must not swallow it the way it
-    swallows one unreadable PDF.
+    A frontier model by name is refused with the decision behind it: it is not a
+    backend this pipeline can be configured to use.
     """
+    if backend in BACKENDS:
+        return
+    if "frontier" in str(backend) or "external" in str(backend):
+        raise PreAnnotationError(
+            f"{backend!r} is refused: frontier models are never used for gold, synthetic or "
+            f"training data (decision 2026-10-19). Draft with {DEFAULT_BACKEND!r} or "
+            "'own_finetuned', and have a person review every draft."
+        )
+    raise PreAnnotationError(f"unknown backend {backend!r}; expected one of {list(BACKENDS)}")
 
 
 @dataclass
@@ -108,46 +108,6 @@ class Draft:
         }
 
 
-def external_permission() -> tuple[bool, str]:
-    """Whether external pre-annotation is permitted, and why not when it is not."""
-    flag = (env(EXTERNAL_ENV_FLAG, "false") or "false").strip().lower()
-    if flag not in ("true", "1", "yes"):
-        return False, (
-            f"{EXTERNAL_ENV_FLAG} is not set to true. Insurance documents carry names, TINs, "
-            "addresses and financials; sending them to a third-party API may breach the "
-            "compliance posture or the DPA (arch §7)."
-        )
-    if not env(EXTERNAL_PREANNOTATION_ENDPOINT := EXTERNAL_ENDPOINT_ENV):
-        return False, (
-            f"{EXTERNAL_PREANNOTATION_ENDPOINT} is not configured. The external backend requires a "
-            "zero-retention or enterprise endpoint — a default consumer endpoint may retain "
-            "prompts, which is the exact thing this guard exists to prevent."
-        )
-    return True, ""
-
-
-def assert_external_allowed(*, allow_external: bool) -> None:
-    """Refuse external pre-annotation unless **both** permissions are present.
-
-    Refuses rather than warns, on purpose: a warning is dismissed once and then
-    never seen again, and the thing it was warning about is a disclosure that
-    cannot be taken back.
-    """
-    if not allow_external:
-        raise ExternalBackendRefused(
-            "external pre-annotation requires --allow-external. It is off by default because it "
-            "sends unredacted documents outside the tenancy boundary; the self-hosted "
-            f"{DEFAULT_BACKEND!r} backend needs no permission and produces rougher but usable "
-            "drafts (IMPL-04 §1)."
-        )
-    permitted, reason = external_permission()
-    if not permitted:
-        raise ExternalBackendRefused(
-            f"external pre-annotation refused: {reason} Use the self-hosted backend, or obtain the "
-            "compliance sign-off and set both the flag and the endpoint."
-        )
-
-
 def resolve_backend_model(
     backend: Backend, client: BlobClient, *, doc_type: str | None = None
 ) -> str:
@@ -165,7 +125,8 @@ def resolve_backend_model(
                 "default (arch §4c)."
             )
         return promoted.replace("foundation-", "")
-    return "external"
+    check_backend(backend)
+    raise PreAnnotationError(f"no model for backend {backend!r}")
 
 
 def pre_annotate(
@@ -174,7 +135,6 @@ def pre_annotate(
     client: BlobClient,
     *,
     backend: Backend = DEFAULT_BACKEND,
-    allow_external: bool = False,
     model: Any = None,
     classifier: Any = None,
     calibration: Any = None,
@@ -190,15 +150,7 @@ def pre_annotate(
     """
     if doc_type not in ACTIVE_DOC_TYPES:
         raise PreAnnotationError(f"unknown doc_type {doc_type!r}; expected one of {list(ACTIVE_DOC_TYPES)}")
-    if backend not in BACKENDS:
-        raise PreAnnotationError(f"unknown backend {backend!r}; expected one of {list(BACKENDS)}")
-    if backend == "external_frontier":
-        assert_external_allowed(allow_external=allow_external)
-        raise PreAnnotationError(
-            "the external frontier backend has no wired client. It is a one-time bootstrap for the "
-            "case where base Qwen3-VL zero-shot is too rough to be a useful starting point; wire a "
-            "zero-retention endpoint here only after the compliance decision is recorded."
-        )
+    check_backend(backend)
 
     from data_pipeline.labeling.export_golden_labels import review_requirement
     from serving.pipeline import ExtractionRequest, extract
@@ -238,8 +190,8 @@ def pre_annotate(
         raise PreAnnotationError(
             "pre_annotate needs a loaded model. Resolve one with "
             f"inference_core.model_runner.load_model({model_version!r}, client) — which is still "
-            "waiting on a live backend (Phase 0) — and pass it in. The drafting logic, the "
-            "permission guard and the review rule around it are complete."
+            "waiting on a live backend (Phase 0) — and pass it in. The drafting logic and the "
+            "review rule around it are complete."
         )
 
     result = extract(
@@ -288,14 +240,13 @@ def pre_annotate_batch(
     **kwargs: Any,
 ) -> tuple[list[Draft], list[tuple[str, str]]]:
     """Draft many documents. One unreadable document never stops the batch —
-    but a compliance refusal stops all of them, because it applies to every one."""
+    but a refused backend stops all of them, because it applies to every one."""
+    check_backend(kwargs.get("backend", DEFAULT_BACKEND))
     drafts: list[Draft] = []
     failed: list[tuple[str, str]] = []
     for source_id in source_ids:
         try:
             drafts.append(pre_annotate(source_id, doc_type, client, **kwargs))
-        except ExternalBackendRefused:
-            raise
         except Exception as exc:  # noqa: BLE001 - one bad document must not stop a batch
             failed.append((source_id, str(exc)))
             log.warning("draft failed for %s: %s", source_id, exc)
@@ -307,8 +258,6 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     parser.add_argument("--doc-type", required=True, choices=list(ACTIVE_DOC_TYPES))
     parser.add_argument("--source-ids", nargs="+", required=True)
     parser.add_argument("--backend", default=DEFAULT_BACKEND, choices=list(BACKENDS))
-    parser.add_argument("--allow-external", action="store_true",
-                        help=f"required, with {EXTERNAL_ENV_FLAG}, for the external backend")
     parser.add_argument("--tenant", default=None)
     args = parser.parse_args(list(argv) if argv is not None else None)
     # On the pod, run detached in tmux: a closed laptop must not stop this job.
@@ -322,7 +271,7 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
 
     drafts, failed = pre_annotate_batch(
         args.source_ids, args.doc_type, client,
-        backend=args.backend, allow_external=args.allow_external, tenant_id=args.tenant,
+        backend=args.backend, tenant_id=args.tenant,
     )
     for draft in drafts:
         write_draft(draft, client, args.tenant)

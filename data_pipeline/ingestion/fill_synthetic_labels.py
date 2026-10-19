@@ -5,6 +5,11 @@ label is what the generator could read and place, about 29% of the fields the
 reviewed gold of that source holds. The model reads an omitted field as "not on
 the page", so trained on those labels it learns to skip most of a policy.
 
+"Reviewed" is what the source gold must be, not something this checks: a twin
+filled from a seed nobody reviewed (its ``seed_review`` says so) is still
+refused at import until a reviewer is recorded
+(``export_golden_labels.review_problem``, decision 2026-10-19).
+
 This adds the missing fields. It never changes a field the synthetic label
 already has - those are the generator's values, which match the synthetic PDF.
 Each field added comes from the source's reviewed gold, made true of the twin:

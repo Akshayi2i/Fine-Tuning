@@ -573,6 +573,31 @@ def test_an_eval_set_accepted_small_caps_the_release_at_interim(client, controll
     assert decision["warnings"]
 
 
+def test_a_model_drafted_label_nobody_reviewed_never_trains(client, controller):
+    """Decision 2026-10-19: a gold a model drafted counts only once a person
+    reviewed it. The corpus build refuses the run rather than train on it."""
+    from orchestration.pipeline_dag import load_labeled_documents
+
+    seeded = seed_corpus(client)
+    source_id = seeded[0]
+    doc_type = source_id.rsplit("_", 1)[0]
+    label = client.read_json(paths.golden_label(doc_type, source_id))
+    label["fideon:provenance"] = {"provenance": "Seed gold drafted by Claude Code, not reviewed"}
+    client.write_json(paths.golden_label(doc_type, source_id), label)
+    metadata = client.read_json(paths.label_metadata(doc_type, source_id))
+    unreviewed = {k: v for k, v in metadata.items() if k not in ("reviewer_id", "review_date")}
+    client.write_json(paths.label_metadata(doc_type, source_id), unreviewed)
+
+    ctx = make_context(client, controller)
+    ctx.doc_types = [doc_type]
+    with pytest.raises(PipelineError, match="nobody reviewed"):
+        load_labeled_documents(ctx)
+
+    client.write_json(paths.label_metadata(doc_type, source_id),
+                      {**unreviewed, "reviewer_id": "a.reviewer", "review_date": "2026-10-20"})
+    assert source_id in {d.source_id for d in load_labeled_documents(ctx)}
+
+
 def test_no_promoted_version_means_no_baseline_not_a_lookup_failure(client, controller):
     from orchestration.pipeline_dag import default_baseline_metrics
 

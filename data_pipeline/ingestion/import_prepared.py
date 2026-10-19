@@ -212,6 +212,11 @@ def import_document(
             f"{hint or errors[0]}. A label that reaches golden-labels/ is a training target nobody "
             "checked, and the first symptom is a model that learned the wrong shape."
         )
+    from data_pipeline.labeling.export_golden_labels import review_problem
+
+    problem = review_problem(doc.golden, doc.metadata)
+    if problem:
+        raise ImportError_(f"{doc.directory.name}: {problem}")
 
     # The next id unused ANYWHERE - raw PDFs, processed pages, labels - so an
     # imported document cannot take the id of one that was ingested as a PDF
@@ -268,6 +273,9 @@ def import_document(
         "twin_index": twin_index(doc.metadata),
         "render_mode": doc.metadata.get("render_mode"),
         "synthetic": bool(doc.metadata.get("synthetic", False)),
+        "reviewer_id": doc.metadata.get("reviewer_id"),
+        "review_date": doc.metadata.get("review_date"),
+        "draft_backend": doc.metadata.get("draft_backend"),
         "labeled_at": datetime.now(UTC).isoformat(),
         "imported_from": doc.directory.name,
     })

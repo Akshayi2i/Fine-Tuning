@@ -140,3 +140,20 @@ def test_agreement_below_a_set_minimum_fails(monkeypatch):
     results = []
     preflight.check_label_agreement(None, results, labels=_labels(0.91))
     assert results[0].status == "PASS"
+
+
+def test_every_model_drafted_label_needs_a_reviewer_before_training():
+    from orchestration import preflight
+
+    labels = [("policy", "policy_0001", {}),
+              ("policy", "policy_0002", {"reviewer_id": "a", "review_date": "2026-10-20"}),
+              ("policy", "policy_0003", {})]
+    golds = {"policy_0001": {"fideon:provenance": {"provenance": "drafted by Claude Code"}},
+             "policy_0003": {}}
+    results = []
+    preflight.check_reviewed_labels(None, results, labels, read_label=lambda _t, s: golds[s])
+    assert results[0].status == "FAIL" and results[0].detail.endswith("['policy_0001']")
+
+    results = []
+    preflight.check_reviewed_labels(None, results, labels[1:], read_label=lambda _t, s: golds[s])
+    assert results[0].status == "WARN"

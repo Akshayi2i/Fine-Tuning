@@ -478,14 +478,23 @@ def stage_labeling(ctx: StageContext) -> StageResult:
 def load_labeled_documents(ctx: StageContext) -> list[Any]:
     """Assemble ``SourceDocument``s from Blob for every labeled source_id."""
     from data_pipeline.dataset_builder.build_jsonl import SourceDocument
-    from data_pipeline.labeling.export_golden_labels import list_labeled_source_ids, load_golden_label
+    from data_pipeline.labeling.export_golden_labels import (
+        list_labeled_source_ids,
+        load_golden_label,
+        review_problem,
+    )
     from evaluation.freeze_eval_set import is_scanned
 
     documents = []
     read_by: dict[str, int] = {}
+    unreviewed: list[tuple[str, str]] = []
     for doc_type in ctx.doc_types:
         for source_id in list_labeled_source_ids(ctx.client, doc_type, ctx.tenant_id):
             label, metadata = load_golden_label(source_id, doc_type, ctx.client, ctx.tenant_id)
+            # A model-drafted gold nobody reviewed never trains (decision 2026-10-19).
+            if problem := review_problem(label, metadata):
+                unreviewed.append((source_id, problem))
+                continue
             meta_key = paths.ocr_meta(doc_type, source_id, ctx.tenant_id)
             if not ctx.client.exists(meta_key):
                 log.warning("%s is labeled but not OCR'd — skipping; re-run stage 2", source_id)
@@ -543,6 +552,13 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
                 render_mode=metadata.get("render_mode"),
                 unprinted_values=list(metadata.get("unprinted_values") or []),
             ))
+    if unreviewed:
+        raise PipelineError(
+            f"{len(unreviewed)} labelled document(s) were drafted by a model and nobody reviewed "
+            f"them, so they cannot train (decision 2026-10-19): {unreviewed[0][0]}: "
+            f"{unreviewed[0][1]}. Others: {[s for s, _ in unreviewed[1:6]]}. Have a person review "
+            "them, record reviewer_id and review_date in metadata.json, and re-import."
+        )
     assert_one_mineru_version(read_by)
     ctx.grouping = assign_document_groups(ctx, documents)
     return documents

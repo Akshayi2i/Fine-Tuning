@@ -170,10 +170,36 @@ def test_a_complete_bundle_reports_nothing(tmp_path):
         "field_provenance": {"named_insured.primary_name": 1},
         "policy_number": "WC-8842317-01",
         "lob": ["workers_comp"],
+        "reviewer_id": "a.reviewer", "review_date": "2026-10-20",
     })
     check = check_bundle(read_bundle(complete), "policy")
 
     assert check.ok and not check.warnings
+
+
+def test_a_model_drafted_gold_with_no_reviewer_is_refused(tmp_path):
+    """Frontier models are never used for gold, and no draft is trusted as-is
+    (decision 2026-10-19): a gold whose notes say a model drafted it imports
+    only once a reviewer is recorded."""
+    drafted = {**GOLDEN, "fideon:provenance": {"provenance": "Seed gold drafted by Claude Code"}}
+    check = check_bundle(read_bundle(bundle(tmp_path, golden=drafted)), "policy")
+    assert not check.ok and any("no reviewer is recorded" in e for e in check.errors)
+
+    reviewed = bundle(tmp_path, "reviewed", golden=drafted, metadata={
+        "lob": [LINE], "reviewer_id": "a.reviewer", "review_date": "2026-10-20"})
+    assert check_bundle(read_bundle(reviewed), "policy").ok
+
+
+def test_the_review_record_reaches_the_label_metadata(tmp_path, client, raw_client):
+    root = tmp_path / "batch"
+    root.mkdir()
+    bundle(root, "doc", metadata={"lob": [LINE], "reviewer_id": "a.reviewer",
+                                  "review_date": "2026-10-20", "draft_backend": "base_qwen3vl"})
+    report = import_batch(root, "policy", client, raw_client)
+    assert report.ok, report.describe()
+    stored = client.read_json(paths.label_metadata("policy", report.imported["doc"]))
+    assert (stored["reviewer_id"], stored["review_date"], stored["draft_backend"]) == (
+        "a.reviewer", "2026-10-20", "base_qwen3vl")
 
 
 # --------------------------------------------------------------------------

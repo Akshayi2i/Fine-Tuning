@@ -1,10 +1,11 @@
 """IMPL-04 §1 and §6 — pre-annotation and the confidence-routed review queue.
 
-Two guards carry this file. The **external pre-annotation refusal** is a
-compliance boundary: it must refuse, not warn, because a warning is dismissed
-once and the disclosure it warned about cannot be taken back. The **day-zero
-routing refusal** is the same shape in a different place: routing by confidence
-before a model has earned trust sends its own mistakes past a reviewer.
+Two guards carry this file. **No frontier model drafts a label**: frontier
+models are never used for gold, synthetic or training data (decision
+2026-10-19), so the only backends are self-hosted and a frontier one is refused
+by name. The **day-zero routing refusal** is the same shape in a different
+place: routing by confidence before a model has earned trust sends its own
+mistakes past a reviewer.
 """
 
 from __future__ import annotations
@@ -27,9 +28,7 @@ from data_pipeline.labeling.active_learning import (
 from data_pipeline.labeling.pre_annotate import (
     DEFAULT_BACKEND,
     Draft,
-    ExternalBackendRefused,
     PreAnnotationError,
-    assert_external_allowed,
     resolve_backend_model,
 )
 
@@ -39,12 +38,6 @@ def client() -> BlobClient:
     return BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
 
 
-@pytest.fixture
-def no_external(monkeypatch):
-    """Neither permission present — the default posture."""
-    monkeypatch.setattr(pre_annotate, "env", lambda name, default=None: default)
-
-
 def seed_labels(client: BlobClient, doc_type: str, count: int) -> None:
     for i in range(1, count + 1):
         client.write_json(paths.golden_label(doc_type, f"{doc_type}_{i:04d}"),
@@ -52,54 +45,27 @@ def seed_labels(client: BlobClient, doc_type: str, count: int) -> None:
 
 
 # --------------------------------------------------------------------------
-# The external-backend refusal
+# No frontier model drafts a label
 # --------------------------------------------------------------------------
 
 
-def test_external_is_refused_without_the_flag(no_external):
-    with pytest.raises(ExternalBackendRefused, match="--allow-external"):
-        assert_external_allowed(allow_external=False)
+def test_there_is_no_frontier_backend():
+    assert pre_annotate.BACKENDS == ("base_qwen3vl", "own_finetuned")
 
 
-def test_external_is_refused_without_the_env_permission(no_external):
-    """The flag alone is one person's decision; the env var is the deployment's."""
-    with pytest.raises(ExternalBackendRefused, match="ALLOW_EXTERNAL_PREANNOTATION"):
-        assert_external_allowed(allow_external=True)
+def test_a_frontier_backend_is_refused_by_name(client):
+    """Not a missing permission a flag could grant: the decision is recorded in
+    the refusal."""
+    with pytest.raises(PreAnnotationError, match="never used for gold"):
+        pre_annotate.pre_annotate("policy_0001", "policy", client, backend="external_frontier")
+    with pytest.raises(PreAnnotationError, match="never used for gold"):
+        resolve_backend_model("external_frontier", client)  # type: ignore[arg-type]
 
 
-def test_external_is_refused_without_a_zero_retention_endpoint(monkeypatch):
-    """A default consumer endpoint may retain prompts, which is the exact thing
-    the guard exists to prevent."""
-    monkeypatch.setattr(
-        pre_annotate, "env",
-        lambda name, default=None: "true" if name == "ALLOW_EXTERNAL_PREANNOTATION" else None,
-    )
-    with pytest.raises(ExternalBackendRefused, match="zero-retention"):
-        assert_external_allowed(allow_external=True)
-
-
-def test_external_is_allowed_only_with_both_permissions_and_an_endpoint(monkeypatch):
-    monkeypatch.setattr(
-        pre_annotate, "env",
-        lambda name, default=None: {
-            "ALLOW_EXTERNAL_PREANNOTATION": "true",
-            "EXTERNAL_PREANNOTATION_ENDPOINT": "https://zero-retention.example/v1",
-        }.get(name, default),
-    )
-    assert_external_allowed(allow_external=True)  # does not raise
-
-
-def test_the_refusal_is_a_distinct_error_type():
-    """A batch loop swallows one unreadable PDF; it must not swallow a
-    compliance refusal, which applies to every document in the batch."""
-    assert issubclass(ExternalBackendRefused, PreAnnotationError)
-
-
-def test_a_refusal_stops_the_whole_batch(client, no_external):
-    with pytest.raises(ExternalBackendRefused):
+def test_a_refused_backend_stops_the_whole_batch(client):
+    with pytest.raises(PreAnnotationError, match="never used for gold"):
         pre_annotate.pre_annotate_batch(
-            ["policy_0001", "policy_0002"], "policy", client,
-            backend="external_frontier", allow_external=False,
+            ["policy_0001", "policy_0002"], "policy", client, backend="external_frontier",
         )
 
 
@@ -301,14 +267,52 @@ def test_the_queue_is_written_where_reviewers_look(client):
     assert client.read_json(key)["documents"] == 1
 
 
-def test_the_documented_env_flag_is_actually_read():
-    """It was in .env.example and referenced in no module — a guard that existed
-    only in documentation. `test_repo_contracts` now catches the general case;
-    this pins the specific one that bit."""
+def test_no_external_pre_annotation_setting_remains():
+    """The external backend is gone, so is the permission that guarded it."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
     source = (root / "data_pipeline" / "labeling" / "pre_annotate.py").read_text(encoding="utf-8")
     template = (root / ".env.example").read_text(encoding="utf-8")
-    assert "ALLOW_EXTERNAL_PREANNOTATION" in source
-    assert "ALLOW_EXTERNAL_PREANNOTATION" in template
+    for name in ("ALLOW_EXTERNAL_PREANNOTATION", "EXTERNAL_PREANNOTATION_ENDPOINT"):
+        assert name not in source and name not in template
+
+
+# --------------------------------------------------------------------------
+# A model-drafted gold trains only once a person reviewed it
+# --------------------------------------------------------------------------
+
+
+def _gold(note):
+    return {"fideon:provenance": {"provenance": note}} if note else {}
+
+
+@pytest.mark.parametrize("note", [
+    "Seed gold drafted by Claude Code (SPEC_21 Phase 4), 08 October 2026",
+    "Drafted by Claude Code from the seed text layer and page renders",
+    "Labels generated by GPT-4o for the pilot",
+])
+def test_a_gold_whose_notes_name_a_model_needs_a_reviewer(note):
+    from data_pipeline.labeling.export_golden_labels import review_problem
+
+    problem = review_problem(_gold(note), {})
+    assert problem and "no reviewer is recorded" in problem
+    assert review_problem(_gold(note), {"reviewer_id": "a.person", "review_date": "2026-10-20"}) is None
+
+
+def test_a_twin_of_an_unreviewed_seed_needs_a_reviewer():
+    from data_pipeline.labeling.export_golden_labels import review_problem
+
+    twin = {"fideon:provenance": {"seed_review": "NOT REVIEWED - engine test", "run_config":
+                                  "C:/tmp/claude/scratchpad/run.yaml"}}
+    assert "not reviewed" in review_problem(twin, {})
+
+
+def test_a_model_draft_backend_needs_a_reviewer_and_a_human_label_does_not():
+    from data_pipeline.labeling.export_golden_labels import review_problem
+
+    assert "drafted by base_qwen3vl" in review_problem({}, {"draft_backend": "base_qwen3vl"})
+    assert review_problem({}, {"draft_backend": "human"}) is None
+    assert review_problem(_gold("Keyed in by the labelling team"), {}) is None
+    # A path that happens to contain a model's name is not a drafting note.
+    assert review_problem(_gold("C:/Users/x/AppData/Local/Temp/claude/scratch"), {}) is None

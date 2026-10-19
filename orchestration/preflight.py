@@ -253,6 +253,40 @@ def check_label_agreement(ctx, results: list[Check], labels=None) -> None:
         results.append(Check("label agreement", "PASS", detail))
 
 
+def check_reviewed_labels(ctx, results: list[Check], labels=None, read_label=None) -> None:
+    """Every model-drafted label has a reviewer recorded (decision 2026-10-19).
+
+    The corpus build refuses the run on the first one it meets; this names all
+    of them before anything is built.
+    """
+    from artifact_registry import paths
+    from data_pipeline.labeling.export_golden_labels import has_review_record, review_problem
+
+    labels = _label_metadata(ctx) if labels is None else labels
+    if read_label is None:
+        def read_label(doc_type, source_id):
+            return ctx.client.read_json(paths.golden_label(doc_type, source_id, ctx.tenant_id))
+    blocked, unrecorded = [], 0
+    for doc_type, source_id, metadata in labels:
+        if has_review_record(metadata):
+            continue
+        if review_problem(read_label(doc_type, source_id), metadata):
+            blocked.append(source_id)
+        else:
+            unrecorded += 1
+    if blocked:
+        results.append(Check(
+            "reviewed labels", "FAIL",
+            f"{len(blocked)} of {len(labels)} labels were drafted by a model with no reviewer "
+            f"recorded: {blocked[:5]}",
+            "have a person review them, record reviewer_id and review_date, and re-import"))
+    elif unrecorded:
+        results.append(Check("reviewed labels", "WARN",
+                             f"{unrecorded} of {len(labels)} labels record no reviewer"))
+    else:
+        results.append(Check("reviewed labels", "PASS", f"{len(labels)} labels, all reviewed"))
+
+
 def check_ocr_report(path: Path, results: list[Check]) -> None:
     summary = path / "summary.json"
     if not summary.is_file():
@@ -314,7 +348,9 @@ def run_preflight(args: argparse.Namespace) -> tuple[list[Check], dict[str, Any]
     ctx.doc_types = list(ctx.scope.doc_types)
     _run("azure", lambda r: check_blob(ctx.client, r), results)
     _run("data", lambda r: check_ocr_done(ctx, r), results)
-    _run("label agreement", lambda r: check_label_agreement(ctx, r), results)
+    labels = _run("labels", lambda r: _label_metadata(ctx), results) or []
+    _run("reviewed labels", lambda r: check_reviewed_labels(ctx, r, labels), results)
+    _run("label agreement", lambda r: check_label_agreement(ctx, r, labels), results)
     _run("post-OCR check", lambda r: check_ocr_report(args.ocr_check, r), results)
     facts: dict[str, Any] = {}
     if not args.skip_corpus:
