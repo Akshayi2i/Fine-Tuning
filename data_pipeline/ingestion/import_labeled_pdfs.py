@@ -186,6 +186,26 @@ def check_bundle(bundle: LabeledPdf, doc_type: str) -> DocumentCheck:
     if split is not None and str(split).lower() not in ("train", "val", "test"):
         check.errors.append(f"metadata split {split!r} is not train, val or test")
 
+    # One convention for form editions: an edition left inside a form number
+    # the label rules would have moved means the bundle was never prepared.
+    from data_pipeline.ingestion.label_rules import edition_rows, may_hold_edition, split_form_edition
+
+    unmoved, unsure = [], []
+    for index, row in edition_rows(bundle.golden):
+        raw = row["form_number"].get("raw")
+        if split_form_edition(raw):
+            unmoved.append(f"forms_and_endorsements[{index}] {raw!r}")
+        elif may_hold_edition(raw):
+            unsure.append(f"forms_and_endorsements[{index}] {raw!r}")
+    if unmoved:
+        check.errors.append(
+            f"{len(unmoved)} form number(s) still carry their edition with edition_date empty "
+            f"({', '.join(unmoved[:3])}): re-run prepare_bundles, whose label rules move it")
+    if unsure:
+        check.warnings.append(
+            f"{len(unsure)} form number(s) may end in their edition, edition_date empty "
+            f"({', '.join(unsure[:3])}): check them by hand")
+
     # A model-drafted gold trains only once a person reviewed it (decision
     # 2026-10-19); one with no record either way is named, not blocked.
     from data_pipeline.labeling.export_golden_labels import has_review_record, review_problem

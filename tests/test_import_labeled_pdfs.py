@@ -283,3 +283,21 @@ def test_the_deliverys_unseen_carrier_mark_reaches_the_label_metadata(tmp_path, 
 
     assert label_metadata("unseen")["held_out_carrier"] is True
     assert label_metadata("seen")["held_out_carrier"] is False
+
+
+def test_an_edition_left_inside_a_form_number_blocks_and_a_doubtful_one_warns(tmp_path):
+    """The label rules move it at preparation; one still there means the bundle
+    was never prepared, and the model would learn two conventions."""
+    unmoved = {**GOLDEN, "forms_and_endorsements": [
+        {"form_number": {"raw": "CG 00 01 04 13", "parsed": "CG 00 01 04 13", "page_ref": [1],
+                         "confidence": {"score": 1.0, "source": "vlm"}, "flagged": False}}]}
+    check = check_bundle(read_bundle(bundle(tmp_path, golden=unmoved)), "policy")
+    assert any("still carry their edition" in e for e in check.errors)
+
+    doubtful = {**GOLDEN, "forms_and_endorsements": [
+        {"form_number": {"raw": "CG 20 10 04", "parsed": "CG 20 10 04", "page_ref": [1],
+                         "confidence": {"score": 1.0, "source": "vlm"}, "flagged": False}}]}
+    check = check_bundle(read_bundle(bundle(tmp_path, "doubtful", golden=doubtful)), "policy")
+    assert not any("edition" in e for e in check.errors)
+    assert any("may end in their edition" in w for w in check.warnings)
+

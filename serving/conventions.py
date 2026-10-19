@@ -36,6 +36,7 @@ EXTRA_DROPPED_FLAG = "additional_fields:not_printed_dropped"
 
 _EXTRA = re.compile(r"additional_fields\[(\d+)\](.*)")
 _MOVED = re.compile(r"(additional_fields\[\d+\]) .* -> (\S+)$")
+_EDITION_MOVED = re.compile(r"^(forms_and_endorsements\[\d+\])\.form_number ")
 
 
 @dataclass
@@ -78,6 +79,9 @@ def conform(
     # one to the field it moved to; a value the rules removed takes its span.
     moved = {f"{m.group(1)}.value": m.group(2) for kind, detail in notes
              if kind == "extra field moved to its field" and (m := _MOVED.match(detail))}
+    # An edition moved out of a form number was read in the number's tokens.
+    editions = {f"{m.group(1)}.form_number": f"{m.group(1)}.edition_date" for kind, detail in notes
+                if kind == "form edition moved" and (m := _EDITION_MOVED.match(detail))}
     now = {original[id(entry)]: index for index, entry in enumerate(extraction.get("additional_fields") or [])
            if id(entry) in original}
     rekeyed: dict[str, Any] = {}
@@ -85,6 +89,8 @@ def conform(
         if key in moved:
             rekeyed[moved[key]] = span
             continue
+        if key in editions:
+            rekeyed[editions[key]] = span
         m = _EXTRA.match(key)
         if m:
             if int(m.group(1)) not in now:

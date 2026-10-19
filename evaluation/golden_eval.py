@@ -28,6 +28,7 @@ for clean OCR: the noise lives in the data, never in the instruction.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -132,9 +133,16 @@ def load_golden_set(
 
 
 def verified_label(label: dict[str, Any], page_texts: list[str]) -> dict[str, Any]:
+    """The frozen gold as training would teach it: rule-added values the page
+    does not print left out (label_verification), and a form's edition moved out
+    of its number, as the label rules now do. A set frozen before that rule is
+    not rewritten in Blob; it is read under it."""
     from data_pipeline.dataset_builder.label_verification import verified_label as verify
+    from data_pipeline.ingestion.label_rules import split_form_editions
 
-    return verify(label, page_texts)
+    verified = copy.deepcopy(verify(label, page_texts))
+    split_form_editions(verified)
+    return verified
 
 
 def merge_line(lob: Any) -> Any:

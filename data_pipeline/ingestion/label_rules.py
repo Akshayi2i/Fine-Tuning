@@ -33,6 +33,11 @@ The rules, each logged as a correction (:func:`apply_label_rules`):
 * **extra field moved to its field** - Protection Class and a "Paid By:
   Mortgagee" line, where the proper field is empty (and dropped where it holds
   them already).
+* **form edition moved** - a form number that carries its edition in a shape
+  no form number takes ("CG 00 01 04 13", "IL0017(11-98)"), with the form's
+  ``edition_date`` empty, gives the edition to ``edition_date`` (parsed
+  ``MM/YY``, the schema's code) and keeps the number. The labels did both, and
+  the model learned both.
 * **link names the building** - an entry that applies to a location with one
   building names the building, as the client's own example does (Coverage A
   and the mortgagee of homeowners_minimal.json name ``bldg_1``). The labels
@@ -62,6 +67,7 @@ gold; a document with no text layer gets only the rules that need no text.
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Collection, Iterator
 from pathlib import Path
@@ -185,13 +191,89 @@ def apply_label_rules(gold: dict[str, Any], pages: dict[int, str], *,
     if not any(text.words for text in texts.values()):
         texts = {}
     reliable = _reliable_pages(gold, texts) - set(scanned) if texts else set()
-    notes: list[tuple[str, str]] = []
+    notes: list[tuple[str, str]] = split_form_editions(gold)
     _building_links(gold, notes)
     _extra_fields(gold, texts, reliable, notes)
     if texts:
         _numbers(gold, pages, reliable, notes)
         _page_lists(gold, pages, texts, reliable, notes)
         notes += [(PRINTED_NOWHERE, path) for path in printed_nowhere(gold, texts, reliable)]
+    return notes
+
+
+# --------------------------------------------------------------------------
+# Form editions
+# --------------------------------------------------------------------------
+
+#: An edition printed as part of a form number, in shapes no form number takes:
+#: ISO's number then month and year ("CG 00 01 04 13") ...
+_ISO_EDITION = re.compile(r"^(?P<form>[A-Z]{2} [A-Z0-9]{2} \d{2}) (?P<mm>0[1-9]|1[0-2]) (?P<yy>\d{2})$")
+#: ... or a month and year in brackets after the number ("IL0017(11-98)").
+_BRACKETED_EDITION = re.compile(
+    r"^(?P<form>.*?\S)\s*\(\s*(?P<mm>0[1-9]|1[0-2])\s*[-/ ]\s*(?P<yy>\d{4}|\d{2})\s*\)$")
+#: A number ending in what may be a month and year, or may be its own groups
+#: ("CG 20 10 04"): named for a person to look at, never changed.
+_MAYBE_EDITION = re.compile(r"^(?P<form>.*\d.*?)[ /-](?P<mm>0[1-9]|1[0-2])[ /-](?P<yy>\d{2})$")
+
+
+def split_form_edition(text: Any) -> tuple[str, str, str] | None:
+    """``(form number, edition as printed, edition parsed MM/YY)`` when ``text``
+    carries its edition in a shape no form number takes; else ``None``."""
+    value = " ".join(str(text or "").split())
+    if match := _ISO_EDITION.match(value):
+        return match["form"], f"{match['mm']} {match['yy']}", f"{match['mm']}/{match['yy']}"
+    if (match := _BRACKETED_EDITION.match(value)) and _form_code(match["form"]):
+        printed = value[value.rindex("(") + 1:].rstrip(")").strip()
+        return match["form"].strip(), printed, f"{match['mm']}/{match['yy'][-2:]}"
+    return None
+
+
+def may_hold_edition(text: Any) -> bool:
+    """A form number that may end in its edition, in a shape a number takes too."""
+    value = " ".join(str(text or "").split())
+    return split_form_edition(value) is None and bool(_MAYBE_EDITION.match(value))
+
+
+def edition_rows(gold: dict[str, Any]) -> Iterator[tuple[int, dict[str, Any]]]:
+    """``(index, form row)`` for each form whose ``edition_date`` is empty."""
+    from common.canonical import is_field_value
+
+    for index, row in enumerate(gold.get("forms_and_endorsements") or []):
+        if not isinstance(row, dict) or not is_field_value(row.get("form_number")):
+            continue
+        edition = row.get("edition_date")
+        if edition is None or (isinstance(edition, dict) and edition.get("raw") in (None, "")):
+            yield index, row
+
+
+def split_form_editions(gold: dict[str, Any]) -> list[tuple[str, str]]:
+    """Move each edition a form number carries to its form's ``edition_date``.
+
+    IN PLACE; one note per form changed. Only where ``edition_date`` is empty:
+    a filled one is the label's own reading and is never overwritten. The
+    edition takes the number's pages and confidence: it is printed with it.
+    """
+    notes: list[tuple[str, str]] = []
+    for index, row in edition_rows(gold):
+        number = row["form_number"]
+        split = split_form_edition(number.get("raw"))
+        if split is None:
+            continue
+        form, printed, parsed = split
+        before = number.get("raw")
+        number["raw"] = form
+        if isinstance(number.get("parsed"), str):
+            number["parsed"] = form
+        edition: dict[str, Any] = {"raw": printed, "parsed": parsed}
+        if "confidence" in number:
+            edition["confidence"] = copy.deepcopy(number["confidence"])
+        edition["page_ref"] = list(number.get("page_ref") or [])
+        if "flagged" in number:
+            edition["flagged"] = number["flagged"]
+        row["edition_date"] = edition
+        notes.append(("form edition moved",
+                      f"forms_and_endorsements[{index}].form_number {before!r} -> {form!r}, "
+                      f"edition {printed!r}"))
     return notes
 
 

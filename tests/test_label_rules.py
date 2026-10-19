@@ -461,3 +461,65 @@ def test_a_location_with_two_buildings_keeps_its_links():
     gold["coverages"][0]["applies_to"] = ["loc_1"]
     apply_label_rules(gold, {})
     assert gold["coverages"][0]["applies_to"] == ["loc_1"]
+
+
+# --------------------------------------------------------------------------
+# Form editions: one convention
+# --------------------------------------------------------------------------
+
+
+def _forms(*numbers, edition=None):
+    rows = []
+    for number in numbers:
+        row = {"form_number": _v(number, [5])}
+        if edition is not None:
+            row["edition_date"] = edition
+        rows.append(row)
+    return {"forms_and_endorsements": rows}
+
+
+def test_an_iso_edition_inside_a_form_number_moves_to_edition_date():
+    gold = _forms("CG 00 01 04 13")
+    notes = apply_label_rules(gold, {})
+    row = gold["forms_and_endorsements"][0]
+    assert row["form_number"]["raw"] == row["form_number"]["parsed"] == "CG 00 01"
+    assert row["edition_date"]["raw"] == "04 13" and row["edition_date"]["parsed"] == "04/13"
+    assert row["edition_date"]["page_ref"] == [5]
+    assert row["edition_date"]["confidence"] == row["form_number"]["confidence"]
+    assert ("form edition moved", "forms_and_endorsements[0].form_number 'CG 00 01 04 13' -> "
+            "'CG 00 01', edition '04 13'") in notes
+
+
+def test_a_bracketed_edition_moves_without_its_brackets():
+    gold = _forms("IL0017(11-98)")
+    apply_label_rules(gold, {})
+    row = gold["forms_and_endorsements"][0]
+    assert row["form_number"]["raw"] == "IL0017"
+    assert (row["edition_date"]["raw"], row["edition_date"]["parsed"]) == ("11-98", "11/98")
+
+
+def test_a_form_number_shaped_like_an_edition_is_left_alone():
+    """'HO 04 35' is a real form number whose last groups look like MM YY."""
+    gold = _forms("HO 04 35", "CG 00 01", "CG 20 10 04")
+    before = copy.deepcopy(gold)
+    assert not apply_label_rules(gold, {})
+    assert gold == before
+
+
+def test_a_filled_edition_date_is_never_overwritten():
+    gold = _forms("CG 00 01 04 13", edition=_v("04 13", [5], "04/13"))
+    before = copy.deepcopy(gold)
+    apply_label_rules(gold, {})
+    assert gold == before
+
+
+
+def test_a_frozen_gold_is_scored_under_the_edition_rule_without_being_rewritten():
+    """A set frozen before the rule is not rewritten in Blob; it is read under it."""
+    from evaluation.golden_eval import verified_label
+
+    gold = _forms("CG 00 01 04 13")
+    before = copy.deepcopy(gold)
+    read = verified_label(gold, ["page text"])
+    assert read["forms_and_endorsements"][0]["edition_date"]["parsed"] == "04/13"
+    assert gold == before

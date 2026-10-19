@@ -131,3 +131,13 @@ def test_a_table_block_is_not_looked_in():
     from serving.conventions import declaration_objects
 
     assert "lob_parts" not in declaration_objects("homeowners") and "policy" in declaration_objects("homeowners")
+
+
+def test_an_edition_moved_out_of_a_form_number_takes_the_numbers_span():
+    answer = _answer(forms_and_endorsements=[{"form_number": _v("CG 00 01 04 13", [2])}])
+    out = conform(answer, {"forms_and_endorsements[0].form_number": "s-form"}, PAGES, native=True)
+    row = out.extraction["forms_and_endorsements"][0]
+    assert row["form_number"]["raw"] == "CG 00 01" and row["edition_date"]["parsed"] == "04/13"
+    assert out.spans["forms_and_endorsements[0].edition_date"] == "s-form"
+    assert out.spans["forms_and_endorsements[0].form_number"] == "s-form"
+
