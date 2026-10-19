@@ -322,6 +322,22 @@ def test_without_a_verdict_a_common_model_answer_is_validated_as_before():
     assert _full(copy.deepcopy(GOLD), copy.deepcopy(GOLD)).metrics["schema_validity_rate"] == 1.0
 
 
+def test_a_merged_answer_is_judged_as_serving_returns_it():
+    """Checkpoint selection holds the merged answer, not serving's verdict. What
+    the pipeline adds - the document's system fields, a part when the model read
+    none - must not fail it (it read as a false 0%); a section the model never
+    wrote still does."""
+    from evaluation.metrics.coverage_metrics import score_schema_validity
+
+    merged = copy.deepcopy(GOLD)
+    merged["document"] = {}
+    del merged["lob_parts"]
+    assert score_schema_validity([("pa_1", merged, "policy", None, "personal_auto")]).rate == 1.0
+    unwritten = copy.deepcopy(merged)
+    del unwritten["policy"]
+    assert score_schema_validity([("pa_1", unwritten, "policy", None, "personal_auto")]).rate == 0.0
+
+
 def test_a_self_contained_line_is_validated_whatever_its_metadata_says():
     from tests.test_schema2_review_eval import _coverage, _location, _old_style
 

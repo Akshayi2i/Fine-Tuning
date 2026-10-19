@@ -877,6 +877,11 @@ def _feature_calibrated(
 
 
 def _with_every_key(output: dict[str, Any], route_: Route, lob: Any) -> dict[str, Any]:
+    """``output`` with every key of its schema (common.canonical.with_all_keys)."""
+    return _every_key(output, route_.schema_doc_type, route_.schema_acord_form, lob)
+
+
+def _every_key(output: dict[str, Any], doc_type: str, acord_form: str | None, lob: Any) -> dict[str, Any]:
     """``output`` with every key of its schema (common.canonical.with_all_keys).
 
     Without the client's annotation properties (``fideon:provenance``): they are
@@ -886,7 +891,99 @@ def _with_every_key(output: dict[str, Any], route_: Route, lob: Any) -> dict[str
     from common.schemas import _strip_prefixed, load_schema
 
     return with_all_keys(output, _strip_prefixed(
-        load_schema(route_.schema_doc_type, route_.schema_acord_form, lob), ("fideon:",)))
+        load_schema(doc_type, acord_form, lob), ("fideon:",)))
+
+
+@dataclass(frozen=True)
+class SchemaVerdict:
+    """Serving's schema judgement of one answer: the audit gate's verdict."""
+
+    #: The answer as judged before the every-key fill. On a common-model line,
+    #: with its empty optional objects and empty rows dropped - served that way.
+    output: Any
+    #: ``output`` with every key of its schema, on a common-model line; else None.
+    filled: dict[str, Any] | None
+    valid: bool
+    errors: tuple[str, ...] = ()
+
+
+def schema_verdict(
+    extraction: Mapping[str, Any],
+    output: Any,
+    *,
+    doc_type: str,
+    acord_form: str | None,
+    lob: Any,
+    common_model: bool,
+) -> SchemaVerdict:
+    """Judge ``output`` against the client's full schema, as ``extract`` does.
+
+    ``extraction`` is the model's merged answer and ``output`` the same answer
+    as served so far (enveloped, system fields filled, on a canonical line).
+    Shared with evaluation, so checkpoint selection judges an answer the way
+    production would return it, not a stricter copy of it.
+    """
+    filled = None
+    unwritten: list[str] = []
+    empty: list[str] = []
+    if common_model:
+        # A common-model line's model view is looser than the client's schema on
+        # purpose (common.model_view): a window may hold a flat deductible whose
+        # amount it cannot see, where the client's rule requires the key. The
+        # every-key fill supplies what such an answer lacks, as a null, so the
+        # served JSON is what is judged - the answer the audit gate sees. A
+        # section the model view requires that no window wrote (its declarations
+        # windows all failed) still fails: the system fields and the fill would
+        # pass it off as an empty section nobody read.
+        # Empty optional objects and empty rows are dropped from the answer
+        # itself - judged and served without them - not only from a copy.
+        output = _without_empty(output, keep=frozenset(required_fields(doc_type, acord_form, lob)))
+        filled = _every_key(output, doc_type, acord_form, lob)
+        unwritten = [
+            name for name in required_fields(doc_type, acord_form, lob) if name not in extraction
+        ]
+        # The fill would also pass off an object written with nothing in it - a
+        # carrier: {} the decoder allows, since it drops the client's
+        # minProperties, or a [{}] row - as a row of nulls the client's rule
+        # accepts. Emptiness is judged on the answer before the fill, after the
+        # system fields (document and policy carry those, so are never empty).
+        empty = list(iter_validation_errors_by_keyword(
+            output, doc_type, acord_form, lob, keywords=("minProperties",)))
+    judged = output if filled is None else filled
+    valid = not unwritten and not empty and is_valid(judged, doc_type, acord_form, lob)
+    errors: tuple[str, ...] = ()
+    if not valid:
+        errors = tuple(
+            [f"{name}: a required section no window wrote" for name in unwritten] + empty
+            + list(iter_validation_errors(judged, doc_type, acord_form, lob))
+        )
+    return SchemaVerdict(output=output, filled=filled, valid=valid, errors=errors)
+
+
+def served_schema_verdict(
+    answer: Mapping[str, Any],
+    *,
+    doc_type: str = "policy",
+    acord_form: str | None = None,
+    lob: Any = None,
+    page_count: int | None = None,
+    modality: str | None = None,
+    source_file_name: str | None = None,
+) -> SchemaVerdict:
+    """A merged common-model answer judged the way ``extract`` would serve it.
+
+    Enveloped and given the system fields first, as serving does, then
+    :func:`schema_verdict`. For a scorer holding the model's merged answer but
+    no serving verdict (checkpoint selection): checked as written, an answer
+    lacks the system fields and the every-key fill serving adds, and fails for
+    what the pipeline - not the model - supplies.
+    """
+    output = with_system_fields(
+        envelope(dict(answer), {}), page_count=page_count, source_file_name=source_file_name,
+        lob=lob, modality=modality,
+    )
+    return schema_verdict(
+        answer, output, doc_type=doc_type, acord_form=acord_form, lob=lob, common_model=True)
 
 
 def _lob_output(fields: dict[str, Any]) -> dict[str, Any] | None:
@@ -1258,43 +1355,14 @@ def extract(
     # --- schema validation, mirroring the audit gate ------------------------
     # Against the client's FULL schema for a canonical document, envelope and
     # all — the model form it was generated in is ours, the contract is theirs.
-    filled = None
-    unwritten: list[str] = []
-    empty: list[str] = []
-    if common_model:
-        # A common-model line's model view is looser than the client's schema on
-        # purpose (common.model_view): a window may hold a flat deductible whose
-        # amount it cannot see, where the client's rule requires the key. The
-        # every-key fill supplies what such an answer lacks, as a null, so the
-        # served JSON is what is judged - the answer the audit gate sees. A
-        # section the model view requires that no window wrote (its declarations
-        # windows all failed) still fails: the system fields and the fill would
-        # pass it off as an empty section nobody read.
-        # Empty optional objects and empty rows are dropped from the answer
-        # itself - judged and served without them - not only from a copy.
-        output = _without_empty(output, keep=frozenset(
-            required_fields(route_.schema_doc_type, route_.schema_acord_form, lob)))
-        filled = _with_every_key(output, route_, lob)
-        unwritten = [
-            name for name in required_fields(route_.schema_doc_type, route_.schema_acord_form, lob)
-            if name not in extraction
-        ]
-        # The fill would also pass off an object written with nothing in it - a
-        # carrier: {} the decoder allows, since it drops the client's
-        # minProperties, or a [{}] row - as a row of nulls the client's rule
-        # accepts. Emptiness is judged on the answer before the fill, after the
-        # system fields (document and policy carry those, so are never empty).
-        empty = list(iter_validation_errors_by_keyword(
-            output, route_.schema_doc_type, route_.schema_acord_form, lob,
-            keywords=("minProperties",)))
-    judged = output if filled is None else filled
-    schema_valid = not unwritten and not empty and is_valid(
-        judged, route_.schema_doc_type, route_.schema_acord_form, lob)
-    validation_errors: list[str] = []
+    verdict = schema_verdict(
+        extraction, output, doc_type=route_.schema_doc_type,
+        acord_form=route_.schema_acord_form, lob=lob, common_model=common_model,
+    )
+    output, filled = verdict.output, verdict.filled
+    schema_valid = verdict.valid
+    validation_errors = list(verdict.errors)
     if not schema_valid:
-        validation_errors = [f"{name}: a required section no window wrote" for name in unwritten] + empty + list(
-            iter_validation_errors(judged, route_.schema_doc_type, route_.schema_acord_form, lob)
-        )
         if strict_schema:
             raise PipelineError(
                 f"the extraction for {request.source_id} failed schema validation and will not be "

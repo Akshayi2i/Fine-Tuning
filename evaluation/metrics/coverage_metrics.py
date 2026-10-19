@@ -164,8 +164,10 @@ def score_schema_validity(
     against that slice's model view (``resolved_schema``), as written: the model
     is never asked for what the pipeline fills in after the merge - a coverage's
     ``coverage_id``, the numbering of every row - and the client's slice
-    requires it. A whole common-model document is checked against the client's
-    schema like any other.
+    requires it. A whole common-model document is judged as serving would
+    return it (``serving.pipeline.served_schema_verdict``): enveloped, given the
+    system fields and every key, then checked against the client's schema. The
+    merged answer alone lacks what the pipeline adds and would fail for it.
     """
     from common.canonical import envelope
     from common.schemas import is_canonical, validator_for
@@ -175,6 +177,14 @@ def score_schema_validity(
         lob = rest[0] if rest else None
         sections = rest[1] if len(rest) > 1 else None
         report.total += 1
+        if not sections and _is_common_model(doc_type, acord_form, lob):
+            from serving.pipeline import served_schema_verdict
+
+            if served_schema_verdict(output, doc_type=doc_type, acord_form=acord_form, lob=lob).valid:
+                report.valid += 1
+            else:
+                report.invalid_source_ids.append(source_id)
+            continue
         if sections and _is_common_model(doc_type, acord_form, lob):
             validator = _model_view_validator(doc_type, acord_form, lob, sections)
         else:
