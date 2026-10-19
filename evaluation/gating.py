@@ -52,8 +52,8 @@ Direction = Literal["higher_is_better", "lower_is_better"]
 #: `alias_accuracy` is deliberately absent: it is reported, not gated, because a
 #: rare surface variant has too little support for a stable threshold and gating
 #: on it would block good models on noise (arch §0c). So is
-#: `held_out_carrier_match` — reported, because a two-carrier slice is too small
-#: to gate on and its whole purpose is to be harder than the rest.
+#: `held_out_carrier_match` — reported, because a one-carrier-per-line slice is
+#: too small to gate on and its whole purpose is to be harder than the rest.
 GATING_METRICS: dict[str, Direction] = {
     "field_exact_match": "higher_is_better",
     "field_normalized_match": "higher_is_better",

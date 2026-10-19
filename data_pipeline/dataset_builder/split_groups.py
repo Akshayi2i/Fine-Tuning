@@ -16,9 +16,10 @@ and modality mode of a group inside whichever split it landed in.
 
 Three things this adds beyond the group unit:
 
-* **A held-out-carrier slice.** At least two carriers per doc type go entirely to
-  test once six exist, because "unseen template" is a different question from
-  "unseen document" and only a held-out carrier answers it.
+* **A held-out-carrier slice.** One carrier per line of business goes entirely
+  to test once the line names ten or more carriers (fewer: every carrier
+  trains), because "unseen template" is a different question from "unseen
+  document" and only a held-out carrier answers it.
 * **Validation halves.** Validation is split by group into a calibration half
   (fits calibrators, §5.3) and a threshold half (sets review thresholds, §5.4).
   Fitting both on the same data makes every threshold optimistic — the
@@ -78,10 +79,11 @@ MIN_DOCS_TO_MEASURE_LINE = 5
 #: with fewer, the repair would hand one line's whole evaluation to one family.
 MIN_GROUPS_TO_REPAIR = 3
 
-#: Carriers to hold out entirely per doc type, once the corpus has enough of them
-#: that removing two still leaves a usable training set.
-HELD_OUT_CARRIERS_PER_TYPE = 2
-MIN_CARRIERS_FOR_HELD_OUT = 6
+#: A line of business holds one carrier out of train and validation only when
+#: its real documents name at least this many carriers (decision 2026-10-19):
+#: below it, every carrier trains - one carrier of a few is too large a share
+#: of the line's layouts to give up.
+MIN_CARRIERS_PER_LINE_FOR_HELD_OUT = 10
 
 
 class SplitError(RuntimeError):
@@ -110,6 +112,9 @@ class GroupSplitAssignment:
     lines_not_held_out: dict[str, dict[str, str]] = field(default_factory=dict)
     #: Per doc type, lines none of whose documents names a carrier.
     lines_without_carrier: dict[str, list[str]] = field(default_factory=dict)
+    #: Per doc type, lines naming fewer carriers than
+    #: MIN_CARRIERS_PER_LINE_FOR_HELD_OUT, with how many they name: none held out.
+    lines_below_carrier_minimum: dict[str, dict[str, int]] = field(default_factory=dict)
     #: The eval set was frozen when this split was made: its test set is the
     #: frozen one, and the carriers held out are the ones recorded at freezing.
     frozen_eval_set: bool = False
@@ -169,6 +174,8 @@ class GroupSplitAssignment:
             "lines_not_held_out": {k: dict(sorted(v.items()))
                                    for k, v in sorted(self.lines_not_held_out.items())},
             "lines_without_carrier": {k: sorted(v) for k, v in sorted(self.lines_without_carrier.items())},
+            "lines_below_carrier_minimum": {k: dict(sorted(v.items()))
+                                            for k, v in sorted(self.lines_below_carrier_minimum.items())},
             "frozen_eval_set": self.frozen_eval_set,
             "moved_to_test": dict(sorted(self.moved_to_test.items())),
             "held_out_source_ids": sorted(self.held_out_source_ids),
@@ -242,28 +249,6 @@ def _stable_hash(group_id: str, seed: int, salt: str = "") -> float:
     return int.from_bytes(digest[:8], "big") / float(1 << 64)
 
 
-def _pick_held_out_carriers(groups: list[GroupRecord], seed: int) -> list[str]:
-    """Choose carriers to place entirely in test.
-
-    Chosen by hash so the choice is reproducible, but **weighted away from the
-    largest carriers**: holding out the carrier that contributes 40% of the
-    training data answers the generalisation question by destroying the corpus.
-    Held-out carriers are drawn from the smaller half.
-    """
-    by_carrier: dict[str, int] = defaultdict(int)
-    for group in groups:
-        if group.carrier and not group.synthetic:
-            by_carrier[group.carrier] += group.size
-    if len(by_carrier) < MIN_CARRIERS_FOR_HELD_OUT:
-        return []
-
-    ordered = sorted(by_carrier.items(), key=lambda kv: (kv[1], kv[0]))
-    smaller_half = [c for c, _ in ordered[: max(2, len(ordered) // 2)]]
-    return sorted(smaller_half, key=lambda c: _stable_hash(c, seed, "carrier"))[
-        :HELD_OUT_CARRIERS_PER_TYPE
-    ]
-
-
 def assign_group_splits(
     groups_by_doc_type: dict[str, list[GroupRecord]],
     *,
@@ -282,6 +267,13 @@ def assign_group_splits(
     test set, so new documents split into train and val only, in the ratio's own
     train:val proportion, and no carrier is held out (the frozen set already
     holds the carriers the first split held out).
+
+    With ``hold_out_carriers``, each line whose real documents name at least
+    :data:`MIN_CARRIERS_PER_LINE_FOR_HELD_OUT` carriers holds one carrier out:
+    every real family of it in that line goes to test (Fideon SPEC_09
+    amendment item 4; decision 2026-10-19). The carrier is chosen by
+    :func:`held_out_carrier_per_line` on the split the hash would draw, so the
+    line keeps a train and a validation family.
     """
     result = GroupSplitAssignment(seed=seed)
 
@@ -302,14 +294,19 @@ def assign_group_splits(
             "train": ratio.train, "val": ratio.val, "test": ratio.test,
         }
 
-        held_out = (
-            _pick_held_out_carriers(unique, seed) if hold_out_carriers and with_test else []
-        )
-        if held_out:
-            result.held_out_carriers[doc_type] = held_out
-
         train_edge = ratio.train
         val_edge = ratio.train + ratio.val
+
+        held_by_line: dict[str, str] = {}
+        if hold_out_carriers and with_test:
+            real = [r for r in unique if not r.synthetic]
+            provisional = {
+                r.group_id: _hash_split(r.group_id, seed, train_edge, val_edge) for r in real
+            }
+            choice = held_out_carrier_per_line(
+                real, seed, provisional, min_carriers=MIN_CARRIERS_PER_LINE_FOR_HELD_OUT)
+            held_by_line = choice.held
+            _record_hold_out(result, doc_type, choice)
         buckets: dict[str, list[str]] = {"train": [], "val": [], "test": []}
 
         by_line: dict[str | None, list[GroupRecord]] = defaultdict(list)
@@ -324,16 +321,15 @@ def assign_group_splits(
                 if record.synthetic:
                     line_buckets["train"].append(record.group_id)
                     continue
-                if record.carrier and record.carrier in held_out:
+                if record.carrier and line is not None and held_by_line.get(line) == record.carrier:
                     line_buckets["test"].append(record.group_id)
                     result.held_out_source_ids.extend(record.source_ids)
                     continue
                 if not measured and line is not None:
                     line_buckets["train"].append(record.group_id)
                     continue
-                position = _stable_hash(record.group_id, seed)
-                split = "train" if position < train_edge else "val" if position < val_edge else "test"
-                line_buckets[split].append(record.group_id)
+                line_buckets[_hash_split(record.group_id, seed, train_edge, val_edge)].append(
+                    record.group_id)
 
             if measured or line is None:
                 _repair_empty_splits(
@@ -386,6 +382,27 @@ def assign_group_splits(
     return result
 
 
+def _hash_split(group_id: str, seed: int, train_edge: float, val_edge: float) -> str:
+    position = _stable_hash(group_id, seed)
+    return "train" if position < train_edge else "val" if position < val_edge else "test"
+
+
+def _record_hold_out(result: GroupSplitAssignment, doc_type: str, choice: CarrierHoldOut) -> None:
+    """Write one doc type's carrier hold-out onto the assignment."""
+    if choice.held:
+        result.held_out_carriers_by_line[doc_type] = dict(choice.held)
+    if choice.single:
+        result.single_carrier_lines[doc_type] = list(choice.single)
+    if choice.below_minimum:
+        result.lines_below_carrier_minimum[doc_type] = dict(choice.below_minimum)
+    if choice.not_held_out:
+        result.lines_not_held_out[doc_type] = dict(choice.not_held_out)
+        log.warning("%s: no carrier held out of %s - %s", doc_type, sorted(choice.not_held_out),
+                    next(iter(choice.not_held_out.values())))
+    if choice.no_carrier:
+        result.lines_without_carrier[doc_type] = list(choice.no_carrier)
+
+
 #: The split names a delivery may carry, in a document's metadata ``split``.
 DELIVERED_SPLITS = ("train", "val", "test")
 
@@ -411,6 +428,9 @@ class CarrierHoldOut:
     held: dict[str, str] = field(default_factory=dict)
     #: Lines with one carrier: none can be held out.
     single: list[str] = field(default_factory=list)
+    #: Lines with two or more carriers but fewer than the minimum asked for,
+    #: and how many they have: none held out.
+    below_minimum: dict[str, int] = field(default_factory=dict)
     #: Lines where every carrier is the line's only train or only validation
     #: carrier, so holding any out would leave the line untrained or unvalidated.
     not_held_out: dict[str, str] = field(default_factory=dict)
@@ -419,8 +439,12 @@ class CarrierHoldOut:
 
 
 def held_out_carrier_per_line(records: list[GroupRecord], seed: int,
-                              split_of: dict[str, str] | None = None) -> CarrierHoldOut:
+                              split_of: dict[str, str] | None = None, *,
+                              min_carriers: int = MIN_CARRIERS_PER_LINE_FOR_HELD_OUT) -> CarrierHoldOut:
     """The carrier each line holds out of train and validation.
+
+    Only in a line naming at least ``min_carriers`` carriers; a line with
+    fewer holds none out (``below_minimum``).
 
     Only a carrier whose families can all go to test while the line keeps at
     least one train family and one validation family (``split_of``, the
@@ -446,6 +470,9 @@ def held_out_carrier_per_line(records: list[GroupRecord], seed: int,
     for line, carriers in sorted(families.items()):
         if len(carriers) < 2:
             result.single.append(line)
+            continue
+        if len(carriers) < min_carriers:
+            result.below_minimum[line] = len(carriers)
             continue
         eligible = [c for c in carriers if {"train", "val"} <= splits_without(carriers, c)]
         if not eligible:
@@ -498,6 +525,7 @@ def assign_delivered_splits(
     seed: int = 42,
     with_test: bool = True,
     hold_out_carriers: bool = HOLD_OUT_CARRIER_PER_LINE,
+    min_carriers: int = MIN_CARRIERS_PER_LINE_FOR_HELD_OUT,
 ) -> GroupSplitAssignment:
     """Use the split the data arrived with, instead of drawing one.
 
@@ -508,11 +536,11 @@ def assign_delivered_splits(
     splits, a non-empty val, and a non-empty test unless the eval set is frozen.
     Validation is halved by group exactly as for a drawn split.
 
-    One exception to "as given": with ``hold_out_carriers`` (the default), one
-    carrier per line with two or more carriers is held out - every family of
-    it in that line goes to test, whatever split it was delivered in (Fideon
-    SPEC_09 amendment item 4) - unless that would leave the line no train or
-    no validation family (:func:`held_out_carrier_per_line`). Not once the eval
+    One exception to "as given": with ``hold_out_carriers`` (off by default),
+    one carrier per line with at least ``min_carriers`` carriers is held out -
+    every family of it in that line goes to test, whatever split it was
+    delivered in (Fideon SPEC_09 amendment item 4) - unless that would leave the
+    line no train or no validation family (:func:`held_out_carrier_per_line`). Not once the eval
     set is frozen: the frozen set is the test set and takes no new documents.
 
     Held out of its LINE: the carrier still trains in its other lines, so its
@@ -527,18 +555,9 @@ def assign_delivered_splits(
             continue
         held: dict[str, str] = {}
         if hold_out_carriers and with_test:
-            choice = held_out_carrier_per_line(unique, seed, split_of_group)
+            choice = held_out_carrier_per_line(unique, seed, split_of_group, min_carriers=min_carriers)
             held = choice.held
-            if held:
-                result.held_out_carriers_by_line[doc_type] = held
-            if choice.single:
-                result.single_carrier_lines[doc_type] = choice.single
-            if choice.not_held_out:
-                result.lines_not_held_out[doc_type] = choice.not_held_out
-                log.warning("%s: no carrier held out of %s - %s", doc_type, sorted(choice.not_held_out),
-                            next(iter(choice.not_held_out.values())))
-            if choice.no_carrier:
-                result.lines_without_carrier[doc_type] = choice.no_carrier
+            _record_hold_out(result, doc_type, choice)
         buckets: dict[str, list[str]] = {name: [] for name in DELIVERED_SPLITS}
         documents = dict.fromkeys(DELIVERED_SPLITS, 0)
         by_line: dict[str, dict[str, int]] = defaultdict(lambda: dict.fromkeys(DELIVERED_SPLITS, 0))

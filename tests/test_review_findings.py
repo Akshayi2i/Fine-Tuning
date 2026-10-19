@@ -135,7 +135,8 @@ def test_a_small_line_of_a_held_out_carrier_is_not_recorded_as_train_only(monkey
     from data_pipeline.dataset_builder import split_groups as S
     from data_pipeline.dataset_builder.split_groups import GroupRecord, assign_group_splits
 
-    monkeypatch.setattr(S, "_pick_held_out_carriers", lambda groups, seed: ["Held Out Co"])
+    monkeypatch.setattr(S, "held_out_carrier_per_line",
+                        lambda *a, **k: S.CarrierHoldOut(held={"motorcycle": "Held Out Co"}))
     groups = [GroupRecord(group_id=f"h{i}", doc_type="policy", source_ids=[f"h{i}"],
                           carrier=f"Carrier {i % 7}", line="homeowners") for i in range(60)]
     # A two-document line, both from the held-out carrier.

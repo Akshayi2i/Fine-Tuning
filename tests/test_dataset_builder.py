@@ -576,36 +576,49 @@ def test_a_row_without_its_group_is_refused():
         assert_no_leakage(assignment, [{"source_id": "grp0_000", "split": "train"}])
 
 
-def test_held_out_carriers_go_entirely_to_test():
+def test_a_line_with_ten_or_more_carriers_holds_exactly_one_out_entirely():
     """'Unseen template' is a different question from 'unseen document', and only
-    a carrier held out in full answers it."""
+    a carrier held out in full answers it: one per line (decision 2026-10-19)."""
     families = [
-        _family(f"grp{i}", 4, carrier=f"carrier_{i % 8}") for i in range(24)
+        _family(f"grp{i}", 4, carrier=f"carrier_{i % 12}", line="homeowners") for i in range(48)
     ]
     assignment = assign_group_splits({"policy": families})
-    held_out = assignment.held_out_carriers.get("policy", [])
+    held = assignment.held_out_carriers_by_line.get("policy", {})
 
-    assert len(held_out) == 2, f"expected 2 held-out carriers, got {held_out}"
+    assert list(held) == ["homeowners"], held
     for fam in families:
-        if fam.carrier in held_out:
+        if fam.carrier == held["homeowners"]:
             assert assignment.split_of(fam.group_id) == "test"
+    assert not assignment.held_out_carriers, "held out of its line, not of the doc type"
 
 
-def test_no_carrier_is_held_out_below_the_minimum():
-    """Holding out 2 of 3 carriers answers the generalisation question by
-    destroying the corpus."""
-    families = [_family(f"grp{i}", 4, carrier=f"carrier_{i % 3}") for i in range(9)]
+def test_no_carrier_is_held_out_of_a_line_with_fewer_than_ten():
+    """Below ten carriers every carrier trains: one of a few is too large a share
+    of the line's layouts to give up."""
+    families = [_family(f"grp{i}", 4, carrier=f"carrier_{i % 9}", line="homeowners") for i in range(36)]
     assignment = assign_group_splits({"policy": families})
-    assert assignment.held_out_carriers.get("policy", []) == []
+    assert not assignment.held_out_carriers_by_line.get("policy")
+    assert assignment.lines_below_carrier_minimum["policy"] == {"homeowners": 9}
+    assert assignment.as_dict()["lines_below_carrier_minimum"] == {"policy": {"homeowners": 9}}
+
+
+def test_each_line_counts_its_own_carriers():
+    ten = [_family(f"h{i}", 3, carrier=f"c{i % 10}", line="homeowners") for i in range(30)]
+    nine = [_family(f"m{i}", 3, carrier=f"c{i % 9}", line="motorcycle") for i in range(27)]
+    assignment = assign_group_splits({"policy": ten + nine})
+    assert set(assignment.held_out_carriers_by_line["policy"]) == {"homeowners"}
+    assert assignment.lines_below_carrier_minimum["policy"] == {"motorcycle": 9}
 
 
 def test_the_largest_carrier_is_not_held_out():
-    """Held-out carriers are drawn from the smaller half: removing the carrier
-    that contributes most of the training data is not a generalisation test."""
-    families = [_family("big", 200, carrier="dominant")]
-    families += [_family(f"grp{i}", 2, carrier=f"carrier_{i}") for i in range(8)]
+    """The carrier held out is the one costing train and validation least:
+    removing the one that contributes most of the training data is not a
+    generalisation test."""
+    families = [_family(f"big{i}", 20, carrier="dominant", line="homeowners") for i in range(10)]
+    families += [_family(f"grp{i}", 2, carrier=f"carrier_{i % 11}", line="homeowners")
+                 for i in range(22)]
     assignment = assign_group_splits({"policy": families})
-    assert "dominant" not in assignment.held_out_carriers.get("policy", [])
+    assert assignment.held_out_carriers_by_line["policy"]["homeowners"] != "dominant"
 
 
 def test_validation_is_halved_by_group():

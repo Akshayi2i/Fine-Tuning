@@ -251,7 +251,7 @@ def test_one_insured_spelt_with_and_without_its_legal_form_is_one_family(tmp_pat
 
 def test_a_test_document_of_a_carrier_training_never_sees_is_marked_held_out(tmp_path):
     """The gate reports those documents apart: the model reading a carrier it never saw."""
-    docs = {(f"Carrier {n % 9}", f"policy_{n:02d}"): _gl_gold(f"INSURED {n}", carrier=f"Carrier {n % 9}")
+    docs = {(f"Carrier {n % 10}", f"policy_{n:02d}"): _gl_gold(f"INSURED {n}", carrier=f"Carrier {n % 10}")
             for n in range(40)}
     root = _source(tmp_path, docs)
     out = tmp_path / "bundles"
@@ -259,12 +259,13 @@ def test_a_test_document_of_a_carrier_training_never_sees_is_marked_held_out(tmp
 
     metas = {folder.name: json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
              for folder in out.iterdir() if folder.is_dir()}
-    carrier = {name: f"carrier {int(name.rsplit('_', 1)[1]) % 9}" for name in metas}
+    carrier = {name: f"carrier {int(name.rsplit('_', 1)[1]) % 10}" for name in metas}
     trained = {carrier[name] for name, meta in metas.items() if meta["split"] == "train"}
     for name, meta in metas.items():
         expected = meta["split"] == "test" and carrier[name] not in trained
         assert meta["held_out_carrier"] is expected, name
-    assert any(meta["held_out_carrier"] for meta in metas.values())          # the draw holds two carriers out
+    # The gl line names ten carriers, so the draw holds one of them out.
+    assert any(meta["held_out_carrier"] for meta in metas.values())
     with (out / "split.csv").open(encoding="utf-8", newline="") as fh:
         assert {row["document"]: row["held_out_carrier"] == "True" for row in csv.DictReader(fh)} == {
             name: meta["held_out_carrier"] for name, meta in metas.items()}

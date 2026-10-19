@@ -28,7 +28,7 @@ def test_the_carrier_costing_train_and_val_least_is_held_out_and_single_carrier_
     records = [_record("a", "big co", size=30), _record("b", "small co", size=5), _record("c", "big co"),
                _record("v", "big co"), _record("d", "only co", line="motorcycle")]
     splits = {"a": "train", "b": "train", "c": "train", "v": "val", "d": "train"}
-    choice = held_out_carrier_per_line(records, seed=42, split_of=splits)
+    choice = held_out_carrier_per_line(records, seed=42, split_of=splits, min_carriers=2)
     assert choice.held == {"homeowners": "small co"} and choice.single == ["motorcycle"]
 
 
@@ -38,7 +38,8 @@ def test_test_documents_cost_nothing_when_choosing():
                _record("t1", "zenith", size=40), _record("t2", "zenith", size=40),
                _record("tr", "zenith"), _record("v", "zenith")]
     splits = {"a": "train", "a2": "val", "t1": "test", "t2": "test", "tr": "train", "v": "val"}
-    assert held_out_carrier_per_line(records, seed=42, split_of=splits).held == {"homeowners": "zenith"}
+    assert held_out_carrier_per_line(records, seed=42, split_of=splits,
+                                     min_carriers=2).held == {"homeowners": "zenith"}
 
 
 def test_a_line_keeps_its_only_validation_carrier():
@@ -46,11 +47,11 @@ def test_a_line_keeps_its_only_validation_carrier():
     records = [_record("m1", "allstate", line="motorcycle"), _record("m2", "progressive", line="motorcycle"),
                _record("m3", "progressive", line="motorcycle")]
     splits = {"m1": "train", "m2": "val", "m3": "test"}
-    choice = held_out_carrier_per_line(records, seed=42, split_of=splits)
+    choice = held_out_carrier_per_line(records, seed=42, split_of=splits, min_carriers=2)
     assert choice.held == {} and "motorcycle" in choice.not_held_out      # either choice empties train or val
     records.append(_record("m4", "honda", line="motorcycle"))
     splits["m4"] = "train"
-    choice = held_out_carrier_per_line(records, seed=42, split_of=splits)
+    choice = held_out_carrier_per_line(records, seed=42, split_of=splits, min_carriers=2)
     assert choice.held["motorcycle"] in {"allstate", "honda"}            # never progressive
 
 
@@ -59,7 +60,7 @@ def test_a_held_out_carrier_goes_to_test_whatever_split_it_was_delivered_in():
     groups = {"policy": [_record("a", "acme"), _record("b", "acme"), _record("c", "zenith", size=40),
                          _record("d", "zenith", size=40), _record("z", "zenith", size=40),
                          _record("e", "solo", line="motorcycle")]}
-    result = assign_delivered_splits(groups, splits, hold_out_carriers=True)
+    result = assign_delivered_splits(groups, splits, hold_out_carriers=True, min_carriers=2)
     assert result.held_out_carriers_by_line["policy"] == {"homeowners": "acme"}
     assert result.assignment["a"] == "test" and result.assignment["b"] == "test"     # moved out of train and val
     assert result.assignment["e"] == "train"                                         # single-carrier line: untouched
@@ -79,10 +80,19 @@ def test_lines_that_hold_none_out_or_name_no_carrier_are_recorded():
                          _record("m2", "progressive", line="motorcycle"),
                          _record("m3", "allstate", line="motorcycle"),
                          _record("n1", None, line="ocean_marine"), _record("n2", None, line="ocean_marine")]}
-    result = assign_delivered_splits(groups, splits, hold_out_carriers=True)
+    result = assign_delivered_splits(groups, splits, hold_out_carriers=True, min_carriers=2)
     assert "motorcycle" in result.lines_not_held_out["policy"]
     assert result.lines_without_carrier["policy"] == ["ocean_marine"]
     assert result.assignment["m2"] == "val"                                          # its validation kept
+
+
+def test_asked_for_on_a_delivered_split_the_ten_carrier_minimum_still_applies():
+    splits = {"a": "train", "b": "val", "c": "test", "d": "train"}
+    groups = {"policy": [_record("a", "acme"), _record("b", "zenith"), _record("c", "zenith"),
+                         _record("d", "zenith")]}
+    result = assign_delivered_splits(groups, splits, hold_out_carriers=True)
+    assert result.assignment == splits and not result.held_out_carriers_by_line
+    assert result.lines_below_carrier_minimum == {"policy": {"homeowners": 2}}
 
 
 def test_a_delivered_split_is_kept_as_delivered_unless_the_hold_out_is_asked_for():

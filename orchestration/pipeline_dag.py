@@ -557,6 +557,7 @@ def split_policy(split: dict[str, Any]) -> dict[str, Any]:
         "single_carrier_lines": split.get("single_carrier_lines") or {},
         "lines_not_held_out": split.get("lines_not_held_out") or {},
         "lines_without_carrier": split.get("lines_without_carrier") or {},
+        "lines_below_carrier_minimum": split.get("lines_below_carrier_minimum") or {},
         "frozen_eval_set": bool(split.get("frozen_eval_set")),
         "moved_to_test": split.get("moved_to_test") or {},
         "twin_cap": split.get("twin_cap"),
