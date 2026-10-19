@@ -264,10 +264,11 @@ def check_swift_row_format(r: Result) -> None:
     in no training metric.
 
     Uses the ms-swift 3 template API (``get_model_tokenizer`` / ``get_template``).
-    Vision-token runs are collapsed before comparing: ms-swift expands each
-    placeholder to the image's real token count, the text template does not.
+    Compares TOKEN IDS, not decoded text: the prompt's ids up to the assistant
+    header, and each image's visual-token count, against the model's processor
+    tokenizing the same messages and pages (``training.parity``). Two renders
+    that decode alike can still differ by a special token.
     """
-    import re
     import tempfile
 
     from PIL import Image
@@ -292,7 +293,6 @@ def check_swift_row_format(r: Result) -> None:
     row = to_swift_row(original, lambda key: str(tmp / key))
 
     processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
-    expected = processor.apply_chat_template(original["messages"], tokenize=False)
 
     _model, swift_processor = get_model_tokenizer(MODEL_ID, load_model=False)
     template = get_template(swift_processor.model_meta.template, swift_processor)
@@ -303,20 +303,45 @@ def check_swift_row_format(r: Result) -> None:
     else:
         template.mode = "train"
     encoded = template.encode({"messages": row["messages"], "images": row["images"]})
-    rendered = swift_processor.tokenizer.decode(encoded["input_ids"])
 
-    def collapse(text: str) -> str:
-        return re.sub(r"(<\|image_pad\|>)+", "<|image_pad|>", text).strip()
+    from training.parity import ASSISTANT_HEADER, IMAGE_PAD, flat_ids, image_pad_runs, prompt_ids
 
-    r.ok = collapse(rendered) == collapse(expected)
-    r.detail = (
-        "a staged row renders identically to the corpus row" if r.ok else
-        "ms-swift renders the staged row DIFFERENTLY from serving — prompt drift; see sample"
-    )
+    tokenizer = swift_processor.tokenizer
+    header = tokenizer.encode(ASSISTANT_HEADER, add_special_tokens=False)
+    pad = tokenizer.convert_tokens_to_ids(IMAGE_PAD)
+    trained = prompt_ids(encoded["input_ids"], header)
+    # The same messages as serving sends them: the pages at their local paths,
+    # no answer, and the generation header the model answers after.
+    serving_messages = [
+        {**m, "content": [
+            {**b, "image": str(tmp / b["image"])} if b.get("type") == "image" else b
+            for b in m["content"]
+        ]} if isinstance(m["content"], list) else m
+        for m in original["messages"] if m["role"] != "assistant"
+    ]
+    try:
+        served = flat_ids(processor.apply_chat_template(
+            serving_messages, tokenize=True, add_generation_prompt=True, return_dict=True,
+        )["input_ids"])
+    except Exception as exc:  # noqa: BLE001 - this transformers cannot tokenize pages in a template
+        r.ok = None
+        r.detail = f"the processor could not tokenize the pages in the chat template: {exc}"
+        return
+
     r.data["images"] = len(row["images"])
+    r.data["image_tokens_trained"] = image_pad_runs(trained, pad)
+    r.data["image_tokens_served"] = image_pad_runs(served, pad)
+    r.ok = trained == served
+    r.detail = (
+        "a staged row tokenizes identically to the serving prompt" if r.ok else
+        "ms-swift tokenizes the staged row DIFFERENTLY from serving — prompt drift; see sample"
+    )
     if not r.ok:
-        r.data["expected"] = collapse(expected)[:600]
-        r.data["rendered"] = collapse(rendered)[:600]
+        first = next((i for i, (a, b) in enumerate(zip(trained, served)) if a != b),
+                     min(len(trained), len(served)))
+        r.data["first_difference_at"] = first
+        r.data["trained"] = tokenizer.decode(trained[max(0, first - 20):first + 20])
+        r.data["served"] = tokenizer.decode(served[max(0, first - 20):first + 20])
 
 
 def check_swift_image_budget(r: Result) -> None:

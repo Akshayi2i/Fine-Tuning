@@ -44,9 +44,11 @@ CHARS_PER_TOKEN = 3.5
 #: worst (2026-10-07). Applied only where the tokenizer itself is not at hand.
 TARGET_ESTIMATE_FACTOR = 1.25
 
-#: Pixels per visual token — 16px patches with a 2x2 spatial merge.
-#: TODO Phase 0 (spike item 4, `visual_token_geometry`): replace with the
-#: measured value. Every cap in sequence.yaml derives from this number.
+#: Pixels per visual token — 16px patches with a 2x2 spatial merge. Every cap
+#: in sequence.yaml derives from this number. Measured on the pod by
+#: ``tests/test_parity.py::test_template_token_parity`` (``pytest -m gpu``), which
+#: fails if the processor's patch x merge geometry or any page's token count
+#: disagrees; record the date it first passes here.
 PIXELS_PER_VISUAL_TOKEN = 32 * 32
 
 #: Fixed overhead for chat template scaffolding, role markers and image

@@ -20,11 +20,17 @@ is the one piece both sides share in this repo today.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: A staged ms-swift epoch file on the pod (``/workspace/.../epoch_1.jsonl``):
+#: when set, the token parity test reads its first rows - real pages, real
+#: prompts - instead of the fixed examples it builds.
+PARITY_CORPUS_ENV = "FIDEON_PARITY_CORPUS"
 
 #: Ten fixed examples, per §10.2. Fixed rather than sampled so a failure is
 #: reproducible and a fix is verifiable against the same inputs.
@@ -104,8 +110,80 @@ def test_the_prompt_version_is_recorded_so_drift_is_attributable():
 # Token parity — needs the pinned stack
 # --------------------------------------------------------------------------
 
+def _pinned_stack_or_skip() -> Path:
+    """The base model's directory, or a skip naming what is missing.
+
+    Runs only on the pod: a CUDA GPU, the pinned base weights on disk, and the
+    training environment's ms-swift and vLLM.
+    """
+    import importlib.util
+
+    try:
+        import torch
+    except ImportError:
+        pytest.skip("needs torch")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    from common.config import base_model_dir
+
+    model_dir = base_model_dir()
+    if model_dir is None:
+        pytest.skip("needs the pinned base model on disk (configs/base_model.yaml model.local_dir)")
+    missing = [name for name in ("swift", "vllm") if importlib.util.find_spec(name) is None]
+    if missing:
+        pytest.skip(f"needs {missing}: run it in the training environment")
+    return model_dir
+
+
+#: Page sizes the fixed examples are drawn at: a letter page at the 1792px cap
+#: both ways, and smaller renders.
+_PAGE_SIZES = ((1386, 1792), (1792, 1386), (1275, 1650), (1224, 1584), (850, 1100))
+
+
+def _parity_rows(tmp_path: Path) -> list[dict]:
+    """PARITY_EXAMPLE_COUNT staged (ms-swift) rows, fixed so a failure reproduces.
+
+    The first rows of ``$FIDEON_PARITY_CORPUS`` when set; otherwise examples
+    built with the shared prompt renderer - one to three pages, both modes.
+    """
+    corpus = os.environ.get(PARITY_CORPUS_ENV)
+    if corpus:
+        rows: list[dict] = []
+        with open(corpus, encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    rows.append(json.loads(line))
+                if len(rows) == PARITY_EXAMPLE_COUNT:
+                    break
+        return rows
+
+    from PIL import Image
+
+    from inference_core.input_builder import build_messages
+    from training.stage_data import to_swift_row
+
+    rows = []
+    for i in range(PARITY_EXAMPLE_COUNT):
+        paths = []
+        for page in range(1 + i % 3):
+            width, height = _PAGE_SIZES[(i + page) % len(_PAGE_SIZES)]
+            path = tmp_path / f"example_{i}_page_{page + 1}.png"
+            Image.new("RGB", (width, height), "white").save(path)
+            paths.append(str(path))
+        mode = "image_only" if i % 4 == 3 else "ocr_plus_image"
+        text = (f"POLICY NUMBER GL-{1000 + i}\n| Coverage | Limit |\n|---|---|\n"
+                "| Each Occurrence | $1,000,000 |")
+        built = build_messages(
+            "policy", paths, None if mode == "image_only" else [text] * len(paths), mode,
+            lob="gl", assistant_content=json.dumps({"policy": {"policy_number": f"GL-{1000 + i}"}}),
+        )
+        rows.append(to_swift_row({"source_id": f"parity_{i}", "messages": built.messages},
+                                 lambda key: key))
+    return rows
+
+
 @pytest.mark.gpu
-def test_template_token_parity():  # pragma: no cover - needs the pinned stack
+def test_template_token_parity(tmp_path, record_property):  # pragma: no cover - needs the pod
     """ms-swift's template and vLLM's processor must produce IDENTICAL prompt
     token IDs and identical image-token counts for the same example.
 
@@ -113,14 +191,71 @@ def test_template_token_parity():  # pragma: no cover - needs the pinned stack
     extra special token shifts every position the model learned; a different
     image-token count means the picture it sees at serving time is not the one it
     trained on. Neither raises.
+
+    It also measures the pixels one visual token covers, from the model's own
+    processor, and checks every page's token count against the resize rule the
+    sequence caps are built on (``training.length_check.image_tokens``).
     """
-    pytest.skip(
-        "Phase 0 spike items 1-2. Tokenize the same §7.1 example through "
-        "ms-swift's Qwen3-VL template and through vLLM's processor, and assert "
-        "the prompt token IDs and the image-token count are equal. Until this "
-        "runs on a pod, train/serve parity is asserted by construction rather "
-        "than measured."
+    model_dir = _pinned_stack_or_skip()
+    from transformers import AutoProcessor
+    from vllm import LLM, SamplingParams
+
+    from common.config import pixel_budget, serving_config
+    from data_pipeline.dataset_builder.cap_check import PIXELS_PER_VISUAL_TOKEN
+    from inference_core.model_runner import to_vllm_messages
+    from training.length_check import RESIZE_FACTOR, image_tokens, png_size
+    from training.parity import (
+        ASSISTANT_HEADER,
+        IMAGE_PAD,
+        from_swift_row,
+        image_pad_runs,
+        prompt_ids,
     )
+    from training.train import _masking_encoder, build_training_config
+
+    rows = _parity_rows(tmp_path)
+    assert len(rows) == PARITY_EXAMPLE_COUNT
+
+    processor = AutoProcessor.from_pretrained(str(model_dir))
+    image_processor = processor.image_processor
+    measured = (int(image_processor.patch_size) * int(image_processor.merge_size)) ** 2
+    record_property("pixels_per_visual_token", measured)
+    assert measured == PIXELS_PER_VISUAL_TOKEN == RESIZE_FACTOR ** 2, (
+        f"the processor covers {measured} pixels per visual token; cap_check assumes "
+        f"{PIXELS_PER_VISUAL_TOKEN}, and every sequence cap derives from it"
+    )
+    tokenizer = processor.tokenizer
+    header = tokenizer.encode(ASSISTANT_HEADER, add_special_tokens=False)
+    pad = tokenizer.convert_tokens_to_ids(IMAGE_PAD)
+
+    # The trainer's own encoder: ms-swift's template, with the pixel budget env.
+    swift, _recorded = build_training_config(
+        corpus_paths=[str(tmp_path / "parity.jsonl")] * 16, output_dir=str(tmp_path / "out"))
+    encode, _header, _end, _suffix = _masking_encoder(swift)
+
+    # The engine settings serving builds with that decide the prompt's tokens:
+    # the weights and the processor's pixel budget (inference_core.model_runner).
+    min_pixels, max_pixels = pixel_budget()
+    engine = LLM(
+        model=str(model_dir),
+        mm_processor_kwargs={"min_pixels": min_pixels, "max_pixels": max_pixels},
+        max_model_len=int(serving_config()["sequence"]["max_seq_len"]),
+        gpu_memory_utilization=0.85, seed=0,
+    )
+    once = SamplingParams(max_tokens=1, temperature=0.0)
+
+    for index, row in enumerate(rows):
+        trained = prompt_ids(encode(row)["input_ids"], header)
+        prompt = [m for m in from_swift_row(row) if m["role"] != "assistant"]
+        served = [int(t) for t in engine.chat(to_vllm_messages(prompt), once)[0].prompt_token_ids]
+        assert trained == served, f"row {index}: training and serving tokenize the prompt differently"
+        expected = [
+            image_tokens(*png_size(image), min_pixels=min_pixels, max_pixels=max_pixels)
+            for image in row["images"]
+        ]
+        assert image_pad_runs(trained, pad) == image_pad_runs(served, pad) == expected, (
+            f"row {index}: image-token counts differ (trained, served, resize rule)"
+        )
 
 
 @pytest.mark.gpu
@@ -240,3 +375,53 @@ def test_the_parity_fixtures_exist_for_the_gpu_run():
         assert "line_of_business" in payload or metadata.get("lob"), (
             f"{path.name} names no line of business, so no schema can be selected for it"
         )
+
+
+# --------------------------------------------------------------------------
+# What the GPU test compares, checked without a GPU
+# --------------------------------------------------------------------------
+
+
+def test_the_prompt_ends_at_the_last_assistant_header():
+    from training.parity import ParityError, prompt_ids
+
+    assert prompt_ids([1, 7, 8, 2, 7, 8, 5, 6], [7, 8]) == [1, 7, 8, 2, 7, 8]
+    with pytest.raises(ParityError):
+        prompt_ids([1, 2, 3], [7, 8])
+
+
+def test_image_token_counts_are_the_runs_of_the_pad_token():
+    from training.parity import image_pad_runs
+
+    assert image_pad_runs([1, 9, 9, 9, 2, 9, 9, 3], 9) == [3, 2]
+    assert image_pad_runs([9, 9], 9) == [2]
+    assert image_pad_runs([1, 2], 9) == []
+
+
+def test_a_staged_row_reads_back_as_the_pages_serving_would_send():
+    from training.parity import ParityError, flat_ids, from_swift_row
+    from training.stage_data import to_swift_row
+
+    original = {"messages": [
+        {"role": "system", "content": "extract"},
+        {"role": "user", "content": [
+            {"type": "image", "image": "p1.png"}, {"type": "text", "text": "<page 1 of 2>"},
+            {"type": "image", "image": "p2.png"}, {"type": "text", "text": "<page 2 of 2>"},
+        ]},
+        {"role": "assistant", "content": "{}"},
+    ]}
+    staged = to_swift_row(original, lambda key: f"/local/{key}")
+    back = from_swift_row(staged)
+    assert back[1]["content"][0] == {"type": "image", "image": "/local/p1.png"}
+    assert to_swift_row({"messages": back}, lambda key: key) == staged
+    with pytest.raises(ParityError):
+        from_swift_row({**staged, "images": staged["images"][:1]})
+    assert flat_ids([[4, 5]]) == [4, 5]
+
+
+def test_the_parity_examples_are_built_from_the_shared_renderer(tmp_path):
+    """The fixed rows the GPU test encodes, built here without a GPU."""
+    rows = _parity_rows(tmp_path)
+    assert len(rows) == PARITY_EXAMPLE_COUNT
+    for row in rows:
+        assert row["images"] and row["messages"][-1]["role"] == "assistant"
