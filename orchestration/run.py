@@ -82,6 +82,7 @@ def build_context(args: argparse.Namespace, *, client: BlobClient | None = None,
         "skip_quantize": getattr(args, "skip_quantize", False),
         "keep_staging": getattr(args, "keep_staging", False),
         "from_blob": getattr(args, "from_blob", False),
+        "fixes_defect": getattr(args, "fixes_defect", None),
         "git_commit": commit,
         "max_attempts": int(retry_policy()["max_attempts"]),
         "retry_backoff_seconds": backoff_seconds(),
@@ -245,6 +246,11 @@ def _add_package_flags(parser: argparse.ArgumentParser, *, version_required: boo
     # bf16: the adapter trained against a bf16 base and FP8 is quantized from the
     # merge, so an fp16 merge inserts a precision change nothing asked for.
     parser.add_argument("--dtype", default=defaults().get("dtype", "bf16"), choices=["bf16", "fp16"])
+    # Satisfies the gate's improvement rule only (arch §15.5): floors and
+    # non-inferiority still apply, and the text is recorded in the decision.
+    parser.add_argument("--fixes-defect", dest="fixes_defect", default=None,
+                        help="the documented defect this release fixes (ticket or sentence); "
+                             "stands in for 'a primary metric improved' and nothing else")
     if version_required:
         # Standalone `package` only — under `all` these come from the finetune
         # flags and adding them twice is an argparse conflict.

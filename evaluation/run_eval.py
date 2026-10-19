@@ -29,6 +29,7 @@ import argparse
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -169,6 +170,10 @@ class SubsetReport:
     error_records: list[dict[str, Any]] = field(default_factory=list)
     #: The errors totalled by class, by line and for the worst fields (:func:`_error_summary`).
     error_summary: dict[str, Any] = field(default_factory=dict)
+    #: ``{metric: {source_id: score}}``: each document's own score, the samples
+    #: the gate's paired bootstrap needs (:meth:`EvalReport.per_document_scores`).
+    #: Kept out of :meth:`as_dict`; the report carries them once, at the top.
+    per_document: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -246,6 +251,30 @@ class EvalReport:
             metrics.pop("doc_type_classifier_accuracy", None)
         return metrics
 
+    def per_document_scores(self) -> dict[str, dict[str, float]]:
+        """``{gate metric: {source_id: score}}`` over the full set.
+
+        What ``promotion_gate(per_document=...)`` pairs with the promoted
+        release's on the shared documents, so non-inferiority and the
+        improvement rule are judged by a paired bootstrap instead of two point
+        estimates (arch §15.5). The subset accuracies come from their subsets'
+        field match, as in :meth:`gate_metrics`.
+        """
+        scores: dict[str, dict[str, float]] = {}
+        for report in self.full_set():
+            for name, by_source in report.per_document.items():
+                scores.setdefault(name, {}).update(by_source)
+        for subset, gate_name in (
+            ("image_only", "image_only_accuracy"),
+            ("scanned", "scanned_accuracy"),
+            ("noisy_ocr", "ocr_arbitration_accuracy"),
+        ):
+            for report in self.subsets:
+                if report.subset == subset:
+                    scores.setdefault(gate_name, {}).update(
+                        report.per_document.get("field_normalized_match", {}))
+        return {name: by_source for name, by_source in scores.items() if by_source}
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "model_version": self.model_version,
@@ -260,6 +289,10 @@ class EvalReport:
             "gate_metrics": {
                 k: round(v, 4) if isinstance(v, float) else v
                 for k, v in sorted(self.gate_metrics().items())
+            },
+            "per_document": {
+                name: {source: round(score, 6) for source, score in sorted(by_source.items())}
+                for name, by_source in sorted(self.per_document_scores().items())
             },
         }
 
@@ -404,6 +437,8 @@ def score_subset(
     # score — boilerplate pages answered with nothing — adds nothing, rather
     # than a 0.0.
     pooled: dict[Any, list[int]] = {}
+    # Each document's list recalls, for its per-document score.
+    recalls_by_source: dict[str, list[float]] = {}
     for index, (expected, got, metadata) in enumerate(scored):
         if common_model[index]:
             model_tally.add(expected, got, lines[index])
@@ -469,14 +504,21 @@ def score_subset(
         tables = (without_overflow(expected), without_overflow(got)) if common_model[index] else (expected, got)
         for list_report in score_all_list_fields(*tables, common_model=common_model[index]).values():
             recalls.append(list_report.recall)
+            if metadata.get("source_id"):
+                recalls_by_source.setdefault(metadata["source_id"], []).append(list_report.recall)
             f1s.append(list_report.f1)
             if list_report.got_rows:
                 list_precisions.append(list_report.precision)
 
-    for correct, exact, total in pooled.values():
+    # Per document: the mean of its readings (one per modality), so that over
+    # documents read in the same modes it averages to the subset's own number.
+    readings_by_source: dict[str, list[tuple[float, float]]] = {}
+    for (source, _mode), (correct, exact, total) in pooled.items():
         if total:
             accuracies.append(correct / total)
             exacts.append(exact / total)
+            if not str(source).startswith("#"):
+                readings_by_source.setdefault(source, []).append((correct / total, exact / total))
 
     lob = score_lob([(e, g) for e, g, _m in scored])
     misattribution = aggregate_misattribution(misattributions)
@@ -518,6 +560,21 @@ def score_subset(
     validity.invalid_source_ids.extend(served.invalid_source_ids)
     validity_total = validity.total + len(unselectable)
     validity_rate = validity.valid / validity_total if validity_total else 0.0
+    invalid_by_source = Counter(validity.invalid_source_ids) + Counter(unselectable)
+    validity_readings = Counter(m.get("source_id", "") for _e, _g, m in scored)
+
+    report.per_document = {
+        "field_normalized_match": {
+            source: sum(a for a, _x in r) / len(r) for source, r in readings_by_source.items()},
+        "field_exact_match": {
+            source: sum(x for _a, x in r) / len(r) for source, r in readings_by_source.items()},
+        "list_field_recall": {
+            source: sum(r) / len(r) for source, r in recalls_by_source.items() if r},
+        "schema_validity_rate": {
+            source: 1.0 - min(invalid_by_source[source], n) / n
+            for source, n in validity_readings.items() if source and n
+        },
+    }
     if unselectable:
         log.warning(
             "%d ACORD eval document(s) record no acord_form, so no schema could be selected and "

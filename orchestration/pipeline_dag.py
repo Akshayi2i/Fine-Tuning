@@ -151,6 +151,14 @@ class StageContext:
     #: A named, written waiver of specific gates (arch v2.1 §15.5), recorded in
     #: the gate decision and the release bundle. ``None`` is the normal case.
     gate_override: Any = None
+    #: The documented defect this release fixes (a ticket or a sentence). It
+    #: satisfies the gate's improvement rule (§15.5) and nothing else: floors
+    #: and non-inferiority still apply. ``None`` is the normal case.
+    fixes_defect: str | None = None
+    #: ``{metric: (current_scores, candidate_scores)}`` aligned by document, for
+    #: the gate's paired bootstrap. Injected by tests; ``None`` reads both eval
+    #: reports' per-document scores (:func:`paired_document_scores`).
+    per_document: dict[str, tuple[list[float], list[float]]] | None = None
 
     #: Staged checkpoint directories from the training run (arch v2.1 §11.2).
     #: Supplied by the trainer in a real cycle; empty in a dry run, where nothing
@@ -1478,6 +1486,15 @@ def default_baseline_metrics(ctx: StageContext) -> dict[str, Any] | None:
     ``None`` means there is no promoted version yet — a genuine first version,
     which the gate handles. It never means "could not find one".
     """
+    key = _promoted_eval_report_key(ctx)
+    if key is None:
+        return None
+    report = ctx.client.read_json(key)
+    return report.get("gate_metrics") or report.get("candidate_metrics") or None
+
+
+def _promoted_eval_report_key(ctx: StageContext) -> str | None:
+    """Where the promoted version's eval report lives; ``None`` with no report."""
     from registry_utils.query_registry import latest_promoted
 
     promoted = latest_promoted(
@@ -1498,8 +1515,48 @@ def default_baseline_metrics(ctx: StageContext) -> dict[str, Any] | None:
             "not a pass.", promoted, key,
         )
         return None
-    report = ctx.client.read_json(key)
-    return report.get("gate_metrics") or report.get("candidate_metrics") or None
+    return key
+
+
+def paired_document_scores(
+    ctx: StageContext,
+) -> dict[str, tuple[list[float], list[float]]] | None:
+    """Each gate metric's per-document scores, promoted vs candidate, paired.
+
+    Read from the two eval reports (``EvalReport.per_document_scores``) and
+    aligned on the documents both scored, in sorted order: that alignment is
+    what the paired bootstrap resamples. ``None`` when either report lacks
+    per-document scores (one written before they were kept): the gate then
+    falls back to a point comparison and records ``point_estimate``.
+    """
+    promoted_key = _promoted_eval_report_key(ctx)
+    candidate_key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
+    if promoted_key is None or not ctx.client.exists(candidate_key):
+        return None
+    current = ctx.client.read_json(promoted_key).get("per_document") or {}
+    candidate = ctx.client.read_json(candidate_key).get("per_document") or {}
+    if not current or not candidate:
+        log.warning(
+            "%s has no per-document scores, so non-inferiority falls back to a point comparison "
+            "and the improvement rule cannot be enforced. Re-score it to gate on a bootstrap.",
+            promoted_key if not current else candidate_key,
+        )
+        return None
+    paired: dict[str, tuple[list[float], list[float]]] = {}
+    for name in sorted(set(current) & set(candidate)):
+        shared = sorted(set(current[name]) & set(candidate[name]))
+        if set(current[name]) != set(candidate[name]):
+            log.warning(
+                "%s: the two eval reports scored different documents (%d promoted, %d candidate, "
+                "%d shared). Paired on the shared ones; the frozen set should not change.",
+                name, len(current[name]), len(candidate[name]), len(shared),
+            )
+        if shared:
+            paired[name] = (
+                [float(current[name][d]) for d in shared],
+                [float(candidate[name][d]) for d in shared],
+            )
+    return paired or None
 
 
 def stage_evaluation_gate(ctx: StageContext) -> StageResult:
@@ -1518,8 +1575,13 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
     provider = ctx.metrics_provider or eval_report_metrics
     candidate = provider(ctx)
     baseline = ctx.baseline_metrics
+    per_document = ctx.per_document
     if baseline is None:
         baseline = default_baseline_metrics(ctx)
+        # Paired only against the promoted report's own documents: an injected
+        # baseline has no per-document scores to pair with.
+        if per_document is None and baseline is not None:
+            per_document = paired_document_scores(ctx)
 
     # Read the manifest back from the registry when this run did not train it —
     # a resume, or --from-stage evaluation_gate, leaves ctx.manifests empty, and
@@ -1545,6 +1607,10 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
     result = promotion_gate(
         candidate,
         baseline,
+        # Per-document scores turn non-inferiority into a paired bootstrap and
+        # let the improvement rule be enforced (arch §15.5).
+        per_document=per_document,
+        fixes_defect=ctx.fixes_defect,
         continued_from=getattr(foundation, "continued_from", None),
         # Passed through verbatim: the operator supplies both sides, because
         # only they know which promoted per-type report is the baseline.
@@ -1580,6 +1646,10 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         "improved_metrics": result.improved_metrics,
         "waived_gates": sorted(result.waived),
         "override": result.override.as_dict() if result.override else None,
+        # How many documents each metric's bootstrap paired; empty when the gate
+        # compared point estimates (a first release, or reports without them).
+        "paired_documents": {name: len(pair[0]) for name, pair in sorted((per_document or {}).items())},
+        "fixes_defect": ctx.fixes_defect,
         # Fideon SPEC_09 §6: production (field match >= 0.92) or interim; None if
         # blocked, by the gate or by the cascade.
         "tier": result.tier if not cascade_blocked else None,

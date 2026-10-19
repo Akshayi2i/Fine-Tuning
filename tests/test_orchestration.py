@@ -520,6 +520,41 @@ def test_the_baseline_comes_from_the_promoted_version_s_own_report(client, contr
     assert baseline == PASSING_METRICS
 
 
+def test_per_document_scores_in_both_reports_gate_on_a_paired_bootstrap(client, controller):
+    """With per-document scores in both eval reports, non-inferiority is a paired
+    bootstrap and the improvement rule is enforced (arch §15.5): a release no
+    better than the last is blocked unless it names the defect it fixes."""
+    from artifact_registry import paths
+    from registry_utils.query_registry import get
+    from registry_utils.write_run_manifest import mark_promoted
+
+    seed_corpus(client)
+    run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
+    mark_promoted(get("extractor-v1", client), client, promoted_by="test")
+    same = {f"doc_{i:02d}": 0.9 for i in range(20)}
+    per_document = {"field_normalized_match": same, "list_field_recall": same}
+    for version in ("v1", "v1.1", "v1.2"):
+        client.write_json(paths.eval_report(version), {
+            "gate_metrics": dict(PASSING_METRICS), "per_document": per_document,
+        })
+
+    ctx = make_context(client, controller, out_version="v1.1", release_id="release-2026.9.2",
+                       metrics_provider=None)
+    report = run_stages(ctx, stages_for("all"), command="all")
+    assert report.blocked_at == "evaluation_gate"
+    decision = client.read_json(paths.gate_decision("v1.1"))
+    assert decision["failed_gates"] == ["improvement"]
+    assert decision["paired_documents"]["field_normalized_match"] == 20
+    basis = {v["name"]: v["basis"] for v in decision["verdicts"]}
+    assert basis["field_normalized_match"] == "paired_bootstrap"
+    assert basis["field_exact_match"] == "point_estimate"
+
+    fixed = make_context(client, controller, out_version="v1.2", release_id="release-2026.9.3",
+                         metrics_provider=None, fixes_defect="TICKET-12: wrong edition dates")
+    assert run_stages(fixed, stages_for("all"), command="all").ok
+    assert client.read_json(paths.gate_decision("v1.2"))["fixes_defect"].startswith("TICKET-12")
+
+
 def test_no_promoted_version_means_no_baseline_not_a_lookup_failure(client, controller):
     from orchestration.pipeline_dag import default_baseline_metrics
 

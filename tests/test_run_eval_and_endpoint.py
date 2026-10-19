@@ -177,6 +177,34 @@ def test_an_image_only_regression_is_visible_as_its_own_gate_metric():
     assert metrics["image_only_accuracy"] < metrics["field_normalized_match"]
 
 
+def test_each_document_s_own_score_is_kept_for_the_gate_s_bootstrap():
+    """The paired bootstrap needs per-document scores; read in one mode, their
+    mean is the gate metric itself."""
+    wrong = {**GOLDEN, "insured_name": "Someone Else"}
+    documents = [
+        (GOLDEN, GOLDEN if i % 2 else wrong,
+         {"source_id": f"p{i}", "doc_type": "lossrun", "modality_mode": "ocr_plus_image",
+          "page_count": 1})
+        for i in range(6)
+    ] + [
+        (GOLDEN, wrong, {"source_id": "p0", "doc_type": "lossrun",
+                         "modality_mode": "image_only", "page_count": 1}),
+    ]
+    report = build_report("v2", documents)
+    per_document = report.per_document_scores()
+    metrics = report.gate_metrics()
+
+    assert set(per_document["field_normalized_match"]) == {f"p{i}" for i in range(6)}
+    assert per_document["image_only_accuracy"] == {"p0": pytest.approx(2 / 3)}
+    ocr_only = build_report("v2", documents[:6])
+    scores = ocr_only.per_document_scores()["field_normalized_match"]
+    assert sum(scores.values()) / len(scores) == pytest.approx(
+        ocr_only.gate_metrics()["field_normalized_match"])
+    assert metrics["image_only_accuracy"] == pytest.approx(2 / 3)
+    assert report.as_dict()["per_document"]["field_normalized_match"]["p1"] == 1.0
+    assert "per_document" not in report.full_set()[0].as_dict()
+
+
 def test_error_records_are_kept_not_just_aggregates():
     """vit_gate needs the perception-vs-reasoning split, and failure-mode
     analysis needs real material."""
