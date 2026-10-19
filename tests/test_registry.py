@@ -15,6 +15,7 @@ from artifact_registry import paths
 from artifact_registry.blob_client import (
     AccessDeniedError,
     BlobClient,
+    BlobError,
     ImmutableBlobError,
     InMemoryBackend,
 )
@@ -630,3 +631,63 @@ def test_listing_by_scope_reads_an_absent_scope_as_unified(client):
 
     assert [r["run_id"] for r in Q.list_runs(client, scope="unified")] == ["extractor-v1"]
     assert [r["run_id"] for r in Q.list_runs(client, scope="policy")] == ["policy-v1"]
+
+
+# --------------------------------------------------------------------------
+# Storage login: a SAS token before the account key
+# --------------------------------------------------------------------------
+
+
+class _RecordingBackend:
+    def __init__(self, connection_string=None, *, account_url=None, credential=None):
+        self.connection_string, self.account_url, self.credential = (
+            connection_string, account_url, credential)
+
+
+@pytest.fixture
+def azure_env(monkeypatch):
+    from artifact_registry import blob_client
+
+    for name in ("AZURE_STORAGE_ACCOUNT_URL", "AZURE_STORAGE_SAS_TOKEN",
+                 "AZURE_STORAGE_CONNECTION_STRING"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(blob_client, "AzureBackend", _RecordingBackend)
+    return monkeypatch
+
+
+def test_a_sas_login_is_preferred_to_the_connection_string(azure_env):
+    """The connection string carries the account key; a SAS is short-lived and
+    limited to its permissions."""
+    from artifact_registry.blob_client import azure_from_environment
+
+    azure_env.setenv("AZURE_STORAGE_ACCOUNT_URL", "https://acct.blob.core.windows.net")
+    azure_env.setenv("AZURE_STORAGE_SAS_TOKEN", "?sv=2024&sig=abc")
+    azure_env.setenv("AZURE_STORAGE_CONNECTION_STRING", "AccountName=acct;AccountKey=k")
+    backend = azure_from_environment()
+    assert backend.account_url == "https://acct.blob.core.windows.net"
+    assert backend.credential == "sv=2024&sig=abc"
+    assert backend.connection_string is None
+
+
+def test_the_connection_string_still_works_alone(azure_env):
+    from artifact_registry.blob_client import azure_from_environment
+
+    azure_env.setenv("AZURE_STORAGE_CONNECTION_STRING", "AccountName=acct;AccountKey=k")
+    assert azure_from_environment().connection_string == "AccountName=acct;AccountKey=k"
+
+
+def test_half_a_sas_login_is_refused_without_naming_the_token(azure_env):
+    from artifact_registry.blob_client import azure_from_environment
+
+    azure_env.setenv("AZURE_STORAGE_SAS_TOKEN", "sv=2024&sig=secret")
+    azure_env.setenv("AZURE_STORAGE_CONNECTION_STRING", "AccountName=acct;AccountKey=k")
+    with pytest.raises(BlobError, match="AZURE_STORAGE_ACCOUNT_URL is not set") as caught:
+        azure_from_environment()
+    assert "secret" not in str(caught.value)
+
+
+def test_no_storage_login_at_all_is_refused(azure_env):
+    from artifact_registry.blob_client import azure_from_environment
+
+    with pytest.raises(BlobError, match="no storage login"):
+        azure_from_environment()

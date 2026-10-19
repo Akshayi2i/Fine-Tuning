@@ -130,7 +130,13 @@ class InMemoryBackend(BlobBackend):
 class AzureBackend(BlobBackend):
     """Real Azure Blob Storage. Imported lazily so CI needs no Azure SDK."""
 
-    def __init__(self, connection_string: str) -> None:
+    def __init__(
+        self, connection_string: str | None = None, *,
+        account_url: str | None = None, credential: str | None = None,
+    ) -> None:
+        """A connection string (it carries the account key), or an account URL
+        with a SAS token as ``credential`` - short-lived and scoped by its
+        permissions, so a leaked pod ``.env`` exposes less."""
         try:
             from azure.storage.blob import BlobServiceClient
         except ImportError as exc:  # pragma: no cover - depends on optional extra
@@ -138,7 +144,12 @@ class AzureBackend(BlobBackend):
                 "azure-storage-blob is not installed. Install the [data] extra: "
                 'pip install -e ".[data]"'
             ) from exc
-        self._service = BlobServiceClient.from_connection_string(connection_string)
+        if account_url:
+            self._service = BlobServiceClient(account_url=account_url, credential=credential)
+        elif connection_string:
+            self._service = BlobServiceClient.from_connection_string(connection_string)
+        else:
+            raise BlobError("AzureBackend needs a connection string or an account URL")
 
     def _client(self, container: str, key: str):
         return self._service.get_blob_client(container=container, blob=key)
@@ -229,13 +240,7 @@ class BlobClient:
         if backend is not None:
             self._backend = backend
         else:
-            conn = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
-            if not conn:
-                raise BlobError(
-                    "AZURE_STORAGE_CONNECTION_STRING is not set. For tests, pass "
-                    "InMemoryBackend() explicitly rather than relying on a live account."
-                )
-            self._backend = AzureBackend(conn)
+            self._backend = azure_from_environment()
 
     # -- routing and guards -------------------------------------------------
 
@@ -379,6 +384,34 @@ class BlobClient:
             self.download_file(key, root / rel)
             count += 1
         return count
+
+
+def azure_from_environment() -> AzureBackend:
+    """The Azure backend the environment logs in to.
+
+    A SAS token (``AZURE_STORAGE_ACCOUNT_URL`` + ``AZURE_STORAGE_SAS_TOKEN``) when
+    set - preferred, because the connection string carries the account key, which
+    reaches everything for ever - and the connection string otherwise. The token
+    is never logged or put in an error message.
+    """
+    url = (os.environ.get("AZURE_STORAGE_ACCOUNT_URL") or "").strip()
+    sas = (os.environ.get("AZURE_STORAGE_SAS_TOKEN") or "").strip().lstrip("?")
+    if url or sas:
+        if not (url and sas):
+            missing = "AZURE_STORAGE_SAS_TOKEN" if url else "AZURE_STORAGE_ACCOUNT_URL"
+            raise BlobError(
+                f"{missing} is not set: a SAS login needs the account URL and the token both. "
+                "Half of one is refused rather than falling back to the connection string."
+            )
+        return AzureBackend(account_url=url, credential=sas)
+    conn = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+    if not conn:
+        raise BlobError(
+            "no storage login: set AZURE_STORAGE_ACCOUNT_URL and AZURE_STORAGE_SAS_TOKEN "
+            "(preferred), or AZURE_STORAGE_CONNECTION_STRING. For tests, pass InMemoryBackend() "
+            "explicitly rather than relying on a live account."
+        )
+    return AzureBackend(conn)
 
 
 def for_ingestion(**kwargs: Any) -> BlobClient:

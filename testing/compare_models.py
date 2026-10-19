@@ -261,7 +261,14 @@ def download_command(prefix: str, *, container: str, account: str | None,
 
 
 def _account_name() -> str | None:
-    """The storage account's name from the connection string - the name only, never the key."""
+    """The storage account's name - the name only, never the key or the token.
+
+    From the SAS login's account URL when set, else from the connection string.
+    """
+    url = (os.environ.get("AZURE_STORAGE_ACCOUNT_URL") or "").strip()
+    if url:
+        host = url.split("://", 1)[-1].split("/", 1)[0]
+        return host.split(".", 1)[0] or None
     for part in (os.environ.get("AZURE_STORAGE_CONNECTION_STRING") or "").split(";"):
         if part.startswith("AccountName="):
             return part.split("=", 1)[1]

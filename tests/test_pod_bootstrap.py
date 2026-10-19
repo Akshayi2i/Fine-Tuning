@@ -137,6 +137,12 @@ def test_an_unquoted_connection_string_is_refused():
     assert "contains ';' but is not quoted" in SCRIPT
 
 
+def test_an_unquoted_sas_token_is_refused_and_either_login_will_do():
+    """Sourced by bash, an unquoted token's '&' sends the rest to the background."""
+    assert "AZURE_STORAGE_SAS_TOKEN in .env contains '&' but is not quoted" in SCRIPT
+    assert "AZURE_STORAGE_ACCOUNT_URL + AZURE_STORAGE_SAS_TOKEN, or AZURE_STORAGE_CONNECTION_STRING" in SCRIPT
+
+
 # --------------------------------------------------------------------------
 # The pipeline in the training environment, without MinerU
 # --------------------------------------------------------------------------

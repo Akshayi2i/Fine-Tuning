@@ -150,15 +150,26 @@ case "$azure_value" in
   *\;*) die "AZURE_STORAGE_CONNECTION_STRING in .env contains ';' but is not quoted. Wrap the \
 value in double quotes: bash would otherwise cut it at the first ';'." ;;
 esac
+# A SAS token is cut the same way at each '&', and the rest run in the background.
+sas_line="$(grep -E '^AZURE_STORAGE_SAS_TOKEN=' .env | tail -n1 || true)"
+sas_value="${sas_line#AZURE_STORAGE_SAS_TOKEN=}"
+case "$sas_value" in
+  \"*|\'*) ;;
+  *\&*) die "AZURE_STORAGE_SAS_TOKEN in .env contains '&' but is not quoted. Wrap the value \
+in double quotes: bash would otherwise run each part after an '&' in the background." ;;
+esac
 set -a; . ./.env; set +a
 export HF_HOME MINERU_TOOLS_CONFIG_JSON MINERU_DEVICE_MODE MINERU_MODEL_SOURCE RUNPOD_VOLUME_MOUNT
 # RunPod images turn on the hf_transfer downloader for every process; it is not
 # installed in our environments, and Hugging Face then refuses to download.
 export HF_HUB_ENABLE_HF_TRANSFER=0
-case "${AZURE_STORAGE_CONNECTION_STRING:-}" in
-  ""|*AccountName=...*)
-    PENDING+=("set AZURE_STORAGE_CONNECTION_STRING in $REPO/.env (every stage reads and writes Blob)") ;;
-esac
+# A SAS login (account URL + token) or the connection string; either one will do.
+if [ -z "${AZURE_STORAGE_ACCOUNT_URL:-}" ] || [ -z "${AZURE_STORAGE_SAS_TOKEN:-}" ]; then
+  case "${AZURE_STORAGE_CONNECTION_STRING:-}" in
+    ""|*AccountName=...*)
+      PENDING+=("set AZURE_STORAGE_ACCOUNT_URL + AZURE_STORAGE_SAS_TOKEN, or AZURE_STORAGE_CONNECTION_STRING, in $REPO/.env (every stage reads and writes Blob)") ;;
+  esac
+fi
 
 # --- 3 and 4. the two environments -------------------------------------------------
 # A marker records the requirements an environment was built from; an unchanged
