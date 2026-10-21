@@ -337,7 +337,7 @@ def check_swift_row_format(r: Result) -> None:
         "ms-swift tokenizes the staged row DIFFERENTLY from serving — prompt drift; see sample"
     )
     if not r.ok:
-        first = next((i for i, (a, b) in enumerate(zip(trained, served)) if a != b),
+        first = next((i for i, (a, b) in enumerate(zip(trained, served, strict=False)) if a != b),
                      min(len(trained), len(served)))
         r.data["first_difference_at"] = first
         r.data["trained"] = tokenizer.decode(trained[max(0, first - 20):first + 20])
