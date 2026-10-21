@@ -1,19 +1,20 @@
 """How a policy is read: its windows, and each window's training target.
 
 Every canonical policy — short or long — is read as the cross product of section
-groups and page windows (``configs/schema_sections.yaml``): ``decl`` over the
-declarations pages, ``arrays`` and ``lineblk`` over every routed page, ``dtd``
-where the line carries it. Always, never above a length threshold: a threshold
+groups and page windows (``configs/schema_sections.yaml``): every group over
+every page (decision 2026-10-19: every page, chunk by chunk, never selected
+pages), ``decl`` and ``dtd`` with the declarations pages leading together in
+their first window. Always, never above a length threshold: a threshold
 computed from prompt length moves whenever the template, a schema or the vision
 budget does, and would silently re-shape documents between two corpus builds.
 
 **One planner, two callers.** :func:`plan_windows` is what the dataset build
 expands a document with *and* what ``serving.pipeline`` extracts one with. It is
-a function of the line, the routed pages and where the declarations were found —
+a function of the line, the page count and where the declarations were found —
 never of a gold label — so the windows a model trains on are the windows it is
-served. The routed pages come from the same place on both sides too:
-``serving.page_router.plan_pages`` over the OCR text the row actually carries, or
-every page when there is none.
+served. The declarations page comes from the same place on both sides too:
+``serving.page_router.plan_pages`` over the OCR text the row actually carries
+(none when there is no text).
 
 **The target is the window's slice of the gold label** (:func:`window_target`):
 the group's sections, narrowed to values printed on the window's own pages. A
@@ -54,7 +55,6 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from common.canonical import CanonicalLabelError, in_schema_order, is_field_value, to_model_target
-from common.constants import DEFAULT_LONG_DOC_PAGE_THRESHOLD
 from common.model_view import PRINTED_STRING_FIELDS
 
 #: Never in an assistant target: attached at inference by the section builder
@@ -119,26 +119,25 @@ class TargetReport:
     away: list[str] = field(default_factory=list)
 
 
-def routed_pages(
+def pages_to_read(
     page_texts: Mapping[int, str] | Sequence[str] | None,
     page_count: int,
-    *,
-    page_threshold: int = DEFAULT_LONG_DOC_PAGE_THRESHOLD,
 ) -> tuple[list[int], int | None]:
-    """``(pages to read, detected declarations page)`` — serving's own rule.
+    """``(every page, detected declarations page)`` — one rule for both sides.
 
-    No OCR text (``image_only``) means every page: there is nothing to score.
+    Every page, whatever the length (decision 2026-10-19). The declarations page
+    is found in the OCR text; with none (``image_only``) there is none to find.
     """
     from serving.page_router import plan_pages
 
+    pages = list(range(1, page_count + 1))
     if not page_texts:
-        return list(range(1, page_count + 1)), None
+        return pages, None
     texts = (
         dict(page_texts) if isinstance(page_texts, Mapping)
         else {index: text for index, text in enumerate(page_texts, start=1)}
     )
-    plan = plan_pages(texts, page_threshold=page_threshold)
-    return list(plan.pages), plan.declarations_page
+    return pages, plan_pages(texts).declarations_page
 
 
 def plan_windows(
@@ -146,8 +145,11 @@ def plan_windows(
     routed: Sequence[int],
     declarations_page: int | None = None,
 ) -> list[PolicyWindowPlan]:
-    """Every window a policy is read with, in group order then page order."""
-    from common.schema_sections import groups_for, pages_for, reads_declarations, run_overlap
+    """Every window a policy is read with, in group order then page order.
+
+    ``routed`` is the pages to read - every page (:func:`pages_to_read`).
+    """
+    from common.schema_sections import groups_for, leading_pages, pages_for, run_overlap
     from data_pipeline.dataset_builder.expand_tasks import (
         pages_per_extraction_call,
         plan_policy_windows,
@@ -155,14 +157,14 @@ def plan_windows(
 
     plans: list[PolicyWindowPlan] = []
     for group in groups_for(lob):
-        pages = pages_for(group, list(routed), declarations_page=declarations_page)
+        pages = pages_for(group, list(routed))
         capacity = pages_per_extraction_call("policy", None, lob, group)
-        # A declarations group's pages all lead — its leading pages and the page
-        # the declarations were found on, read together. A routed group packs by
-        # runs alone.
+        # A declarations group's first window is its leading pages and the page
+        # the declarations were found on, read together; every other page
+        # follows, packed by runs, as every other group's are.
         windows = plan_policy_windows(
             pages, pages_per_window=capacity,
-            leading=pages if reads_declarations(group) else (),
+            leading=leading_pages(group, pages, declarations_page=declarations_page),
             overlap=run_overlap(lob),
         )
         plans.extend(

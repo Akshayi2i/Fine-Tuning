@@ -131,8 +131,8 @@ def test_page_order_is_preserved_exactly():
     assert images != reversed_images
 
 
-def test_page_selection_returns_sorted_paths():
-    """Page routing selects a subset; out-of-order pages change what the model sees."""
+def test_a_windows_pages_come_back_in_page_order():
+    """A window reads a subset of the pages; out-of-order pages change what the model sees."""
     from artifact_registry.paths import processed_page
 
     paths = page_images_for(

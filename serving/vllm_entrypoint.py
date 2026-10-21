@@ -658,27 +658,6 @@ def serving_thresholds() -> dict[str, Any]:
     return tuning
 
 
-def long_doc_types_for(plan: Any) -> tuple[str, ...]:
-    """Which served types get page routing, from their releases' own scopes.
-
-    The page signals are policy vocabulary (declarations, schedule, endorsement),
-    so routing a Loss Run through them spends a pass to select every page anyway.
-    """
-    from common.scopes import ScopeError, get_scope
-
-    if plan is None:
-        return ("policy",)
-    found: set[str] = set()
-    for release in plan.served:
-        try:
-            found.update(get_scope(release.scope).long_doc_types)
-        except ScopeError:
-            # A release from a scope this deployment no longer declares still
-            # serves; it simply gets the default.
-            found.add("policy")
-    return tuple(sorted(found))
-
-
 def handler(event: dict[str, Any], state: EndpointState) -> dict[str, Any]:
     """The RunPod Serverless entrypoint. One request in, the output contract out.
 
@@ -731,7 +710,6 @@ def handler(event: dict[str, Any], state: EndpointState) -> dict[str, Any]:
             plan=state.plan,
             release_runtimes=state.release_runtimes,
             base_model_loaded=state.base_model_loaded,
-            long_doc_types=long_doc_types_for(state.plan),
             **tuning,
         )
     except ServingError as exc:

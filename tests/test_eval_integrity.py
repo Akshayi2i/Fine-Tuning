@@ -247,7 +247,7 @@ def test_a_short_policy_reports_its_declarations_page():
         1: "Fax cover sheet", 2: "Billing notice", 3: "Privacy notice",
         4: "COMMON POLICY DECLARATIONS Named Insured Policy Period",
     })
-    assert not plan.routed
+    assert plan.pages == [1, 2, 3, 4]
     assert plan.declarations_page == 4
 
 

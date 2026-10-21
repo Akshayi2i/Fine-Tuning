@@ -908,51 +908,16 @@ def test_every_lossrun_example_shares_the_documents_identity():
     assert {e.source_id for e in examples} == {"lr_002"}
 
 
-def test_the_declarations_pages_are_always_routed():
-    """A selector that misses the declarations area produces an extraction with
-    no policy number."""
-    from data_pipeline.dataset_builder.expand_tasks import select_policy_pages
+def test_a_long_policy_is_read_on_every_page():
+    """Every page, chunk by chunk, never selected pages (decision 2026-10-19): a
+    200-page policy's windows cover all 200, the declarations leading."""
+    from data_pipeline.dataset_builder.expand_tasks import plan_policy_windows
 
-    assert select_policy_pages([22, 31], 40)[:3] == [1, 2, 3]
-
-
-def test_no_routed_page_is_ever_dropped():
-    """The routed set used to be truncated at six pages, keeping the declarations
-    and the numerically LOWEST remaining pages — under a docstring claiming the
-    highest-relevance ones survived, with no relevance score anywhere in it.
-
-    A page set larger than one call is a document that needs more than one call.
-    It is not a document with fewer pages.
-    """
-    from data_pipeline.dataset_builder.expand_tasks import select_policy_pages
-
-    found = [5, 9, 14, 22, 31, 33, 38]
-    selected = select_policy_pages(found, 40)
-    assert selected[:3] == [1, 2, 3], "the declarations lead"
-    assert set(found) <= set(selected), f"dropped {sorted(set(found) - set(selected))}"
-
-
-def test_a_long_policy_keeps_its_schedules_and_endorsements():
-    """The case the old cap silently destroyed: a 200-page policy whose vehicle
-    schedule, locations and endorsements all sit past page 100."""
-    from data_pipeline.dataset_builder.expand_tasks import (
-        plan_policy_windows,
-        select_policy_pages,
-    )
-
-    found = [12, *range(140, 147), 150, 151, 152, *range(180, 186)]
-    selected = select_policy_pages(found, 200)
-    assert set(found) <= set(selected), f"dropped {sorted(set(found) - set(selected))}"
-
-    windows = plan_policy_windows(selected, pages_per_window=5, leading=[1, 2, 3])
-    assert [p for w in windows for p in w] == selected, "windowing lost a page"
+    pages = list(range(1, 201))
+    windows = plan_policy_windows(pages, pages_per_window=5, leading=[1, 2, 3])
+    assert [p for w in windows for p in w] == pages, "windowing lost a page"
     assert windows[0] == [1, 2, 3], "the declarations lead their own window"
     assert all(len(w) <= 5 for w in windows)
-    # The vehicle schedule is one table printed across seven pages. It may span
-    # two windows because seven does not fit in five, but it must not be
-    # interleaved with the endorsements twenty pages later.
-    schedule = [w for w in windows if any(140 <= p <= 146 for p in w)]
-    assert all(all(140 <= p <= 146 for p in w) for w in schedule)
 
 
 def test_a_run_of_pages_is_not_split_until_it_has_to_be():
@@ -988,17 +953,6 @@ def test_how_many_pages_a_call_holds_depends_on_the_line():
     assert 1 <= larger < smaller, (
         f"management_liability {larger} should fit fewer than gl {smaller}"
     )
-
-
-def test_a_long_policy_is_thumbnailed_in_chunks():
-    """A 200-page policy cannot have every page thumbnailed in one call even at
-    256 tokens a page."""
-    from data_pipeline.dataset_builder.expand_tasks import page_select_chunks
-
-    chunks = page_select_chunks(200)
-    assert len(chunks) == 4
-    assert chunks[0][0] == 1 and chunks[-1][-1] == 200
-    assert sum(len(c) for c in chunks) == 200
 
 
 def test_train_documents_get_one_row_per_epoch_not_one_per_regime():
@@ -1041,5 +995,7 @@ def test_the_declarations_page_is_read_with_the_leading_pages():
     from data_pipeline.dataset_builder.policy_windows import plan_windows
 
     plans = plan_windows("homeowners", [1, 2, 3, 5, 9, 10], declarations_page=5)
-    decl = [p for p in plans if p.group == "decl"]
-    assert [list(p.pages) for p in decl] == [[1, 2, 3, 5]]
+    decl = [list(p.pages) for p in plans if p.group == "decl"]
+    assert decl[0] == [1, 2, 3, 5]
+    # ... and then every other page, as every group reads them.
+    assert {page for pages in decl for page in pages} == {1, 2, 3, 5, 9, 10}

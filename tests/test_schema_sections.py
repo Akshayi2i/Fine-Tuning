@@ -149,33 +149,30 @@ def test_no_slice_leaks_a_fideon_key():
 # --------------------------------------------------------------------------
 
 
-def test_the_declarations_group_follows_the_declarations_page():
+def test_every_group_reads_every_page():
+    """Every page, chunk by chunk, never selected pages (decision 2026-10-19).
+    A location schedule can be printed anywhere in a 200-page policy, and a
+    declarations block past page 5 is still the declarations."""
+    pages = list(range(1, 42))
+    for group in ("decl", "arrays", "lineblk", "dtd"):
+        assert pages_for(group, pages) == pages, group
+
+
+def test_the_declarations_lead_together_and_follow_the_declarations_page():
     """Scanned intake routinely opens with a fax cover sheet, a billing notice
-    or a broker letter, which puts the real declarations on page 4 or 5.
+    or a broker letter, which puts the real declarations on page 4 or 5 - or
+    later. They are read together with the leading pages (1-5,
+    declarations_leading), in the declarations group's first window."""
+    from common.schema_sections import leading_pages
 
-    Pinned to its leading pages, nothing would ask for the policy-level fields
-    on exactly the documents most likely to be messy, and every one of them
-    would come back null. The leading pages are 1-5 (declarations_leading).
-    """
-    routed = [1, 2, 3, 5, 7, 40, 41]
-    assert pages_for("decl", routed) == [1, 2, 3, 5]
-    assert pages_for("decl", routed, declarations_page=40) == [1, 2, 3, 5, 40]
-    # A detected page outside the routed set is not invented into it.
-    assert pages_for("decl", routed, declarations_page=99) == [1, 2, 3, 5]
-
-
-def test_the_array_groups_read_every_routed_page():
-    """A location schedule can be printed anywhere in a 200-page policy, and
-    guessing where costs a whole table."""
-    routed = [1, 2, 3, 12, 140, 141, 180]
-    assert pages_for("arrays", routed) == routed
-    assert pages_for("lineblk", routed) == routed
-
-
-def test_the_declarations_group_is_never_given_an_empty_page_set():
-    """A routed set with no leading page still has to be asked for the
-    policy-level fields somewhere."""
-    assert pages_for("decl", [40, 41, 42]) == [40]
+    pages = [1, 2, 3, 5, 7, 40, 41]
+    assert leading_pages("decl", pages) == [1, 2, 3, 5]
+    assert leading_pages("decl", pages, declarations_page=40) == [1, 2, 3, 5, 40]
+    # A detected page outside the document is not invented into it.
+    assert leading_pages("decl", pages, declarations_page=99) == [1, 2, 3, 5]
+    assert leading_pages("arrays", pages, declarations_page=40) == []
+    # Never empty: with no leading page the first page leads.
+    assert leading_pages("decl", [40, 41, 42]) == [40]
 
 
 def test_an_unknown_group_is_refused_by_name():
@@ -320,12 +317,13 @@ def test_a_common_model_group_keeps_its_task_and_page_rule():
 def test_a_group_off_the_common_model_profile_keeps_its_task_and_page_rule():
     """`dtd` is in no common-model profile, and the fallback is read with one:
     a self-contained line's `dtd` window still has its task and its pages."""
-    from common.schema_sections import pages_for, reads_declarations, task_for
+    from common.schema_sections import leading_pages, pages_for, reads_declarations, task_for
 
     assert "dtd" not in group_names()
     assert task_for("dtd") == "policy_endorsements" and reads_declarations("dtd")
-    routed = [1, 2, 3, 4, 5, 6, 7, 8]
-    assert pages_for("dtd", routed, declarations_page=7) == pages_for("decl", routed, declarations_page=7)
+    pages = [1, 2, 3, 4, 5, 6, 7, 8]
+    assert pages_for("dtd", pages) == pages
+    assert leading_pages("dtd", pages, declarations_page=7) == leading_pages("decl", pages, declarations_page=7)
 
 
 def test_the_common_model_keys_are_their_own():

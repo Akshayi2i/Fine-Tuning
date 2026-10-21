@@ -486,7 +486,7 @@ def test_a_row_budgeted_differently_from_the_run_is_refused_before_any_download(
     pixels serving sends it."""
     _seed(client)
     rows = [json.loads(line) for line in client.read_text(EPOCHS[0]).splitlines() if line.strip()]
-    rows[0]["task"] = "page_select"
+    rows[0]["task"] = "classify"
     client.write_text(EPOCHS[0], "".join(json.dumps(r) + "\n" for r in rows))
 
     with pytest.raises(StagingError, match="budgeted at"):

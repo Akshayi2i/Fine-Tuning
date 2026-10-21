@@ -245,16 +245,5 @@ def test_the_endpoint_hands_the_serving_plan_to_every_extraction(client, monkeyp
     }}, state)
 
     assert seen.get("plan") is plan, "the serving plan never reached extract"
-    assert "long_doc_types" in seen
 
 
-def test_page_routing_follows_the_served_releases_own_scopes(client):
-    """The page signals are policy vocabulary, so a lossrun-only deployment
-    should not spend a routing pass selecting every page anyway."""
-    from serving.vllm_entrypoint import long_doc_types_for
-
-    promote(client, "release-2026.10.1", scope="lossrun", doc_types=["lossrun"])
-    assert long_doc_types_for(build_serving_plan(client)) == ()
-
-    promote(client, "release-2026.10.2", scope="policy", doc_types=["policy"])
-    assert "policy" in long_doc_types_for(build_serving_plan(client))

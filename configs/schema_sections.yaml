@@ -20,10 +20,8 @@
 # only for that - needs a page->section map, which comes either from gold
 # (training only) or from a classifier (serving). Either way a mislabelled page
 # means a section that is never asked for on the page that had it, and the field
-# comes back null with nothing to say why. That is the same silent miss that
-# `select_policy_pages` used to have when it truncated the routed set. Because
-# slicing nearly doubles the pages per call, the safe version costs about what
-# the guess would have: 7-8 calls for a 200-page policy either way.
+# comes back null with nothing to say why - the same silent miss page selection
+# had, which is why every group now reads every page (decision 2026-10-19).
 #
 # ONE MAP, EVERY LINE. Sixteen top-level sections appear in all 33 canonical
 # schemas, byte-identical, and they are over half of every prompt. So `decl` and
@@ -37,7 +35,8 @@ groups:
     title: Declarations
     task: policy_declarations
     pages: declarations
-    # The policy-level objects. These are the fields whose value is the
+    # Every page, with pages 1-5 and the detected declarations page read
+    # together in the first window. The policy-level objects. These are the fields whose value is the
     # document's, not a row's, and `policy.jinja` tells the model that where a
     # schedule or an endorsement repeats one of them differently, the
     # declarations value wins. That rule only holds if this group is the one
@@ -57,8 +56,8 @@ groups:
   arrays:
     title: Schedules
     task: policy_schedule
-    pages: routed
-    # The repeating tables shared by every line. Asked over every routed page,
+    pages: every
+    # The repeating tables shared by every line. Asked over every page,
     # because a location schedule can be printed anywhere in a 200-page policy
     # and guessing where costs a whole table.
     sections:
@@ -72,7 +71,7 @@ groups:
   lineblk:
     title: Line-specific coverages
     task: policy_schedule
-    pages: routed
+    pages: every
     # Defined as "every top-level section no other group claims", so a line with
     # sections this file has never heard of - `covered_classes`,
     # `business_liability_coverage_part` - still has them asked for. Naming them
@@ -85,8 +84,8 @@ groups:
     pages: declarations
     # What KIND of policy document this is - declarations, renewal offer,
     # cancellation, endorsement. That is stated near the front, with the
-    # declarations, which is why it shares their page rule rather than the
-    # routed set. Only a few self-contained lines carry it.
+    # declarations, which is why its first window is theirs; it reads every
+    # page after it. Only a few self-contained lines carry it.
     sections:
       - document_type_detail
 
@@ -94,9 +93,13 @@ groups:
 # Page rules
 # --------------------------------------------------------------------------
 #
-# `routed`       every page the selector returned.
+# Every group reads EVERY page, chunk by chunk, never selected pages
+# (decision 2026-10-19). The rule says only how the first window is formed:
+#
+# `every`        the pages are packed into windows by runs.
 # `declarations` pages 1-N, PLUS the page the declarations were detected on when
-#                it falls outside them.
+#                it falls outside them, are read together in the first window;
+#                the rest follow as for `every`.
 #
 # That second clause is not defensive padding. Scanned intake routinely opens
 # with a fax cover sheet, a billing notice or a broker letter, which puts the

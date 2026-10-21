@@ -10,7 +10,7 @@ task is declared in the prompt, so the model is never guessing which output shap
 is wanted, and a routed request stays a subsequence of the full-document shape.
 
     ACORD      classify -> extract (all pages, one call)
-    Policy     classify -> page_select -> extract (selected pages, one call)
+    Policy     classify -> section-group windows over every page (policy_windows)
     Loss Run   classify -> lossrun_header -> lossrun_rows (windows) ->
                            lossrun_totals -> deterministic merge
 
@@ -56,9 +56,6 @@ DECLARATIONS_PAGES = 3
 #: leaves capacity unused while under-estimating is caught by ``cap_check``,
 #: which rejects the row rather than truncating it.
 OCR_TOKENS_PER_PAGE = 700
-
-#: Above this, thumbnails are sent in chunks and the selections unioned.
-PAGE_SELECT_CHUNK = 60
 
 #: Estimated output tokens per claim row. Used by the planner to shrink a window
 #: before it is built. TODO Phase 0 (spike item 4): measure on real Loss Runs.
@@ -265,43 +262,6 @@ def _apportion(claims: list[Any], windows: list[list[int]], index: int) -> list[
     return claims[start:end]
 
 
-def select_policy_pages(
-    provenance_pages: list[int],
-    total_pages: int,
-    *,
-    distractors: list[int] | None = None,
-) -> list[int]:
-    """Every page a policy extraction must read, in page order.
-
-    Pages 1-3 are **always** included: the declarations area carries the
-    policy-level fields, and a selector that misses it produces an extraction with
-    no policy number.
-
-    Returns the whole set. It is :func:`plan_policy_windows` that decides how many
-    calls the set takes — this function no longer truncates it.
-
-    It used to. The cap was six pages, and beyond that it kept the declarations
-    plus the numerically *lowest* remaining pages and logged the rest, under a
-    docstring claiming the highest-relevance ones were kept. There was never a
-    relevance score in it. On a 200-page policy with the vehicle schedule on
-    pp.140-146, the locations on pp.150-152 and the endorsements on pp.180-190,
-    that kept ``[1, 2, 3, 12, 140, 141]`` and discarded fourteen pages including
-    every endorsement. The extraction then validated cleanly against the schema
-    and was missing most of the policy, and the only trace was a log line nobody
-    reads at corpus-build time.
-
-    A page set larger than one call is a document that needs more than one call.
-    It is not a document with fewer pages.
-    """
-    if total_pages <= 0:
-        raise ExpansionError("a policy needs at least one page")
-
-    declarations = list(range(1, min(DECLARATIONS_PAGES, total_pages) + 1))
-    selected = set(declarations) | {p for p in provenance_pages if 1 <= p <= total_pages}
-    selected |= {p for p in (distractors or []) if 1 <= p <= total_pages}
-    return sorted(selected)
-
-
 def plan_policy_windows(
     pages: list[int], *, pages_per_window: int, leading: Sequence[int] = (), overlap: int = 0,
 ) -> list[list[int]]:
@@ -475,106 +435,3 @@ def pages_per_extraction_call(
     return max(1, int(room // per_page))
 
 
-def page_select_chunks(total_pages: int, chunk: int = PAGE_SELECT_CHUNK) -> list[list[int]]:
-    """Thumbnail batches for page selection, unioned by the caller.
-
-    A 200-page policy cannot have every page thumbnailed in one call even at 256
-    tokens a page, so selection runs in chunks and the results are unioned.
-    """
-    return [
-        list(range(start + 1, min(start + chunk, total_pages) + 1))
-        for start in range(0, max(total_pages, 0), chunk)
-    ]
-
-
-#: Schema fields that are tables of rows rather than policy-level values. Each
-#: becomes `policy_schedule` windows; everything else belongs to declarations.
-POLICY_SCHEDULE_FIELDS: tuple[str, ...] = ("coverage_schedule", "vehicles", "locations")
-
-#: Where endorsements are recorded on a policy's golden label.
-POLICY_ENDORSEMENT_FIELD = "endorsements"
-
-
-def expand_policy(
-    *,
-    source_id: str,
-    golden_label: dict[str, Any],
-    page_markdown: list[str],
-    output_budget: int,
-    provenance_pages: list[int] | None = None,
-    endorsement_pages: list[int] | None = None,
-) -> list[TaskExample]:
-    """Declarations, schedule windows and endorsements for one policy (§7b).
-
-    The one-call ``extract`` path stays for short policies. This is what a long
-    one is read with, because the routed read caps at six pages: a 60-page policy
-    extracted that way silently drops everything past the sixth, and a missing
-    field looks exactly like a field the document does not have.
-
-    Schedules are windowed for the same reason Loss Run rows are — the binding
-    constraint is the OUTPUT budget, not the input. Endorsements are found by
-    page tagging rather than by position: they are scattered through a policy
-    rather than gathered at one end.
-    """
-    if not page_markdown:
-        raise ExpansionError(f"{source_id}: a policy needs at least one page")
-
-    total_pages = len(page_markdown)
-    examples: list[TaskExample] = []
-
-    schedules = {
-        name: list(golden_label.get(name) or [])
-        for name in POLICY_SCHEDULE_FIELDS
-        if golden_label.get(name)
-    }
-    endorsements = list(golden_label.get(POLICY_ENDORSEMENT_FIELD) or [])
-
-    declared = {
-        k: v for k, v in golden_label.items()
-        if k not in schedules and k != POLICY_ENDORSEMENT_FIELD
-    }
-    examples.append(TaskExample(
-        task=Task.POLICY_DECLARATIONS,
-        source_id=source_id,
-        doc_type="policy",
-        pages=select_policy_pages(
-            provenance_pages=provenance_pages or [], total_pages=total_pages
-        ),
-        target=declared,
-    ))
-
-    # One window sequence per schedule, because a vehicle schedule and a location
-    # schedule are different tables on different pages: merging them would ask
-    # one call to return two shapes.
-    for name, rows in sorted(schedules.items()):
-        densities = [detect_row_density(page) for page in page_markdown]
-        windows = plan_windows(densities, output_budget=output_budget)
-        for index, window in enumerate(windows):
-            in_window = _apportion(rows, windows, index)
-            if not in_window:
-                continue
-            examples.append(TaskExample(
-                task=Task.POLICY_SCHEDULE,
-                source_id=source_id,
-                doc_type="policy",
-                pages=window,
-                target={name: in_window},
-                window_index=index,
-                metadata={"schedule": name, "window_pages": len(window),
-                          "carries_table_header": True},
-            ))
-
-    if endorsements:
-        pages = [p for p in (endorsement_pages or []) if 1 <= p <= total_pages]
-        examples.append(TaskExample(
-            task=Task.POLICY_ENDORSEMENTS,
-            source_id=source_id,
-            doc_type="policy",
-            # No tagged pages means the whole document is the search space. That
-            # is expensive and honest; guessing a range would drop the
-            # endorsements that sit outside it, silently.
-            pages=pages or list(range(1, total_pages + 1)),
-            target={POLICY_ENDORSEMENT_FIELD: endorsements},
-            metadata={"tagged_pages": bool(pages)},
-        ))
-    return examples

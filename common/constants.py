@@ -188,10 +188,6 @@ RESOLUTION_CAP_RANGE_PX: Final[tuple[int, int]] = (1536, 2048)
 #: Tunable — the value is a starting point, not a settled threshold.
 DEFAULT_REVIEW_CONFIDENCE_THRESHOLD: Final[float] = 0.70
 
-#: Documents longer than this get page-routed rather than extracted whole
-#: (arch §7). Primarily a Policy-document concern.
-DEFAULT_LONG_DOC_PAGE_THRESHOLD: Final[int] = 5
-
 # --------------------------------------------------------------------------
 # Labeling (arch §4c)
 # --------------------------------------------------------------------------

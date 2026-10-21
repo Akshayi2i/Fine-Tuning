@@ -99,7 +99,8 @@ def test_a_premium_item_for_one_vehicle_is_taught_without_its_vehicle():
     _client_valid(gold)
     targets, report = _targets(gold)
     _assert_writable(targets)
-    (decl,) = [t for p, t in targets if p.group == "decl"]
+    # The declarations' first window (pages 1-5) holds the premium item.
+    decl = next(t for p, t in targets if p.group == "decl")
     (item,) = decl["premium"]["items"]
     assert "applies_to" not in item and item["coverage_code"] == "X_COLLISION"
     assert "decl:premium.items[0].applies_to=veh_1" in report.dangling
@@ -236,7 +237,7 @@ def test_a_part_of_a_line_read_as_this_one_is_written_as_this_line():
     gold["lob_parts"][0]["lob"] = "classic_auto"
     targets, _ = _targets(gold)
     _assert_writable(targets)
-    (decl,) = [t for p, t in targets if p.group == "decl"]
+    decl = next(t for p, t in targets if p.group == "decl")
     assert [part["lob"] for part in decl["lob_parts"]] == ["personal_auto"]
     assert AUTO["lob_parts"][0]["lob"] == "personal_auto"
 

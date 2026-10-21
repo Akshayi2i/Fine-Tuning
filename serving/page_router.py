@@ -1,23 +1,17 @@
-"""Long-document page selection and merge (arch §7).
+"""Where a document's declarations are, and the old merge helpers (arch §7b).
 
-Primarily a **Policy-document** concern. A policy can run 50+ pages, each costing
-1,000–2,000 vision tokens at full resolution, so sending the whole document would
-blow the context window *and* spend most of it on pages containing nothing
-extractable. Most policy schemas draw from a minority of pages: the declarations
-page, schedule pages, and specific endorsements.
+**Every page is read, chunk by chunk, never selected pages** (decision
+2026-10-19). Routing used to send a long policy's first page and the pages
+scoring as a schema section, and a page that scored nothing was never read:
+whatever it printed was silently missing. Now every page of every document
+that reaches the model is read, in windows (``policy_windows.plan_windows``).
 
-Three steps:
+What this module still does is find the declarations page by its section
+signals: the declarations group's first window is pages 1 to 5 plus that page,
+read together, so a policy opening with a fax cover sheet still has its
+declarations read as one block. Detecting a page labels it; it drops nothing.
 
-1. **Page routing** — a cheap first pass over per-page OCR text picks the pages
-   likely to carry the schema's fields.
-2. **Scoped extraction** — the model sees only those pages.
-3. **Merge** — per-page results combine into one document, with a defined
-   conflict rule: **the declarations page wins for policy-level fields**.
-
-Short documents skip all of it. ACORD forms and most Loss Runs are a few pages,
-and routing them would add latency and a failure mode for no benefit.
-
-Which pages fed the extraction is **recorded** (``pages_used``), so a
+Which pages fed the extraction is still **recorded** (``pages_used``), so a
 low-confidence field can be traced to the page it came from.
 """
 
@@ -27,13 +21,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from common.constants import DEFAULT_LONG_DOC_PAGE_THRESHOLD
-
 log = logging.getLogger(__name__)
 
-#: Section markers that identify a page worth reading, weighted by how strongly
-#: they indicate policy-level fields. Declarations outranks everything because
-#: it is where the canonical values live.
+#: Section markers, weighted by how strongly they say a page is the
+#: declarations or a schedule. Only the declarations markers decide anything
+#: now (:func:`plan_pages`); the scores are kept on the plan for tracing.
 PAGE_SIGNALS: dict[str, float] = {
     "declaration": 10.0,
     "declarations page": 10.0,
@@ -41,11 +33,6 @@ PAGE_SIGNALS: dict[str, float] = {
     "common policy declarations": 10.0,
     "schedule": 5.0,
     "coverage schedule": 6.0,
-    # A schedule's own title on its continuation pages ("Coverage Summary
-    # Page 2 ... (Continued)"), and the word every limits table carries
-    # ("Peril Deductible"). Without them those pages scored 0 and their rows were
-    # never read: 788 homeowners values on the SPEC_21 set (2026-10-07), for
-    # about 7% more pages read in routed policies.
     "coverage summary": 6.0,
     "deductible": 3.0,
     "named insured": 4.0,
@@ -56,16 +43,6 @@ PAGE_SIGNALS: dict[str, float] = {
     "endorsement": 2.0,
     "producer": 2.0,
 }
-
-#: Pages scoring at least this are selected. Low on purpose: missing a page that
-#: carried a field is worse than reading one that did not, because a missing
-#: field is silent while a wasted page only costs tokens.
-SELECTION_THRESHOLD = 2.0
-
-#: Always read the first page even if it scores nothing — the header carries the
-#: document's identity, and a scan with poor OCR can score zero while still
-#: being the declarations page.
-ALWAYS_INCLUDE_FIRST_PAGE = True
 
 
 @dataclass
@@ -78,12 +55,11 @@ class PageScore:
 
 @dataclass
 class RoutingPlan:
-    """Which pages to read, and why."""
+    """The pages a document is read on - all of them - and its declarations page."""
 
     pages: list[int]
     scores: list[PageScore] = field(default_factory=list)
     declarations_page: int | None = None
-    routed: bool = False
     reason: str = ""
 
     @property
@@ -105,83 +81,20 @@ def score_page(text: str, page_number: int) -> PageScore:
     return PageScore(page=page_number, score=score, matched=matched, is_declarations=is_declarations)
 
 
-def plan_pages(
-    page_texts: dict[int, str],
-    *,
-    page_threshold: int = DEFAULT_LONG_DOC_PAGE_THRESHOLD,
-    selection_threshold: float = SELECTION_THRESHOLD,
-    max_pages: int | None = None,
-) -> RoutingPlan:
-    """Decide which pages to send to the model.
+def plan_pages(page_texts: dict[int, str]) -> RoutingPlan:
+    """Every page, in order, and the first page that reads as the declarations.
 
     Args:
         page_texts: page number -> OCR text, 1-based.
-        page_threshold: documents at or below this length are not routed.
-        max_pages: cap on selected pages, highest-scoring first.
     """
-    total = len(page_texts)
-    # Scored whatever the length. The declarations page is what the decl group
-    # reads beyond its leading pages, and a short policy behind a fax cover sheet — its
-    # declarations on page 4 or 5 of 5 — reported none, so its policy-level
-    # fields were asked of three pages that do not print them.
     scores = [score_page(text, page) for page, text in sorted(page_texts.items())]
     declarations = next((s.page for s in scores if s.is_declarations), None)
-
-    if total <= page_threshold:
-        return RoutingPlan(
-            pages=sorted(page_texts),
-            scores=scores,
-            declarations_page=declarations,
-            routed=False,
-            reason=f"{total} page(s) is at or below the {page_threshold}-page threshold — "
-                   "single-pass extraction, no routing",
-        )
-
-    matched = {s.page for s in scores if s.score >= selection_threshold}
-
-    # Check for an empty selection BEFORE adding the always-include first page:
-    # otherwise a document where the heuristic recognised nothing would still
-    # "route", to a single page, and silently drop everything else.
-    if not matched:
-        log.warning(
-            "no page scored above %.1f in a %d-page document — falling back to all pages. "
-            "The routing heuristic did not recognise this layout, and reading everything is "
-            "better than reading one arbitrary page.",
-            selection_threshold, total,
-        )
-        return RoutingPlan(
-            pages=sorted(page_texts), scores=scores, declarations_page=declarations,
-            routed=False,
-            reason="no page matched the selection signals; reading all pages",
-        )
-
-    selected = set(matched)
-    if ALWAYS_INCLUDE_FIRST_PAGE and page_texts:
-        # The header carries the document's identity, and a poorly-OCR'd scan
-        # can score zero while still being the declarations page.
-        selected.add(min(page_texts))
-
-    if max_pages and len(selected) > max_pages:
-        # The first page and the declarations page survive the cap regardless of
-        # score. Dropping them contradicts the plan's own reason for selecting
-        # them, and would still report a declarations_page the model never saw.
-        pinned = {min(page_texts)} if ALWAYS_INCLUDE_FIRST_PAGE else set()
-        if declarations is not None:
-            pinned.add(declarations)
-        ranked = sorted(
-            (s for s in scores if s.page in selected and s.page not in pinned),
-            key=lambda s: -s.score,
-        )
-        selected = pinned | {s.page for s in ranked[: max(0, max_pages - len(pinned))]}
-    plan = RoutingPlan(
-        pages=sorted(selected),
+    return RoutingPlan(
+        pages=sorted(page_texts),
         scores=scores,
         declarations_page=declarations,
-        routed=True,
-        reason=f"selected {len(selected)} of {total} pages by section signals",
+        reason=f"every page of {len(page_texts)} is read (decision 2026-10-19)",
     )
-    log.info("page routing: %s (declarations page: %s)", plan.reason, declarations)
-    return plan
 
 
 # --------------------------------------------------------------------------

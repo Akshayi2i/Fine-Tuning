@@ -163,9 +163,9 @@ class BuiltMessages:
 #: Stands in for a page whose OCR recovered no text, in training AND serving.
 #: Serving substituted it and training sent the marker alone, so the model
 #: trained on one prompt for a blank page and was served another. An empty
-#: string is not an option at serving either: ALWAYS_INCLUDE_FIRST_PAGE makes a
-#: poorly scanned first page the likeliest page to be selected, and a request
-#: that refused on it aborted exactly the documents routing exists for.
+#: string is not an option at serving either: every page is read, a poorly
+#: scanned one included, and a request that refused on it would abort exactly
+#: the messy documents.
 EMPTY_PAGE_TEXT = "(no OCR text recovered for this page — read it from the image)"
 
 

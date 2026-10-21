@@ -31,9 +31,9 @@ from data_pipeline.dataset_builder.noisy_ocr_augment import corrupt_ocr_pages
 from data_pipeline.dataset_builder.policy_windows import (
     TargetReport,
     multi_window_sections,
+    pages_to_read,
     plan_windows,
     printed_pages_in,
-    routed_pages,
     unread_values,
     window_target,
     with_inferred_pages,
@@ -254,11 +254,11 @@ def _policy_window_rows(
 ) -> list[dict[str, Any]]:
     """One row per window, planned exactly as serving plans them.
 
-    The routed pages come from the OCR text THIS row carries - clean, corrupted
-    or none - because that is what serving routes on for the same input.
+    Every page is read; the declarations page is found in the OCR text THIS row
+    carries - clean, corrupted or none - as serving finds it for the same input.
     """
     page_count = len(document.image_paths)
-    routed, declarations_page = routed_pages(ocr_pages, page_count)
+    routed, declarations_page = pages_to_read(ocr_pages, page_count)
     plans = plan_windows(document.lob, routed, declarations_page)
 
     report = TargetReport()

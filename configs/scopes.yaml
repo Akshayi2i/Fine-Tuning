@@ -29,10 +29,6 @@
 #                metrics this scope cannot produce. Checked against what the
 #                scope's SHAPE implies - declaring more is refused at load, so
 #                this cannot become a way to waive a gate by configuration.
-#   long_doc_types
-#                types that get page routing at serving time. The page signals
-#                are policy vocabulary (declarations, schedule, endorsement), so
-#                applying them to a Loss Run only wastes a pass.
 #
 # `classify` stays in EVERY scope's task set, including single-type ones: a
 # policy-only release still has to recognise an ACORD and refuse it, so the
@@ -46,11 +42,10 @@ scopes:
   unified:
     lineage: extractor
     doc_types: [acord, policy, lossrun]
-    tasks: [classify, page_select, extract,
+    tasks: [classify, extract,
             lossrun_header, lossrun_rows, lossrun_totals,
             policy_declarations, policy_schedule, policy_endorsements]
     training_config: unified
-    long_doc_types: [policy]
 
   # Policy only. Everything else is paused, not deleted: the unified scope above
   # is unchanged and can be trained again by naming it.
@@ -64,21 +59,17 @@ scopes:
     # The policy decomposition (7b): a 60-page policy is read as declarations,
     # schedule windows and endorsement passes. The one-call `extract` stays for
     # short policies.
-    tasks: [classify, page_select, extract,
+    tasks: [classify, extract,
             policy_declarations, policy_schedule, policy_endorsements]
     training_config: unified
-    long_doc_types: [policy]
     not_applicable_metrics: [lossrun_totals_reconciliation_rate, table_f1]
 
-  # Declared now so the shape is settled before it is needed. Loss Runs carry no
-  # routed page selection, so page_selection_recall has no producer.
+  # Declared now so the shape is settled before it is needed.
   lossrun:
     lineage: lossrun
     doc_types: [lossrun]
     tasks: [classify, extract, lossrun_header, lossrun_rows, lossrun_totals]
     training_config: unified
-    long_doc_types: []
-    not_applicable_metrics: [page_selection_recall]
 
   # Personal lines (the LOB enum's personal lines; flood is NOT in this
   # adapter - a flood policy is outside the scope and refused): a policy-only
@@ -99,7 +90,6 @@ scopes:
     # unified.yaml plus this adapter's per-line data mix (Fideon SPEC_09
     # amendment items 6 and 7).
     training_config: personal_lines
-    long_doc_types: [policy]
     not_applicable_metrics: [lossrun_totals_reconciliation_rate, table_f1]
 
   # Casualty and fleet (configs/layout_families.yaml): the family's adapter,
@@ -115,5 +105,4 @@ scopes:
     tasks: [classify, extract, policy_declarations, policy_schedule, policy_endorsements]
     # No per-line data mix: one line, no synthetic copies.
     training_config: unified
-    long_doc_types: [policy]
     not_applicable_metrics: [lossrun_totals_reconciliation_rate, table_f1]

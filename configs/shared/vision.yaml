@@ -37,11 +37,6 @@ tasks:
     min_pixels: 50176
     note: "page 1 only; reads the form's shape, not its small print"
 
-  page_select:
-    max_pixels: 262144          # up to 60 thumbnails in one call - see sequence.yaml
-    min_pixels: 50176
-    note: "needs to see which pages carry field-bearing structure, nothing finer"
-
   # --- extraction: small print and checkboxes must survive -----------------
   extract:
     max_pixels: 2483200         # ~2.48M

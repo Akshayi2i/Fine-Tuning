@@ -78,10 +78,6 @@ class Scope:
     #: what :func:`structural_not_applicable` allows.
     not_applicable_metrics: frozenset[str] = frozenset()
 
-    #: Types that get page routing at serving time. The page signals are policy
-    #: vocabulary, so routing a Loss Run through them only wastes a pass.
-    long_doc_types: tuple[str, ...] = ()
-
     #: The lines of business this scope covers, as canonical schema names
     #: (``homeowners``, ``wc``). Empty means every line. Only a policy-only scope
     #: can narrow by line: the line is a policy's, read from its metadata.
@@ -218,9 +214,6 @@ def structural_not_applicable(scope: Scope) -> frozenset[str]:
         absent.add("lossrun_totals_reconciliation_rate")
         absent.add("table_f1")
 
-    if Task.PAGE_SELECT not in trained:
-        absent.add("page_selection_recall")
-
     if Task.CLASSIFY not in trained:
         # A scope that never classifies cannot be scored on classification. Note
         # that a single-type scope SHOULD still classify: it has to recognise the
@@ -320,7 +313,6 @@ def _build(name: str, body: dict[str, Any]) -> Scope:
         not_applicable_metrics=frozenset(
             str(m) for m in body.get("not_applicable_metrics") or ()
         ),
-        long_doc_types=tuple(str(d).strip().lower() for d in body.get("long_doc_types") or ()),
         lines=lob_lines(body.get("lines") or ()),
     )
 
@@ -471,7 +463,6 @@ def narrow(scope: Scope, doc_types: list[str] | tuple[str, ...] | None) -> Scope
         serves=tuple(d for d in scope.serves if d in wanted),
         floors=dict(scope.floors),
         not_applicable_metrics=scope.not_applicable_metrics,
-        long_doc_types=tuple(d for d in scope.long_doc_types if d in wanted),
         # A line-scoped scope stays line-scoped: dropping this turned a narrowed
         # personal_lines into a scope covering every line.
         lines=scope.lines,

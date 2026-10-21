@@ -265,7 +265,7 @@ def import_document(
         "lob": lob,
         # Which page each golden value came from. Without it the policy
         # decomposition has to apportion rows across windows instead of placing
-        # them, and page_select has no labels at all (§7b).
+        # them (§7b).
         "field_provenance": doc.metadata.get("field_provenance", {}),
         "document_kind": doc.metadata.get("document_kind"),
         "template_id": doc.metadata.get("template_id"),

@@ -29,14 +29,8 @@ class Task(StrEnum):
     #: wrong answer wastes everything downstream of it (arch §4a).
     CLASSIFY = "classify"
 
-    #: Thumbnails of every page -> the page numbers carrying schema fields.
-    #: Labels come free from field provenance: the pages the golden values were
-    #: found on (arch §7b).
-    PAGE_SELECT = "page_select"
-
-    #: The whole document, or the selected pages, in ONE call. Not one call per
-    #: page: a routed request has to be a subsequence of the full-document shape
-    #: the model trained on, or it is a shape no training row ever had.
+    #: The whole document in ONE call (an ACORD form, a short Loss Run). Pages
+    #: are never selected: every page is read (decision 2026-10-19).
     EXTRACT = "extract"
 
     #: Loss Run pages 1-2 -> carrier, insured, policy periods, valuation date.
@@ -104,7 +98,7 @@ def parse(value: str | Task) -> Task:
 
 #: The tasks the corpus build actually emits training rows for: whole-document
 #: ``extract`` for the flat types, and the three section-window tasks for
-#: canonical policies. A scope may DECLARE more (classify, page_select), but a
+#: canonical policies. A scope may DECLARE more (classify), but a
 #: task with no rows is not trained, and a metric scoring an untrained task is
 #: not a measurement of this model. ``tests/test_policy_windows`` pins this to
 #: what the build produces, so the day classify rows are built this changes too.

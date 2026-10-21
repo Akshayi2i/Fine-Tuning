@@ -58,8 +58,8 @@ def oracle(source_id: str, label: dict, lob: Any, page_count: int,
     from data_pipeline.dataset_builder.policy_windows import (
         TargetReport,
         multi_window_sections,
+        pages_to_read,
         plan_windows,
-        routed_pages,
         unread_values,
         window_target,
         with_inferred_pages,
@@ -68,7 +68,7 @@ def oracle(source_id: str, label: dict, lob: Any, page_count: int,
 
     line = ", ".join(lob) if isinstance(lob, list) else str(lob)
     result = DocumentResult(source_id, line, synthetic, page_count)
-    routed, declarations_page = routed_pages(ocr_pages, page_count)
+    routed, declarations_page = pages_to_read(ocr_pages, page_count)
     plans = plan_windows(lob, routed, declarations_page)
     report = TargetReport()
     # As the dataset build does: pages placed from the OCR text, when there is one.

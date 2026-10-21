@@ -93,8 +93,6 @@ GATING_METRICS: dict[str, Direction] = {
 #: the gate demands is what the scorer emits.
 PENDING_GATING_METRICS: dict[str, str] = {
     "list_field_precision": "row alignment (§15.1 Hungarian matching) — not written",
-    "page_selection_recall": "serving page_select task (§7b) — metric written, needs the "
-                             "selected/provenance pages in eval metadata",
     "hallucination_rate": "metric written; needs the OCR text of the pages that were sent "
                           "carried through eval metadata (§15.2)",
 }
@@ -113,8 +111,6 @@ CONDITIONAL_METRICS: frozenset[str] = frozenset({
     # Only Loss Runs have claim rows and printed totals.
     "lossrun_totals_reconciliation_rate",
     "table_f1",
-    # Only routed Policies exercise page selection.
-    "page_selection_recall",
     # Only canonical outputs carry review flags. When present it faces its
     # floor like any other metric.
     "auto_accept_error_rate",

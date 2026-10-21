@@ -30,12 +30,6 @@ tasks:
     max_output_tokens: 128
     composition: "page 1 thumbnail (~256) + enum schema + short JSON answer"
 
-  page_select:
-    max_seq_len: 20480
-    max_output_tokens: 512
-    composition: "<=60 thumbnails (~256 each) + page list output"
-    note: "policies over 60 pages are thumbnailed in chunks of 60 and the selections unioned"
-
   extract:
     max_seq_len: 24576
     max_output_tokens: 2048

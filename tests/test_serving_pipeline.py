@@ -218,42 +218,25 @@ def test_acord_form_reaches_the_schema_selection():
 
 
 # --------------------------------------------------------------------------
-# Page routing
+# Pages read
 # --------------------------------------------------------------------------
 
-def test_short_documents_are_not_routed():
-    """ACORD forms and most Loss Runs are a few pages; routing them would add
-    latency and a failure mode for nothing."""
-    plan = plan_pages({1: "text", 2: "text"}, page_threshold=5)
-    assert not plan.routed and plan.pages == [1, 2]
-
-
-def test_long_documents_select_the_relevant_pages():
+def test_every_page_of_a_long_document_is_read():
+    """Every page, chunk by chunk, never selected pages (decision 2026-10-19):
+    a page the section signals miss is read like any other."""
     pages = {i: "boilerplate exclusions and definitions" for i in range(1, 21)}
     pages[3] = "COMMON POLICY DECLARATIONS named insured policy number policy period"
     pages[7] = "COVERAGE SCHEDULE limits of insurance premium"
 
-    plan = plan_pages(pages, page_threshold=5)
-    assert plan.routed
-    assert 3 in plan.pages and 7 in plan.pages
+    plan = plan_pages(pages)
+    assert plan.pages == list(range(1, 21))
     assert plan.declarations_page == 3
-    assert len(plan.pages) < len(pages)
 
 
-def test_the_first_page_is_always_read():
-    """A poorly-OCR'd scan can score zero while still being the declarations
-    page."""
-    pages = {i: "" for i in range(1, 11)}
-    pages[6] = "declarations named insured"
-    assert 1 in plan_pages(pages, page_threshold=5).pages
-
-
-def test_no_matching_pages_falls_back_to_reading_everything():
-    """An empty selection means the heuristic failed, not that the document is
-    empty."""
-    plan = plan_pages({i: "unrecognisable layout" for i in range(1, 11)}, page_threshold=5)
-    assert not plan.routed
-    assert len(plan.pages) == 10
+def test_a_layout_the_signals_do_not_recognise_is_read_in_full():
+    plan = plan_pages({i: "unrecognisable layout" for i in range(1, 11)})
+    assert plan.pages == list(range(1, 11))
+    assert plan.declarations_page is None
 
 
 def test_declarations_page_wins_policy_level_conflicts():

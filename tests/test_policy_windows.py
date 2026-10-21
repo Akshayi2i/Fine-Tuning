@@ -24,8 +24,8 @@ from data_pipeline.dataset_builder.build_jsonl import (
 from data_pipeline.dataset_builder.policy_windows import (
     PolicyWindowPlan,
     TargetReport,
+    pages_to_read,
     plan_windows,
-    routed_pages,
     unread_values,
     window_target,
 )
@@ -67,40 +67,51 @@ LABEL = {
         {"location_number": _fv("2", 7), "address": {"city": _fv("Dayton", 8)}},
     ],
     "forms_and_endorsements": [{"form_number": _fv("CG 20 10", 12)}],
-    # A value printed on a page the keyword router does not route.
+    # A value printed on a page no section signal marks: read all the same.
     "state_notices": [{"state": _fv("OH", 14)}],
 }
 
 
 def _plans(lob=LOB):
-    routed, declarations = routed_pages(TEXTS, TOTAL)
-    return routed, plan_windows(lob, routed, declarations)
+    pages, declarations = pages_to_read(TEXTS, TOTAL)
+    return pages, plan_windows(lob, pages, declarations)
 
 
 # --------------------------------------------------------------------------
 # Planning
 # --------------------------------------------------------------------------
 
-def test_every_group_is_asked_over_every_page_that_could_carry_it():
-    routed, plans = _plans()
-    assert routed == [1, 7, 8, 12]
+def test_every_group_is_asked_over_every_page():
+    """Every page, chunk by chunk, never selected pages (decision 2026-10-19)."""
+    pages, plans = _plans()
+    assert pages == list(range(1, TOTAL + 1))
     by_group: dict[str, set[int]] = {}
     for plan in plans:
         by_group.setdefault(plan.group, set()).update(plan.pages)
-    assert by_group["decl"] == {1}
-    assert by_group["arrays"] == set(routed)
+    assert by_group and all(read == set(pages) for read in by_group.values()), by_group
+    # The declarations group's first window: pages 1-5, read together.
+    assert next(p for p in plans if p.group == "decl").pages == (1, 2, 3, 4, 5)
+
+
+def test_a_declarations_page_behind_a_cover_sheet_joins_the_first_window():
+    texts = ["FAX COVER SHEET"] * 7 + ["Common Policy Declarations"] + ["Conditions"] * 4
+    pages, declarations = pages_to_read(texts, len(texts))
+    plans = plan_windows(LOB, pages, declarations)
+    assert declarations == 8
+    assert next(p for p in plans if p.group == "decl").pages == (1, 2, 3, 4, 5, 8)
+    assert {page for p in plans if p.group == "decl" for page in p.pages} == set(pages)
 
 
 def test_a_short_policy_is_windowed_too():
     """Always, whatever the length: a threshold computed from prompt length would
     move between corpus builds and silently re-shape documents."""
-    routed, declarations = routed_pages(["Declarations"], 1)
-    groups = {plan.group for plan in plan_windows("homeowners", routed, declarations)}
+    pages, declarations = pages_to_read(["Declarations"], 1)
+    groups = {plan.group for plan in plan_windows("homeowners", pages, declarations)}
     assert groups == {"decl", "arrays", "lineblk"}
 
 
-def test_image_only_routes_every_page():
-    assert routed_pages(None, 4) == ([1, 2, 3, 4], None)
+def test_image_only_reads_every_page():
+    assert pages_to_read(None, 4) == ([1, 2, 3, 4], None)
 
 
 # --------------------------------------------------------------------------
@@ -152,11 +163,13 @@ def test_a_value_with_no_page_is_placed_only_when_there_is_one_window():
     assert report.unplaced == ["decl:policy.policy_number"]
 
 
-def test_values_no_window_reads_are_reported():
-    """The router did not route page 14, so the state notice is unreachable at
-    serving too. Counting it is how a page rule that misses content shows up."""
-    _routed, plans = _plans()
-    assert unread_values(LABEL, LOB, plans) == ["state_notices[0].state"]
+def test_no_value_is_left_on_a_page_no_window_reads():
+    """Page 14 carries no section signal and is read all the same: a value
+    there was unreachable under page selection, at training and at serving."""
+    _pages, plans = _plans()
+    assert unread_values(LABEL, LOB, plans) == []
+    # Still counted when a plan leaves a page out.
+    assert "state_notices[0].state" in unread_values(LABEL, LOB, [p for p in plans if 14 not in p.pages])
 
 
 # --------------------------------------------------------------------------
@@ -178,7 +191,7 @@ def test_a_policy_becomes_one_row_per_window_per_mode():
         (p.group, list(p.pages)) for p in plans
     ]
     assert all(r["task"] for r in rows)
-    assert any("unread state_notices[0].state" in d for d in details)
+    assert not any("unread" in d for d in details)
 
 
 def test_a_row_carries_the_documents_page_markers():
@@ -303,7 +316,7 @@ def test_serving_returns_one_canonical_document(client, lob, response, carrier_n
     assert result.schema_valid
     leaf = result.extraction["carrier"][carrier_name]
     assert set(leaf) == {"raw", "parsed", "confidence", "page_ref", "flagged"}
-    assert result.pages_used == [1, 7, 8, 12]
+    assert result.pages_used == list(range(1, TOTAL + 1)), "every page is read"
     # Every window echoed the same declarations: one value, not several.
     assert not any(f.endswith(":merge_conflict") for f in result.review_flags)
 

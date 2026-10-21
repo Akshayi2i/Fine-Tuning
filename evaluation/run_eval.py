@@ -385,7 +385,6 @@ def score_subset(
         score_false_nulls,
         score_hallucinations,
         score_page_refs,
-        score_page_selection,
     )
     from evaluation.metrics.field_accuracy import score_all_list_fields, score_fields
     from training.vit_gate import classify_error
@@ -657,18 +656,6 @@ def score_subset(
         "hallucination_rate": _hallucination_rate(scored, common_model, score_hallucinations),
         "additional_fields_hallucination_rate": _hallucination_rate(
             scored, common_model, score_hallucinations, overflow=True),
-        # Only meaningful where routing ran. A document that sent every page has
-        # no selection to score, and counting it as perfect recall would dilute
-        # the metric toward 1.0 with documents that never exercised it.
-        "page_selection_recall": score_page_selection([
-            (
-                metadata.get("source_id", ""),
-                metadata.get("provenance_pages") or [],
-                metadata.get("selected_pages") or [],
-            )
-            for _, _, metadata in scored
-            if metadata.get("provenance_pages")
-        ]).recall if any(m.get("provenance_pages") for _, _, m in scored) else None,
         # Emitted only where reconciliation ran — Loss Runs. gate_metrics()
         # weights by the documents that produced each metric, so a metric that
         # only one doc type can produce still reaches the gate, weighted by that

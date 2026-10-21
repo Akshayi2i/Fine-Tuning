@@ -46,7 +46,7 @@ from common.canonical import (
     with_system_fields,
     without_bare_values,
 )
-from common.constants import DEFAULT_LONG_DOC_PAGE_THRESHOLD, DEFAULT_REVIEW_CONFIDENCE_THRESHOLD
+from common.constants import DEFAULT_REVIEW_CONFIDENCE_THRESHOLD
 from common.schemas import (
     is_canonical,
     is_common_model,
@@ -62,7 +62,6 @@ from inference_core.model_runner import Generation, LoadedModel, generate, gener
 from inference_core.span_map import SpanMapError, map_field_spans
 from serving.adapter_router import Route, RoutingError, route
 from serving.doc_type_classifier import Classifier
-from serving.page_router import plan_pages
 
 log = logging.getLogger(__name__)
 
@@ -373,7 +372,6 @@ def _extract_policy_windows(
     route_: Route,
     lob: str | list[str] | None,
     *,
-    page_threshold: int,
     latencies: list[float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], float | None, list[int], list[str]]:
     """Read a canonical policy window by window, then merge.
@@ -397,7 +395,7 @@ def _extract_policy_windows(
     it could not read. Only when no window at all succeeds is the request an
     error.
     """
-    from data_pipeline.dataset_builder.policy_windows import plan_windows, routed_pages
+    from data_pipeline.dataset_builder.policy_windows import pages_to_read, plan_windows
     from serving.policy_merge import PolicyWindow, merge_policy_windows
 
     image_only = request.modality_mode == "image_only"
@@ -406,11 +404,9 @@ def _extract_policy_windows(
     if not image_only:
         texts = dict(request.page_texts) or dict(enumerate(_all_page_texts(request), start=1))
 
-    # Routed on the same text, by the same rule, as the training rows were:
-    # every page when there is no OCR text to score.
-    routed, declarations_page = routed_pages(
-        texts or None, page_count, page_threshold=page_threshold
-    )
+    # Every page, with the declarations found in the same text by the same
+    # rule as the training rows were.
+    routed, declarations_page = pages_to_read(texts or None, page_count)
     pending: list[tuple[str, list[int]]] = [
         (plan.group, list(plan.pages)) for plan in plan_windows(lob, routed, declarations_page)
     ]
@@ -483,17 +479,13 @@ def _extract_policy_windows(
     return merged.extraction, merged.spans, round(wall_ms, 1), sorted(routed), flags
 
 
-def _likely_missed(extraction: dict[str, Any], page_texts: dict[int, str], lob: Any, page_threshold: int) -> list[str]:
+def _likely_missed(extraction: dict[str, Any], page_texts: dict[int, str], lob: Any) -> list[str]:
     """Declarations fields left empty whose label and a value of their type open
-    a line of the pages the declarations windows read (serving.conventions)."""
-    from common.schema_sections import groups_for, pages_for, reads_declarations
-    from data_pipeline.dataset_builder.policy_windows import routed_pages
+    a line of a page the declarations windows read - every page
+    (serving.conventions)."""
     from serving.conventions import declaration_objects, likely_missed
 
-    routed, declarations_page = routed_pages(page_texts, len(page_texts), page_threshold=page_threshold)
-    pages = sorted({page for group in groups_for(lob) if reads_declarations(group)
-                    for page in pages_for(group, list(routed), declarations_page=declarations_page)})
-    return likely_missed(extraction, page_texts, pages, declaration_objects(lob))
+    return likely_missed(extraction, page_texts, sorted(page_texts), declaration_objects(lob))
 
 
 #: A coverage served with no unit while the answer holds several units of a kind.
@@ -1037,11 +1029,9 @@ def extract(
     thresholds: Any = None,
     classifier_threshold: float = 0.70,
     review_threshold: float = DEFAULT_REVIEW_CONFIDENCE_THRESHOLD,
-    page_threshold: int = DEFAULT_LONG_DOC_PAGE_THRESHOLD,
     strict_schema: bool = True,
     plan: Any = None,
     fallback_doc_type: str | None = None,
-    long_doc_types: tuple[str, ...] = ("policy",),
     release_runtimes: Mapping[str, Any] | None = None,
     detect_lob: bool = False,
     base_model_loaded: bool = True,
@@ -1058,9 +1048,6 @@ def extract(
             one, a document type no promoted release covers is refused HERE,
             before any generation — extracting it would run a model that never
             trained on the type against a schema it has never seen.
-        long_doc_types: which types get page routing. The page signals are policy
-            vocabulary (declarations, schedule, endorsement), so routing a Loss
-            Run through them spends a pass to select every page anyway.
         detect_lob: read the line of a policy that arrives with none
             (:func:`_resolve_lob`). Off by default, and in the endpoint's config,
             until ``scripts/measure_lob_detection.py`` has measured the reading on
@@ -1162,12 +1149,8 @@ def extract(
     common_model = canonical and route_.schema_doc_type == "policy" and is_common_model(
         route_.schema_doc_type, route_.schema_acord_form, lob)
 
-    # --- page routing, for long documents only -----------------------------
-    routes_pages = route_.doc_type in long_doc_types
-    page_plan = (
-        plan_pages(request.page_texts, page_threshold=page_threshold)
-        if request.page_texts and routes_pages else None
-    )
+    # Every page of every document is read (decision 2026-10-19): a policy in
+    # windows, a long Loss Run in windows, anything else in one call.
     latency: float | None = None
     merge_flags: list[str] = []
     reconciliation: dict[str, Any] | None = None
@@ -1181,7 +1164,7 @@ def extract(
         # Always, whatever the length: a threshold computed from prompt length
         # would move between corpus builds and re-shape documents silently.
         extraction, all_spans, latency, pages_used, merge_flags = _extract_policy_windows(
-            request, model, route_, lob, page_threshold=page_threshold, latencies=window_latencies,
+            request, model, route_, lob, latencies=window_latencies,
         )
         if common_model:
             # The conventions the training labels follow, applied to the merged
@@ -1198,30 +1181,12 @@ def extract(
             extraction, all_spans = conformed.extraction, conformed.spans
             merge_flags.extend(conformed.flags)
             if page_texts:
-                merge_flags.extend(_likely_missed(extraction, page_texts, lob, page_threshold))
+                merge_flags.extend(_likely_missed(extraction, page_texts, lob))
     elif len(windows) > 1:
         # A Loss Run longer than one window: read by window, merged and
         # reconciled. One that fits a window is read in one call below.
         extraction, all_spans, latency, pages_used, merge_flags, reconciliation = (
             _extract_lossrun_windows(request, model, route_, windows, latencies=window_latencies))
-    elif page_plan and page_plan.routed:
-        # The selected pages go in **one** call, not one call per page. Sending
-        # them separately asked the model to produce a whole-document JSON from a
-        # single page — a shape it never trained on — and stopped it from seeing
-        # that a table on page 9 continues on page 14. Interleaving makes a
-        # routed request a subsequence of the full document rather than a
-        # different structure.
-        pages_used = page_plan.pages
-        page_images = [_image_for(request, page) for page in pages_used]
-        page_ocr = (
-            None if request.modality_mode == "image_only"
-            else [request.page_texts.get(page) or _EMPTY_PAGE for page in pages_used]
-        )
-        extraction, all_spans, latency = _generate_once(
-            model, route_, page_images, page_ocr, request.modality_mode,
-            page_numbers=pages_used, total_pages=len(request.page_texts) or len(pages_used),
-            lob=lob,
-        )
     else:
         # Derived from the images actually sent, not from page_texts: an
         # image_only document has no page_texts, and defaulting to [1] made

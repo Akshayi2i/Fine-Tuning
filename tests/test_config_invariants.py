@@ -122,14 +122,13 @@ def test_every_task_is_budgeted_in_both_shared_files():
 
 
 def test_thumbnail_tasks_cost_an_order_of_magnitude_less_than_extraction():
-    """classify and page_select recognise layout, not small print. Paying
-    extraction resolution for that is the most wasteful thing this pipeline
-    could do — page_select alone sends up to 60 pages in one call."""
+    """classify recognises layout, not small print. Paying extraction
+    resolution for that is the most wasteful thing this pipeline could do."""
     thumbnail = config.vision_for_task("classify")["max_pixels"]
     extraction = config.vision_for_task("extract")["max_pixels"]
     assert thumbnail * 5 < extraction, (
         f"classify at {thumbnail:,}px vs extract at {extraction:,}px — a thumbnail task "
-        "budgeted near extraction resolution multiplies the page_select cost by ~10x"
+        "budgeted near extraction resolution multiplies its cost by ~10x"
     )
 
 

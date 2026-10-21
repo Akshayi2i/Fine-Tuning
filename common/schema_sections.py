@@ -156,42 +156,49 @@ def groups_for(lob: str | list[str] | None = None) -> tuple[str, ...]:
     return tuple(name for name in group_names(lob) if sections_for(name, lob))
 
 
+#: The page rules a group may declare (configs/schema_sections.yaml).
+PAGE_RULES = ("every", "declarations")
+
+
 def reads_declarations(group: str) -> bool:
-    """Whether ``group`` reads the declarations pages rather than the routed set."""
-    return str(_rule(group)["pages"]) == "declarations"
+    """Whether ``group``'s first window is the declarations pages, read together."""
+    return _page_rule(group) == "declarations"
 
 
-def pages_for(
-    group: str,
-    routed_pages: list[int],
-    *,
-    declarations_page: int | None = None,
-) -> list[int]:
-    """The pages this group reads, out of the routed set.
-
-    ``routed`` groups read all of them. The declarations group reads the leading
-    pages plus, when it falls outside them, the page the declarations were
-    actually found on.
-
-    That last clause is the difference between working and not on scanned
-    intake. A policy that opens with a fax cover sheet or a billing notice has
-    its declarations on page 4 or 5; a group pinned to pages 1-3 would never ask
-    for the policy-level fields, and every one of them would come back null on
-    exactly the documents most likely to be messy.
-    """
+def _page_rule(group: str) -> str:
     rule = str(_rule(group)["pages"])
-    if rule == "routed":
-        return sorted(set(routed_pages))
-    if rule != "declarations":
+    if rule not in PAGE_RULES:
         raise SectionMapError(f"group {group!r} declares an unknown page rule {rule!r}")
+    return rule
 
+
+def pages_for(group: str, pages: list[int]) -> list[int]:
+    """The pages this group reads: every one of them (decision 2026-10-19).
+
+    Every page, chunk by chunk, never selected pages - for every group. A page
+    no group read was a page whose values were silently missing.
+    """
+    _page_rule(group)
+    return sorted(set(pages))
+
+
+def leading_pages(group: str, pages: list[int], *, declarations_page: int | None = None) -> list[int]:
+    """The pages a declarations group reads together in its first window.
+
+    The leading pages plus, when it falls outside them, the page the
+    declarations were actually found on. That last clause is the difference
+    between working and not on scanned intake: a policy that opens with a fax
+    cover sheet or a billing notice has its declarations on page 4 or 5, and
+    reading them apart from the leading pages would split one block in two.
+    Empty for every other group.
+    """
+    if _page_rule(group) != "declarations":
+        return []
     leading = int(_map()["pages"]["declarations_leading"])
-    pages = {p for p in routed_pages if p <= leading}
-    if declarations_page and declarations_page in routed_pages:
-        pages.add(declarations_page)
-    # Never empty: a routed set that somehow holds no leading page still has to
-    # be asked for the policy-level fields somewhere.
-    return sorted(pages) or sorted(routed_pages)[:1]
+    found = {p for p in pages if p <= leading}
+    if declarations_page and declarations_page in pages:
+        found.add(declarations_page)
+    return sorted(found) or sorted(pages)[:1]
 
 
 def array_key(section: str, lob: str | list[str] | None = None) -> tuple[str, ...]:
