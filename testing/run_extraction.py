@@ -341,9 +341,15 @@ def document_request(
     under ``processed/``, the label under ``golden-labels/`` - so the document is
     read exactly as serving reads one. The gold label is ``None`` when the
     document has none: the extraction still runs, and is not scored.
+
+    A form's edition left inside its number moves to ``edition_date``, as the
+    label rules and the gate's golden eval read it: a gold imported before that
+    rule is not rewritten in Blob, and scored as stored it would count the
+    model's ``edition_date`` wrong for following the convention.
     """
     from artifact_registry import paths
     from common.lob import merge_line
+    from data_pipeline.ingestion.label_rules import split_form_editions
     from training.stage_data import localize_keys
 
     meta_key = paths.ocr_meta(doc_type, source_id, tenant_id)
@@ -367,6 +373,8 @@ def document_request(
         metadata = client.read_json(label_meta_key)
     golden_key = paths.golden_label(doc_type, source_id, tenant_id)
     golden = client.read_json(golden_key) if client.exists(golden_key) else None
+    if golden is not None:
+        split_form_editions(golden)
 
     request = ExtractionRequest(
         source_id=source_id,

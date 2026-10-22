@@ -114,6 +114,23 @@ def _imported_document(client, source_id="policy_0001", tenant="t1"):
                       {"policy": {"policy_number": {"raw": "HO-1", "parsed": "HO-1", "page_ref": [1]}}})
 
 
+def test_a_gold_scored_by_the_harness_keeps_one_form_edition_convention(client, tmp_path):
+    """As the gate's golden eval reads it: an edition left inside a form number
+    (a gold imported before the rule) is scored from edition_date."""
+    from testing.run_extraction import document_request
+
+    _imported_document(client)
+    envelope = {"raw": "CG 00 01 04 13", "parsed": "CG 00 01 04 13", "page_ref": [2]}
+    client.write_json(paths.golden_label("policy", "policy_0001", "t1"),
+                      {"forms_and_endorsements": [{"form_number": envelope}]})
+
+    _, golden = document_request(client, "policy_0001", doc_type="policy", tenant_id="t1",
+                                 images_root=tmp_path / "pages")
+    row = golden["forms_and_endorsements"][0]
+    assert row["form_number"]["raw"] == "CG 00 01"
+    assert row["edition_date"]["parsed"] == "04/13" and row["edition_date"]["page_ref"] == [2]
+
+
 def test_the_extraction_command_runs_each_document_through_serving_with_the_adapter(client, tmp_path):
     from testing.run_extraction import run_batch
 
