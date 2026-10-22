@@ -37,8 +37,10 @@ python -m orchestration.run finetune --input ./intake --corpus-version v1 --out-
 
 # 2  quantize -> calibrate -> GATE -> push real weights + release bundle to Azure Blob
 python -m orchestration.run package --version v2 --release-id release-2026.11.1 --formats bf16
-#    a release that improves no primary metric needs --fixes-defect "<ticket>"; a gate on an eval set
-#    frozen with --allow-small is capped at interim
+#    a release that improves no primary metric needs --fixes-defect "<ticket>" (scope=TICKET when several
+#    scopes run; a blank or placeholder value is refused). A scope scored on fewer than 150 frozen documents
+#    of a type it covers is capped at interim. A failed gate ships only with a written override:
+#    --override-approver "<person>" --override-reason "<why, 20+ chars>" --override-gate <gate> (one scope)
 
 # 3  extraction through the serving pipeline, on documents already imported and OCR'd
 python -m orchestration.run extract --model base|v1|v2 --tenant T --source-ids policy_0001 policy_0002
@@ -106,8 +108,12 @@ with a list of anything still to do (the Blob login, MinerU's weights).
 Everything is on `/workspace` because the container disk is wiped when the pod
 stops. For Blob, prefer a SAS login (`AZURE_STORAGE_ACCOUNT_URL` +
 `AZURE_STORAGE_SAS_TOKEN`, used when both are set) over the connection string,
-which carries the account key. Keep either in **double quotes** in `.env`: it is
-sourced by bash, which would otherwise cut it at the first `;` or `&`.
+which carries the account key. A container SAS reaches one container only: give the
+raw container its own token in `AZURE_RAW_SAS_TOKEN`, or the one token must be an
+account SAS, which reaches the raw PDFs from every pod that holds it. Keep each in
+**double quotes** in `.env`: it is sourced by bash, which would otherwise cut it at
+the first `;` or `&` (the bootstrap checks `export` and indented lines too, and lists
+half a SAS login under "Still to do").
 
 **OCR runs first, in its own environment**, then the pipeline:
 
@@ -248,20 +254,26 @@ as they are, full dates shifted by the recorded `date_shift_days`, a replaced id
 known (else left out), amounts only where the template kept them, table rows matched on unchanged values and never
 duplicated. Every merged label must pass the schema. After OCR, the audit checks every value against the page.
 
-**A gold a model drafted counts only once a person reviewed it.** Frontier models are never used for gold,
-synthetic or training data (decision 2026-10-19). A label whose metadata names a `draft_backend`, or whose
-`fideon:provenance` notes say a model drafted it, needs `reviewer_id` and `review_date` in its
-`metadata.json`; the audit, the import, the preflight and the corpus build refuse it otherwise.
+**Every gold needs a review record.** Frontier models are never used for gold, synthetic or training data
+(decision 2026-10-19), and a gold trains, is frozen into the eval set or is scored only when its
+`metadata.json` names who reviewed it and when: `reviewer_id` (a person, not "pending" or "N/A") and
+`review_date` (an ISO date, not in the future) (decision 2026-10-22). Nothing is guessed from the gold's
+notes. A synthetic twin carries its seed's record (`review_inherited_from`, written by `prepare_bundles`), so a
+twin of an unreviewed seed is unreviewed too. Real documents delivered without a manifest take theirs from
+`<input>/reviews.csv` (`document,reviewer_id,review_date,draft_backend`). The audit, the import, the preflight,
+the corpus build, the freeze, the gate and the harness all refuse a gold without one. A set frozen before the
+freeze carried records is fixed with `freeze-eval-set --tenant T --mark-reviewed`.
 
 **The delivered split is used as given.** The generator put each source document and its ten synthetic twins
 in one of Train/Val/Test, so a test layout is one the model never trained on. The corpus build takes that
 split when every document carries one (`split_groups.assign_delivered_splits`): one family per source, a source
 in two splits refused, synthetic twins allowed in val and test only then. A split the build draws itself holds
-one carrier out of train and val per line of business, only in a line naming 10 or more carriers. The gate report adds a
+one carrier out of train and val per line of business, only in a line naming 10 or more carriers. On policies, a
+placeholder carrier ("N/A", "Unknown") is no carrier, and a carrier seen through a synthetic family is never the one held out. The gate report adds a
 **`real_only`** section, the same metrics over the real documents alone, and the composition of the set.
 
 It reports blockers (one PDF + `golden.json` + `metadata.json` per folder, PDF readable, `lob` valid and in
-scope, `page_ref` inside the PDF, a model-drafted gold reviewed, no form edition left inside a form number),
+scope, `page_ref` inside the PDF, a review record, no form edition left inside a form number on a common-model line),
 checks each labelled value against the text on its page, checks formats and
 totals, and draws a 5% spot-check sample per line. Fix and re-run until it exits 0. The report and CSVs go to
 `data/audit_report/`, which is git-ignored: they quote label values.
@@ -381,12 +393,15 @@ test suite is not evidence about extraction quality.
   the loss curve looks normal.
 - **The alias registry is never used at inference.** It is labeling and
   evaluation material. The model does the semantic mapping.
-- **The promotion gate has no override flag.** The one exception is a recorded
-  written override (named approver, reason, waived gates), stored with the release.
+- **The promotion gate has no bypass flag.** The one way past it is a written
+  override (`--override-approver`, `--override-reason`, `--override-gate`, all three
+  together), recorded as a waiver in the gate decision and the release bundle.
 - **Every page is read, chunk by chunk, never selected pages** - in training and
-  in serving, by one window planner (decision 2026-10-19).
+  in serving, by one window planner (decision 2026-10-19). A window whose pages'
+  own text would not fit its call is split into windows that do (decision
+  2026-10-22), and a corpus built with another window plan neither trains nor packages.
 - **No frontier model touches the data.** Drafts come from the self-hosted
-  Qwen3-VL only, and a drafted gold trains or scores only once reviewed.
+  Qwen3-VL only, and no gold trains or scores without a review record.
 - **GPU only.** Every step that runs a model refuses to start without CUDA;
   GGUF is an optional edge export, not a deployment target.
 

@@ -18,7 +18,7 @@
 > |---|---|---|
 > | **Every page, chunk by chunk, never selected pages.** Every window group reads every page; the declarations group's first window is still pages 1–5 plus the detected declarations page. Page routing, the page threshold, `long_doc_types` and the `page_select` task are gone | A page no group read was a page whose values were silently missing | 00, 01, 05, 06, 07, 08, 11, 12, 14 |
 > | **No latency SLA is agreed** — latency is recorded, not gated | No target has been set | 00 |
-> | **No frontier model for gold, synthetic or training data**; a gold a model drafted counts only once a person reviewed it | The compliance position. It overrides Fideon SPEC_21's model-drafted seed golds | 00, 01, 03, 04, 05, 13, 15 |
+> | **No frontier model for gold, synthetic or training data**; every gold needs a review record (decision 2026-10-22); a twin inherits its seed's | The compliance position. It overrides Fideon SPEC_21's model-drafted seed golds | 00, 01, 03, 04, 05, 08, 12, 13, 15 |
 > | **One carrier held out per line of business, only in a line naming 10 or more carriers** | Replaces "2 carriers per doc type once 6 exist" | 05, 08, 15 |
 > | **The production tier stays at field match 0.92** | Unchanged | 08 |
 > | **GPU only**; GGUF stays an optional edge export | The endpoint runs vLLM on a GPU | 10 |
@@ -34,7 +34,7 @@
 > | **Task decomposition**: classify, extract, lossrun header/rows/totals, policy section windows (v2.1's `page_select` was removed in v2.4: every page is read) | Long Loss Runs and Policies do not fit one call | 05, 11, 12 |
 > | **Group-level splits** (carrier, template, account) + held-out carriers | Source-document splits leak renewals and shared templates | 05, 08 |
 > | **Per-epoch modality sampling** | Three rows per document produced 33/33/33, not 50/20/30, and tripled effective epochs | 05, 06 |
-> | **Gate**: absolute floors + paired-bootstrap non-inferiority + a recorded override | "Beat previous on every metric within 0.001" could not be passed at pilot volume, and had no override | 08, 13 |
+> | **Gate**: absolute floors + paired-bootstrap non-inferiority + a recorded written override, given with all three `--override-*` flags | "Beat previous on every metric within 0.001" could not be passed at pilot volume, and had no override | 08, 13 |
 > | **Confidence**: per-field-type feature calibrators, risk-controlled thresholds | Min-logprob is length-biased; a fixed 0.70 was tied to no measured error rate | 09, 11 |
 > | **Serving formats**: bf16 → FP8 on vLLM; GGUF demoted to an edge export | GGUF is llama.cpp's format and the endpoint runs vLLM | 10, 12, 13 |
 > | **13 pipeline stages**, gate after merge/quantize/calibrate | The gate scores the merged model in each serving format, and reads a metric that does not exist until thresholds are chosen | 13 |
@@ -209,9 +209,9 @@ The same real-world field appears under many surface labels across documents. Th
 | MinerU | **MinerU 3.4.5, pipeline backend** (layout, PP-OCRv6 OCR and table models, no VLM), on the GPU, on pipeline weights pinned to a fixed PDF-Extract-Kit-1.0 revision. Version **pinned per corpus version**; inference must use the same version as the corpus, and a corpus holding documents read by two MinerU versions is refused (§7 below, arch §8a). |
 | Prompt template | Versioned alongside the schema registry; **training-time and inference-time prompts must render identically**; a template change forces a corpus rebuild (arch §7). |
 | Page reading | **Every page, chunk by chunk, never selected pages** (decision 2026-10-19). A policy is read as section group × page window over all its pages, planned by one function in training and serving; the declarations group's first window is pages 1–5 plus the detected declarations page, read together (§13.1). |
-| Gold and training data | **No frontier model, ever** (decision 2026-10-19): drafts come from the self-hosted Qwen3-VL only, and a gold a model drafted trains or scores only once a person reviewed it (`reviewer_id` and `review_date` in its metadata; IMPL-04). |
+| Gold and training data | **No frontier model, ever** (decision 2026-10-19): drafts come from the self-hosted Qwen3-VL only, and every gold needs a review record to train, be frozen or score — `reviewer_id` and `review_date` in its metadata, a twin's inherited from its seed (decision 2026-10-22; IMPL-04). |
 | Latency | Recorded per release (P95 per adapter, peak GPU memory), **not gated**: no latency SLA is agreed (decision 2026-10-19). |
-| Release tier | **production** at field match ≥ 0.92 (kept, decision 2026-10-19), **interim** below that or when the eval set was frozen below its minimum size (IMPL-08). |
+| Release tier | **production** at field match ≥ 0.92 (kept, decision 2026-10-19), **interim** below that or when the scope was scored on fewer than 150 frozen documents of a type it covers (IMPL-08). |
 
 ---
 
@@ -558,6 +558,7 @@ A cycle is run through **three commands plus one umbrella command**, all from `o
 ```bash
 python -m orchestration.run finetune --input ./intake --corpus-version v1 --out-version v2 [--scope personal_lines] [--tenant T]
 python -m orchestration.run package  --version v2 --release-id release-2026.10.1 --formats bf16 [--fixes-defect "<ticket>"]
+python -m orchestration.run package  --version v2 --release-id release-2026.10.1 --override-approver "A. Reviewer" --override-reason "<why, 20+ characters>" --override-gate <failed gate>   # a written waiver, one scope
 python -m orchestration.run extract  --model base|v1|v2 --tenant T --source-ids policy_0001 policy_0002
 python -m orchestration.run extract  --model base --adapter <adapter folder> --tenant T --split test --corpus v1
 python -m orchestration.run all      --input ./intake --out-version v2 --release-id release-2026.10.1
@@ -576,7 +577,7 @@ returns with the job's name; see §13.
 **Three facts this surface has to respect, and does:**
 
 1. **Labeling is human work inside the span of command 1.** `finetune` ingests and OCRs everything, builds the corpus from only the source_ids that have a validated `golden.json`, and **reports the unlabeled backlog**. It aborts before training only when the labeled set is below `--min-labels-per-type` (default 25, matching IMPL-04's day-zero rule).
-2. **The gate is a hard stop inside command 2.** `package` quantizes and calibrates first — the gate reads `auto_accept_error_rate`, which does not exist until thresholds are chosen — then runs the evaluation gate on the frozen golden set through the serving pipeline. Non-inferiority is a paired bootstrap over the documents the candidate and the promoted release both scored, and a release that improves no primary metric is blocked unless it names the defect it fixes (`--fixes-defect`). A failed gate stops before anything is pushed and exits non-zero, so `all` never publishes a model that failed it. The release's routing check also runs before the push.
+2. **The gate is a hard stop inside command 2.** `package` quantizes and calibrates first — the gate reads `auto_accept_error_rate`, which does not exist until thresholds are chosen — then runs the evaluation gate on the frozen golden set through the serving pipeline. Non-inferiority is a paired bootstrap over the documents the candidate and the promoted release both scored — weighted as the metric counts them, and only when both were scored on the same frozen set of the tenant; otherwise a point comparison, with the reason in the decision's warnings — and a release that improves no primary metric is blocked unless it names the defect it fixes (`--fixes-defect`, per scope when several run). The only way past a failed gate is a written override, given with `--override-approver`, `--override-reason` and `--override-gate` (all three, one scope); there is no `--force`. A failed gate stops before anything is pushed and exits non-zero, so `all` never publishes a model that failed it. The release's routing check also runs before the push.
 3. **Command 1 launches one training job per scope.** Stages 1–4 build the corpus once and every scope shares it (`SHARED_STAGES`); stages 5–11 run once per scope (`PER_SCOPE_STAGES`, `--scope` is repeatable), each an independent adapter. v1 fanned out into 1 + N sequentially, because each per-type adapter sat on top of the Foundation. That topology is gone (arch v2.1 §4.1): vLLM applies one LoRA per request, so a Foundation LoRA and a per-type LoRA could never both be active on a call.
 
 Every stage records its wall time (`wall_seconds`), and the run report so far is written after every stage to `$FIDEON_LOG_DIR` (default `/workspace/logs`, when that folder exists) as `run-<command>-<scope>-<tenant>-<version>.json`, so two scopes or tenants trained under one version tag keep their own.
@@ -663,13 +664,18 @@ What the build does now that the sections above did not describe. Each module sp
   extra fields are dropped; a form's edition printed inside its form number in an unambiguous shape moves to
   the form's empty `edition_date` (parsed `MM/YY`; `label_rules.split_form_edition`), which changes training
   targets; a value with figures no page prints is listed in the metadata (`unprinted_values`) and the windows
-  holding one are left out of the corpus.
+  holding one are left out of the corpus. These rules hold on a common-model policy line only
+  (`label_rules.label_rules_apply`), where serving applies them too; there a gold stored before the edition
+  rule is read under it (`load_golden_label`), by the corpus build as by the gate and the harness. Each
+  bundle's `metadata.json` carries its review record: a real document's own, a twin's its seed's
+  (`review_inherited_from`; `reviews.csv` for real documents alone).
 - **Golds and who drafted them** (decision 2026-10-19): frontier models are never used for gold, synthetic or
   training data — pre-annotation has only the self-hosted `base_qwen3vl` and `own_finetuned` backends, and a
-  frontier backend asked for by name is refused. A gold a model drafted (metadata `draft_backend`, or its own
-  `fideon:provenance` notes) counts only once a person reviewed it (`reviewer_id` and `review_date`;
-  `export_golden_labels.review_problem`): the import, the pre-upload audit, the preflight and the corpus
-  build all refuse one that was not.
+  frontier backend asked for by name is refused. **Every gold needs a review record** (decision 2026-10-22):
+  a real `reviewer_id` and an ISO `review_date` not in the future, read from its metadata alone
+  (`export_golden_labels.review_problem`); a twin inherits its seed's. The import, the pre-upload audit, the
+  preflight, the corpus build, the freeze and the gate's golden eval refuse a gold without one; the harness
+  extracts it but does not score it.
 - **What a window is taught** (`policy_windows`): its target cites only its own pages; a common-model row
   travels only with a printed value on those pages, its ids renumbered from 1 and a reference to a row the
   window cannot see left out (counted as dangling); a coverage row is taught only on windows that show its
@@ -678,7 +684,8 @@ What the build does now that the sections above did not describe. Each module sp
   where its pages print them; `text_sections` never.
 - **Splits**: group-level, band per type, placement per line; lines under 5 documents train whole (§10). A
   drawn split holds one carrier out per line naming 10 or more carriers (lines under the minimum are recorded
-  as `lines_below_carrier_minimum`); a delivered split is used as given (no carrier hold-out by default); twin
+  as `lines_below_carrier_minimum`; on a policy only real carriers count — a placeholder such as "N/A" is no
+  carrier, and a carrier any synthetic family trains is never held out); a delivered split is used as given (no carrier hold-out by default); twin
   cap 20 per seed per render mode;
   rows carry `carrier`, `twin_index`, `render_mode`, `is_scanned`. The corpus build counts each answer with
   the base model's tokenizer (`cap_check.target_tokens`; a 1.25-padded estimate where it is not at hand), sets
@@ -687,8 +694,10 @@ What the build does now that the sections above did not describe. Each module sp
 - **The golden eval set is frozen once per tenant** at `golden-eval-set/{tenant}/` from that tenant's corpus
   test split (`python -m orchestration.run freeze-eval-set --corpus vN [--tenant T]`); refused twice, refused
   below 150 test documents per type (arch §15.4) unless `--allow-small`, and a set left at the old unscoped
-  root is refused with the move to make. Later builds exclude its documents and their families and split new
-  documents into train/val only.
+  root is refused with the move to make. A gold with no review record is refused before anything is copied;
+  each frozen document carries its record, and the gate refuses a frozen gold without one
+  (`freeze-eval-set --mark-reviewed` copies records into a set frozen earlier). Later builds exclude its
+  documents and their families and split new documents into train/val only.
 - **Scopes** (`configs/scopes.yaml`): `unified`, `policy`, `lossrun`, and two line-scoped policy adapters.
   `personal_lines` covers homeowners, personal_auto (classic auto is read as personal auto), dwelling_fire,
   ocean_marine, motorcycle, recreational_vehicle and personal_umbrella — **not flood**, and not a package of
@@ -702,9 +711,12 @@ What the build does now that the sections above did not describe. Each module sp
   and a real build with no val rows, or no test rows while the eval set is not yet frozen.
 - **Purge plans** report and never delete (`python -m data_pipeline.ingestion.pull_raw_pdfs --purge-plan
   SOURCE_ID`, `--tenant-purge-plan`): a document's raw, processed, label and frozen-eval-set prefixes, the
-  tenant's exports, the corpus versions to rebuild, and every run trained on it — with its weights and
-  releases, "needs retrain or delete" — since trained weights are not tenant-prefixed yet; a tenant's plan
-  covers every prefix in `paths.TENANT_SCOPED`.
+  tenant's exports, the delivered copies in `intake/` and on the pod's volume, the corpus versions to rebuild,
+  and every run trained on it — with its weights, staged copy, eval report, calibrator and releases, "needs
+  retrain or delete" — since trained weights are not tenant-prefixed yet; a tenant's plan covers every prefix
+  in `paths.TENANT_SCOPED`. Every prefix ends in `/`, so `policy_1` never reaches `policy_10`. A run that
+  continued from a checkpoint, or a per-type adapter on a listed Foundation, is listed too; a manifest that
+  cannot be read is listed "check by hand", naming the error type only.
 
 ### 13.3 Training, selection, merge, packaging
 - ms-swift 3 CLI; staged rows in ms-swift's own format on the pod volume; before launch the real tokenizer
@@ -732,10 +744,13 @@ What the build does now that the sections above did not describe. Each module sp
   corpus rebuild and retrain of both adapters before the next gate.
 - **`package`**: quantize → calibrate → evaluation gate on the tenant's frozen set through the serving
   pipeline → push. The gate pairs the candidate's per-document scores with the promoted release's
-  (`pipeline_dag.paired_document_scores`), so non-inferiority is a paired bootstrap and the improvement rule
-  is enforced (`--fixes-defect "<ticket>"` stands in for an improvement and nothing else). The release bundle
+  (`pipeline_dag.paired_document_scores`) when both were scored on the same frozen set of the tenant, so
+  non-inferiority is a paired bootstrap, weighted as each metric counts its documents, and the improvement
+  rule is enforced (`--fixes-defect "<ticket>"`, per scope, stands in for an improvement and nothing else;
+  a blank or placeholder value is refused). Reports that cannot be paired get a point comparison, with the
+  reason in the decision's warnings. The release bundle
   records the gate's metrics and tier (**production** at field match ≥ 0.92, **interim** below, or whenever
-  the eval set was frozen with `--allow-small`; none when blocked), latency P95 per adapter and peak GPU
+  the scope was scored on fewer than 150 frozen documents of a type it covers; none when blocked), latency P95 per adapter and peak GPU
   memory (recorded, not gated: no latency SLA is agreed), and a routing table built before anything is
   pushed: a line that cannot be routed, or a line the release trained for that would not reach it, stops the
   release. The published adapter is
@@ -760,7 +775,8 @@ What the build does now that the sections above did not describe. Each module sp
   `scripts/pod_bootstrap.sh`: GPU (every GPU counted)/CUDA 12.8 driver/mount/150 GB checks, `.env` keys
   (`MINERU_TOOLS_CONFIG_JSON=/workspace/mineru.json`, `MINERU_DEVICE_MODE=cuda`,
   `MINERU_MODEL_SOURCE=local`; a Blob login, either `AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`
-  or `AZURE_STORAGE_CONNECTION_STRING`, an unquoted value refused), **two environments** on the volume (`/workspace/venv` for training and
+  (with `AZURE_RAW_SAS_TOKEN` for the raw container) or `AZURE_STORAGE_CONNECTION_STRING`, an unquoted value
+  refused, `export` and indented lines included, half a SAS login listed as still to do), **two environments** on the volume (`/workspace/venv` for training and
   serving; `/workspace/venv-ocr` for MinerU, whose dependency set is kept apart from the training stack),
   MinerU's pinned pipeline weights (`scripts/download_mineru_models.sh`, which writes `mineru.json`; OCR
   refuses to run without it, and a MinerU 1.x config is refused), the pinned base model, the spike. OCR runs
@@ -768,13 +784,14 @@ What the build does now that the sections above did not describe. Each module sp
   documents are still pending.
 - **Before a real run**: `python -m data_pipeline.ocr_check` (labelled values against the OCR text),
   `python -m orchestration.preflight` (GPU, packages, base model, config invariants, disk, Azure, OCR done,
-  every model-drafted label reviewed, annotation agreement reported, and an in-memory corpus build;
+  every label with a review record, annotation agreement reported, and an in-memory corpus build;
   `--skip-corpus` when `finetune` follows in the same chain), and
   `python -m orchestration.smoke_run` (tenant `smoke`, version `v0`, `--scope`; a few sources per split with
   their twins; select → import → OCR → check → finetune, never freezing or packaging).
 - **Blob login** (`artifact_registry.blob_client.azure_from_environment`): a SAS token
   (`AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`) when both are set, else
-  `AZURE_STORAGE_CONNECTION_STRING`; half a SAS login is refused.
+  `AZURE_STORAGE_CONNECTION_STRING`; half a SAS login is refused. `AZURE_RAW_SAS_TOKEN` is the raw
+  container's own token; without it the one token serves both containers, so it must be an account SAS.
 - **Train/serve token parity is measured on the pod** (`tests/test_parity.py::test_template_token_parity`,
   GPU-marked; it skips without a GPU, the base weights, ms-swift and vLLM): the trainer's token ids against
   vLLM's prompt token ids, and each image's token count against the resize rule the sequence caps use.
@@ -799,8 +816,10 @@ What the build does now that the sections above did not describe. Each module sp
   paired by what the page prints, values inside rows counted, plus `reference_accuracy`,
   `coverage_code_accuracy` / `coverage_code_recall` and additional-fields recall/precision.
 - **Gate** (`evaluation/gating.py`): absolute floors plus non-inferiority, a paired bootstrap over the
-  per-document scores the eval report keeps (`EvalReport.per_document_scores()`; a point comparison, with a
-  warning, against a report written before they were kept). Conditional metrics — exempt only
+  per-document scores the eval report keeps (`EvalReport.per_document_scores()`), weighted so it tests the
+  metric the report states (`per_document_weights()`), and paired only on the same frozen set of the tenant;
+  a point comparison, with the reason in the decision's warnings, when the reports cannot be paired or fewer
+  than two documents measure a metric. Conditional metrics — exempt only
   from "was it measured" — include `table_f1` (floor 0.88, Loss Run scopes), `worst_line_field_match`
   (floor 0.85, once a line has 200 values scored) and `scanned_accuracy` (an eval set with no scans, such as
   the all-digital CGL originals, is not blocked on it; one the frozen baseline measured is required). The
@@ -810,7 +829,7 @@ What the build does now that the sections above did not describe. Each module sp
   invented values is gated: `hallucination_rate` is reported, no spec states a ceiling, and the gate path does
   not measure it — an open item.
 - **Serving guards**: `page_ref` is bounded to the pages a request shows (`common.schemas.with_page_bounds`);
-  `serving/conventions.py` holds the merged answer to the label conventions against every page's text — a
+  on a common-model line `serving/conventions.py` holds the merged answer to the label conventions against every page's text — a
   value no page prints is flagged `<path>:not_printed` (an extra field like it dropped on a born-digital
   document), a form's edition left in its number is moved to `edition_date` with the number's span, and an
   empty declarations field whose own label and a value of its type open a line of any page is flagged
@@ -850,3 +869,15 @@ What the build does now that the sections above did not describe. Each module sp
 - §11 now sits between §10 and §12, so the sections run in order.
 - §12: `--fixes-defect`; the gate's paired bootstrap; preflight checks reviewed labels.
 - §13: every page read and the declarations group's first window; the form-edition label rule; the frontier ban and reviewed golds; the per-line carrier rule; purge plans; the paired-bootstrap gate, `--fixes-defect` and the interim cap for a small eval set; SAS login; token parity on the pod; preflight's label checks; the served schema verdict; pilot targets from `PILOT_FLOORS`; no invented-value ceiling (open item).
+
+## Changes of 2026-10-22 (code review)
+
+- Purge plans: prefixes end in `/`; the delivered copies in `intake/` and on the pod's volume; each run's staged copy, eval report and calibrator; lineage (`continued_from`, per-type adapters); unreadable manifests listed by error type.
+- Blob login: `AZURE_RAW_SAS_TOKEN` for the raw container; the bootstrap's quoting and half-login checks.
+- Every page: a window whose pages' own text would not fit its call is split (decision 2026-10-22); the corpus manifest pins `window_plan_version`, and training and packaging refuse a policy corpus built with another.
+- Gate: per-document weights in the paired bootstrap; pairing only on the same frozen set and tenant; the written override on the command line; the interim cap per scope; `--fixes-defect` checked and per scope (IMPL-08, IMPL-13).
+- Gate: a metric fewer than two paired documents measure is a point estimate, with a warning; an unenforced improvement rule, and why reports were not paired, are warnings in the decision (IMPL-08).
+- Every gold needs a review record (decision 2026-10-22), in the v2.4 table, §2 and §13.2: a twin inherits its seed's; the freeze and the gate refuse a gold without one, and the harness does not score it.
+- §13.2: the label rules, the form-edition rule among them, hold on common-model policy lines only (`label_rules_apply`); a stored gold is read under the edition rule by the corpus build as by the gate; bundles carry the review record.
+- §13.2: on a policy the carrier hold-out counts real carriers only — a placeholder is no carrier, and a carrier a synthetic family trains is never held out; `freeze-eval-set --mark-reviewed`.
+- §13.4 and §13.5: the preflight's review-record check; serving's conventions on common-model lines.

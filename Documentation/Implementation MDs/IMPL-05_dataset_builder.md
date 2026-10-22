@@ -119,8 +119,9 @@ Writes `manifest.json` per corpus version — this is what training and eval rea
 - [ ] Every flat assistant JSON validates against its schema and contains `line_of_business`; every common-model window target validates against its slice of the model view.
 - [ ] A window target cites only the window's own pages; no window holding a value no page prints is built; no coverage row is taught on a multi-window window that shows none of its home pages.
 - [ ] Every page of a policy is in a window of every group planned for its line, whatever its length; the declarations group's (and `dtd`'s) first window is pages 1–5 plus the detected declarations page; the corpus holds no `page_select` rows.
-- [ ] A drawn split holds one carrier out of train and val per line only where the line's real documents name at least 10 carriers; a line with fewer holds none out and is recorded in `lines_below_carrier_minimum`. A delivered split stays as delivered.
-- [ ] A gold a model drafted (`draft_backend`, or its `fideon:provenance` notes) with no `reviewer_id` and `review_date` stops the corpus build.
+- [ ] A drawn split holds one carrier out of train and val per line only where the line's real documents name at least 10 carriers; a line with fewer holds none out and is recorded in `lines_below_carrier_minimum`. A delivered split stays as delivered. On a policy only real carriers count: a placeholder ("N/A", "Unknown", blank) is no carrier, a carrier any synthetic family trains is never held out, and a seed family's real carrier still counts toward the 10 (`GroupRecord.holds_real`); a delivered split asked for a hold-out counts and chooses the same way.
+- [ ] A gold with no review record (`reviewer_id`, `review_date`; decision 2026-10-22), or a twin whose seed has none, stops the corpus build.
+- [ ] On a common-model policy line the corpus build reads a stored gold exactly as the gate scores it — a form's edition moved out of its number (`load_golden_label`) — and on a self-contained line as stored.
 - [ ] No `lossrun_totals` example is built while the Loss Run schema declares no `totals`.
 - [ ] `corpus_manifest` warns loudly and names under-represented LoB values below the 20% target.
 - [ ] `corpus_manifest` reports `alias_coverage` per canonical field × surface label and warns on variants below the floor.
@@ -168,7 +169,14 @@ common-model line consecutive windows of a split run share `run_overlap_pages: 1
 (`common.schema_sections.run_overlap`, `_split_overlapping`), so a row printed across the boundary is whole in
 one window. A window's capacity is `expand_tasks.pages_per_extraction_call(..., group)`: the group task's
 `max_seq_len` minus its reserved `max_output_tokens` (`policy_declarations` 4,096, `policy_schedule` 12,288 in
-`configs/shared/sequence.yaml`) minus the sliced prompt, per page at the task's pixel budget plus OCR.
+`configs/shared/sequence.yaml`) minus the sliced prompt, per page at the task's pixel budget plus 700 OCR
+tokens. A window whose pages' **own** text would not fit that budget (policy-form wording runs to twice the
+700 tokens a page is charged) is split into the fewest windows that fit, as evenly as they allow
+(`expand_tasks.fit_windows_to_text`, `page_tokens`, `window_page_room`; decision 2026-10-22): the answer is
+reserved whole, as serving reserves it, and each page costs its image plus its marker and OCR text, counted as
+the cap check counts a row. A window that fits is left as planned. `image_only` rows carry no text and are sized
+by page count alone; a noisy row is planned on the clean text, since its corruption is drawn per window after
+the plan. The corpus manifest pins `window_plan_version` (`policy_windows.WINDOW_PLAN_VERSION`, now `"2"`).
 
 **Window targets** (`window_target`): the group's sections, narrowed to values printed on the window's pages.
 
@@ -180,10 +188,12 @@ one window. A window's capacity is `expand_tasks.pages_per_extraction_call(..., 
 - `text_sections` is never in a target (`EXCLUDED_FROM_TARGETS`). Each `additional_fields` entry is placed by
   its own `page_ref` — on a common-model line, by its own pages and its value's — trimmed the same way, and
   kept in SPEC_21's shape (label, value, section_hint, page_ref).
-- A value with no `page_ref` is taught as it is in a group read in one window (`plan.single`). In a group
-  read over several windows (`multi_window_sections`) it is given a page by `with_inferred_pages` when the
-  clean OCR prints it (at least 4 characters, on word boundaries) on exactly one page, and is otherwise
-  reported `unplaced`. Values printed only on pages no window of their group reads are reported `unread`;
+- A value with no `page_ref` is taught as it is in the window that takes such values
+  (`PolicyWindowPlan.holds_unpaged`): a group's only window, or the first window its declarations pages lead
+  (`decl`, and `dtd` where the line carries it), so a policy-level value the label rules could not place is
+  taught where the declarations print it. In any other group read over several windows
+  (`multi_window_sections`) it is given a page by `with_inferred_pages` when the clean OCR prints it (at least
+  4 characters, on word boundaries) on exactly one page, and is otherwise reported `unplaced`. Values printed only on pages no window of their group reads are reported `unread`;
   with every page read, that is now only a value citing a page the document does not have.
 
 On a **common-model** line, additionally:
@@ -214,28 +224,32 @@ On a **common-model** line, additionally:
 
 **Golds the build reads.**
 
-- **Reviewed golds only** (decision 2026-10-19: frontier models are never used for gold, synthetic or training
-  data): `pipeline_dag.load_labeled_documents` passes each gold and its metadata to
-  `export_golden_labels.review_problem`. A gold a model drafted — metadata `draft_backend`, or its own
-  `fideon:provenance` notes naming a model as the drafter or saying it was not reviewed — with no
-  `reviewer_id` and `review_date` in its metadata stops the build (`PipelineError`, naming it and up to five
-  others). A gold with neither a review record nor a drafting note loads. The import, the pre-upload audit and
-  the preflight refuse the same golds (IMPL-04, IMPL-13).
+- **Every gold needs a review record** (decision 2026-10-22; frontier models are never used for gold,
+  synthetic or training data, decision 2026-10-19): `pipeline_dag.load_labeled_documents` passes each gold's
+  metadata to `export_golden_labels.review_problem`. A gold with no real `reviewer_id` and `review_date`, or a
+  twin naming no seed it inherited its record from, stops the build (`PipelineError`: they "have no review
+  record", naming one and up to five others). The gold's notes and `draft_backend` decide nothing. The import,
+  the pre-upload audit, the preflight, the freeze and the gate refuse the same golds (IMPL-04, IMPL-08,
+  IMPL-13).
 - **One form-edition convention**: the label rules `prepare_bundles` applies to a common-model gold
   (`corrected_gold` → `label_rules.apply_label_rules`) move an edition printed inside a form number in a shape
   no form number takes (ISO's `AA 99 99 MM YY`, or a month and year in brackets after the number) to the
   form's empty `edition_date`, parsed `MM/YY`, with the number's pages and confidence
   (`label_rules.split_form_edition`); a filled `edition_date` is never overwritten. The import and the
-  pre-upload audit refuse a bundle that still carries one (`check_bundle`) and warn on a number that only may
-  end in one. This changed training targets: bundles prepared before it are prepared again and the corpus
-  rebuilt.
+  pre-upload audit refuse a bundle on a common-model line that still carries one (`check_bundle`,
+  `import_prepared`) and warn on a number that only may end in one; the rule holds there and nowhere else
+  (`label_rules.label_rules_apply`), so a self-contained line's numbers are trained as printed. A gold stored
+  before the rule is read under it, not rewritten (`export_golden_labels.load_golden_label` →
+  `label_rules.under_edition_rule`), so the build reads it exactly as the gate scores it. This changed training
+  targets: bundles prepared before it are prepared again and the corpus rebuilt.
 
 **Label checks before slicing** (`build_jsonl._policy_window_rows`, once per document, on the clean OCR text
 whatever the row's mode — the target is the same answer in every mode):
 
 - `label_verification.verified_label`: a value a rule added to a synthetic label (`fideon:filled`) is kept
   where the page prints it, re-paged when exactly one other page prints it, and left out otherwise; with no
-  OCR text it is kept and counted unverifiable;
+  OCR text it is kept and counted unverifiable; given the gold's `doc_type` and line (`doc_type=`, `lob=`) it
+  first reads the gold under the form-edition rule where that holds — the gate reads its frozen golds this way;
 - **unprinted values**: bundle metadata `unprinted_values` (written by `prepare_bundles`' label rules) lists
   label values no page prints; a window whose sections and pages hold one is **left out whole**
   (`_held_unprinted`) — taught, it is a value to invent; deleted, a printed value the search missed would be
@@ -287,6 +301,13 @@ tokenizer re-measures every staged row before launch (IMPL-06).
   (`lines_without_carrier`), or no carrier it can spare (`lines_not_held_out`). This replaces "2 carriers per
   doc type once 6 exist" and takes effect when a corpus is next split (a frozen eval set draws no new test
   documents);
+- **on a policy, real carriers only** (decision 2026-10-22): a placeholder carrier
+  (`split_groups.is_placeholder_carrier`: "N/A", "Unknown", "none", "TBD", "various", blank …) is no carrier — it
+  never counts toward the 10 and is never held out; a carrier any synthetic family trains in the line is never
+  the one held out (twins train wherever they sit, so its layouts are seen), though a family holding a real seed
+  and its twins counts its real carrier (`GroupRecord.holds_real`, set by `pipeline_dag.group_records`, which
+  names the family by its real member's carrier); a twins-only family counts for nothing. A delivered split
+  asked for a hold-out counts and chooses the same way. ACORD and Loss Runs are read as before;
 - `counts_by_line`, `train_only_lines` and the hold-out records are in the manifest's `split_assignment`; the
   run manifest's `split_policy` carries `lines_below_carrier_minimum` too.
 
@@ -390,3 +411,13 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 - Current implementation, golds: `load_labeled_documents` refuses an unreviewed model-drafted gold (`review_problem`); the form-edition label rule applied by `prepare_bundles` (`split_form_edition`).
 - Current implementation, Loss Runs: the `lossrun_totals` example only when the schema declares `totals`.
 - Split: one carrier per line, only in a line naming 10 or more carriers (`MIN_CARRIERS_PER_LINE_FOR_HELD_OUT`, `held_out_carrier_per_line`, `below_minimum`, `lines_below_carrier_minimum`), replacing 2 per doc type once 6 exist; the delivered split's opt-in hold-out takes the same minimum.
+
+## Changes of 2026-10-22 (code review)
+
+- Windows sized by their pages' own text (decision 2026-10-22): a window that would not fit its call is split into the fewest that fit, as evenly as they allow (`fit_windows_to_text`); a dense policy is read, never set aside. More, smaller windows on text-heavy policies, so a longer run.
+- A value with no `page_ref` is taught in the window the declarations lead, or a group's only window (`PolicyWindowPlan.holds_unpaged`), not dropped from every window.
+- The corpus manifest pins `window_plan_version` (`policy_windows.WINDOW_PLAN_VERSION`, `"2"`); training and packaging refuse a policy corpus built with another plan (IMPL-13).
+- Golds: every gold needs a review record to train (decision 2026-10-22), a twin its seed's; the build's refusal says they "have no review record".
+- Golds: the corpus build reads a stored gold under the form-edition rule where it holds (`load_golden_label`), exactly as the gate scores it; on a self-contained line the edition stays in the number. `label_verification.verified_label` takes `doc_type=` and `lob=` to do the same.
+- Split, policies only: a placeholder carrier is no carrier; a carrier any synthetic family trains is never held out; a seed family's real carrier counts toward the 10 (`GroupRecord.holds_real`); a delivered split counts and chooses from real carriers.
+- Acceptance checklist: the review-record refusal, the corpus build reading golds as the gate does, real carriers only.

@@ -19,7 +19,7 @@ Provide a clean, typed interface for all Azure Blob reads/writes, and implement 
 - **Also expresses the RunPod staging paths** (master §12a) — `/runpod-volume/staging/{adapters,merged-models,eval-reports,run_manifests}/` — deliberately mirroring the Blob layout so `package` (IMPL-13 command 2) copies rather than translates. Staging paths and Blob paths are built by separate functions that must never be interchanged: one is working storage, the other is the artifact of record.
 
 ### 2. `artifact_registry/blob_client.py`
-- Thin wrapper around `azure-storage-blob`, initialized from env (`AZURE_BLOB_CONTAINER`, `AZURE_RAW_CONTAINER`, and a login). `azure_from_environment` prefers a **SAS token** — `AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`, short-lived and limited to the permissions it was issued with — when both are set, and falls back to `AZURE_STORAGE_CONNECTION_STRING`, which carries the account key; half a SAS login (one of the two) is refused, and the token never appears in an error. Two backends behind `BlobBackend`: `AzureBackend` (SDK imported lazily) and `InMemoryBackend` (tests; same write-once and container rules). The Azure SDK's own logger is held at WARNING.
+- Thin wrapper around `azure-storage-blob`, initialized from env (`AZURE_BLOB_CONTAINER`, `AZURE_RAW_CONTAINER`, and a login). `azure_from_environment` prefers a **SAS token** — `AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`, short-lived and limited to the permissions it was issued with — when both are set, and falls back to `AZURE_STORAGE_CONNECTION_STRING`, which carries the account key; half a SAS login (one of the two) is refused, and the token never appears in an error. `AZURE_RAW_SAS_TOKEN` is the raw container's own token: `AzureBackend` routes each call by container (`_service_for`), so the main token can be a container SAS that cannot read raw PDFs. Without it the one token serves both containers and must be an account SAS. It is refused beside a connection string alone (half a SAS login) and when there is no separate raw container. Two backends behind `BlobBackend`: `AzureBackend` (SDK imported lazily) and `InMemoryBackend` (tests; same write-once and container rules). The Azure SDK's own logger is held at WARNING.
 - Methods: `read_bytes` / `write_bytes`, `read_text` / `write_text`, `read_json` / `write_json`, `exists`, `list(prefix)`, `delete`, `upload_file`, `download_file`, `upload_dir`, `download_dir`, `holds`.
   - `upload_dir(local_dir, prefix, *, names=None, skip_identical=False)` returns the files written. `names` uploads only those paths relative to the folder (a missing one raises `BlobError`); `skip_identical` leaves any blob that already holds the file's bytes.
   - `holds(local, key)` compares the MD5 recorded with the blob (`BlobBackend.md5`) with the local file's (`file_md5`, read in 8 MB chunks). A blob that records no MD5 does not count, so it is sent again. The properties call is retried like any read.
@@ -125,7 +125,7 @@ CLI + functions:
 - [ ] A published scoped adapter holds `adapter_config.json` and `adapter_model.safetensors` only; a folder missing either is refused.
 - [ ] A re-push of the same adapter or merged model writes nothing; a blob that records no MD5 is sent again; `upload_dir(names=...)` refuses a named file that is not there.
 - [ ] Each tenant pushes and pulls only its own golden eval set (`golden-eval-set/{tenant}/`).
-- [ ] With `AZURE_STORAGE_ACCOUNT_URL` and `AZURE_STORAGE_SAS_TOKEN` both set the client logs in with the SAS token; with one of them alone it refuses, naming the missing one; with neither it uses `AZURE_STORAGE_CONNECTION_STRING`.
+- [ ] With `AZURE_STORAGE_ACCOUNT_URL` and `AZURE_STORAGE_SAS_TOKEN` both set the client logs in with the SAS token; with one of them alone it refuses, naming the missing one; with neither it uses `AZURE_STORAGE_CONNECTION_STRING`. With `AZURE_RAW_SAS_TOKEN` set too, calls to the raw container use it and calls to the main container do not; it is refused without the URL and main token, or with no separate raw container, and no message holds a token.
 
 ---
 
@@ -165,8 +165,8 @@ an empty prefix that would read as a published model.
 format — bf16 is the merged model, never an export.
 
 **Release bundle** (`registry_utils/models.py::ReleaseBundle`) also records `tier` (`production` at field
-match ≥ 0.92, `interim` when it passed every floor below that, or when its eval set was frozen with
-`--allow-small`; `evaluation.gating.release_tier`), and — recorded, not gated, since no latency SLA is agreed
+match ≥ 0.92, `interim` when it passed every floor below that, or when its scope was scored on fewer than
+150 frozen documents of a type it covers; `evaluation.gating.release_tier`), and — recorded, not gated, since no latency SLA is agreed
 (decision 2026-10-19) — `latency_p95_ms_by_adapter`, `peak_gpu_memory_mb`, `measured_with`, and `routing` (where
 every line of business routes once the release is promoted), plus `scope`, `doc_types` and `lines` (empty
 means every type / every line).
@@ -190,3 +190,8 @@ into the per-corpus cache atomically (unique `.part` names, renamed into place).
 - §2: the SAS login (`AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`) is preferred over the connection string; half a SAS login is refused. New acceptance item.
 - §4/§5: de-identification is Option A (none), recorded, not "blocked"; `split_policy` records `lines_below_carrier_minimum`.
 - Current implementation: the tier is also `interim` for a release gated on a set frozen with `--allow-small`; latency is recorded, not gated (no SLA).
+
+## Changes of 2026-10-22 (code review)
+
+- §2: the raw container's own SAS token (`AZURE_RAW_SAS_TOKEN`), routed per call; two new refusals. New acceptance item.
+- Release bundle tier: `interim` follows what the release's scope was scored on (fewer than 150 frozen documents of a type it covers), not the whole set's `--allow-small` (IMPL-08).

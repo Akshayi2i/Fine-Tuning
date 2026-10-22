@@ -22,9 +22,9 @@ For each PDF from a local folder or source location:
 - Write `metadata.json`: ingestion timestamp, `tenant_id`, source system, original filename, checksum, size, page count, a first **digital-vs-scanned flag**, PII flags placeholder (`not_assessed`), retention class. The ingest flag (`inspect_pdf`) reads the extractable text of up to three pages with pypdf — PyMuPDF when pypdf cannot read the file, so only a PDF neither library opens is refused — and calls a document scanned below 50 characters per page. It counts any extractable text, a searchable scan's invisible OCR layer included, so it is a first look only: the flag the scanned eval subset (IMPL-08) and the ViT gate (IMPL-06) read is the OCR stage's `ocr_meta.is_scanned` (§3), which counts visible text only.
 - Idempotent and re-runnable. CLI: `--input` (required to ingest), `--doc-type` (an active type or `unclassified`; required to ingest and for `--purge-plan`), `--tenant` (optional, defaults from env), `--source-system`, `--purge-plan SOURCE_ID` and `--tenant-purge-plan` (below; both print a plan and delete nothing). There is no container flag: the raw container is `AZURE_RAW_CONTAINER`, reached through `for_ingestion()`.
 - **Purge plans** (arch §18.3) report what a purge must reach and never delete:
-  - `purge_plan(source_id, doc_type, tenant_id, client=)` (`--purge-plan SOURCE_ID`): the document's `raw`, `processed` and `golden_labels` prefixes, `golden-eval-set/{tenant}/{source_id}` (with the action: remove it from the frozen set and update its manifest — later scores are then not comparable with earlier ones), `exports/{tenant}` (result sets hold many documents' outputs, so each is checked), the corpus versions to rebuild (corpus files are shared, so a row cannot simply be deleted), and `trained_weights`.
-  - `tenant_purge_plan(tenant_id, client)` (`--tenant-purge-plan`, needs `--tenant`): every prefix in `paths.TENANT_SCOPED` for the tenant, built from that set so a prefix added there cannot be missed, plus `trained_weights`.
-  - `trained_weights` comes from `runs_trained_on(client, tenant_id=, source_id=)`, which reads the run registry: each run of the tenant (for a document, each whose corpus manifest lists it in any split) with its corpus version, adapter, merged and quantized weights and the tenant's releases built on it, marked **"needs retrain or delete"**. A run whose manifest cannot be read, that records no tenant, or (for a document) whose corpus manifest is missing is listed "check by hand", never skipped. Trained weights are not tenant-prefixed yet (`paths.SHARED`), so a deletion cannot reach them by prefix and the plans name them instead. Without a client the plan says to pass one.
+  - `purge_plan(source_id, doc_type, tenant_id, client=)` (`--purge-plan SOURCE_ID`): the document's `raw`, `processed` and `golden_labels` prefixes, `golden-eval-set/{tenant}/{source_id}` (with the action: remove it from the frozen set and update its manifest — later scores are then not comparable with earlier ones), `exports/{tenant}` (result sets hold many documents' outputs, so each is checked), `intake` (every `intake/{batch}/{folder}/` holding the folder the import recorded, `imported_from`, to confirm against the raw `checksum_sha256`; the import records the folder, not the batch, so without raw access the plan says to check by hand), `pod_volume` (the pulled intake copies, the cached page images, the staged training rows, `ocr_check` reports, and `/workspace/logs/` to check by hand), the corpus versions to rebuild (corpus files are shared, so a row cannot simply be deleted), and `trained_weights`. Every prefix ends in `/`, so `policy_1` does not match `policy_10/`. `--purge-plan` uses an ingestion client, so it can list `intake/`; it still only reads.
+  - `tenant_purge_plan(tenant_id, client)` (`--tenant-purge-plan`, needs `--tenant`): every prefix in `paths.TENANT_SCOPED` for the tenant, built from that set so a prefix added there cannot be missed, plus the pod volume, `trained_weights`, and a note that `intake/` batches are not filed by tenant and must be checked by hand.
+  - `trained_weights` comes from `runs_trained_on(client, tenant_id=, source_id=)`, which reads the run registry: each run of the tenant (for a document, each whose corpus manifest lists it in any split) with its corpus version, adapter, merged and quantized weights, staged copy, eval report, calibrator and the tenant's releases built on it, marked **"needs retrain or delete"**. A run whose manifest cannot be read (any registry, storage, validation or JSON error, named by type only), that records no tenant, or (for a document) whose corpus manifest is missing or unreadable is listed "check by hand", never skipped. So is a run whose corpus does not list the document but that continued from a checkpoint (`continued_from` is a path, so the corpora behind it are not traced), and a per-type adapter built on a listed Foundation is listed with it. Trained weights are not tenant-prefixed yet (`paths.SHARED`), so a deletion cannot reach them by prefix and the plans name them instead. Without a client the plan says to pass one.
 - Uses the tighter-RBAC container for `raw-documents/` (master §8). **This is the only pipeline component that writes this layer** (the labeled-PDF importer stores its PDFs through `ingest_pdf`). `raw-documents/` is kept in the **Cool tier once processed, never Archive** (arch §18.2): a corpus rebuild after an OCR pin change needs the PDFs readable without hours of rehydration. The tier is a storage-account setting; no code here sets it.
 
 
@@ -115,9 +115,10 @@ Consequences, all enforced in code:
 - [ ] `find_unprocessed` applies the same render-only test `process_document` does. Counting a render-only `ocr_meta.json` as done filtered the document out of `--all-unprocessed`, so it was never OCR'd and the CLI reported nothing to do.
 - [ ] The `_reprocessed` marker is added to the **returned** metadata only, never written to Blob — persisting it made the skip path read it straight back, so `process_batch` reported every skipped document as processed.
 - [ ] The serving-side `run_mineru` raises `MinerUError` on a timeout, any engine failure, or fewer than 10 characters read.
-- [ ] `--purge-plan SOURCE_ID` lists the document's raw, processed, label and frozen-eval-set prefixes, the tenant's exports, the corpus versions to rebuild and every run trained on it (with weights and releases, "needs retrain or delete"); `--tenant-purge-plan` lists every prefix in `paths.TENANT_SCOPED` and every run of the tenant. Neither deletes anything, and a run that cannot be checked is listed "check by hand".
-- [ ] `check_bundle` blocks a bundle whose form number still carries its edition with `edition_date` empty, and warns on a number that may end in one; the audit reports the same.
-- [ ] `check_bundle` and `import_prepared` refuse a model-drafted gold (`draft_backend`, or `fideon:provenance` notes) without `reviewer_id` and `review_date`; both importers copy `reviewer_id`, `review_date` and `draft_backend` into `label_metadata.json`.
+- [ ] `--purge-plan SOURCE_ID` lists the document's raw, processed, label and frozen-eval-set prefixes, the tenant's exports, the corpus versions to rebuild and every run trained on it (with weights and releases, "needs retrain or delete"); `--tenant-purge-plan` lists every prefix in `paths.TENANT_SCOPED` and every run of the tenant. Both list the pod-volume copies and the `intake/` batches (or say to check them by hand), every prefix ends in `/`, neither deletes anything, and a run that cannot be checked is listed "check by hand".
+- [ ] On a common-model policy line (`label_rules.label_rules_apply`), `check_bundle` and `import_prepared` block a bundle whose form number still carries its edition with `edition_date` empty, and warn on a number that may end in one; a self-contained line (auto, wc, umbrella) is not checked for it; the audit reports the same.
+- [ ] `check_bundle` and `import_prepared` refuse every gold without a review record — a real `reviewer_id` and an ISO `review_date` not in the future (decision 2026-10-22) — and a twin whose metadata names no seed it inherited its record from, whatever the gold's notes say; both importers copy `reviewer_id`, `review_date`, `draft_backend` and `review_inherited_from` into `label_metadata.json`.
+- [ ] `prepare_bundles` writes each bundle's review record from the delivery (a real document's own, a twin's its seed's, naming the seed) and counts the documents left without one; `fill_synthetic_labels` never fills a twin from a seed with no review record.
 
 ---
 
@@ -170,20 +171,22 @@ Consequences, all enforced in code:
   `golden.json` per folder, the label against its line's schema, a valid split; a missing line or
   `field_provenance` only warns). Two more checks block a bundle:
   - **a form's edition left in its form number** with the form's `edition_date` empty, in a shape the label
-    rules move (`label_rules.split_form_edition`, IMPL-04): the bundle was never prepared, so re-run
-    `prepare_bundles`. A number that only *may* end in its edition (`may_hold_edition`, "CG 20 10 04") is a
-    warning, to check by hand;
-  - **a gold a model drafted with no reviewer recorded** (`export_golden_labels.review_problem`, decision
-    2026-10-19, IMPL-04): drafted is read from the metadata's `draft_backend` or the gold's own
-    `fideon:provenance` notes; `reviewer_id` and `review_date` in `metadata.json` satisfy it. A bundle with no
-    review record and no drafting note is warned about, not blocked.
+    rules move (`label_rules.split_form_edition`, IMPL-04), on a line the label rules hold for — a policy on
+    a common-model line (`label_rules.label_rules_apply`, `edition_problems`): the bundle was never prepared,
+    so re-run `prepare_bundles`. A number that only *may* end in its edition (`may_hold_edition`,
+    "CG 20 10 04") is a warning, to check by hand. A self-contained line (auto, wc, umbrella) keeps its form
+    numbers as printed: nothing on it moves an edition, in its golds or in serving's answers;
+  - **a gold with no review record** (`export_golden_labels.review_problem`, decision 2026-10-22, IMPL-04):
+    every gold needs a real `reviewer_id` (not blank, not a placeholder such as "pending") and an ISO
+    `review_date` not in the future in `metadata.json`; a twin inherits its seed's, and
+    `review_inherited_from` names the seed. The gold's notes and `draft_backend` decide nothing.
 
   Then each PDF goes through `ingest_pdf` — a re-import of a corrected batch refreshes the label of a document
   already stored and keeps its PDF — and its label and `label_metadata.json` are written with
-  `awaiting_ocr: true`, carrying `reviewer_id`, `review_date` and `draft_backend` from the bundle's metadata
+  `awaiting_ocr: true`, carrying `reviewer_id`, `review_date`, `draft_backend` and `review_inherited_from` from the bundle's metadata
   (IMPL-04 lists the metadata). A PDF that cannot be read fails its own document; the rest of the batch goes
-  on. The prepared importer (`import_prepared`) refuses a model-drafted gold without a reviewer the same way
-  and copies the same three keys.
+  on. The prepared importer (`import_prepared`) refuses a gold with no review record, and an edition left in a
+  form number on a common-model line, the same way, and copies the same four keys.
 - **GPU only**, with no CPU option (see the GPU section above and `common/gpu.py` for the same rule on every
   other model step).
 - **Render-only documents** (`ocr_meta.render_only: true`, rendered for labeling without OCR) and documents
@@ -266,7 +269,9 @@ import bundles — `<out>/<document>/{document.pdf, golden.json, metadata.json}`
 1. **fideon_synth, first delivery** (`Train|Val|Test/pdfs`, `Train|Val|Test/gold json`, `manifest.csv`):
    metadata from the manifest row — `lob` (after `data/bundle_lob_overrides.csv` and the merged lines),
    `synthetic`, `template_id` (the source), `split`, `carrier`, `sample`, `render_mode` (the manifest's `mode`
-   column, else the gold's `fideon:provenance.mode`). Rows outside the scope's lines, rows with `ok` false and
+   column, else the gold's `fideon:provenance.mode`), and the review record — a real row's own `reviewer_id`, `review_date` and
+   `draft_backend` columns; a twin's its seed's (the row of the same source that is not synthetic), with
+   `review_inherited_from` naming the seed; a twin's own columns are never read. Rows outside the scope's lines, rows with `ok` false and
    rows whose files are missing are skipped and counted; a document named twice is refused. Every document of
    this delivery is a scan without a text layer, so the value-against-page check runs after OCR.
 2. **SPEC_21** (`split_manifest.csv`: split, lob, carrier, seed, twin, digital, scanned, gold): each twin
@@ -275,19 +280,24 @@ import bundles — `<out>/<document>/{document.pdf, golden.json, metadata.json}`
    or drawn seeds) is one scanned document. With `--originals` (default `data/source data`: `pdfs/` and
    `gold json/`; `none` leaves them out) each seed is bundled as a real document,
    `<line>__<carrier>__<seed>__original`, in its twins' family and split; a seed with twins in two splits is
-   refused. The delivery's `motorcyle` reads as motorcycle (`delivery_line` also applies the merged lines and
+   refused. A row's review columns (`reviewer_id`, `review_date`, `draft_backend`) record its **seed's** review:
+   the seed's document carries it and every twin inherits it (`review_inherited_from: <line>/<seed>`); rows of
+   one seed stating two records are refused. The delivery's `motorcyle` reads as motorcycle (`delivery_line` also applies the merged lines and
    reads `cgl` as `gl`).
 3. **Real documents alone, one line** (`--lob <line>`; `<input>/PDFs/<carrier>/<name>.pdf` with
    `<input>/Gold JSON/<carrier>/<name>.gold.json` — the CGL source data, bundled with
    `--lob gl --scope casualty_fleet --out data/cgl_bundles`): `--out` is required; each pair becomes
-   `<line>__<carrier folder>__<name>`, with `carrier` left to the gold (a folder is not always one carrier). A
-   family is one insured (`named_insured.primary_name` without case, punctuation or legal-form words, hashed),
+   `<line>__<carrier folder>__<name>`, with `carrier` left to the gold (a folder is not always one carrier). Its
+   review record comes from `<input>/reviews.csv` (`document,reviewer_id,review_date,draft_backend`; `document`
+   the gold's path under `Gold JSON/` without `.gold.json`, or the folder name); a document it does not list has
+   none. A family is one insured (`named_insured.primary_name` without case, punctuation or legal-form words, hashed),
    so a declarations page, the policy and its renewals stay on one side. The split is drawn as the corpus build
    draws one (`split_groups.assign_group_splits`, seed 42) and delivered in each document's metadata, the same
    on every re-run; `--frozen` (the tenant's eval set is frozen) draws train and val only. The draw holds one
    carrier out of train and val only when the line names at least 10 carriers
-   (`split_groups.MIN_CARRIERS_PER_LINE_FOR_HELD_OUT`, decision 2026-10-19; IMPL-05). A test document whose
-   carrier no train document has is marked `held_out_carrier: true`. `<out>/split.csv` lists document, family,
+   (`split_groups.MIN_CARRIERS_PER_LINE_FOR_HELD_OUT`, decision 2026-10-19; IMPL-05); a placeholder such as
+   "N/A" is no carrier. A test document whose carrier no train document has is marked
+   `held_out_carrier: true` — never one of a placeholder carrier. `<out>/split.csv` lists document, family,
    split and `held_out_carrier`. Never `move`: a re-run removes the folder of a document left out, which would be
    the only copy of a moved PDF.
 
@@ -300,7 +310,7 @@ policy filed under one common-model line, is left out with the reason, and every
 and every `metadata.json` are written as new files, never through a hard link to the delivery or to a batch
 linked to the bundles. A re-run leaves `<out>` holding exactly what it bundles: folders an earlier run made for
 documents now left out are removed and `corrections.csv` is rewritten. `--dry-run` reports everything and
-writes nothing. Documents the audit rejected stay out through `data/bundle_exclusions.csv` (`--exclude`).
+writes nothing. The report counts the documents bundled with no review record, which the importer refuses. Documents the audit rejected stay out through `data/bundle_exclusions.csv` (`--exclude`).
 
 `held_out_carrier` reaches the bundle's `metadata.json`, and `import_labeled_pdfs.import_bundle` copies it into
 `label_metadata.json`: the corpus build reads it (`delivered_held_out`) and records the document with the split's
@@ -310,7 +320,8 @@ after a re-import with `freeze-eval-set --tenant T --mark-held-out` (IMPL-08, IM
 The audit (`data_pipeline/audit.py`, default input `data/bundles`, `--scope personal_lines` by default,
 `--scope casualty_fleet` for the CGL bundles) blocks a source document found in two splits and a delivery where
 only some documents carry a split, and runs the importer's own `check_bundle`, so a form's edition left in its
-number and a model-drafted gold with no reviewer are blockers before upload as well as at import. It reports
+number (on a common-model line) and a gold with no review record are blockers before upload as well as at
+import. It reports
 the delivered Train/Val/Test counts (real and synthetic) with the test count checked against the freeze minimum.
 
 ### Completing synthetic labels (first delivery)
@@ -325,9 +336,11 @@ edition dates, the carrier's own name and address), **shifted** by the recorded 
 known from a field both labels share, and **left out** otherwise; amounts are added only when every amount the two
 labels share is equal (89% of shared amounts are; some templates change them). Table rows are matched on unchanged
 values, and no row is added while the twin has rows that did not match, so none is listed twice. A merged label
-that fails the schema is not written. Filling does not make a twin reviewed: a twin filled from a seed nobody
-reviewed (its `seed_review` note says so) is still refused at import until a reviewer is recorded
-(`review_problem`, IMPL-04). Result on the first delivery: 90,050 → 295,082 fields; 30,268 deliberately
+that fails the schema is not written. A twin is filled only from a seed whose own manifest row (the row of its
+source that is not synthetic) records a review — `reviewer_id` and `review_date`, as `review_problem` reads
+them (decision 2026-10-22, IMPL-04); any other twin is refused and counted. A filled twin's `fideon:filled`
+names the seed, its review and the seed's own notes. Filling does not make a twin reviewed: its record is its
+seed's, inherited at bundling. Result on the first delivery: 90,050 → 295,082 fields; 30,268 deliberately
 left out. The originals take their reviewed gold through fideon_synth's `use_reviewed_gold.py`. The audit accepts
 the reviewed gold's conventions: month/year edition dates in any layout (`05 11`, `0699`, `(06/99)`) and split
 limits (several amounts in one field). A SPEC_21 delivery needs none of this: its golds arrive complete and are
@@ -352,3 +365,13 @@ corrected at bundling instead.
 - GPU only: Fideon SPEC_05's CPU OCR is not followed (decision 2026-10-19).
 - Acceptance checklist: purge plans, the form-edition blocker, the reviewed-gold rule.
 - Current implementation: `check_bundle` blocks an edition left in a form number and an unreviewed model-drafted gold; both importers copy `reviewer_id`, `review_date`, `draft_backend`; the audit runs the same checks; the SPEC_05 timeouts are ceilings, not a latency budget; the originals draw holds a carrier out only in a line naming 10 or more; the label rules move form editions, which changes targets; a filled twin from an unreviewed seed is still refused.
+
+## Changes of 2026-10-22 (code review)
+
+- §1 Purge plans: prefixes end in `/`; `intake` and `pod_volume` entries; each run's staged copy, eval report and calibrator; lineage; unreadable manifests listed by error type; `--purge-plan` uses an ingestion client.
+- Not yet: the import records the delivered folder, not the batch, so the plan matches `intake/` by folder name.
+- Every gold needs a review record (decision 2026-10-22); a twin inherits its seed's. `check_bundle` and `import_prepared` refuse a gold without one whatever its notes say, and both importers copy `review_inherited_from` too.
+- The form-edition blocker holds on common-model policy lines only (`label_rules_apply`), the lines `prepare_bundles` and serving apply the rule to; `import_prepared` checks it as well.
+- `prepare_bundles` writes the review record into every bundle (the manifest's columns, a SPEC_21 row's being its seed's; `reviews.csv` for real documents alone) and counts the documents without one; a placeholder carrier is never an unseen one.
+- `fill_synthetic_labels` refuses a twin whose seed has no review record, and records the seed, its review and its notes in `fideon:filled`.
+- Acceptance checklist: the review-record, form-edition, bundling and filling items.

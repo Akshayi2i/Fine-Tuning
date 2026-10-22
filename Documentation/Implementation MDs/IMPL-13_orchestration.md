@@ -60,7 +60,7 @@ Runs, in order: **ingest → OCR → labeling → dataset build → train (ONE a
 **The human-labeling precondition.** Stage 3 (labeling) is human work and cannot be inside an automated command. `finetune` therefore:
 
 1. Ingests and OCRs **everything** in `--input` (OCR in practice runs first, in the OCR environment; see *Current implementation*).
-2. Builds the corpus from **only the source_ids that have a validated `golden.json`** (IMPL-04) — and refuses the run, naming them, if any is a gold a model drafted that no person reviewed (`load_labeled_documents`; no `reviewer_id` and `review_date` in its metadata; decision 2026-10-19).
+2. Builds the corpus from **only the source_ids that have a validated `golden.json`** (IMPL-04) — and refuses the run, naming them, if any gold has no review record (`load_labeled_documents`; no real `reviewer_id` and `review_date` in its metadata, a twin's inherited from its seed; decision 2026-10-22).
 3. **Reports the unlabeled backlog** — a count and a `source_id` list written to the run report — and continues with what is labeled.
 4. Aborts before training only if the labeled set is empty, or below `--min-labels-per-type` (default 25, matching the day-zero rule in IMPL-04).
 
@@ -70,13 +70,13 @@ This is the honest shape: you ingest 500 documents, 200 are labeled, you train o
 
 **No training fan-out.** One `finetune` run launches **one** training job per scope. v1 launched 1 + N sequentially — a Foundation, then one adapter per document type stacked on it — and that topology is unservable: vLLM applies one LoRA per request, so the two could never both be active (arch v2.1 §4.1). A per-type adapter returns only through the §4.2 graduation gate, trained on the merged foundation and never stacked. With several `--scope`s, stages 1–4 build the corpus once over the union of their document types and stages 5–11 run once per scope, each with its own context (`run_multi_scope`); a block in one scope does not stop the others, and the exit code is non-zero if any failed.
 
-**Where the gate's numbers come from.** The gate (in `package`) reads the candidate's scores from this scope's frozen-eval-set report (`eval-reports/v{n}/[scope/{scope}/]summary.json`, IMPL-08) — producing it, when absent, by serving the frozen set through the serving pipeline with the merged bf16 model and the release's bf16 calibrators — and the baseline from the currently promoted version's own report for the same scope. Each report also keeps every document's scores (`per_document`, IMPL-08); `paired_document_scores` pairs the two on the documents both scored, so non-inferiority is a **paired bootstrap**. A report written before per-document scores were kept gets a point comparison, with a warning, and the improvement rule cannot be enforced against it. Neither report is optional and neither is fabricated: with no report a dry run fails rather than gating on nothing, and with no promoted version the baseline is genuinely `None` — a first version — rather than a lookup that quietly failed.
+**Where the gate's numbers come from.** The gate (in `package`) reads the candidate's scores from this scope's frozen-eval-set report (`eval-reports/v{n}/[scope/{scope}/]summary.json`, IMPL-08) — producing it, when absent, by serving the frozen set through the serving pipeline with the merged bf16 model and the release's bf16 calibrators — and the baseline from the currently promoted version's own report for the same scope. Each report also keeps every document's scores and weights (`per_document`, `per_document_weights`) and the frozen set it was scored on (`eval_set`, IMPL-08); `paired_document_scores` pairs the two on the documents both scored, so non-inferiority is a **paired bootstrap**, weighted so it tests the metric the report states. It pairs only when both reports name the same frozen set of this tenant. When they cannot be paired — another set or tenant, no shared documents, a report without per-document scores or without its `eval_set` — the gate compares point estimates, the improvement rule cannot be enforced, and the decision's warnings say so and why. Neither report is optional and neither is fabricated: with no report a dry run fails rather than gating on nothing, and with no promoted version the baseline is genuinely `None` — a first version — rather than a lookup that quietly failed.
 
-**The gate is a hard stop inside `package`.** It runs after merge, quantize and calibrate (arch v2.1 §13), so a regression stops the **release**, not the build: merging still happens, nothing is packaged, and the staged artifacts sit on a volume that will be reclaimed. It exits non-zero with the per-metric verdicts — floor, interval and basis, not a bare delta. A passing release is classed **production** (field normalized match ≥ 0.92) or **interim** — below that, or whenever the frozen eval set was accepted below its minimum size (`freeze-eval-set --allow-small`; the gate stage reads `small_set_accepted` from the set's manifest and adds a warning). The `tier` is recorded in the gate decision and the bundle.
+**The gate is a hard stop inside `package`.** It runs after merge, quantize and calibrate (arch v2.1 §13), so a regression stops the **release**, not the build: merging still happens, nothing is packaged, and the staged artifacts sit on a volume that will be reclaimed. It exits non-zero with the per-metric verdicts — floor, interval and basis, not a bare delta. A passing release is classed **production** (field normalized match ≥ 0.92) or **interim** — below that, or whenever the scope was scored on fewer than 150 frozen documents of a type it covers, with a warning. The count is what the scope was scored on (`scope_eval_set_size`: the candidate report's own counts, else the frozen manifest's per line or per type), not the whole set's `small_set_accepted`. The `tier` is recorded in the gate decision and the bundle.
 
-**A release must improve something, or name the defect it fixes.** With per-document scores, a release on which no primary metric (`field_normalized_match`, `list_field_recall`) improves (its interval's lower bound above zero) is blocked at `improvement`, unless `package` / `all` is given **`--fixes-defect "<ticket>"`** (`StageContext.fixes_defect`). That stands in for an improvement and nothing else: floors and non-inferiority still apply, and the text is recorded in the gate decision. The first release is exempt.
+**A release must improve something, or name the defect it fixes.** With per-document scores, a release on which no primary metric (`field_normalized_match`, `list_field_recall`) improves (its interval's lower bound above zero) is blocked at `improvement`, unless `package` / `all` is given **`--fixes-defect "<ticket>"`** (`StageContext.fixes_defect`; `scope=<ticket>` per scope when several run, as `--release-id`; a blank or placeholder value is refused before any work). That stands in for an improvement and nothing else: floors and non-inferiority still apply, and the text is recorded in the gate decision. The first release is exempt.
 
-There is no `--force`. There **is** an override (§15.5), requiring a named person and a written reason, both recorded in the gate decision and the release bundle. v1 had none at all, on the reasoning that a waivable gate is a suggestion — which was right about the risk and wrong about the remedy, because the v1 gate demanded improvement on twelve metrics within 0.001 and could not be passed at pilot volume at all.
+There is no `--force`. There **is** an override (§15.5), requiring a named person, a written reason of at least 20 characters and the gates it waives, all recorded in the gate decision and the release bundle. It is given on `package` and `all` with `--override-approver`, `--override-reason` and `--override-gate` (repeatable): all three together, checked before any work, for one scope per run. It lifts only gates that failed, and they are recorded as waived. v1 had none at all, on the reasoning that a waivable gate is a suggestion — which was right about the risk and wrong about the remedy, because the v1 gate demanded improvement on twelve metrics within 0.001 and could not be passed at pilot volume at all.
 
 **Flags:** `--input`, `--doc-types`, `--corpus-version`, `--out-version`, `--scope NAME` (repeatable; `configs/scopes.yaml`, default the unified scope), `--gpu`, `--commit <sha>`, `--from-stage <name>` (resume), `--skip-ingest`, `--train-vit`, `--min-labels-per-type`, `--push-adapters` (see §3), `--tenant` (optional, defaults from env), `--dry-run`. `--foundation-only` is gone: one adapter per scope is the only topology.
 
@@ -129,7 +129,7 @@ Runs: **quantize → calibrate → evaluation & gate → release bundle (with it
 - `--keep-staging` retains the volume copy (default: clear **this scope's** staged paths after at least one manifest was published, so the volume doesn't fill).
 - Quantization threshold validation (IMPL-10 / arch §13b) runs inside the quantize stage when per-format metrics are supplied (`StageContext.quant_metrics`); no CLI path supplies them yet, so a bf16-only cycle — bf16 *is* the reference — passes with a warning.
 
-**Flags:** `--version`, **`--release-id release-YYYY.M.N`** (required; repeatable as `scope=release-YYYY.M.N` pairs when several scopes are named), `--formats`, `--skip-quantize` (push adapters + merged only), `--keep-staging`, `--from-blob`, `--dtype`, `--fixes-defect "<ticket>"` (also on `all`; §2), and on a standalone `package` **`--scope`**, **`--doc-types`**, **`--tenant`**, `--corpus-version` (read from the run manifest when omitted).
+**Flags:** `--version`, **`--release-id release-YYYY.M.N`** (required; repeatable as `scope=release-YYYY.M.N` pairs when several scopes are named), `--formats`, `--skip-quantize` (push adapters + merged only), `--keep-staging`, `--from-blob`, `--dtype`, `--fixes-defect "<ticket>"` (repeatable as `scope=<ticket>`; also on `all`; §2), `--override-approver` / `--override-reason` / `--override-gate` (the written override, all three together; also on `all`; §2), and on a standalone `package` **`--scope`**, **`--doc-types`**, **`--tenant`**, `--corpus-version` (read from the run manifest when omitted).
 
 **`--release-id` is checked before any stage runs** — under `all`, before training. Calibrators, gate decisions and the bundle are all addressed by it, and an invalid one used to surface only when calibrate tried to save what it had already fitted. It is named by the operator, never derived: a derived id would move between a failed run and its `--from-stage` resume and split one release across two ids. A missing or malformed id fails with the next free id for the month as the suggested fix; pass the same id when resuming. Each scope produces its own release, so one bare id given for several scopes is refused (`release_id_for`).
 
@@ -137,7 +137,7 @@ Runs: **quantize → calibrate → evaluation & gate → release bundle (with it
 
 - **Checkpoints** — after training, `discover_checkpoints` reads the `checkpoint-*` directories ms-swift wrote under the staged adapter directory (the most recent `v*-<timestamp>/` run), and the best-loss one from `trainer_state.json`. Selection (`stage_checkpoint_eval`) scores each as a decoder LoRA by generated field accuracy on a stratified sample of the scope's own validation view (`validation_sample_rows`: 400) through `evaluation/validation_generation.py`, whose metrics are the gate's own `build_report`. The best `selection_document_finalists` (2) are then generated on every validation row in `selection_document_modes` (`[ocr_plus_image]`) and judged on whole documents — windows merged as serving merges them — among finalists whose rates of invented and of missed printed values are within `selection_guard_margin` (0.02) of the best one's; with 0 or 1 finalists the near-tie rule (`selection_tie_break_margin`) decides. With several GPUs, one vLLM engine per GPU scores the candidates at once (`parallel_vllm_scorer`). Generation sends `validation_batch_rows` (96) rows per vLLM call. The stage result carries the selection and the generation cost (`generation`: rows and seconds); the choice is written to `eval-reports/v{n}/[scope/{scope}/]checkpoint_selection.json`.
 - **Calibration samples** — when none are supplied, calibrate generates the validation split **with each staged serving format**, constrained as serving is, and labels every field's features correct or not against the golden label, split by the `val_half` the dataset build stamped. There is no shared or wildcard sample set. The stage records the expected calibration error per field type and overall.
-- **Gate decision** — written under `releases/{tenant}/{release_id}/gate/bf16/`. The candidate metrics are the merged bf16 model's, so that is bf16's gate run and no other format's. Besides the metrics, the verdicts (each with its basis: `paired_bootstrap`, `point_estimate`, or `floor_only` with no baseline), the failed and waived gates, the override and the tier, it records `paired_documents` (how many documents each metric's bootstrap paired; empty for a point comparison), `fixes_defect`, `eval_set` (`small_set_accepted`, `documents_by_doc_type`, `frozen_from_corpus`) and the gate's `warnings`.
+- **Gate decision** — written under `releases/{tenant}/{release_id}/gate/bf16/`. The candidate metrics are the merged bf16 model's, so that is bf16's gate run and no other format's. Besides the metrics, the verdicts (each with its basis: `paired_bootstrap`, `point_estimate`, or `floor_only` with no baseline), the failed and waived gates, the override and the tier, it records `paired_documents` (how many documents each metric's bootstrap paired; empty for a point comparison), `fixes_defect`, `eval_set` (`small_set_accepted`, `documents_by_doc_type`, `frozen_from_corpus`, `frozen_at`, and the count that decided the interim cap: `scope_documents_by_doc_type`, `scope_documents_counted_from`, `minimum_per_doc_type`, `small_for_scope`) and the gate's `warnings`.
 
 **The release bundle** (`releases/{tenant}/{release_id}/bundle.json`, plus a row in `release_index.json`) pins the scope, its `lines` and served `doc_types`, the adapter run, merged and per-format model paths, per-format calibrators and gate decisions, the release `tier`, a hash of every prompt input (`common.prompts.prompt_hash`: templates, schemas, the section map), schema versions, the OCR pin, and hashes of `configs/shared/vision.yaml`, `configs/inference/vllm_serving.yaml` and the dependency lock (`requirements-train.lock`; `pyproject.toml` only when the lock is missing). It also records the p95 latency per adapter and the peak GPU memory from the eval report's `release_measurements`, and the **routing table**. Its status is **`promoted` only when every serving format has its own calibrator and its own gate run**; otherwise it is written as **`gated`** with the missing pieces listed in the stage result. Until a per-format gate run exists for quantized formats, an FP8 release is `gated`.
 
@@ -210,7 +210,7 @@ The 13 stages (arch v2.1 §13) as reusable, individually addressable stage funct
 - Every training, evaluation, and quantization job produces a **run manifest** (IMPL-02).
 - **Stages are idempotent and resumable.** `--from-stage` re-enters mid-pipeline; a completed stage re-run is a no-op, not a duplicate.
   - **Ingestion is the exception, and always runs.** There is no cheap correct completion check for it — comparing an input directory against ingested checksums costs the same as ingesting — and the approximate one that used to be here ("has anything ever been ingested?") was true from cycle two onward, so a second `finetune --input ./new_batch` skipped the stage and built the corpus from the previous batch. `ingest_directory` is checksum-deduped, so re-running it writes nothing and reports duplicates. An approximate guard on cheap idempotent work buys nothing and can be wrong in the direction that loses documents.
-- **The gate (stage 10) is a hard stop.** Promotion requires every gating metric to pass. There is no `--force-deploy`; the only exception is the recorded written override (§2). `package` reads the recorded gate decision and refuses a version whose gate did not pass — running `package` after a blocked gate used to publish it.
+- **The gate (stage 10) is a hard stop.** Promotion requires every gating metric to pass. There is no `--force-deploy`; the only exception is the recorded written override (§2), given with `--override-approver`, `--override-reason` and `--override-gate`. `package` reads the recorded gate decision and refuses a version whose gate did not pass — running `package` after a blocked gate used to publish it.
 - **Every run says where its time went.** Each stage that runs records its `wall_seconds` (every attempt included) in its result, and the run report is written after every stage (*Current implementation*).
 
 ## 9. `orchestration/config/`
@@ -224,7 +224,7 @@ The 13 stages (arch v2.1 §13) as reusable, individually addressable stage funct
 - `finetune` always writes its run manifest to Blob even when weights stay staged.
 - Orchestration runs on cheap CPU infra **outside** RunPod; only GPU-bound work runs on RunPod (arch §14).
 - Secrets from env only. Logs PII-scrubbed before leaving the pod.
-- No flag around the evaluation gate; only a recorded, attributed override (§2).
+- No flag around the evaluation gate; only a recorded, attributed override (§2), whose three flags build that record and nothing else.
 
 ## Acceptance checklist
 - [ ] `run finetune` executes stages 1→7 on a tiny fixture set and leaves adapters + merged model on the staging volume.
@@ -232,9 +232,12 @@ The 13 stages (arch v2.1 §13) as reusable, individually addressable stage funct
 - [ ] `finetune` launches **one** training job per scope (one unified adapter, or one per named scope).
 - [ ] The dataset build refuses a corpus that set aside more than 25% of its documents, before writing anything — also when preflight ran with `--skip-corpus`.
 - [ ] **A failed gate stops `package` before anything is published, exits non-zero, and prints per-metric verdicts (floor, interval and basis);** `package` run on its own refuses a version whose recorded gate did not pass.
-- [ ] With per-document scores in both eval reports, non-inferiority is a paired bootstrap and the decision records `paired_documents`; a release that improves no primary metric is blocked at `improvement` unless `--fixes-defect` names the defect, which the decision records. A report without per-document scores is compared on point estimates, with a warning.
-- [ ] A release gated on an eval set frozen with `--allow-small` is at most `interim`, with a warning; the decision records the `eval_set` it was scored on.
-- [ ] The corpus build refuses a gold a model drafted with no reviewer recorded; preflight names every such label (FAIL) and reports annotation agreement (WARN while no minimum is set).
+- [ ] With per-document scores in both eval reports, non-inferiority is a paired bootstrap and the decision records `paired_documents`; a release that improves no primary metric is blocked at `improvement` unless `--fixes-defect` names the defect, which the decision records. Reports that cannot be paired (another frozen set or tenant, no shared documents, no per-document scores) are compared on point estimates, with the reason in the decision's warnings. `--fixes-defect` is checked and given per scope.
+- [ ] A release whose scope was scored on fewer than 150 frozen documents of a type it covers is at most `interim`, with a warning; the decision records the `eval_set` and the count it was judged on.
+- [ ] `--override-approver`, `--override-reason` and `--override-gate` build a validated written override only when all three are given, for one scope; the decision and the bundle record it as a waiver.
+- [ ] Training and packaging refuse a corpus that holds policies when its `window_plan_version` is not `policy_windows.WINDOW_PLAN_VERSION`.
+- [ ] The corpus build refuses a gold with no review record (a twin's is its seed's); preflight names every such label (FAIL) and reports annotation agreement (WARN while no minimum is set).
+- [ ] `freeze-eval-set --mark-reviewed` copies review records into an existing frozen set, changing nothing else, and exits 1 while any frozen gold still has none.
 - [ ] `finetune` writes a run manifest to Blob with `artifacts.status: "staged"` even though weights are not pushed.
 - [ ] `run package --version v2` pushes the **real** selected adapter (its `adapter_config.json` and `adapter_model.safetensors` only), the merged model and each non-bf16 serving format to their Blob paths, then flips the manifest to `"published"`.
 - [ ] A release whose routing check fails pushes nothing.
@@ -261,11 +264,14 @@ The 13 stages (arch v2.1 §13) as reusable, individually addressable stage funct
 **Commands** (`orchestration/run.py`): `finetune`, `package`, `all`, `extract`, `deploy-endpoint`,
 `rollback-endpoint`, and **`freeze-eval-set --corpus vN [--tenant T] [--allow-small]`**, or **`freeze-eval-set --tenant T --mark-held-out`**
 on an already frozen set (marks the documents the delivery calls unseen carriers', after a re-import; nothing else
-changes) (IMPL-08): the first copies that
+changes), or **`freeze-eval-set --tenant T --mark-reviewed`** (copies each frozen document's review record from
+its label metadata, which the gate needs; nothing else changes; exit 1 while any frozen gold still has none)
+(IMPL-08): the first copies that
 tenant's corpus test split into `golden-eval-set/{tenant}/` — each tenant freezes its own, from its own corpus,
 and is gated on it. It refuses fewer than 150 test documents per type unless `--allow-small` (recorded as
-`small_set_accepted` in the set's manifest; the gate caps a release scored on it at interim), refuses a second
-freeze, and refuses while a set frozen before sets were per tenant still sits at the root. After a freeze the
+`small_set_accepted` in the set's manifest; the gate caps at interim a release whose scope was scored on fewer
+than 150 of its documents of a type), refuses a second
+freeze, refuses a test split holding a gold with no review record, and refuses while a set frozen before sets were per tenant still sits at the root. After a freeze the
 tenant's corpus builds leave the frozen documents and their families out and split into train and val only.
 
 **Scopes** (`configs/scopes.yaml`, `--scope`, repeatable): `unified`, `policy`, `lossrun`, `personal_lines`
@@ -337,13 +343,16 @@ the corpus is built once.
 - `package` requires a passed recorded gate, finds calibrators in Blob on resume, builds the bundle and its
   routing check before pushing, and uploads real weights through `artifact_registry/transfer.py` (IMPL-10):
   adapter files only, identical files skipped by MD5.
+- Training and packaging read the corpus manifest, and both refuse a corpus that holds policies when its
+  `window_plan_version` differs from `policy_windows.WINDOW_PLAN_VERSION` (`pipeline_dag._assert_window_plan`):
+  the prompt hash is computed at packaging, so it cannot catch an adapter trained on another window plan.
 - `--push-adapters` uploads the best-loss checkpoint's `adapter_config.json` and `adapter_model.safetensors`
   after training (non-dry runs), not a placeholder and not the checkpoint's resume state.
 - The dataset build excludes the tenant's frozen eval documents and their families once its set is frozen
-  (IMPL-05), refuses documents read by more than one MinerU, refuses a >25% set-aside, and refuses a gold a
-  model drafted that nobody reviewed (`load_labeled_documents`, through `export_golden_labels.review_problem`:
-  `draft_backend` in the metadata, or the gold's own `fideon:provenance` notes, with no `reviewer_id` and
-  `review_date`).
+  (IMPL-05), refuses documents read by more than one MinerU, refuses a >25% set-aside, and refuses a gold
+  with no review record (`load_labeled_documents`, through `export_golden_labels.review_problem`: no real
+  `reviewer_id` and `review_date` in its metadata, or a twin naming no seed it inherited them from; the message
+  says they "have no review record").
 - The run manifest's `data_stats.split_policy` (`pipeline_dag.split_policy`) records the carriers held out per
   line and the lines naming fewer than the 10 carriers a hold-out needs (`lines_below_carrier_minimum`), which
   hold none out (IMPL-05).
@@ -351,17 +360,18 @@ the corpus is built once.
   policy is planned in windows over every page (decision 2026-10-19, IMPL-05/11).
 - The gate stage (`stage_evaluation_gate`) passes `promotion_gate` the per-document scores
   (`StageContext.per_document`, injected by tests; otherwise `paired_document_scores` reads both eval reports,
-  and only against the promoted report — an injected baseline has none to pair with), `fixes_defect`, and
-  `small_eval_set` from the frozen set's manifest.
+  and only against the promoted report — an injected baseline has none to pair with — and only when both name
+  the same frozen set of this tenant), the reasons it could not pair as `warnings`, `fixes_defect`, the
+  `--override-*` record as `override`, and `small_eval_set` from what the scope was scored on
+  (`scope_eval_set_size`).
 
 **Preflight** (`python -m orchestration.preflight --scope S [--tenant T] [--skip-corpus]`): PASS/WARN/FAIL per
 check, exit 1 on any FAIL, report in `/workspace/logs/preflight.json`; detached on the pod. Checks: every visible
 GPU at least 90% free and the training GPU count dividing the batch; packages (torch, transformers 4.57, vLLM,
 flash-attn, ms-swift, peft, deepspeed; `swift` next to the Python); the base model verified at the pinned revision;
 config invariants; 100 GB free; Azure write, overwrite, read and delete; every labelled document OCR'd and at
-least `--min-labels-per-type`; **reviewed labels** (`check_reviewed_labels`: FAIL naming each label a model
-drafted with no reviewer recorded, the labels the corpus build would refuse; WARN for labels recording no
-reviewer and no drafting); **label agreement** (`check_label_agreement`: how many documents are double-labelled
+least `--min-labels-per-type`; **reviewed labels** (`check_reviewed_labels`: FAIL naming each label with no
+review record, the labels the corpus build would refuse, with the first one's reason); **label agreement** (`check_label_agreement`: how many documents are double-labelled
 and their mean and lowest `agreement_score`; WARN, since `common.constants.MIN_INTER_ANNOTATOR_AGREEMENT` is
 `None` — no spec states a minimum — and a FAIL below it once one is set); the **post-OCR report** (`--ocr-check`, default `/workspace/ocr_check`) passed; and
 the **corpus**, built in memory by `plan_corpus` (rows per split, documents set aside and why, WARN above 5%,
@@ -377,7 +387,9 @@ a driver supporting CUDA 12.8, `/workspace` mounted, the repo on the volume, Pyt
 `MINERU_TOOLS_CONFIG_JSON=/workspace/mineru.json` (replacing a MinerU 1.x `magic-pdf.json` value),
 `MINERU_DEVICE_MODE=cuda`, `MINERU_MODEL_SOURCE=local` and `HF_HUB_ENABLE_HF_TRANSFER=0`, filled only when unset,
 blank or the template's default; a Blob login — `AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`, or
-`AZURE_STORAGE_CONNECTION_STRING` — with a refusal if the connection string (`;`) or the token (`&`) is unquoted; `/workspace/venv`
+`AZURE_STORAGE_CONNECTION_STRING` — with a refusal if the connection string (`;`) or a token (`&`,
+`AZURE_STORAGE_SAS_TOKEN` or `AZURE_RAW_SAS_TOKEN`) is unquoted, `export` and indented lines read as bash
+reads them, and half a SAS login or a raw token with no separate raw container listed as still to do; `/workspace/venv`
 (`setup_pod.sh train`) and `/workspace/venv-ocr` (`setup_pod.sh ocr`, MinerU 3.4.5), rebuilt only when their
 requirements change; MinerU's pinned pipeline weights and config (`scripts/download_mineru_models.sh`, checked by
 `data_pipeline.ocr.mineru_config`); the base model at the pinned revision into `/workspace/models` (an existing
@@ -423,3 +435,14 @@ resumes from the failed step. It never freezes an eval set or packages a release
 - §4: `--fixes-defect` flag; the gate decision's new fields (`paired_documents`, `fixes_defect`, `eval_set`, `warnings`, each verdict's basis).
 - Acceptance checklist: per-metric verdicts rather than deltas; new items for the paired bootstrap and `--fixes-defect`, the interim cap, and reviewed labels.
 - *Current implementation*: `small_set_accepted` read by the gate; the dataset build's reviewed-gold refusal; `split_policy.lines_below_carrier_minimum`; no page selection in the stage wiring; what the gate stage passes `promotion_gate`; preflight's `check_reviewed_labels` and `check_label_agreement`; the bootstrap's SAS or connection-string login.
+
+## Changes of 2026-10-22 (code review)
+
+- Bootstrap: the quoting check reads `export` and indented lines, covers `AZURE_RAW_SAS_TOKEN`, and lists half a SAS login as still to do.
+- §2 and §4: the paired bootstrap is weighted and pairs only reports scored on the same frozen set of the tenant, with every fallback a warning in the decision; the interim cap follows what the scope was scored on (`scope_eval_set_size`); `--fixes-defect` is checked and given per scope; the written override on the command line (`--override-approver`, `--override-reason`, `--override-gate`, all three, one scope); the decision's new `eval_set` fields.
+- Training and packaging refuse a corpus that holds policies built with another window plan (`pipeline_dag._assert_window_plan`).
+- Acceptance checklist: the pairing fallbacks and per-scope `--fixes-defect`, the per-scope interim cap, the override flags, the window-plan refusal.
+- *Current implementation*: the freeze's cap per scope; what the gate stage passes `promotion_gate`; the window-plan refusal.
+- §2 and *Current implementation*: the corpus build refuses every gold with no review record (decision 2026-10-22; a twin's is its seed's) and says so; preflight's `check_reviewed_labels` fails on the same labels and no longer warns.
+- `freeze-eval-set --mark-reviewed`: review records copied into an existing frozen set, exit 1 while any is missing; the freeze refuses a gold with no record.
+- Acceptance checklist: the review-record refusal and `--mark-reviewed`.

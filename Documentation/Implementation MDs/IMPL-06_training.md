@@ -233,7 +233,9 @@ caps use (`training.length_check.image_tokens`). It also measures pixels per vis
 (patch × merge, squared) against `cap_check.PIXELS_PER_VISUAL_TOKEN` (1,024). Without a CUDA GPU, the pinned
 base weights, ms-swift or vLLM it skips, naming what is missing. What is compared lives in `training/parity.py`
 (`prompt_ids`, `image_pad_runs`, `from_swift_row`, `flat_ids`) and is tested without a GPU; the Phase 0 spike
-(`check_swift_row_format`) compares token ids the same way, not decoded text. Serving output parity
+(`check_swift_row_format`) compares token ids the same way, not decoded text. It passes a plain-string
+system prompt as one text block (the pinned processor reads every content as a list of blocks; Qwen3-VL's
+template renders the two alike), and any error tokenizing the serving prompt is a FAIL, never "unknown". Serving output parity
 (`test_serving_output_parity`) is still a placeholder that skips.
 
 **Every page is read** (decision 2026-10-19): a policy trains on its windows over every page (IMPL-05), so a
@@ -282,8 +284,9 @@ Validation and test are never sampled, rotated or repeated. None of the three ap
 which reads the corpus files as they are and warns when they are configured. **casualty_fleet** (`lines:
 [gl]`, `training_config: unified`) is the CGL adapter, trained in its own tenant on the CGL bundles
 (`--tenant`): one line, real documents only, so the three change nothing there. The architecture records that
-its v1 adapter was trained and scored on golds a model drafted and nobody reviewed; such golds no longer
-reach a corpus (IMPL-05), so they are reviewed before it trains again. A scope without `lines`
+its v1 adapter was trained and scored on golds nobody reviewed; a gold with no review record no longer
+reaches a corpus or the gate (decision 2026-10-22; IMPL-05, IMPL-08), so they are reviewed before it trains
+again. A scope without `lines`
 (`policy`, `lossrun`) filters by type alone.
 
 ## Changes since 2026-10-05
@@ -318,3 +321,8 @@ reach a corpus (IMPL-05), so they are reviewed before it trains again. A scope w
 - §3: checkpoint selection judges a whole common-model document's schema validity with `served_schema_verdict`.
 - Acceptance checklist: the GPU token-parity test; no scope declares `page_select`.
 - Current implementation: token parity on the pod (`training/parity.py`, `test_template_token_parity`, GPU-marked, the spike comparing token ids); every page read, so more windows per policy, a longer run, a corpus rebuild and retrain of both adapters, and no `page_select` rows; casualty_fleet v1's unreviewed golds.
+
+## Changes of 2026-10-22 (code review)
+
+- Phase 0 spike: a plain-string content goes in as one text block; a tokenizing error is a FAIL with its traceback.
+- casualty_fleet: a gold with no review record reaches neither a corpus nor the gate (decision 2026-10-22).

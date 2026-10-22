@@ -79,7 +79,7 @@ python -m testing.run_extraction --model v2 --tenant T --split test --corpus v1 
   **`base` is not a curiosity** — it is the zero-shot baseline of the pilot protocol (IMPL-15) and the day-zero pre-annotation path (IMPL-04). Supporting it here means those two have one implementation, not three.
 - **Which documents:** `--source-ids …` or `--split train|val|test` with `--corpus vN` (that corpus manifest's `source_ids_by_split`) — mutually exclusive; with neither, every labelled document of `--doc-type` (default `policy`) for `--tenant`. `--limit N` keeps the first N.
 - `--mode ocr_plus_image` (default) | `image_only` — both production pathways testable from one harness.
-- **Scoring is on by default**: a document with a gold label in `golden-labels/` is scored against it; one without is extracted and not scored. `--no-score` extracts without comparing.
+- **Scoring is on by default**: a document with a gold label in `golden-labels/` is scored against it; one without, or whose gold has no review record (decision 2026-10-22), is extracted and not scored — the metrics file says why (`ground_truth: not scored: …`) and `summary.json` lists it under `not_scored`. `--no-score` extracts without comparing.
 - Additional: `--label` (the name results are filed under; default the tag, or `base+<run>-<checkpoint>` with `--adapter`), `--format`, `--limit`, `--tenant`.
 
 **What it does, step by step (arch §17):**
@@ -168,11 +168,12 @@ Combined with the `results/{version}/` layout, anyone can see at a glance that `
 
 ### 6. `testing/compare_models.py` — base vs base + adapter
 ```bash
-python -m testing.compare_models --input policy.pdf --gold policy_gold.json --lob homeowners --adapter <checkpoint-N>
+python -m testing.compare_models --input policy.pdf --gold policy_gold.json --lob homeowners \
+    --reviewer-id <reviewer> --review-date YYYY-MM-DD --adapter <checkpoint-N>
 python -m testing.compare_models --input data/bundles/<document>/ --adapter <adapter folder>
 python -m testing.compare_models --input <folder of document folders> --adapter <adapter folder>
 ```
-- `--input` is a PDF (with `--gold` and `--lob`), a bundle folder (`document.pdf` + `golden.json` + `metadata.json`), or a folder of them. Each document is imported and OCR'd (in `/workspace/venv-ocr`) under its own tenant — `compare` by default, never `default` or the real data's — and a re-run finds it by checksum.
+- `--input` is a PDF (with `--gold` and `--lob`), a bundle folder (`document.pdf` + `golden.json` + `metadata.json`), or a folder of them. Each document is imported and OCR'd (in `/workspace/venv-ocr`) under its own tenant — `compare` by default, never `default` or the real data's — and a re-run finds it by checksum. A gold is compared only with a review record (decision 2026-10-22): a PDF's `--gold` takes `--reviewer-id` and `--review-date`, written into its `metadata.json`; a bundle folder carries its own. Without one the answers are compared with no gold.
 - One model load (`load_model("base", adapter=…)`, and `without_adapter` for the base on the same engine); each document is extracted twice through `serving.pipeline.extract`, by the base alone and with the adapter applied, not merged. No calibrators: every field is flagged in both.
 - Per document under `--out` (default `testing/results/comparisons/<label>-<stamp>/`): `document.pdf`, `gold.json`, `base.json`, `adapter.json` (canonical JSON, every schema key), `base.all_fields.json`, `adapter.all_fields.json`, and `comparison.xlsx` (Summary and Fields sheets: each field's gold, base and adapter values, results, and `fixed`/`broke`). Table rows are matched by their identifier (a VIN, a form number, a coverage name), not by position. Across documents: `summary.xlsx` (one row per document, pooled totals) and `errors.json` when a route failed.
 - The finished folder is uploaded to Blob under `exports/{tenant}/comparisons/{run}/` (the raw container: it holds policy data), checked file by file, and removed from the pod (`--keep-on-pod` keeps it). The command prints the `azcopy` line that downloads it to the laptop, by default into `D:\Fine-Tuning\testing\results\comparisons` (git-ignored; `--download-to` changes it).
@@ -191,7 +192,7 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 - [ ] `--mode image_only` runs with no OCR and still extracts.
 - [ ] Per-field + overall confidence present **with and without** ground truth.
 - [ ] `line_of_business` present in every result, with confidence, `null` when undetermined.
-- [ ] With a gold label, per-doc + summary metrics computed, including list-field recall; `--no-score` skips them.
+- [ ] With a gold label that has a review record, per-doc + summary metrics computed, including list-field recall; `--no-score` skips them; a gold with no review record is not scored, and the metrics file and `summary.json` (`not_scored`) say why.
 - [ ] Every result carries `all_fields`: every field of its schema, with its value and, against gold, its result.
 - [ ] `--format fp8` runs that version's FP8 serving weights once packaged (a GGUF format is a category error here: the harness runs vLLM).
 - [ ] `extraction_registry.json` links result → model version → run manifest.
@@ -221,10 +222,15 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
   run measures extraction, not a release's review thresholds.
 - `schema_valid` and the `schema:invalid` flag are serving's own verdict (`serving.pipeline.schema_verdict`, IMPL-11
   §5): on a common-model line the served answer, every key filled, is what is judged.
-- The gold is read from `golden-labels/` under the form-edition rule (`document_request` applies
-  `label_rules.split_form_editions`), as the gate's golden eval reads the frozen set (IMPL-08): the served answer
-  has a form's edition moved out of its number into `edition_date` (IMPL-11), and a gold imported before that
-  rule is not rewritten in Blob, so scored as stored it would count the convention wrong.
+- The gold is read from `golden-labels/` under the form-edition rule where it holds — a common-model policy
+  line (`document_request` → `label_rules.under_edition_rule`) — as the gate's golden eval reads the frozen set
+  (IMPL-08): the served answer there has a form's edition moved out of its number into `edition_date` (IMPL-11),
+  and a gold imported before that rule is not rewritten in Blob, so scored as stored it would count the
+  convention wrong. A self-contained line's gold is scored as stored: nothing on it moves an edition.
+- A gold with no review record (`export_golden_labels.review_problem`, decision 2026-10-22; a twin inherits its
+  seed's) is not scored: `document_request` returns no gold and logs why, the extraction still runs and is
+  written, the metrics file records `ground_truth: not scored: …`, and `summary.json` lists it under
+  `not_scored`. `compare_models` reads golds the same way.
 - On the pod `run_extraction` and `compare_models` run detached in tmux like every long job; they survive a
   closed laptop.
 - The gate's numbers do not come from this harness: they come from the frozen golden eval set
@@ -249,3 +255,10 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 - §4: the `pages_used` example lists every page.
 - §5: `run_batch` writes the registry (the stale "does not call today" removed).
 - *Current implementation*: every page read, no page selection, results before 2026-10-21 read selected pages; `schema_valid` is serving's verdict; golds read under the form-edition rule, as the golden eval reads them.
+
+## Changes of 2026-10-22 (code review)
+
+- §2 and *Current implementation*: a gold with no review record (decision 2026-10-22) is extracted and not scored, and the metrics file and `summary.json` (`not_scored`) say why.
+- *Current implementation*: golds are read under the form-edition rule only on common-model policy lines (`label_rules.under_edition_rule`).
+- §6: `compare_models --reviewer-id --review-date` give a PDF's `--gold` its review record; without one the answers are compared with no gold.
+- Acceptance checklist: scoring needs a reviewed gold.

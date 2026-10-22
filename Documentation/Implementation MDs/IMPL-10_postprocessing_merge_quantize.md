@@ -94,7 +94,7 @@ A format exceeding **any** threshold is not served. Asking the serving gate abou
 
 `package` runs stages 8–11 in order (`orchestration.pipeline_dag.STAGES`): **quantize** (the §4 threshold gate at its end, when per-format metrics are supplied) → **calibrate** (IMPL-09) → **evaluation_gate** → **package** (the push).
 
-- **The promotion gate** (IMPL-08) scores the merged bf16 model on the frozen golden eval set through serving, with the release's bf16 calibrators. It holds every floor; judges non-inferiority by a **paired bootstrap** over the per-document scores of the candidate's and the promoted release's eval reports (`paired_document_scores`; a point comparison, with a logged warning, against a report written before per-document scores were kept); and blocks a release that improves no primary metric unless `--fixes-defect "<ticket>"` names the defect it fixes (on `package` and `all`; recorded in the decision). A passing release is **production** at `field_normalized_match` ≥ 0.92 and **interim** below it — and **interim whatever its score** when the frozen set was accepted small (`small_set_accepted`), with a warning in the decision.
+- **The promotion gate** (IMPL-08) scores the merged bf16 model on the frozen golden eval set through serving, with the release's bf16 calibrators. It holds every floor; judges non-inferiority by a **paired bootstrap** over the per-document scores of the candidate's and the promoted release's eval reports (`paired_document_scores`, weighted as each metric counts its documents, and only on reports scored on the same frozen set of the tenant; otherwise a point comparison, with the reason in the decision's warnings); and blocks a release that improves no primary metric unless `--fixes-defect "<ticket>"` names the defect it fixes (on `package` and `all`, per scope when several run; recorded in the decision). A passing release is **production** at `field_normalized_match` ≥ 0.92 and **interim** below it — and **interim whatever its score** when its scope was scored on fewer than 150 frozen documents of a type it covers, with a warning in the decision. A failed gate is passed only by a written override (`--override-approver`, `--override-reason`, `--override-gate`: all three, one scope), recorded as a waiver.
 - A blocked gate stops the release: the merged model stays on the staging volume, nothing is published, and the command exits non-zero with the per-metric verdicts. The push re-reads the recorded decision (`assert_gate_passed`) and refuses a version that did not pass, so a standalone `package` cannot publish it either. The release bundle carries the bf16 decision's tier.
 - **Latency is recorded, not gated** (no latency SLA; decision 2026-10-19): `record_release_measurements` copies P95 latency per adapter and peak GPU memory from the eval report's `release_measurements` onto the bundle, and a missing measurement is a warning, never a block.
 
@@ -125,7 +125,7 @@ A format exceeding **any** threshold is not served. Asking the serving gate abou
 - [ ] `package` publishes an adapter as its `adapter_config.json` and `adapter_model.safetensors` only, never a checkpoint's resume state.
 - [ ] The merge and every quantized export refuse to run without CUDA; nothing falls back to the CPU.
 - [ ] The promotion gate runs inside `package`, after calibrate and before the push; the push refuses a version whose recorded gate decision did not pass.
-- [ ] The release bundle's tier is the bf16 gate decision's: `interim` below 0.92, and `interim` whatever the score when the frozen set was accepted small.
+- [ ] The release bundle's tier is the bf16 gate decision's: `interim` below 0.92, and `interim` whatever the score when its scope was scored on fewer than 150 frozen documents of a type.
 - [ ] P95 latency and peak GPU memory are recorded on the release bundle and never block a release.
 
 ---
@@ -182,3 +182,8 @@ manifest's `quantized_model` points at the first quantized format — never bf16
 - §2a: GGUF is not a deployment target; no command calls `export_gguf`, and the llama.cpp conversion is not wired.
 - §5 (new): the stage order in `package`; the promotion gate's paired bootstrap, `--fixes-defect` and the interim cap for a small eval set; the push re-checks the decision; the bundle's tier; latency recorded, not gated (no SLA).
 - Acceptance checklist: GPU only; the gate's place and the push's check; the bundle's tier and the small-set cap; latency never blocks.
+
+## Changes of 2026-10-22 (code review)
+
+- §5: the gate's bootstrap is weighted and pairs only reports scored on the same frozen set of the tenant; the interim cap follows what the scope was scored on; `--fixes-defect` per scope; the written override on the command line (IMPL-08).
+- Acceptance checklist: the bundle's tier under the per-scope cap.

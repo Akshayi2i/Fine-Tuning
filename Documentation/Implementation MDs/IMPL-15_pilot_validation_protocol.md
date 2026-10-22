@@ -64,7 +64,7 @@ Confirm all of:
 
 ### 3. Experiment C — Pilot Training Run (Weeks 2–6, 25–30 documents per type)
 
-Annotate 25–30 documents per document type per IMPL-04 — **reviewed golds only**: no frontier model drafts a gold, and a gold a model drafted trains only once `reviewer_id` and `review_date` are recorded (decision 2026-10-19; the preflight and the corpus build refuse the run otherwise). Use the **pilot split ratios (~70/18/12)** from IMPL-05 (or the split a delivery arrives with — master §10). Train ONE adapter for the pilot's scope with the §11.1 pilot hyperparameters (`configs/training/unified.yaml`). Evaluate on the pilot test split, in every modality regime, with **every page of every document read**, chunk by chunk, never selected pages (decision 2026-10-19).
+Annotate 25–30 documents per document type per IMPL-04 — **reviewed golds only**: no frontier model drafts a gold, and every gold needs a review record — `reviewer_id` and `review_date` — to train or score, a twin its seed's (decisions 2026-10-19 and 2026-10-22; the preflight and the corpus build refuse the run otherwise). Use the **pilot split ratios (~70/18/12)** from IMPL-05 (or the split a delivery arrives with — master §10). Train ONE adapter for the pilot's scope with the §11.1 pilot hyperparameters (`configs/training/unified.yaml`). Evaluate on the pilot test split, in every modality regime, with **every page of every document read**, chunk by chunk, never selected pages (decision 2026-10-19).
 
 This is the **minimum experiment that tests the architecture's generalisation claim**: whether one adapter captures cross-type behaviour without the types interfering, whether modality-dropout arbitration functions, whether totals reconciliation catches a missed row on unseen documents, and whether the per-field-type calibrators have enough data to be enforced at all — at pilot volume several field types will not clear the 300-instance floor and will route everything to review, which is the system working rather than failing.
 
@@ -114,7 +114,7 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 - Pilot eval numbers are **directional**. At 3–4 test documents per type, no single metric is trustworthy on its own; the batch's real job is proving the pipeline works end to end before scaling annotation to 1000+/type.
 - Re-baseline properly once at real scale — do not carry pilot thresholds forward as production gates.
 - Choosing between the de-identification options (A / B / C) stays a compliance open item, to be closed before the first production release (arch §8b). Until another option is chosen, pilot corpora are built under Option A and that limitation is stated, not assumed away.
-- Golds are reviewed golds: no frontier model is used for gold, synthetic or training data, and a model-drafted gold needs a recorded reviewer (IMPL-04).
+- Golds are reviewed golds: no frontier model is used for gold, synthetic or training data, and every gold needs a review record, a twin's inherited from its seed (decision 2026-10-22, IMPL-04).
 
 ## Acceptance checklist
 - [ ] `zero_shot_baseline` runs the base model over 10 docs/type and emits per-type F1 plus a failure-mode distribution.
@@ -149,8 +149,9 @@ This is the **minimum experiment that tests the architecture's generalisation cl
   splits field accuracy into labels training showed and labels it never did (`unseen_labels`, reported).
 - **Freezing a pilot eval set** is per tenant: `freeze-eval-set --corpus vN [--tenant T]` writes
   `golden-eval-set/{tenant}/`, and needs `--allow-small` under 150 test documents per type: the set is then
-  directional (its manifest records `small_set_accepted`, and a release that passes the gate on it is capped
-  at the `interim` tier, with a warning), and once frozen it is the yardstick for every later version of that
+  directional (its manifest records `small_set_accepted`, and a release whose scope is scored on fewer than
+  150 of its documents of a type is capped at the `interim` tier, with a warning — as is a scope scored on
+  too few documents of a full-size set), and once frozen it is the yardstick for every later version of that
   tenant. Prefer to freeze from the first build at real scale; if a pilot set is frozen, replacing it later is
   a deliberate delete-and-refreeze after which older scores are not comparable.
 - **A pilot whose eval set holds no scans** (the CGL originals are all digital) is not blocked on
@@ -166,8 +167,8 @@ This is the **minimum experiment that tests the architecture's generalisation cl
   more windows per policy, so a longer training run; a corpus built before the change must be rebuilt and the
   adapter retrained, and pilot or gate numbers from before it are not comparable with new ones.
 - **Before the pilot's `finetune`**: `python -m data_pipeline.ocr_check` (labelled values against the OCR
-  text), `python -m orchestration.preflight --scope <scope>` (it also fails on a model-drafted label with no
-  reviewer and reports annotation agreement, warning only; add `--skip-corpus` when `finetune` follows in the
+  text), `python -m orchestration.preflight --scope <scope>` (it also fails on a label with no review
+  record and reports annotation agreement, warning only; add `--skip-corpus` when `finetune` follows in the
   same chain: the build then runs once, and refuses a >25% set-aside itself), and
   `python -m orchestration.smoke_run --scope <scope>` (tenant `smoke`, version `v0`, 4 train / 1 val / 1 test
   sources with their twins; never freezes or packages). The smoke run proves the plumbing; it is not
@@ -203,3 +204,8 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 - Constraints: de-identification is Option A (none) as the architecture records, not "blocked"; the option choice stays a compliance open item; reviewed golds.
 - Acceptance checklist: the gate-floor criteria are met at exactly the floor.
 - Current implementation: one carrier held out per line, only in a line naming 10 or more carriers; a set frozen with `--allow-small` caps the release at interim; every page read (longer run, rebuild and retrain, earlier numbers not comparable); the preflight's label checks; token parity on the pod.
+
+## Changes of 2026-10-22 (code review)
+
+- Freezing a pilot eval set: the interim cap follows what the pilot's scope was scored on (fewer than 150 frozen documents of a type it covers), not the set's `small_set_accepted` (IMPL-08).
+- Reviewed golds: every gold needs a review record (decision 2026-10-22), a twin its seed's; the preflight fails on any without one.
