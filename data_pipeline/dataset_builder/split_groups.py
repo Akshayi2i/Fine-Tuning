@@ -218,6 +218,12 @@ class GroupRecord:
     #: generator, not the model (arch v2.1 §4d).
     synthetic: bool = False
 
+    #: A synthetic family that also holds a real document: a seed with its
+    #: twins. It trains like any synthetic family, but its carrier (the real
+    #: member's) is one of its line's carriers (:func:`held_out_carrier_per_line`).
+    #: Read only when ``synthetic``.
+    holds_real: bool = False
+
     #: The line of business the family belongs to (:func:`line_of`). ``None`` for
     #: types without one (ACORD, Loss Runs), which are then one line per type.
     line: str | None = None
@@ -479,12 +485,14 @@ def held_out_carrier_per_line(records: list[GroupRecord], seed: int,
     validation documents - what holding it out costs; its test documents cost
     nothing - with ties broken by a seeded hash so the choice is reproducible.
 
-    On a policy (decision 2026-10-22) carriers are counted and chosen from its
-    real families only, and a placeholder ("N/A", "Unknown", blank) is no
-    carrier (:func:`is_placeholder_carrier`). A carrier with a synthetic family
-    in the line is never chosen: twins train wherever they sit - a drawn split
-    keeps them in train, a family holding a seed and its twins with them - so
-    its layouts are seen in training. Other doc types are read as given.
+    On a policy (decision 2026-10-22) carriers are counted from the families
+    holding a real document - a seed with its twins among them, so a line's
+    count is its real carriers - and a placeholder ("N/A", "Unknown", blank) is
+    no carrier (:func:`is_placeholder_carrier`). A carrier with a synthetic
+    family in the line is never chosen: twins train wherever they sit - a drawn
+    split keeps them in train, a family holding a seed and its twins with them
+    - so its layouts are seen in training. A family of twins alone counts for
+    nothing: its carrier may be generated. Other doc types are read as given.
     """
     families: dict[str, dict[str, list[GroupRecord]]] = defaultdict(lambda: defaultdict(list))
     #: Per line, the policy carriers a synthetic family trains.
@@ -499,7 +507,8 @@ def held_out_carrier_per_line(records: list[GroupRecord], seed: int,
             if record.synthetic:
                 if carrier:
                     trained[record.line].add(carrier)
-                continue
+                if not record.holds_real:
+                    continue
         lines.add(record.line)
         if carrier:
             families[record.line][carrier].append(record)

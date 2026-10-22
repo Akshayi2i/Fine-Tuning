@@ -157,6 +157,20 @@ def test_a_pdf_with_its_gold_becomes_a_document_folder(tmp_path):
     assert json.loads((folder / "metadata.json").read_text())["lob"] == "homeowners"
 
 
+def test_a_pdfs_gold_carries_the_review_record_it_is_given(tmp_path):
+    """A gold with no review record is not scored, so the record must reach the bundle."""
+    from data_pipeline.labeling.export_golden_labels import has_review_record
+    from testing.compare_models import resolve_inputs
+
+    pdf, gold = tmp_path / "policy.pdf", tmp_path / "gold.json"
+    pdf.write_bytes(b"%PDF-1.4")
+    gold.write_text(json.dumps({"line_of_business": ["homeowners"], "policy": {}}), encoding="utf-8")
+    review = {"reviewer_id": "a.reviewer", "review_date": "2026-10-20"}
+    (folder,) = resolve_inputs(pdf, tmp_path / "staging", gold=gold, review=review)
+    metadata = json.loads((folder / "metadata.json").read_text())
+    assert metadata == {"lob": "homeowners", **review} and has_review_record(metadata)
+
+
 def test_a_pdf_without_gold_or_line_is_refused(tmp_path):
     from testing.compare_models import CompareError, resolve_inputs
 

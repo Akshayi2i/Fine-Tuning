@@ -791,9 +791,9 @@ def test_fixes_defect_is_checked_and_given_per_scope(client, controller):
     assert _cli_context(client, controller, argv, scope=lossrun).fixes_defect is None
 
 
-def test_a_model_drafted_label_nobody_reviewed_never_trains(client, controller):
-    """Decision 2026-10-19: a gold a model drafted counts only once a person
-    reviewed it. The corpus build refuses the run rather than train on it."""
+def test_a_gold_with_no_review_record_never_trains(client, controller):
+    """Decision 2026-10-22: every gold needs a review record. The corpus build
+    refuses the run rather than train on one without it."""
     from orchestration.pipeline_dag import load_labeled_documents
 
     seeded = seed_corpus(client)
@@ -808,7 +808,7 @@ def test_a_model_drafted_label_nobody_reviewed_never_trains(client, controller):
 
     ctx = make_context(client, controller)
     ctx.doc_types = [doc_type]
-    with pytest.raises(PipelineError, match="nobody reviewed"):
+    with pytest.raises(PipelineError, match="no review record"):
         load_labeled_documents(ctx)
 
     client.write_json(paths.label_metadata(doc_type, source_id),

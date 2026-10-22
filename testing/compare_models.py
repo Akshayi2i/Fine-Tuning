@@ -64,12 +64,16 @@ class CompareError(RuntimeError):
 
 
 def resolve_inputs(source: Path, staging: Path, *, gold: Path | None = None,
-                   lob: str | None = None) -> list[Path]:
+                   lob: str | None = None, review: dict[str, str] | None = None) -> list[Path]:
     """The document folders to compare.
 
     A PDF becomes a document folder under ``staging`` (it needs ``gold`` and a
     line of business, from ``lob`` or the gold's ``line_of_business``). A folder
     holding a PDF is one document; a folder of such folders is several.
+
+    ``review`` (``reviewer_id``, ``review_date``) is the gold's review record,
+    written into the PDF's ``metadata.json``: a gold with none is not scored
+    (decision 2026-10-22), so without it the answers are compared with nothing.
     """
     if source.is_file():
         if source.suffix.lower() != ".pdf":
@@ -84,7 +88,7 @@ def resolve_inputs(source: Path, staging: Path, *, gold: Path | None = None,
         folder.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, folder / "document.pdf")
         (folder / "golden.json").write_text(json.dumps(label, ensure_ascii=False, indent=2), encoding="utf-8")
-        (folder / "metadata.json").write_text(json.dumps({"lob": line}), encoding="utf-8")
+        (folder / "metadata.json").write_text(json.dumps({"lob": line, **(review or {})}), encoding="utf-8")
         return [folder]
     if not source.is_dir():
         raise CompareError(f"{source} does not exist")
@@ -287,6 +291,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
                         help="LoRA adapter folder (checkpoint-N or the run's adapter folder; local or Blob)")
     parser.add_argument("--gold", type=Path, default=None, help="the gold JSON, when --input is a PDF")
     parser.add_argument("--lob", default=None, help="line of business, when --input is a PDF")
+    parser.add_argument("--reviewer-id", dest="reviewer_id", default=None,
+                        help="who reviewed --gold, when --input is a PDF; a gold with no review record "
+                             "(this and --review-date) is not scored")
+    parser.add_argument("--review-date", dest="review_date", default=None,
+                        help="when --gold was reviewed (YYYY-MM-DD), when --input is a PDF")
     parser.add_argument("--tenant", default=DEFAULT_TENANT, help="where the documents are imported and OCR'd")
     parser.add_argument("--out", type=Path, default=None, help="output folder (default under testing/results)")
     parser.add_argument("--label", default=None, help="name for the adapter in the outputs")
@@ -312,7 +321,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     out = args.out or COMPARISONS_ROOT / f"{args.label or 'compare'}-{stamp}"
     try:
-        folders = resolve_inputs(args.input, out / "_inputs", gold=args.gold, lob=args.lob)
+        review = {key: value for key, value in (("reviewer_id", args.reviewer_id),
+                                                ("review_date", args.review_date)) if value}
+        folders = resolve_inputs(args.input, out / "_inputs", gold=args.gold, lob=args.lob, review=review)
         ids = import_and_ocr(folders, tenant=args.tenant, doc_type=args.doc_type)
     except CompareError as exc:
         print(f"compare: {exc}")

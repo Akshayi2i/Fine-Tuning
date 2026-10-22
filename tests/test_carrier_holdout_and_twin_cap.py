@@ -176,6 +176,37 @@ def test_a_synthetic_only_carrier_neither_counts_nor_is_held_out_on_a_delivered_
     assert all(result.assignment[f"t-{s}"] == s for s in ("train", "val", "test"))
 
 
+def test_a_carrier_seen_only_with_its_twins_counts_toward_the_minimum_but_is_never_held_out():
+    """Ten real carriers, the tenth's real document delivered in one family with
+    its twins: the line names ten carriers, so it holds one out - never that one."""
+    from orchestration.pipeline_dag import group_records
+
+    records, splits = _ten_carriers()
+    nine = [r for r in records if not r.group_id.startswith("c9-")]
+    nine_splits = {g: s for g, s in splits.items() if not g.startswith("c9-")}
+
+    def doc(source_id, carrier, synthetic):
+        return SimpleNamespace(source_id=source_id, doc_type="policy", family="seed-9", carrier=carrier,
+                               synthetic=synthetic, lob="homeowners")
+
+    # A twin listed first, under a generated carrier: the family takes its seed's.
+    (family,) = group_records([doc("t1", "Generated Mutual", True), doc("s9", "carrier 9", False),
+                               doc("t2", "Generated Mutual", True)])["policy"]
+    assert family.synthetic and family.holds_real and family.carrier == "carrier 9"
+
+    choice = held_out_carrier_per_line(nine + [family], seed=42, split_of={**nine_splits, "seed-9": "train"})
+    assert not choice.below_minimum and choice.held == {"homeowners": "carrier 0"}
+    # Carrier 0, the cheapest, seen only through such a family: counted, never held out.
+    family.carrier = "carrier 0"
+    without_c0 = [r for r in records if not r.group_id.startswith("c0-")]
+    choice = held_out_carrier_per_line(without_c0 + [family], seed=42, split_of=splits)
+    assert choice.held == {"homeowners": "carrier 1"}
+    family.holds_real = False                                      # twins alone count for nothing
+    family.carrier = "carrier 9"
+    choice = held_out_carrier_per_line(nine + [family], seed=42, split_of={**nine_splits, "seed-9": "train"})
+    assert choice.below_minimum == {"homeowners": 9} and not choice.held
+
+
 @pytest.mark.parametrize("placeholder", ["N/A", "n a", "Unknown", "none", "TBD", "various", "", "  "])
 def test_a_placeholder_carrier_neither_counts_nor_is_held_out(placeholder):
     records, splits = _ten_carriers()

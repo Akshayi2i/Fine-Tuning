@@ -399,3 +399,12 @@ def test_marking_needs_a_frozen_set(client):
 
     with pytest.raises(FreezeError, match="no frozen eval set"):
         mark_held_out(client)
+
+
+def test_the_cli_can_mark_a_frozen_set_reviewed():
+    """A set frozen before the freeze carried review records is refused by the
+    gate; --mark-reviewed is how an operator fixes it without refreezing."""
+    from orchestration import run as cli
+
+    args = cli.build_parser().parse_args(["freeze-eval-set", "--tenant", "t", "--mark-reviewed"])
+    assert args.mark_reviewed and not args.mark_held_out

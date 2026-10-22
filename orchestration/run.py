@@ -448,6 +448,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="in the tenant's EXISTING frozen set, mark the documents the delivery calls unseen "
              "carriers' (re-import the batch first); nothing else in the set changes",
     )
+    freeze.add_argument(
+        "--mark-reviewed", dest="mark_reviewed", action="store_true",
+        help="in the tenant's EXISTING frozen set, copy each document's review record from its label "
+             "metadata (the gate refuses a frozen gold without one); nothing else in the set changes",
+    )
 
     return parser
 
@@ -474,15 +479,21 @@ def main(argv: Iterable[str] | None = None) -> int:
         return run_extract(args)
 
     if args.command == "freeze-eval-set":
-        from evaluation.freeze_eval_set import freeze_eval_set, mark_held_out
+        from evaluation.freeze_eval_set import freeze_eval_set, mark_held_out, mark_reviewed
         from registry_utils.write_run_manifest import capture_git_commit
 
         if args.mark_held_out:
             marked = mark_held_out(BlobClient(), tenant_id=args.tenant)
             print(json.dumps({"held_out_source_ids": marked}, indent=2))
             return 0
+        if args.mark_reviewed:
+            # Non-zero while any frozen gold still has no record: the gate refuses the set.
+            missing = mark_reviewed(BlobClient(), tenant_id=args.tenant)
+            print(json.dumps({"still_without_review_record": missing}, indent=2, ensure_ascii=False))
+            return 1 if missing else 0
         if not args.corpus:
-            build_parser().error("freeze-eval-set needs --corpus (or --mark-held-out on a frozen set)")
+            build_parser().error(
+                "freeze-eval-set needs --corpus (or --mark-held-out / --mark-reviewed on a frozen set)")
         manifest = freeze_eval_set(
             BlobClient(), args.corpus, tenant_id=args.tenant, git_commit=capture_git_commit(),
             allow_small=args.allow_small,

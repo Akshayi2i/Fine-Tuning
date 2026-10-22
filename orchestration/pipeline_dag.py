@@ -494,7 +494,7 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
     for doc_type in ctx.doc_types:
         for source_id in list_labeled_source_ids(ctx.client, doc_type, ctx.tenant_id):
             label, metadata = load_golden_label(source_id, doc_type, ctx.client, ctx.tenant_id)
-            # A model-drafted gold nobody reviewed never trains (decision 2026-10-19).
+            # A gold with no review record never trains (decision 2026-10-22).
             if problem := review_problem(label, metadata):
                 unreviewed.append((source_id, problem))
                 continue
@@ -557,10 +557,11 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
             ))
     if unreviewed:
         raise PipelineError(
-            f"{len(unreviewed)} labelled document(s) were drafted by a model and nobody reviewed "
-            f"them, so they cannot train (decision 2026-10-19): {unreviewed[0][0]}: "
-            f"{unreviewed[0][1]}. Others: {[s for s, _ in unreviewed[1:6]]}. Have a person review "
-            "them, record reviewer_id and review_date in metadata.json, and re-import."
+            f"{len(unreviewed)} labelled document(s) have no review record, so they cannot train "
+            f"(decision 2026-10-22): {unreviewed[0][0]}: {unreviewed[0][1]}. Others: "
+            f"{[s for s, _ in unreviewed[1:6]]}. Have a person review them, record reviewer_id and "
+            "review_date in metadata.json (a twin inherits its seed's through prepare_bundles), "
+            "and re-import."
         )
     assert_one_mineru_version(read_by)
     ctx.grouping = assign_document_groups(ctx, documents)
@@ -730,6 +731,7 @@ def group_records(documents: list[Any]) -> dict[str, list[Any]]:
                 source_ids=[document.source_id],
                 carrier=document.carrier,
                 synthetic=document.synthetic,
+                holds_real=not document.synthetic,
                 # The line the split balances on. A family is one line in
                 # practice (one insured's policy renewed); the first member's
                 # stands for it.
@@ -737,6 +739,11 @@ def group_records(documents: list[Any]) -> dict[str, list[Any]]:
             )
         else:
             record.source_ids.append(document.source_id)
+            if not document.synthetic and not record.holds_real:
+                # The real member's carrier names the family: a twin's may be
+                # generated, and the carrier hold-out counts real carriers.
+                record.carrier = document.carrier
+                record.holds_real = True
             # One synthetic member pins the whole family to train. A family moves
             # as a unit, so a mixed family made splittable — which `and` did,
             # while this comment claimed the opposite — could land in val or
