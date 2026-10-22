@@ -1,12 +1,12 @@
 # SPEC 07 — Inference Core (Shared Model-Runner Primitive)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02. **This module exists to break the cycle between evaluation, calibration, serving, and testing** — they all need one shared way to run a model version over a document. Build it here, once; everything downstream imports it.
 >
 > **Naming hazard (master §0.1):** in this folder `IMPL-07` is the inference core. The architecture's "**Fideon SPEC_07 Stage 3**" is the external production **audit gate** — a different document. They are unrelated.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §5 (logprobs → field spans), §6 (modality modes), §7 (prompt template identity, multi-page inputs; §7b windows over every page), §11 (resolution cap).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §5 (logprobs → field spans), §6 (modality modes), §7 (prompt template identity, multi-page inputs; §7b windows over every page), §11 (resolution cap).
 
 ## Why this module exists
 
@@ -131,3 +131,7 @@ A clean, low-level inference engine: given a resolved model version + a prepared
 - §2 `build_messages`: `page_numbers` / `total_pages` label one window of a long document, not a routed request; every page is read, a request is the whole document or one window, and `build_training_row` forwards the same markers.
 - Acceptance checklist: "a routed subset" replaced by "a window is a subsequence of the full document"; new item: no request carries a selected subset of pages.
 - Current implementation: every page read — no page routing, page threshold, `long_doc_types` or `RoutingPlan.routed`; the shapes a request can take (whole document, a canonical policy's windows, a long Loss Run's windows).
+
+## Changes of 2026-10-22 (code review)
+
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

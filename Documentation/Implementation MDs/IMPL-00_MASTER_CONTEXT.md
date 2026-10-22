@@ -1,16 +1,27 @@
 # SPEC 00 — Master Context (Read First)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > **Purpose of this file.** This is the shared context every other spec assumes. When you run any individual spec (IMPL-01 … IMPL-15) in Claude Code, that spec references this file for global conventions. Read this once; each module spec then adds only what's specific to it.
 >
-> **Source of truth.** This spec set and the architecture document **`Documentation/finetuning-architecture-v2.4.docx`** are **in sync** as of this revision (v2.3, v2.1 and v1 are kept for history only). Where a spec cites a section like "(arch §4)", it refers to that document.
+> **Source of truth.** This spec set and the architecture document **`Documentation/finetuning-architecture-v2.5.docx`** are **in sync** as of this revision (v2.4, v2.3, v2.1 and v1 are kept for history only). Where a spec cites a section like "(arch §4)", it refers to that document.
 >
 > **Precedence.** The architecture carries the *why* — design rationale, trade-offs, the reasoning behind each decision. These specs carry the *how* — module boundaries, file paths, function signatures, acceptance criteria. Neither outranks the other: they describe the same system at different altitudes. **If they disagree, that is a bug in one of them.** Fix the disagreement rather than picking a winner, and say which one you changed.
 >
 > Anything genuinely build-level — a CLI flag, a module name, a test — lives here and is not expected to appear in the architecture.
 >
-> **Revision:** aligned to **`finetuning-architecture-v2.4.docx`** (its Revision v2.4, 2026-10-21), which records the decisions of 2026-10-19 below. The section numbers are unchanged from v2.1.
+> **Revision:** aligned to **`finetuning-architecture-v2.5.docx`** (its Revision v2.5, 2026-10-22), which records the decisions of 2026-10-19 and 2026-10-22 below. The section numbers are unchanged from v2.1.
+>
+> **Current target.** **Policy documents only, for now** (decision 2026-10-22): train and gate a policy scope (`--scope policy`, or a line scope such as `personal_lines`); the ACORD and Loss Run code is kept, unchanged, but not targeted. A new training set and canonical schema are to be delivered, and the corpus, the frozen eval set and the adapters are rebuilt from them.
+>
+> What v2.5 changed (decisions 2026-10-22, after a code review of v2.4), and what it means for these specs:
+>
+> | Change | Why | Specs affected |
+> |---|---|---|
+> | **Policy documents only, for now.** A policy scope is trained and gated; the ACORD and Loss Run code stays as it is | The current target. A unified release scored on no ACORD or Loss Run documents is capped at interim, since its scope covers types it was not scored on | 00, 06, 13, 15 |
+> | **Every gold needs a review record** (`reviewer_id`, `review_date`), read from its metadata alone; a twin carries its seed's | Only a person's name shows a person checked a gold; notes can be read either way | 00, 03, 04, 05, 08, 12, 13 |
+> | **Policy windows sized by their pages' own text**; the corpus pins `window_plan_version` | Dense wording overflowed the sequence cap and set whole documents aside | 04, 05, 11, 13 |
+> | **A new training set and canonical schema are to be delivered** | Counts and schema details in these specs describe the older data and the current schema; they change when the new ones arrive | all |
 >
 > What v2.4 changed (decisions 2026-10-19), and what it means for these specs:
 >
@@ -881,3 +892,4 @@ What the build does now that the sections above did not describe. Each module sp
 - §13.2: the label rules, the form-edition rule among them, hold on common-model policy lines only (`label_rules_apply`); a stored gold is read under the edition rule by the corpus build as by the gate; bundles carry the review record.
 - §13.2: on a policy the carrier hold-out counts real carriers only — a placeholder is no carrier, and a carrier a synthetic family trains is never held out; `freeze-eval-set --mark-reviewed`.
 - §13.4 and §13.5: the preflight's review-record check; serving's conventions on common-model lines.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22; the current target (policy documents only) and a table of what v2.5 changed.

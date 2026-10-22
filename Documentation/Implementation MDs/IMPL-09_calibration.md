@@ -1,10 +1,10 @@
 # SPEC 09 — Confidence Calibration
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-07, IMPL-08. Uses the inference core (IMPL-07) for logprobs/spans and the evaluation normalizer (IMPL-08) for the correctness signal. No forward dependency on serving/testing.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §5 (**confidence flow, calibration, list-field second signal**), §0b (LoB carries confidence too), §15 (ECE as a gating metric).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §5 (**confidence flow, calibration, list-field second signal**), §0b (LoB carries confidence too), §15 (ECE as a gating metric).
 
 ## Goal
 
@@ -197,3 +197,7 @@ back to the default target.
 
 - Header: aligned with the code of 2026-10-21; architecture reference is `finetuning-architecture-v2.4.docx`.
 - Current implementation, *How a sample is labelled*: a windowed policy's windows cover every page (decision 2026-10-19), so calibrators are fitted on whole policies merged as served.
+
+## Changes of 2026-10-22 (code review)
+
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

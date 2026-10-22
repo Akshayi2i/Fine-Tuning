@@ -1,10 +1,10 @@
 # SPEC 01 — Project Scaffold, Configs, Schemas, Prompts
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: none. This spec creates the repo skeleton and all static configuration that later modules read.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0a (schema contract), §0b (LoB), §6 (modality instructions), §7 (dataset format, schema registry, prompt template), §9/§9a (LoRA targets), §11 (full hyperparameter spec), §11a (sweeps), §13a/§13b (quantization), §19 (repo structure).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0a (schema contract), §0b (LoB), §6 (modality instructions), §7 (dataset format, schema registry, prompt template), §9/§9a (LoRA targets), §11 (full hyperparameter spec), §11a (sweeps), §13a/§13b (quantization), §19 (repo structure).
 
 ## Goal
 
@@ -299,3 +299,4 @@ not yet read by the model view).
 ## Changes of 2026-10-22 (code review)
 
 - `.env.example`: `AZURE_RAW_SAS_TOKEN`, and the account-SAS note for a single token.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

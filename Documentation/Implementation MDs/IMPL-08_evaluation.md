@@ -1,10 +1,10 @@
 # SPEC 08 — Evaluation (Metrics + Promotion Gating)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-06, IMPL-07. Uses the shared inference core (IMPL-07) for all model runs — no forward dependency on serving or testing.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §15 (**metric definitions + LoB metric**), §0b (LoB gating), §3 (ViT gate inputs), §5 (list-field recall), §13 step 6 (the gate is a hard stop), §12 (gate result recorded in the manifest).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §15 (**metric definitions + LoB metric**), §0b (LoB gating), §3 (ViT gate inputs), §5 (list-field recall), §13 step 6 (the gate is a hard stop), §12 (gate result recorded in the manifest).
 
 ## Goal
 
@@ -325,3 +325,4 @@ extra.
 - The freeze refuses a gold with no review record (decision 2026-10-22) before copying anything, and carries `reviewer_id`, `review_date`, `draft_backend` and `review_inherited_from` into the frozen metadata; `freeze-eval-set --mark-reviewed` (`mark_reviewed`) gives an older set its records and exits 1 while any is missing.
 - The golden eval refuses a frozen set holding a gold with no review record, never skipping it: a set frozen before 2026-10-22 is marked or frozen again before the gate scores it.
 - Frozen golds are read under the form-edition rule only on common-model policy lines (`label_rules_apply`), through the corpus build's own `label_verification.verified_label`.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

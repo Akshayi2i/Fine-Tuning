@@ -1,18 +1,20 @@
 # SPEC 15 — Pilot Validation Protocol (De-Risking Before Full Annotation)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01–IMPL-14 built.
 >
 > **This spec is executed, not imported.** It is an operational runbook, not a library — nothing else in the repo depends on it. It exists because architecture v1 added §16, which has no home in the module specs.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §16 (**pilot validation protocol**: 16.1 zero-shot baseline, 16.2 smoke test, 16.3 pilot run, 16.4 exit decision), §0d (the floors the pilot targets come from), §0e (decisions of 2026-10-19), §8 (pilot split ratios), §8b (de-identification), §4c (day-zero bootstrap), §15 (metrics).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §16 (**pilot validation protocol**: 16.1 zero-shot baseline, 16.2 smoke test, 16.3 pilot run, 16.4 exit decision), §0d (the floors the pilot targets come from), §0e (decisions of 2026-10-19), §8 (pilot split ratios), §8b (de-identification), §4c (day-zero bootstrap), §15 (metrics).
 
 ## Goal
 
 Before committing to full corpus annotation, run three sequential experiments that de-risk the architecture in order of increasing investment. Each answers a different question, and each is cheap relative to the one after it.
 
 **Run these in order. Do not skip to Experiment C.**
+
+**Policy documents only, for now** (decision 2026-10-22): wherever this protocol says *per document type*, read policies, and train and gate a policy scope. ACORD forms and Loss Runs return to the pilot when they are targeted again.
 
 ## Deliverables
 
@@ -209,3 +211,5 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 
 - Freezing a pilot eval set: the interim cap follows what the pilot's scope was scored on (fewer than 150 frozen documents of a type it covers), not the set's `small_set_accepted` (IMPL-08).
 - Reviewed golds: every gold needs a review record (decision 2026-10-22), a twin its seed's; the preflight fails on any without one.
+- Goal: the pilot covers policy documents only, for now (decision 2026-10-22).
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

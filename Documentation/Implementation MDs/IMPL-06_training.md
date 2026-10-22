@@ -1,10 +1,10 @@
 # SPEC 06 — Training (ms-swift LoRA: ONE Unified Adapter)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-05.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §3 (ViT escalation gate — **LoRA, never full FT**), §4.1 (**one unified adapter**), §4.2 (graduation gate for per-type adapters), §6.1 (per-epoch modality sampling), §7b (policy windows over every page), §8b (tenancy per Fideon SPEC_12; de-identification per Fideon SPEC_11 — Option A, none, see IMPL-05 §1), **§9.2 (bf16 base vs 4-bit)**, §9.3 (memory settings), §9.4 / §9a (frozen ViT and mergers; LoRA targets), §10 (**locked three-layer trainer stack**; §10.1 fallback, §10.2 parity tests), §11 (hyperparameters), §11.2 (checkpoint selection), §11a (**sweep methodology**), §12 (versioning + run registry).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §3 (ViT escalation gate — **LoRA, never full FT**), §4.1 (**one unified adapter**), §4.2 (graduation gate for per-type adapters), §6.1 (per-epoch modality sampling), §7b (policy windows over every page), §8b (tenancy per Fideon SPEC_12; de-identification per Fideon SPEC_11 — Option A, none, see IMPL-05 §1), **§9.2 (bf16 base vs 4-bit)**, §9.3 (memory settings), §9.4 / §9a (frozen ViT and mergers; LoRA targets), §10 (**locked three-layer trainer stack**; §10.1 fallback, §10.2 parity tests), §11 (hyperparameters), §11.2 (checkpoint selection), §11a (**sweep methodology**), §12 (versioning + run registry).
 
 ## Goal
 
@@ -49,7 +49,7 @@ Replaces v1's `train_foundation.py` and `train_adapter.py`. One entrypoint. The 
 - **Manifest:** a `RunManifest` (IMPL-02) is written at status **`training`** before launch; `launch_and_record` flips it to `trained` when ms-swift returns, or **`failed`** when it raises, so the registry never claims weights a crashed run never wrote. It records the full config, data stats, LoB coverage, seed, git commit, corpus version, MinerU version, schema/prompt template versions, and the de-identification flag (recorded, not asserted: `false` under Option A, no de-identification — IMPL-05 §1). A model card is written beside it (`registry_utils/model_card.py`).
 - **The YAML's `evaluation:` block** is read in three places. `build_training_config` passes `eval_strategy`, `save_strategy`, `metric_for_best_model`, `greater_is_better` and `load_best_model_at_end` directly, and derives `eval_steps`, `save_steps` and `save_total_limit` from `evaluations_per_run`, `checkpoint_every_steps` and `save_total_limit`. Staging reads `loss_sample_rows`. Checkpoint selection reads `validation_sample_rows` and the `selection_*` keys (§3). `early_stopping_patience` is still in the YAML and passed nowhere: ms-swift 3 accepts none.
 
-Flags: `--corpus vN`, `--out-version vN`, `--tenant`, `--scope NAME` (defaults to unified), `--deepspeed zero2|zero3`, `--train-vit` (refused, see *Current implementation*), `--continue-from <checkpoint dir>`, `--dry-run`.
+Flags: `--corpus vN`, `--out-version vN`, `--tenant`, `--scope NAME` (defaults to unified; while only policies are targeted, name a policy scope — `policy` or a line scope, decision 2026-10-22), `--deepspeed zero2|zero3`, `--train-vit` (refused, see *Current implementation*), `--continue-from <checkpoint dir>`, `--dry-run`.
 
 **Versioning rule (arch §12) — enforced in code:**
 - **Major corpus expansion** → retrain **from the original HF base model** on the full accumulated corpus. Continued training on an existing LoRA compounds drift across cycles.
@@ -326,3 +326,5 @@ again. A scope without `lines`
 
 - Phase 0 spike: a plain-string content goes in as one text block; a tokenizing error is a FAIL with its traceback.
 - casualty_fleet: a gold with no review record reaches neither a corpus nor the gate (decision 2026-10-22).
+- Flags: name a policy scope while only policies are targeted (decision 2026-10-22).
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

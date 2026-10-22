@@ -1,10 +1,10 @@
 # SPEC 05 — Dataset Builder (JSONL, Modality, Split)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-04.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0e (decisions of 2026-10-19), §6 (modality dropout), §7 (dataset format, schema registry, prompt template versioning, long documents), §8 (corpus versioning, split strategy), §8a (MinerU pin in the manifest), §8b (tenant isolation per Fideon SPEC_12; **de-identification per Fideon SPEC_11 — Option A, none, see §1**), §0b (LoB coverage).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0e (decisions of 2026-10-19), §6 (modality dropout), §7 (dataset format, schema registry, prompt template versioning, long documents), §8 (corpus versioning, split strategy), §8a (MinerU pin in the manifest), §8b (tenant isolation per Fideon SPEC_12; **de-identification per Fideon SPEC_11 — Option A, none, see §1**), §0b (LoB coverage).
 
 ## Goal
 
@@ -421,3 +421,4 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 - Golds: the corpus build reads a stored gold under the form-edition rule where it holds (`load_golden_label`), exactly as the gate scores it; on a self-contained line the edition stays in the number. `label_verification.verified_label` takes `doc_type=` and `lob=` to do the same.
 - Split, policies only: a placeholder carrier is no carrier; a carrier any synthetic family trains is never held out; a seed family's real carrier counts toward the 10 (`GroupRecord.holds_real`); a delivered split counts and chooses from real carriers.
 - Acceptance checklist: the review-record refusal, the corpus build reading golds as the gate does, real carriers only.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

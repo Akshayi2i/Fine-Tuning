@@ -1,10 +1,10 @@
 # SPEC 10 — Postprocessing (Merge + Serving-Format Quantization)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-02, IMPL-06.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §13 steps 7–8, §13a (**vLLM-native serving formats**), §13b (quantization quality thresholds, absolute percentage points), §18 (artifact paths).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §13 steps 7–8, §13a (**vLLM-native serving formats**), §13b (quantization quality thresholds, absolute percentage points), §18 (artifact paths).
 
 ## Goal
 
@@ -187,3 +187,4 @@ manifest's `quantized_model` points at the first quantized format — never bf16
 
 - §5: the gate's bootstrap is weighted and pairs only reports scored on the same frozen set of the tenant; the interim cap follows what the scope was scored on; `--fixes-defect` per scope; the written override on the command line (IMPL-08).
 - Acceptance checklist: the bundle's tier under the per-scope cap.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

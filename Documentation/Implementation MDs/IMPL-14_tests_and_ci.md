@@ -1,10 +1,10 @@
 # SPEC 14 — Unit Tests + CI Fixtures
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: all prior specs (01–13).
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0a/§0b (schema + LoB contracts), §5 (list-field recall), §7 (prompt identity, split leakage), §8a/§8b (MinerU pin, tenancy), §10 (collator masking, §10.2 parity tests), §15 (gating).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0a/§0b (schema + LoB contracts), §5 (list-field recall), §7 (prompt identity, split leakage), §8a/§8b (MinerU pin, tenancy), §10 (collator masking, §10.2 parity tests), §15 (gating).
 
 ## Goal
 
@@ -236,3 +236,4 @@ real vLLM engines (the tests fake the engine), and a real upload.
 - *Current implementation*: a table of the gate tests added in the code review; the tier rows say the per-scope interim cap.
 - *Current implementation*: a table of the review-record, form-edition and carrier tests added in the code review; the reviewed-gold, form-edition and orchestration rows say the new rules.
 - *Current implementation*: 2,955 tests in 123 modules.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

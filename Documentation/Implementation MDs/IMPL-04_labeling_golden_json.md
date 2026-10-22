@@ -1,10 +1,10 @@
 # SPEC 04 — Labeling, Golden JSON, and the Day-Zero Bootstrap
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01 (schemas, alias registry, `common.normalize`, `common.aliases`), IMPL-02, IMPL-03 (MinerU output — `derive_aliases` reads it).
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0a (schema contract), §0b (LoB in every label), §0e (decisions of 2026-10-19: **no frontier model**, reviewed golds only), §4c (**day-zero bootstrap**), §7c "Golden Label Generation", §13 step 11 (feedback loop).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0a (schema contract), §0b (LoB in every label), §0e (decisions of 2026-10-19: **no frontier model**, reviewed golds only), §4c (**day-zero bootstrap**), §7c "Golden Label Generation", §13 step 11 (feedback loop).
 
 ## Goal
 
@@ -354,3 +354,4 @@ row per value. Page text is normalised once per page.
 - The form-edition rule holds on common-model policy lines only (`label_rules_apply`); a stored gold is read under it by `load_golden_label`, so the corpus build and the gate read it alike.
 - What the importer records: `review_inherited_from` beside the review record.
 - Constraints and acceptance checklist: the review-record rule and the form-edition rule's lines.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

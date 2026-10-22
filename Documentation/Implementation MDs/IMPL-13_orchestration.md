@@ -1,10 +1,10 @@
 # SPEC 13 — Orchestration (Command Surface + RunPod Controller + Pipeline DAG)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: all prior specs (01–12).
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0e (decisions of 2026-10-19), §13 (**end-to-end pipeline, 13 stages, idempotency, the gate**), §13c (**operator command surface**), §14 (**RunPod: ephemeral training pods vs. persistent serving endpoint**), §12 (every cycle recorded), §17 (extraction routine), §11a (sweep orchestration — deferred).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0e (decisions of 2026-10-19), §13 (**end-to-end pipeline, 13 stages, idempotency, the gate**), §13c (**operator command surface**), §14 (**RunPod: ephemeral training pods vs. persistent serving endpoint**), §12 (every cycle recorded), §17 (extraction routine), §11a (sweep orchestration — deferred).
 
 ## Goal
 
@@ -78,7 +78,7 @@ This is the honest shape: you ingest 500 documents, 200 are labeled, you train o
 
 There is no `--force`. There **is** an override (§15.5), requiring a named person, a written reason of at least 20 characters and the gates it waives, all recorded in the gate decision and the release bundle. It is given on `package` and `all` with `--override-approver`, `--override-reason` and `--override-gate` (repeatable): all three together, checked before any work, for one scope per run. It lifts only gates that failed, and they are recorded as waived. v1 had none at all, on the reasoning that a waivable gate is a suggestion — which was right about the risk and wrong about the remedy, because the v1 gate demanded improvement on twelve metrics within 0.001 and could not be passed at pilot volume at all.
 
-**Flags:** `--input`, `--doc-types`, `--corpus-version`, `--out-version`, `--scope NAME` (repeatable; `configs/scopes.yaml`, default the unified scope), `--gpu`, `--commit <sha>`, `--from-stage <name>` (resume), `--skip-ingest`, `--train-vit`, `--min-labels-per-type`, `--push-adapters` (see §3), `--tenant` (optional, defaults from env), `--dry-run`. `--foundation-only` is gone: one adapter per scope is the only topology.
+**Flags:** `--input`, `--doc-types`, `--corpus-version`, `--out-version`, `--scope NAME` (repeatable; `configs/scopes.yaml`, default the unified scope — while only policies are targeted, name a policy scope: `policy` or a line scope, decision 2026-10-22; a unified release scored on no ACORD or Loss Run documents is capped at interim), `--gpu`, `--commit <sha>`, `--from-stage <name>` (resume), `--skip-ingest`, `--train-vit`, `--min-labels-per-type`, `--push-adapters` (see §3), `--tenant` (optional, defaults from env), `--dry-run`. `--foundation-only` is gone: one adapter per scope is the only topology.
 
 ## 3. The RunPod staging volume
 
@@ -446,3 +446,5 @@ resumes from the failed step. It never freezes an eval set or packages a release
 - §2 and *Current implementation*: the corpus build refuses every gold with no review record (decision 2026-10-22; a twin's is its seed's) and says so; preflight's `check_reviewed_labels` fails on the same labels and no longer warns.
 - `freeze-eval-set --mark-reviewed`: review records copied into an existing frozen set, exit 1 while any is missing; the freeze refuses a gold with no record.
 - Acceptance checklist: the review-record refusal and `--mark-reviewed`.
+- Flags: name a policy scope while only policies are targeted (decision 2026-10-22); the examples already use `personal_lines`.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

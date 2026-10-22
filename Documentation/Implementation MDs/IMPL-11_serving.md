@@ -1,12 +1,12 @@
 # SPEC 11 — Serving (vLLM Endpoint + Classifier + Routing)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-07 (inference core), IMPL-09 (calibration), IMPL-10 (postprocessing).
 >
 > **Naming hazard (master §0.1):** the architecture's "**Fideon SPEC_11**" is the external Presidio de-identification spec (implemented in our IMPL-05). This file is our serving layer. Different documents.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0a (audit gate contract), §0b (LoB output), §0e (decisions of 2026-10-19: every page read), §4a (**classifier as a load-bearing component**), §4b (ACORD two-level), §4c (day-zero classifier), §5 (confidence), §7 (long documents: every page, read in windows), §14 (**RunPod split: what runs where**).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0a (audit gate contract), §0b (LoB output), §0e (decisions of 2026-10-19: every page read), §4a (**classifier as a load-bearing component**), §4b (ACORD two-level), §4c (day-zero classifier), §5 (confidence), §7 (long documents: every page, read in windows), §14 (**RunPod split: what runs where**).
 
 ## Goal
 
@@ -272,3 +272,4 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 
 - Windows split by their pages' own OCR text, by the rule the corpus build uses (`fit_windows_to_text`); `image_only` windows by page count alone.
 - A round's windows go to vLLM in batches of at most 32 (`MAX_WINDOWS_PER_BATCH`, chosen, not measured), one latency entry per batch.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

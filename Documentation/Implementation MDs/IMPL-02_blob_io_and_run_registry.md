@@ -1,10 +1,10 @@
 # SPEC 02 — Azure Blob I/O + Training Run Registry
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01. This is the ONLY module that talks to the Azure SDK directly. Everything else goes through it.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §8b (tenant isolation per Fideon SPEC_12), §12 (versioning + training run registry), §13b (quantization thresholds recorded), §15 (metrics recorded), §18/§18a (Blob layout, raw-document access control).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §8b (tenant isolation per Fideon SPEC_12), §12 (versioning + training run registry), §13b (quantization thresholds recorded), §15 (metrics recorded), §18/§18a (Blob layout, raw-document access control).
 
 ## Goal
 
@@ -195,3 +195,4 @@ into the per-corpus cache atomically (unique `.part` names, renamed into place).
 
 - §2: the raw container's own SAS token (`AZURE_RAW_SAS_TOKEN`), routed per call; two new refusals. New acceptance item.
 - Release bundle tier: `interim` follows what the release's scope was scored on (fewer than 150 frozen documents of a type it covers), not the whole set's `--allow-small` (IMPL-08).
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

@@ -1,10 +1,10 @@
 # SPEC 03 — Ingestion + MinerU OCR (GPU, with Version + Device Pinning)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0e (decisions of 2026-10-19: GPU only, reviewed golds), §7 (page images, multi-page), §7c (delivered golds), §8a (**MinerU version pinning**), §11 (resolution cap), §13 steps 1–2, §18a (raw-document storage, dedup, retention, access pattern), §18.2–18.3 (storage tiers, purge cascade).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0e (decisions of 2026-10-19: GPU only, reviewed golds), §7 (page images, multi-page), §7c (delivered golds), §8a (**MinerU version pinning**), §11 (resolution cap), §13 steps 1–2, §18a (raw-document storage, dedup, retention, access pattern), §18.2–18.3 (storage tiers, purge cascade).
 
 ## Goal
 
@@ -375,3 +375,4 @@ corrected at bundling instead.
 - `prepare_bundles` writes the review record into every bundle (the manifest's columns, a SPEC_21 row's being its seed's; `reviews.csv` for real documents alone) and counts the documents without one; a placeholder carrier is never an unseen one.
 - `fill_synthetic_labels` refuses a twin whose seed has no review record, and records the seed, its review and its notes in `fideon:filled`.
 - Acceptance checklist: the review-record, form-edition, bundling and filling items.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

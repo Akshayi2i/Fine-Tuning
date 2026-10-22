@@ -1,12 +1,12 @@
 # SPEC 12 — Testing / Extraction Routine (CLI Harness)
 
-> Aligned with the code of 2026-10-21.
+> Aligned with the code of 2026-10-22.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-03 (OCR), IMPL-07 (inference core), IMPL-08 (metrics), IMPL-09 (calibration), IMPL-11 (serving pipeline).
 >
 > **Naming hazard (master §0.1):** the architecture's "**Fideon SPEC_12**" is the external multi-tenant deployment spec. This file is our testing harness. Different documents.
 >
-> **Architecture refs:** `finetuning-architecture-v2.4.docx` §17 (**extraction/testing routine**), §19 (folder placement), §13a (quantized-format validation consumer), §5 (confidence without ground truth).
+> **Architecture refs:** `finetuning-architecture-v2.5.docx` §17 (**extraction/testing routine**), §19 (folder placement), §13a (quantized-format validation consumer), §5 (confidence without ground truth).
 
 ## Goal
 
@@ -262,3 +262,4 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 - *Current implementation*: golds are read under the form-edition rule only on common-model policy lines (`label_rules.under_edition_rule`).
 - §6: `compare_models --reviewer-id --review-date` give a PDF's `--gold` its review record; without one the answers are compared with no gold.
 - Acceptance checklist: scoring needs a reviewed gold.
+- Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.

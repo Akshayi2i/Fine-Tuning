@@ -10,11 +10,13 @@ they cannot handle - scanned input, unknown carrier, structure failure.
 Its output schema is **owned by Fideon SPEC_00**, not by this repo. The schemas
 in `schemas/` are those canonical models serialised to JSON Schema.
 
+**Policy documents only, for now** (decision 2026-10-22). Train and gate a policy scope (`--scope policy`, or a line scope such as `personal_lines`); the ACORD and Loss Run code is kept, unchanged, but not targeted. A new training set and canonical schema are to be delivered, and the corpus, the frozen eval set and the adapters are rebuilt from them.
+
 ## Documents
 
 | Where | What |
 |---|---|
-| `Documentation/finetuning-architecture-v2.4.docx` | The design and its rationale - the *why* (v2.4: the decisions of 2026-10-19 and the review fixes of 2026-10-21, §0e and Appendix A). v2.3, v2.1 and v1 are kept for history only |
+| `Documentation/finetuning-architecture-v2.5.docx` | The design and its rationale - the *why* (v2.5: the decisions of 2026-10-19 and 2026-10-22 and the code-review fixes, §0e and Appendix A). v2.4, v2.3, v2.1 and v1 are kept for history only |
 | `Documentation/Implementation MDs/IMPL-00` .. `IMPL-15` | Module specs and acceptance criteria - the *how*; IMPL-00 §13 indexes what the code does now |
 | `Documentation/Implementation MDs/IMPL_ALL_COMBINED.md` | All specs in one file |
 
@@ -33,10 +35,10 @@ scanned page there is no text for a rule to read.
 
 ```bash
 # 1  ingest -> OCR -> corpus -> train -> select checkpoint -> merge  (staged on the pod)
-python -m orchestration.run finetune --input ./intake --corpus-version v1 --out-version v2
+python -m orchestration.run finetune --input ./intake --corpus-version v1 --out-version v2 --scope policy
 
 # 2  quantize -> calibrate -> GATE -> push real weights + release bundle to Azure Blob
-python -m orchestration.run package --version v2 --release-id release-2026.11.1 --formats bf16
+python -m orchestration.run package --version v2 --release-id release-2026.11.1 --formats bf16 --scope policy
 #    a release that improves no primary metric needs --fixes-defect "<ticket>" (scope=TICKET when several
 #    scopes run; a blank or placeholder value is refused). A scope scored on fewer than 150 frozen documents
 #    of a type it covers is capped at interim. A failed gate ships only with a written override:
