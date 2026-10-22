@@ -1,0 +1,43 @@
+# User prompt - policy, line gl (every window and mode)
+
+The user message carries NO instruction text. It is the window's pages, in page
+order, each as its image followed by that page's own text (inference_core/input_builder.py,
+build_messages). An image block holds the page image's path, or its bytes. The system prompt above says what to extract; the user message is the evidence.
+
+## Shape (the chat content list ms-swift and vLLM read)
+
+[
+  {"type": "image", "image": "<path of page {p1}'s image>"},
+  {"type": "text", "text": "<page {p1} of {N}>\n\n<OCR markdown of page {p1}>"},
+  {"type": "image", "image": "<path of page {p2}'s image>"},
+  {"type": "text", "text": "<page {p2} of {N}>\n\n<OCR markdown of page {p2}>"},
+  ...
+]
+
+- {N} is the page count of the WHOLE document; {p1}, {p2}... are the real page numbers of the
+  pages this window reads, so a window of pages 9-12 of a 60-page policy says "<page 9 of 60>".
+- A page whose OCR text is empty gets, in place of the text:
+  "(no OCR text recovered for this page — read it from the image)"
+- image_only mode: the same list with NO OCR text - each image is followed by its marker alone:
+  {"type": "text", "text": "<page {p1} of {N}>"}
+- Page images are capped at the configured resolution (configs: resolution cap, asserted equal in
+  training and serving).
+
+## Which pages each window gets (example: a 60-page policy, every page routed)
+
+- decl (policy_declarations): pages [1, 2, 3, 4, 5] - the leading pages, plus the page the declarations were found on
+- arrays (policy_schedule): every routed page, split into windows of a few pages each (one page shared where a long run is split); one call per window
+- lineblk (policy_schedule): every routed page, split into windows of a few pages each (one page shared where a long run is split); one call per window
+
+## Example (illustrative, not a real document): the declarations window of a 60-page policy
+
+[
+  {"type": "image", "image": "processed/<tenant>/policy/<source_id>/page_1.png"},
+  {"type": "text", "text": "<page 1 of 60>\n\nCOMMERCIAL GENERAL LIABILITY DECLARATIONS\n\n| Policy Number | Policy Period |\n|---|---|\n| CGL 1234567 | 04/01/2026 to 04/01/2027 |\n..."},
+  {"type": "image", "image": "processed/<tenant>/policy/<source_id>/page_2.png"},
+  {"type": "text", "text": "<page 2 of 60>\n\nLIMITS OF INSURANCE\n\n| Each Occurrence Limit | $1,000,000 |\n..."}
+]
+
+The assistant's reply is the JSON for that window's slice of the schema (in training, the gold
+target; in serving, generated under a grammar that holds it to that slice, with page_ref limited
+to the pages shown).

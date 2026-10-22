@@ -1,0 +1,14 @@
+# Mode differences (declarations window shown; the same paragraph differs in every window)
+
+## ocr_plus_image -> noisy_ocr_image: 0 line(s) differ
+
+## ocr_plus_image -> image_only: 9 line(s) differ
+-You are given OCR text and the page images of the same document. They describe one document, not two.
++You are given page images and no OCR text. Read the values directly from the pixels.
+-- The OCR text is the primary source for dense text, identifiers and amounts.
+-- The images are the authority on layout: which heading a value sits under, which column a cell belongs to, which box a value was written in.
+-- Where the two disagree on a character or a digit, trust the image.
+-- Where OCR has flattened a table or merged columns, use the image to decide which value belongs to which field. Position in the OCR text is not evidence of association.
+-- If the image is illegible where the OCR is confident, use the OCR text. If both are illegible, output null.
++- Resolve characters from the image alone. Do not infer an unreadable character from what a value "should" look like.
++- If a character in an identifier or an amount cannot be read with confidence, output null for that field rather than a partly guessed value. A wrong identifier is more damaging downstream than a missing one.

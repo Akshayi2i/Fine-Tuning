@@ -44,3 +44,6 @@ data/bundle_lob_overrides.csv
 
 # Quotes gold-label values (VINs, postal codes, names): personal data, kept local.
 configs/field_types.proposed.yaml
+
+# Office lock files, written while a document is open in Word or Excel.
+~$*

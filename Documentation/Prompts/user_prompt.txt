@@ -1,0 +1,21 @@
+[image of page 1]
+<page 1 of {N}>
+
+{OCR text of page 1}
+
+[image of page 2]
+<page 2 of {N}>
+
+{OCR text of page 2}
+
+[image of page 3]
+<page 3 of {N}>
+
+{OCR text of page 3}
+
+...
+
+[image of page {N}]
+<page {N} of {N}>
+
+{OCR text of page {N}}
