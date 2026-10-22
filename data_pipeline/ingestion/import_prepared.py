@@ -44,7 +44,7 @@ from artifact_registry.blob_client import BlobClient
 from common.constants import ACTIVE_DOC_TYPES
 from common.ids import next_source_id
 from common.schemas import SchemaError, iter_validation_errors
-from data_pipeline.ingestion.import_labeled_pdfs import twin_index
+from data_pipeline.ingestion.import_labeled_pdfs import import_history, twin_index
 
 log = logging.getLogger(__name__)
 
@@ -270,7 +270,9 @@ def import_document(
     })
 
     client.write_json(paths.golden_label(doc_type, source_id, tenant_id), doc.golden)
-    client.write_json(paths.label_metadata(doc_type, source_id, tenant_id), {
+    metadata_key = paths.label_metadata(doc_type, source_id, tenant_id)
+    history = import_history(client, metadata_key, doc.directory.name)
+    client.write_json(metadata_key, {
         "source_id": source_id,
         "doc_type": doc_type,
         "acord_form": acord_form,
@@ -289,6 +291,8 @@ def import_document(
         **review_record(doc.metadata),
         "labeled_at": datetime.now(UTC).isoformat(),
         "imported_from": doc.directory.name,
+        # Every folder it was imported from, this one last (pull_raw_pdfs.purge_plan).
+        "imported_from_history": history,
     })
 
     if not doc.metadata.get("field_provenance"):

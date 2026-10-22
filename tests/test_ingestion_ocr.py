@@ -8,12 +8,14 @@ which is the point of that interface existing.
 
 from __future__ import annotations
 
+import glob
+import json
 from pathlib import Path
 
 import pytest
 
 from artifact_registry import paths
-from artifact_registry.blob_client import BlobClient, InMemoryBackend
+from artifact_registry.blob_client import BlobClient, BlobError, InMemoryBackend
 from data_pipeline.ingestion import pull_raw_pdfs as ingest
 from data_pipeline.ocr import mineru_version as mv
 from data_pipeline.ocr import run_mineru
@@ -366,18 +368,115 @@ def test_without_raw_access_the_intake_check_is_left_to_the_operator():
     assert "check each batch by hand" in unrecorded["pod_volume_action"][0]
 
 
-def test_the_purge_plan_names_the_copies_on_the_pods_volume():
+def _reached(patterns):
+    return {Path(found).as_posix() for pattern in patterns
+            for found in glob.glob(pattern + "**", recursive=True) if Path(found).is_file()}
+
+
+def test_the_purge_plan_names_the_copies_on_the_pods_volume(tmp_path, monkeypatch):
+    """Every copy the code writes of a document's pages or values, written here
+    by the calls that write them on the pod and then found from the plan's
+    globs: training's page cache, the golden eval's (its keys are the frozen
+    set's, under golden-{version}), the testing harness's pages and results,
+    and the adapter cache. The golden eval's and the harness's were missed."""
+    from inference_core import model_runner
+    from serving.pipeline import ExtractionResult
+    from testing import run_extraction
+    from training.stage_data import localize_keys
+
+    monkeypatch.setenv("RUNPOD_VOLUME_MOUNT", (tmp_path / "volume").as_posix())
+    monkeypatch.setattr(run_extraction, "TESTING_ROOT", tmp_path / "testing")
+    monkeypatch.setattr(run_extraction, "PAGE_CACHE", tmp_path / "testing" / "ocr_cache")
+    monkeypatch.setattr(model_runner, "ADAPTER_CACHE", tmp_path / "adapters")
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+
+    def write_copies(source_id):
+        page = paths.processed_page("policy", source_id, 1, "png", "broker_a")
+        frozen = f"{paths.golden_eval_set_dir('broker_a')}/{source_id}/page_1.png"
+        for key in (page, frozen):
+            client.write_bytes(key, b"png")
+        # The calls training (pipeline_dag), the golden eval and the testing harness make.
+        localize_keys(client, [page], paths.staging_train_images_dir("v3", "broker_a"))
+        localize_keys(client, [frozen], paths.staging_train_images_dir("golden-v3", "broker_a"))
+        localize_keys(client, [page], run_extraction.PAGE_CACHE)
+        result = ExtractionResult(source_id, "policy", "extractor-v3", "ocr_plus_image", True, 0.9)
+        run_extraction.write_outputs(result, {}, root=run_extraction.TESTING_ROOT)
+        return {p.as_posix() for p in tmp_path.rglob("*") if p.is_file()}
+
+    written = write_copies("policy_0001")
+    neighbour = write_copies("policy_0002") - written
+
     plan = ingest.purge_plan("policy_0001", "policy", "broker_a")
     volume = plan["pod_volume"]
+    assert written <= _reached(volume), sorted(written - _reached(volume))
+    assert not neighbour & _reached(volume), "another document's copies were named"
     images = paths.staging_train_images_dir("*", "broker_a")
     assert f"{images}/processed/broker_a/policy/policy_0001/" in volume
     assert f"{paths.staging_train_data_dir('*', '*')}/" in volume
     assert any(p.startswith("/workspace/ocr_check") for p in volume)
-    assert len(plan["pod_volume_action"]) >= len(volume)
+    assert f"{(tmp_path / 'adapters').as_posix()}/" in volume
+    # Each path comes with what it holds and what to do with it.
+    actions = plan["pod_volume_action"]
+    assert all(any(action.startswith(f"{path}: ") for action in actions) for path in volume)
+    results = next(a for a in actions if a.startswith(f"{(tmp_path / 'testing').as_posix()}/results/*/"))
+    assert "not by tenant" in results
 
     tenant = ingest.tenant_purge_plan("broker_a")
+    assert (written | neighbour) <= _reached(tenant["pod_volume"])
     assert f"{images}/" in tenant["pod_volume"]
+    assert f"{(tmp_path / 'adapters').as_posix()}/" in tenant["pod_volume"]
     assert "not filed by tenant" in tenant["intake_action"][0]
+
+
+def test_entries_that_reach_other_documents_or_tenants_say_so():
+    """A result set holds many documents' outputs, and the pod's intake folder
+    every tenant's batches: neither is the document's or the tenant's to delete
+    whole, and the plan said nothing of it."""
+    from data_pipeline.ingestion.pull_intake import default_intake_dir
+
+    plan = ingest.purge_plan("policy_0001", "policy", "broker_a")
+    [action] = plan["exports_action"]
+    assert action.startswith("exports/broker_a/: ") and "many documents' outputs" in action
+    assert "check each set for this document" in action and "not the prefix" in action
+
+    tenant = ingest.tenant_purge_plan("broker_a")
+    assert tenant["pod_volume"][0] == f"{default_intake_dir().as_posix()}/"
+    assert "holds every tenant's batches: check each one by hand" in tenant["pod_volume_action"][0]
+
+
+def test_the_purge_plan_looks_for_every_folder_the_document_was_imported_from():
+    """The same PDF delivered twice is one document imported twice. The import
+    keeps both folders (with the batch when it pulled one), and the plan looks
+    for each: the last folder alone missed the first delivery."""
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw", context="ingestion")
+    client.write_json(paths.label_metadata("policy", "policy_0001", "broker_a"), {
+        "source_id": "policy_0001", "imported_from": "HO_0001",
+        "imported_from_history": [{"folder": "HO_1", "batch": "personal-v1"},
+                                  {"folder": "HO_0001", "batch": None}]})
+    for key in ("intake/personal-v1/HO_1/HO_1.pdf", "intake/personal-v2/HO_0001/HO_0001.pdf",
+                "intake/personal-v2/HO_10/HO_10.pdf"):
+        client.write_bytes(key, b"x")
+
+    plan = ingest.purge_plan("policy_0001", "policy", "broker_a", client=client)
+    assert plan["intake"] == ["intake/personal-v1/HO_1/", "intake/personal-v2/HO_0001/"]
+    assert "'HO_1', 'HO_0001'" in plan["intake_action"][0]
+    assert "the record names intake/personal-v1/HO_1/" in plan["intake_action"][0]
+    pulled = [p for p in plan["pod_volume"] if p.endswith(("/*/HO_1/", "/*/HO_0001/"))]
+    assert len(pulled) == 2 and plan["pod_volume"][:2] == pulled
+
+
+def test_an_intake_lookup_that_finds_nothing_is_no_all_clear():
+    """A record from before the history was kept names only the last folder; a
+    first delivery under another name is not found by it. An empty result says
+    so, rather than reading as nothing to delete."""
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw", context="ingestion")
+    _labeled_import(client, "HO_0001")
+    client.write_bytes("intake/personal-v1/HO_1/HO_1.pdf", b"the same bytes")
+
+    plan = ingest.purge_plan("policy_0001", "policy", "broker_a", client=client)
+    assert plan["intake"] == []
+    action = plan["intake_action"][0]
+    assert action.startswith("none found by name: ") and "'HO_0001'" in action and "Check by hand" in action
 
 
 def test_each_run_names_its_staged_weights_eval_report_and_calibrator():
@@ -458,6 +557,78 @@ def test_lineage_lists_continued_runs_and_adapters_on_a_listed_foundation():
     assert runs["policy-adapter-v1"] == "built on extractor-v1, listed here: needs retrain or delete"
     # Neither trained on the document nor built on a run that did.
     assert "extractor-v2" not in runs and "policy-adapter-v2" not in runs
+
+
+def test_every_quantized_format_the_run_published_is_named():
+    """publish exports each format in quantized_formats to its own directory;
+    quantized_model names the first one only, and the plan named that alone."""
+    from registry_utils.query_registry import get
+    from registry_utils.write_run_manifest import write_manifest
+    from tests.test_registry import _scoped
+
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    _trained_run(client, "extractor-v2", "broker_a", "v2")
+    write_manifest(_scoped("policy-v2", "policy", ["policy"], tenant_id="broker_a"), client)
+    for run_id, scope in (("extractor-v2", None), ("policy-v2", "policy")):
+        manifest = get(run_id, client)
+        manifest.artifacts.quantized_model = paths.quantized_model_dir("v2", "fp8", scope=scope)
+        manifest.artifacts.quantized_formats = ["fp8", "awq_int4"]
+        write_manifest(manifest, client)
+
+    runs = {r["run_id"]: r for r in ingest.tenant_purge_plan("broker_a", client)["trained_weights"]}
+    assert runs["extractor-v2"]["quantized_models"] == [
+        "quantized-models/unified/v2/vllm/fp8", "quantized-models/unified/v2/vllm/awq_int4"]
+    assert runs["policy-v2"]["quantized_models"] == [
+        "quantized-models/scope/policy/v2/vllm/fp8", "quantized-models/scope/policy/v2/vllm/awq_int4"]
+    assert runs["extractor-v2"]["quantized_model"] == "quantized-models/unified/v2/vllm/fp8"
+
+
+class _FailingBackend(InMemoryBackend):
+    """exists() fails on one key, as AzureBackend's does on a 503 or a timeout -
+    with a message quoting the URL, as the SDK's can."""
+
+    def __init__(self):
+        super().__init__()
+        self.failing = None
+
+    def exists(self, container, key):
+        if key == self.failing:
+            raise BlobError(f"failed checking https://acct.blob.core.windows.net/{container}/{key}"
+                            "?sv=1&sig=FAKESIG: timed out")
+        return super().exists(container, key)
+
+
+@pytest.mark.parametrize("failing", ["corpus manifest", "release index", "run registry"])
+def test_a_failed_storage_call_is_listed_to_check_by_hand_and_the_plan_goes_on(failing):
+    """One storage call that failed ended the whole plan, every other run and
+    copy unreported. Each is now its own entry's to check by hand, named by the
+    error's type and never its message."""
+    backend = _FailingBackend()
+    client = BlobClient(backend=backend, container="main", raw_container="raw")
+    for corpus in ("v1", "v2"):
+        client.write_json(paths.corpus_manifest(corpus, "broker_a"),
+                          {"source_ids_by_split": {"train": ["policy_0001"]}})
+    _trained_run(client, "extractor-v1", "broker_a", "v1")
+    _trained_run(client, "extractor-v2", "broker_a", "v2")
+    backend.failing = {"corpus manifest": paths.corpus_manifest("v2", "broker_a"),
+                       "release index": paths.release_index("broker_a"),
+                       "run registry": paths.registry_index()}[failing]
+
+    plan = ingest.purge_plan("policy_0001", "policy", "broker_a", client=client)
+    runs = plan["trained_weights"]
+    assert plan["raw"] and plan["pod_volume"] and plan["intake_action"]
+    assert "FAKESIG" not in json.dumps(plan)
+    if failing == "corpus manifest":
+        assert {r["run_id"]: r["action"] for r in runs} == {
+            "extractor-v1": "needs retrain or delete",
+            "extractor-v2": "check by hand: the run's corpus manifest cannot be read (BlobError)"}
+    elif failing == "release index":
+        assert [r["action"] for r in runs] == ["needs retrain or delete"] * 2
+        assert all(r["releases"] == ["check by hand: the release index cannot be read (BlobError)"]
+                   for r in runs)
+    else:
+        assert runs == [{"run_id": None, "action": "check by hand: the run registry cannot be read "
+                                                   "(BlobError), so no run trained on the data is listed"}]
 
 
 def test_unknown_doc_type_is_refused(tmp_path, ingestion_client):

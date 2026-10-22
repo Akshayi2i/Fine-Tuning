@@ -157,6 +157,16 @@ def test_an_imported_document_lands_where_the_pipeline_already_reads(tmp_path, c
     assert label_meta["lob"] == ["workers_comp"]
 
 
+def test_a_prepared_document_imported_again_keeps_every_folder_it_came_from(tmp_path, client):
+    """The purge plan looks up each folder; rewritten, the first was lost."""
+    first = import_document(read_prepared(prepared(tmp_path, "a")), "policy", client,
+                            mineru_version="2.0.0")
+    import_document(read_prepared(prepared(tmp_path, "b")), "policy", client,
+                    mineru_version="2.0.0", source_id=first)
+    meta = client.read_json(paths.label_metadata("policy", first))
+    assert meta["imported_from_history"] == [{"folder": "a", "batch": None}, {"folder": "b", "batch": None}]
+
+
 def test_nothing_is_written_to_the_raw_document_layer(tmp_path, client):
     """There is no PDF, so the importer never touches the unredacted-PII layer.
 

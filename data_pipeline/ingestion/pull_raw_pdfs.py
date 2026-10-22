@@ -279,53 +279,100 @@ def _prefix(path: str) -> str:
 
 
 def _pod_volume(tenant: str, doc_type: str | None = None, source_id: str | None = None,
-                folder: str | None = None) -> tuple[list[str], list[str]]:
+                folders: Iterable[str] = ()) -> tuple[list[str], list[str]]:
     """Where the pod's volume holds copies of the tenant's documents: ``(paths, actions)``.
 
     The volume survives a pod stop, so a copy there outlives the purge of the
     Blob layers it came from. The paths are globs (``*``): the copies are keyed
-    by batch, corpus version, scope and run, and every one of them counts.
+    by batch, corpus version, scope and run, and every one of them counts. The
+    testing harness writes under this checkout's ``testing/`` and the adapter
+    cache under ``/workspace``: on the pod, both are on the volume.
+
+    ``folders`` are the delivered folders the document was imported from
+    (:func:`_import_sources`); a tenant's plan passes none.
     """
     from data_pipeline.ingestion.pull_intake import default_intake_dir
     from data_pipeline.ocr_check import DEFAULT_OUT as OCR_CHECK_OUT
+    from inference_core.model_runner import ADAPTER_CACHE
+    from testing.run_extraction import PAGE_CACHE, TESTING_ROOT
 
-    images = _prefix(paths.staging_train_images_dir("*", tenant))
+    # Each cache stores a page under its own blob key, so one document's pages
+    # are one folder in each cache (training's, the golden eval's golden-{version},
+    # the testing harness's).
+    document = (paths.processed_dir(doc_type, source_id, tenant)
+                if source_id is not None and doc_type is not None else None)
     intake = default_intake_dir().as_posix()
-    if source_id is not None and doc_type is not None:
-        # The image cache stores each page under its own blob key, so one
-        # document's pages are one folder in each corpus version's cache.
-        images = _prefix(f"{images}{paths.processed_dir(doc_type, source_id, tenant)}")
-        if folder:
-            intake = f"{intake}/*/{folder}"
-    found = [
-        _prefix(intake),
-        images,
-        _prefix(paths.staging_train_data_dir("*", "*")),
-        _prefix(f"{OCR_CHECK_OUT.as_posix()}*"),
+    images = paths.staging_train_images_dir("*", tenant)
+    page_cache = PAGE_CACHE.as_posix()
+    testing = TESTING_ROOT.as_posix()
+    pulled = ("delivered bundles (the PDF and its golden.json) pulled by pull_intake, and the smoke "
+              "run's subsets copied from them - pull_intake never deletes a batch")
+    if document is None:
+        entries = [(_prefix(intake), f"{pulled}. Batches are not filed by tenant, so this folder holds "
+                                     "every tenant's batches: check each one by hand")]
+    elif folders:
+        entries = [(_prefix(f"{intake}/*/{folder}"), pulled) for folder in folders]
+    else:
+        entries = [(_prefix(intake), f"{pulled}; the folder this document was imported from is not "
+                                     "recorded, so check each batch by hand")]
+    if document is not None:
+        entries += [
+            (_prefix(f"{images}/{document}"),
+             "the document's page images, cached per corpus version for training and evaluation"),
+            (_prefix(f"{images}/{paths.golden_eval_set_dir(tenant)}/{source_id}"),
+             "its page images from the frozen eval set, cached per corpus version (golden-{version}) "
+             "by the golden eval and measure_lob_detection"),
+            (_prefix(f"{page_cache}/{document}"),
+             "its page images cached by the testing harness (testing.run_extraction), kept between runs"),
+            (f"{testing}/results/*/{source_id}.json",
+             "the testing harness's extracted JSON for it, one file per model version - filed by "
+             "source id, not by tenant, so confirm each is this tenant's document before deleting it"),
+            (f"{testing}/metrics/*/{source_id}.metrics.json",
+             "its metrics from the same runs, filed the same way: confirm each is this tenant's"),
+        ]
+    else:
+        entries += [
+            (_prefix(images), "page images cached per corpus version for training and evaluation, the "
+                              "frozen eval set's under golden-{version}"),
+            (_prefix(f"{page_cache}/processed/{tenant}"),
+             "page images cached by the testing harness (testing.run_extraction), kept between runs"),
+            (_prefix(f"{testing}/results"),
+             "the testing harness's extracted JSONs, filed by model version and source id, not by "
+             "tenant: check each by hand"),
+            (_prefix(f"{testing}/metrics"), "their metrics, filed the same way: check each by hand"),
+        ]
+    entries += [
+        (_prefix(paths.staging_train_data_dir("*", "*")),
+         "each run's staged training rows (labels included), one folder per scope and version - "
+         "delete the folders of the runs under trained_weights"),
+        (_prefix(f"{OCR_CHECK_OUT.as_posix()}*"),
+         "ocr_check reports, whose CSVs quote label values - delete them or run the check again "
+         "after the purge (and any --out folder it was given)"),
+        (_prefix(ADAPTER_CACHE.as_posix()),
+         "adapters copied from Blob to extract with (inference_core.model_runner.prepare_adapter), "
+         "one folder per Blob prefix with each '/' as '_' - delete those of the runs under "
+         "trained_weights"),
     ]
-    actions = [
-        f"{found[0]}: delivered bundles (the PDF and its golden.json) pulled by pull_intake, "
-        "and the smoke run's subsets copied from them - pull_intake never deletes a batch"
-        + ("" if folder or source_id is None else
-           "; the folder this document was imported from is not recorded, so check each batch by hand"),
-        f"{found[1]}: page images cached per corpus version for training and evaluation",
-        f"{found[2]}: each run's staged training rows (labels included), one folder per scope "
-        "and version - delete the folders of the runs under trained_weights",
-        f"{found[3]}: ocr_check reports, whose CSVs quote label values - delete them or run the "
-        "check again after the purge (and any --out folder it was given)",
+    found = [path for path, _action in entries]
+    actions = [f"{path}: {action}" for path, action in entries] + [
         "/workspace/logs/: diagnose_generation reports are named after the document they compare "
         "and hold its values (a compare folder holds its PDF too) - check by hand",
+        f"{testing}/results/comparisons/ and {testing}/extraction_registry.json: compare_models' "
+        "folders (each compared document's PDF, gold and both extractions, when kept with "
+        "--keep-on-pod or downloaded) and the harness's list of every extraction by source id - "
+        "check by hand",
     ]
     return found, actions
 
 
-def _intake_copies(client: BlobClient, folder: str) -> list[str] | None:
-    """``intake/{batch}/{folder}/`` for every delivered batch holding that folder.
+def _intake_copies(client: BlobClient, folders: Iterable[str]) -> list[str] | None:
+    """``intake/{batch}/{folder}/`` for every delivered batch holding one of the folders.
 
     ``None`` when this client cannot list ``intake/``: it is in the raw
     container, which a client outside ingestion and OCR may not read
     (AccessDeniedError) and a token without raw access cannot (a 403).
     """
+    names = set(folders)
     try:
         keys = client.list(_prefix(paths.INTAKE_PREFIX))
     except BlobError:  # AccessDeniedError is one
@@ -333,24 +380,38 @@ def _intake_copies(client: BlobClient, folder: str) -> list[str] | None:
     found = set()
     for key in keys:
         parts = key.split("/")
-        if len(parts) >= 4 and parts[0] == paths.INTAKE_PREFIX and parts[2] == folder:
+        if len(parts) >= 4 and parts[0] == paths.INTAKE_PREFIX and parts[2] in names:
             found.add(_prefix("/".join(parts[:3])))
     return sorted(found)
 
 
-def _imported_from(client: BlobClient, doc_type: str, source_id: str, tenant: str) -> str | None:
-    """The delivered folder a labeled import read the document from, if recorded.
+def _import_sources(
+    client: BlobClient, doc_type: str, source_id: str, tenant: str,
+) -> list[tuple[str, str | None]]:
+    """Every delivered folder a labeled import read the document from, with its batch when recorded.
 
-    ``import_labeled_pdfs`` records the folder's name (``imported_from``) but
-    not the batch it was delivered in.
+    ``import_labeled_pdfs`` keeps each import in ``imported_from_history``: the
+    folder's name, and the intake batch when the import pulled one
+    (``--from-blob``). A record written before that, or by ``import_prepared``,
+    names only the last folder (``imported_from``). Empty when nothing is
+    recorded or the record cannot be read: the plan then says check by hand.
     """
     key = paths.label_metadata(doc_type, source_id, tenant)
     try:
         meta = client.read_json(key) if client.exists(key) else None
     except (BlobError, ValueError):  # unreadable: the plan says check by hand
-        return None
-    folder = meta.get("imported_from") if isinstance(meta, dict) else None
-    return str(folder) if folder else None
+        return []
+    if not isinstance(meta, dict):
+        return []
+    found: list[tuple[str, str | None]] = []
+    history = meta.get("imported_from_history")
+    for entry in history if isinstance(history, list) else []:
+        if isinstance(entry, dict) and entry.get("folder"):
+            found.append((str(entry["folder"]), str(entry["batch"]) if entry.get("batch") else None))
+    last = meta.get("imported_from")
+    if last and str(last) not in {folder for folder, _batch in found}:
+        found.append((str(last), None))
+    return list(dict.fromkeys(found))
 
 
 def purge_plan(
@@ -375,15 +436,25 @@ def purge_plan(
     weights' prefixes are not tenant-scoped yet, so the plan names them.
     """
     tenant = paths._tenant(tenant_id)
-    folder = _imported_from(client, doc_type, source_id, tenant) if client is not None else None
-    on_volume, volume_actions = _pod_volume(tenant, doc_type, source_id, folder)
+    sources = _import_sources(client, doc_type, source_id, tenant) if client is not None else []
+    folders = list(dict.fromkeys(folder for folder, _batch in sources))
+    on_volume, volume_actions = _pod_volume(tenant, doc_type, source_id, folders)
+    exports = _prefix(f"{paths.EXPORTS_PREFIX}/{tenant}")
     plan: dict[str, list[Any]] = {
         "raw": [_prefix(paths.raw_document_dir(doc_type, source_id, tenant))],
         "processed": [_prefix(paths.processed_dir(doc_type, source_id, tenant))],
         "golden_labels": [_prefix(paths.golden_label_dir(doc_type, source_id, tenant))],
         "golden_eval_set": [_prefix(f"{paths.golden_eval_set_dir(tenant)}/{source_id}")],
-        # Result sets hold many documents' outputs; each one must be checked.
-        "exports": [_prefix(f"{paths.EXPORTS_PREFIX}/{tenant}")],
+        "exports": [exports],
+        # Result sets hold many documents' outputs: the prefix is not this
+        # document's to delete.
+        "exports_action": [
+            f"{exports}: result sets made to download (compare_models' comparisons among them) each "
+            "hold many documents' outputs - the PDFs, golds and extracted JSONs: check each set for "
+            "this document and remove its files, not the prefix. compare_models imports what it "
+            "compares under its own tenant ('compare' unless --tenant named another): a document "
+            "compared that way has copies there too, under another source id - check by hand"
+        ],
         "pod_volume": on_volume,
         "pod_volume_action": volume_actions,
         "corpus_action": [
@@ -399,23 +470,32 @@ def purge_plan(
         ],
     }
     # intake/{batch}/{document}/: the PDF and golden.json exactly as delivered.
-    copies = _intake_copies(client, folder) if folder else None
+    # Looked up by every folder an import recorded: the same PDF delivered
+    # again, in another folder or batch, is one more copy, not a replacement.
+    named = ", ".join(repr(folder) for folder in folders)
+    pulled = ", ".join(f"intake/{batch}/{folder}/" for folder, batch in sources if batch)
+    recorded = f" (the record names {pulled})" if pulled else ""
+    copies = _intake_copies(client, folders) if folders and client is not None else None
     if copies:
         plan["intake"] = copies
         plan["intake_action"] = [
-            f"the import records the folder the document came from ({folder!r}), not its batch: "
-            "these batches hold a folder of that name - confirm each is this document (its PDF's "
-            "checksum is checksum_sha256 in the raw metadata.json) before deleting it"
+            f"the imports record each folder the document came from ({named}), and its batch only "
+            f"when they pulled one{recorded}: these batches hold a folder of that name - confirm each "
+            "is this document (its PDF's checksum is checksum_sha256 in the raw metadata.json) before "
+            "deleting it"
         ]
     elif copies is not None:
         plan["intake"] = []
-        plan["intake_action"] = [f"no batch under intake/ holds a folder named {folder!r}"]
+        plan["intake_action"] = [
+            f"none found by name: no batch under intake/ holds a folder named {named}{recorded}. Check "
+            "by hand - an import from a local folder uploaded under another name is not found this way"
+        ]
     else:
         plan["intake"] = []
         plan["intake_action"] = [
-            f"check every batch under intake/ in the raw container by hand for a folder named {folder!r} "
-            "(the import records the folder, not the batch; this client cannot list intake/)"
-            if folder else
+            f"check every batch under intake/ in the raw container by hand for a folder named {named}"
+            f"{recorded} (this client cannot list intake/)"
+            if folders else
             "check every batch under intake/ in the raw container by hand: nothing records which "
             "batch delivered this document" + ("" if client is not None else
                                                 " (pass a client to look up the folder it was imported from)")
@@ -469,9 +549,12 @@ def _corpus_lists(client: BlobClient, manifest: Any, tenant: str, source_id: str
         key = paths.corpus_manifest(corpus, tenant)
     except paths.PathError:
         return "the run's corpus manifest is missing"
-    if not client.exists(key):
-        return "the run's corpus manifest is missing"
+    # The existence check inside the try too: a storage call that fails (a 503,
+    # a timeout) is this run's to check by hand, not the end of the whole plan.
+    # The type is named, never the message: a storage error can quote a URL.
     try:
+        if not client.exists(key):
+            return "the run's corpus manifest is missing"
         listed = client.read_json(key).get("source_ids_by_split")
     except (BlobError, ValueError, AttributeError) as exc:
         return f"the run's corpus manifest cannot be read ({type(exc).__name__})"
@@ -480,7 +563,27 @@ def _corpus_lists(client: BlobClient, manifest: Any, tenant: str, source_id: str
     return any(source_id in (ids or []) for ids in listed.values())
 
 
-def _run_entry(manifest: Any, releases: dict[str, list[str]], action: str) -> dict[str, Any]:
+def _quantized_models(manifest: Any) -> list[str]:
+    """The directory of every quantized format the run published.
+
+    ``quantized_model`` names the first format only; ``publish`` exports each
+    format in ``quantized_formats`` to its own directory, and each one is a
+    model trained on the data.
+    """
+    from common.run_ids import version_of
+
+    artifacts = manifest.artifacts
+    found = [artifacts.quantized_model] if artifacts.quantized_model else []
+    for fmt in artifacts.quantized_formats or []:
+        try:
+            found.append(paths.quantized_model_dir(version_of(manifest.run_id), fmt, scope=manifest.scope))
+        except ValueError as exc:  # PathError and RunIdError are ValueErrors
+            found.append(f"check by hand: the {fmt} model's directory cannot be named "
+                         f"({type(exc).__name__})")
+    return list(dict.fromkeys(found))
+
+
+def _run_entry(manifest: Any, releases: dict[str, list[str]] | str, action: str) -> dict[str, Any]:
     artifacts = manifest.artifacts
     return {
         "run_id": manifest.run_id,
@@ -488,6 +591,8 @@ def _run_entry(manifest: Any, releases: dict[str, list[str]], action: str) -> di
         "adapter_weights": artifacts.adapter_weights,
         "merged_model": artifacts.merged_model,
         "quantized_model": artifacts.quantized_model,
+        # Every format's directory, the first one's included.
+        "quantized_models": _quantized_models(manifest),
         # The weights on the pod's volume while they are staged.
         "staging_path": artifacts.staging_path,
         # Both under shared prefixes (eval-reports/, calibration/), so no tenant
@@ -495,7 +600,9 @@ def _run_entry(manifest: Any, releases: dict[str, list[str]], action: str) -> di
         # expected values, and the calibrator was fitted on the tenant's fields.
         "eval_report": artifacts.eval_report,
         "calibration_params": artifacts.calibration_params,
-        "releases": sorted(releases.get(manifest.run_id, [])),
+        # A string when the release index cannot be read: which releases serve
+        # the run is then to check by hand.
+        "releases": [releases] if isinstance(releases, str) else sorted(releases.get(manifest.run_id, [])),
         "action": action,
     }
 
@@ -515,19 +622,33 @@ def runs_trained_on(
     Lineage counts as well as the corpus. A run that continued from a checkpoint
     carries what earlier corpora taught it though its own corpus may not list
     the document, and a per-type adapter is built on its Foundation's weights.
+
+    A storage call that fails is listed to check by hand with the error's type,
+    never its message (it can quote a URL), and the rest of the plan goes on.
     """
     from registry_utils.query_registry import RegistryQueryError, get, list_runs
 
     tenant = paths._tenant(tenant_id)
-    releases: dict[str, list[str]] = {}
+    releases: dict[str, list[str]] | str = {}
     index_key = paths.release_index(tenant)
-    if client.exists(index_key):
-        for row in client.read_json(index_key) or []:
-            releases.setdefault(str(row.get("adapter")), []).append(str(row.get("release_id")))
+    try:
+        index_rows = client.read_json(index_key) if client.exists(index_key) else []
+        by_run: dict[str, list[str]] = {}
+        for row in index_rows or []:
+            by_run.setdefault(str(row.get("adapter")), []).append(str(row.get("release_id")))
+        releases = by_run
+    except (BlobError, ValueError, AttributeError, TypeError) as exc:
+        releases = f"check by hand: the release index cannot be read ({type(exc).__name__})"
 
+    try:
+        rows = list_runs(client, include_sweeps=True)
+    except (RegistryQueryError, BlobError, ValueError) as exc:
+        return [{"run_id": None, "action": (
+            f"check by hand: the run registry cannot be read ({type(exc).__name__}), so no run "
+            "trained on the data is listed")}]
     found: list[dict[str, Any]] = []
     adapters: list[Any] = []
-    for row in list_runs(client, include_sweeps=True):
+    for row in rows:
         run_id = str(row.get("run_id"))
         try:
             manifest = get(run_id, client)

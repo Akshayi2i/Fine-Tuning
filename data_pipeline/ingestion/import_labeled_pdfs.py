@@ -213,6 +213,37 @@ def twin_index(metadata: dict[str, Any]) -> int | None:
     return int(value) if isinstance(value, (int, str)) and str(value).strip().isdigit() else None
 
 
+def import_history(
+    client: BlobClient, key: str, folder: str, batch: str | None = None,
+) -> list[dict[str, str | None]]:
+    """Every delivered folder the document was imported from, this import last.
+
+    Each entry is the folder's name and the intake batch it was pulled from,
+    when the import pulled one (``--from-blob``), else ``None``. Read from the
+    label metadata this import replaces: ``imported_from`` names only the last
+    folder, and a re-delivery of the same PDF (a checksum duplicate, in another
+    folder or batch) rewrote it, so the purge plan looked for the last copy
+    alone. A record from before the history was kept starts it with its
+    ``imported_from``.
+    """
+    try:
+        previous = client.read_json(key) if client.exists(key) else {}
+    except ValueError:  # not JSON: the history starts again from this import
+        previous = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    recorded = previous.get("imported_from_history")
+    history = [
+        {"folder": str(entry["folder"]), "batch": str(entry["batch"]) if entry.get("batch") else None}
+        for entry in (recorded if isinstance(recorded, list) else [])
+        if isinstance(entry, dict) and entry.get("folder")
+    ]
+    if not history and previous.get("imported_from"):
+        history = [{"folder": str(previous["imported_from"]), "batch": None}]
+    entry = {"folder": folder, "batch": batch or None}
+    return [*(e for e in history if e != entry), entry]
+
+
 def import_bundle(
     bundle: LabeledPdf,
     doc_type: str,
@@ -221,12 +252,14 @@ def import_bundle(
     *,
     tenant_id: str | None = None,
     known_checksums: dict[str, str] | None = None,
+    batch: str | None = None,
 ) -> tuple[str, str]:
     """Store the PDF and its label. Returns ``(source_id, status)``.
 
     The PDF goes through the normal ingestion path — same checksum dedup, same
     write-once raw layer — so an imported document is indistinguishable from one
-    ingested any other way by the time OCR sees it.
+    ingested any other way by the time OCR sees it. ``batch`` is the intake
+    batch the bundle was pulled from, when the import pulled one.
     """
     from data_pipeline.ingestion.pull_raw_pdfs import ingest_pdf
     from data_pipeline.labeling.export_golden_labels import review_record
@@ -243,7 +276,9 @@ def import_bundle(
     # Written through the general client: golden labels are not the PII layer,
     # and the importer holds the raw context only for the PDF itself.
     client.write_json(paths.golden_label(doc_type, source_id, tenant_id), bundle.golden)
-    client.write_json(paths.label_metadata(doc_type, source_id, tenant_id), {
+    metadata_key = paths.label_metadata(doc_type, source_id, tenant_id)
+    history = import_history(client, metadata_key, bundle.directory.name, batch)
+    client.write_json(metadata_key, {
         "source_id": source_id,
         "doc_type": doc_type,
         "acord_form": bundle.acord_form,
@@ -278,6 +313,9 @@ def import_bundle(
         **review_record(bundle.metadata),
         "labeled_at": datetime.now(UTC).isoformat(),
         "imported_from": bundle.directory.name,
+        # Every folder (and pulled batch) it was imported from, this one last:
+        # each is a delivered copy a purge has to find (pull_raw_pdfs.purge_plan).
+        "imported_from_history": history,
         # OCR has NOT run: MinerU runs on the GPU pod as stage 2. Recorded so a
         # later reader can tell an import awaiting OCR from a document whose OCR
         # failed.
@@ -294,12 +332,16 @@ def import_batch(
     *,
     tenant_id: str | None = None,
     validate_only: bool = False,
+    batch: str | None = None,
 ) -> ImportReport:
     """Check every bundle, then import the ones that passed.
 
     Checked **first, all of them**, so a batch is corrected in one pass. Nothing
     is written when any document fails validation in ``validate_only`` mode, and
     in a real import a failing document is skipped while the rest proceed.
+
+    ``batch`` is the intake batch ``input_dir`` was pulled from (``--from-blob``):
+    recorded with each document's folder, so a purge finds its delivered copy.
     """
     if doc_type not in ACTIVE_DOC_TYPES:
         raise LabeledPdfError(f"unknown doc_type {doc_type!r}; active: {list(ACTIVE_DOC_TYPES)}")
@@ -331,7 +373,7 @@ def import_batch(
         try:
             source_id, status = import_bundle(
                 bundle, doc_type, client, raw_client,
-                tenant_id=tenant_id, known_checksums=known,
+                tenant_id=tenant_id, known_checksums=known, batch=batch,
             )
         # An unreadable PDF is that document's failure, not the batch's: it ended
         # an import part-way, every later document unimported.
@@ -385,7 +427,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI
         input_dir = pulled.local_dir
     report = import_batch(
         input_dir, args.doc_type, BlobClient(), raw_client,
-        tenant_id=args.tenant, validate_only=args.validate_only,
+        tenant_id=args.tenant, validate_only=args.validate_only, batch=args.from_blob,
     )
     print(report.describe())
     if report.ok and not args.validate_only:

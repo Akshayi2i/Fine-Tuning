@@ -768,3 +768,67 @@ def test_raw_container_calls_use_the_raw_token(monkeypatch):
 
     single = AzureBackend(account_url="https://acct.blob.core.windows.net", credential="main-fake")
     assert single._client("raw-c", "raw-documents/t/policy/p/original.pdf")[0] == "main-fake"
+
+
+def test_a_client_sends_raw_layer_calls_on_the_raw_login_and_the_rest_on_the_main_one(monkeypatch):
+    """Through BlobClient, as every stage calls it, logged in from the
+    environment: raw-documents/, intake/ and exports/ go to the raw container
+    on its own SAS, every other key to the main container on the main SAS. Each
+    call - read, exists, list - is checked against a fake SDK that records the
+    token and container it was made with."""
+    from types import SimpleNamespace
+
+    sdk = pytest.importorskip("azure.storage.blob")
+    calls = []
+
+    class FakeBlobClient:
+        def __init__(self, credential, container, blob):
+            self.made_with = (credential, container)
+            self.blob = blob
+
+        def download_blob(self):
+            calls.append(("read", *self.made_with))
+            return SimpleNamespace(readall=lambda: b"{}")
+
+        def exists(self):
+            calls.append(("exists", *self.made_with))
+            return True
+
+    class FakeContainerClient:
+        def __init__(self, credential, container):
+            self.made_with = (credential, container)
+
+        def list_blobs(self, name_starts_with):
+            calls.append(("list", *self.made_with))
+            return [SimpleNamespace(name=f"{name_starts_with}/x.json")]
+
+    class FakeServiceClient:
+        def __init__(self, account_url, credential):
+            self.credential = credential
+
+        def get_blob_client(self, container, blob):
+            return FakeBlobClient(self.credential, container, blob)
+
+        def get_container_client(self, container):
+            return FakeContainerClient(self.credential, container)
+
+    monkeypatch.setattr(sdk, "BlobServiceClient", FakeServiceClient)
+    monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING", raising=False)
+    for name, value in (("AZURE_STORAGE_ACCOUNT_URL", "https://acct.blob.core.windows.net"),
+                        ("AZURE_STORAGE_SAS_TOKEN", "sv=2024&sig=main-fake"),
+                        ("AZURE_RAW_SAS_TOKEN", "sv=2024&sig=raw-fake"),
+                        ("AZURE_BLOB_CONTAINER", "main-c"), ("AZURE_RAW_CONTAINER", "raw-c")):
+        monkeypatch.setenv(name, value)
+    client = BlobClient(context="ingestion")
+
+    raw = [paths.raw_pdf("policy", "policy_0001", "acme"), "intake/personal-v1/HO_1/golden.json",
+           f"{paths.export_dir('comparisons', 'run-1', 'acme')}/summary.xlsx"]
+    main = [paths.corpus_manifest("v1", "acme"), paths.registry_index(),
+            paths.label_metadata("policy", "policy_0001", "acme")]
+    for key in raw + main:
+        calls.clear()
+        client.read_bytes(key)
+        client.exists(key)
+        client.list(key.rsplit("/", 1)[0])
+        login = ("sv=2024&sig=raw-fake", "raw-c") if key in raw else ("sv=2024&sig=main-fake", "main-c")
+        assert calls == [(op, *login) for op in ("read", "exists", "list")], key

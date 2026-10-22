@@ -277,6 +277,47 @@ def test_re_importing_a_corrected_batch_relabels_rather_than_duplicating(
     assert client.read_json(paths.golden_label("policy", first)) == corrected
 
 
+def test_every_folder_and_batch_a_document_was_imported_from_is_kept(tmp_path, client, raw_client):
+    """The same PDF delivered again, in another folder or batch, is a checksum
+    duplicate: relabelled, and imported_from rewritten, so the purge plan looked
+    for the last delivered copy alone. Every import is kept, with its batch when
+    the import pulled one (--from-blob), and the plan finds each copy."""
+    from data_pipeline.ingestion.pull_raw_pdfs import purge_plan
+
+    first, again = tmp_path / "personal-v1", tmp_path / "personal-v2"
+    bundle(first, "HO_1", pdf=b"%PDF-1.7 same")
+    bundle(again, "HO_0001", pdf=b"%PDF-1.7 same")
+    source_id = import_batch(first, "policy", client, raw_client, batch="personal-v1").imported["HO_1"]
+    assert import_batch(again, "policy", client, raw_client).duplicates == {"HO_0001": source_id}
+    stored = client.read_json(paths.label_metadata("policy", source_id))
+    assert stored["imported_from"] == "HO_0001"
+    assert stored["imported_from_history"] == [
+        {"folder": "HO_1", "batch": "personal-v1"}, {"folder": "HO_0001", "batch": None}]
+
+    # The first delivery imported again: listed once, and last.
+    import_batch(first, "policy", client, raw_client, batch="personal-v1")
+    stored = client.read_json(paths.label_metadata("policy", source_id))
+    assert stored["imported_from_history"] == [
+        {"folder": "HO_0001", "batch": None}, {"folder": "HO_1", "batch": "personal-v1"}]
+
+    for key in ("intake/personal-v1/HO_1/document.pdf", "intake/personal-v2/HO_0001/document.pdf"):
+        raw_client.write_bytes(key, b"%PDF-1.7 same")
+    plan = purge_plan(source_id, "policy", client=raw_client)
+    assert plan["intake"] == ["intake/personal-v1/HO_1/", "intake/personal-v2/HO_0001/"]
+
+
+def test_a_record_from_before_the_history_starts_it_with_its_folder(tmp_path, client, raw_client):
+    root = batch(tmp_path, ("HO_1",))
+    source_id = import_batch(root, "policy", client, raw_client).imported["HO_1"]
+    key = paths.label_metadata("policy", source_id)
+    legacy = {k: v for k, v in client.read_json(key).items() if k != "imported_from_history"}
+    client.write_json(key, {**legacy, "imported_from": "HO_old"})
+
+    import_batch(root, "policy", client, raw_client)
+    assert client.read_json(key)["imported_from_history"] == [
+        {"folder": "HO_old", "batch": None}, {"folder": "HO_1", "batch": None}]
+
+
 def test_imported_documents_are_what_the_labeling_stage_counts(tmp_path, client, raw_client):
     """The import lands in the existing layout, so nothing downstream needs to
     know a document arrived this way."""

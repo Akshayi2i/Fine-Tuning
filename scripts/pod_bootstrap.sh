@@ -144,21 +144,32 @@ ensure_env HF_HUB_ENABLE_HF_TRANSFER 0 1
 # The value .env gives KEY, read as bash reads the line when sourcing it: blanks
 # before the name and an `export ` are allowed there, so they are here too. Matched
 # only from the first column, `export AZURE_STORAGE_SAS_TOKEN=sv=1&sig=X` passed
-# the quoting check below and was then cut at its '&' when sourced.
+# the quoting check below and was then cut at its '&' when sourced. Neither a CR
+# (a .env saved on Windows) nor a ` # comment` after the value is part of it:
+# `AZURE_RAW_SAS_TOKEN=   # empty: one SAS serves raw & main` sets an empty token.
 env_value() {
   grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" .env | tail -n1 \
-    | sed -E "s/^[[:space:]]*(export[[:space:]]+)?$1=//" || true
+    | sed -E -e "s/^[[:space:]]*(export[[:space:]]+)?$1=//" -e 's/\r$//' -e 's/[[:space:]]+#.*$//' \
+    || true
+}
+# A value with its escaped characters (`\\`, `\&`, `\;`) set aside: bash reads each
+# as itself, never as a separator, so only what is left can cut the value.
+unescaped() {
+  local bs='\' value
+  value="${1//"$bs$bs"/}"
+  value="${value//"$bs&"/}"
+  printf '%s' "${value//"$bs;"/}"
 }
 # .env is sourced by bash (here and by pod_run.sh): an unquoted connection string
 # is cut at its first ';' and every Blob call would fail with a confusing error.
-case "$(env_value AZURE_STORAGE_CONNECTION_STRING)" in
+case "$(unescaped "$(env_value AZURE_STORAGE_CONNECTION_STRING)")" in
   \"*|\'*) ;;
   *\;*) die "AZURE_STORAGE_CONNECTION_STRING in .env contains ';' but is not quoted. Wrap the \
 value in double quotes: bash would otherwise cut it at the first ';'." ;;
 esac
 # A SAS token is cut the same way at each '&', and the rest run in the background.
 for sas_key in AZURE_STORAGE_SAS_TOKEN AZURE_RAW_SAS_TOKEN; do
-  case "$(env_value "$sas_key")" in
+  case "$(unescaped "$(env_value "$sas_key")")" in
     \"*|\'*) ;;
     *\&*) die "$sas_key in .env contains '&' but is not quoted. Wrap the value in double \
 quotes: bash would otherwise run each part after an '&' in the background." ;;
@@ -173,7 +184,16 @@ export HF_HUB_ENABLE_HF_TRANSFER=0
 # The same rule as Python's (artifact_registry.blob_client.azure_from_environment):
 # any part of a SAS login set means a SAS login, and half of one is refused there
 # rather than falling back to the connection string - so it is not done here either.
-sas_url="${AZURE_STORAGE_ACCOUNT_URL:-}" sas_main="${AZURE_STORAGE_SAS_TOKEN:-}" sas_raw="${AZURE_RAW_SAS_TOKEN:-}"
+# Python strips each value first, so a value of blanks - or the CR a .env saved on
+# Windows leaves in `AZURE_RAW_SAS_TOKEN=` when Linux bash sources it - is empty
+# there, and here too.
+trimmed() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  printf '%s' "${value%"${value##*[![:space:]]}"}"
+}
+sas_url="$(trimmed "${AZURE_STORAGE_ACCOUNT_URL:-}")" sas_main="$(trimmed "${AZURE_STORAGE_SAS_TOKEN:-}")"
+sas_raw="$(trimmed "${AZURE_RAW_SAS_TOKEN:-}")"
 if [ -n "$sas_url$sas_main$sas_raw" ]; then
   if [ -z "$sas_url" ] || [ -z "$sas_main" ]; then
     PENDING+=("set both AZURE_STORAGE_ACCOUNT_URL and AZURE_STORAGE_SAS_TOKEN in $REPO/.env, or empty every SAS setting to use the connection string: half a SAS login is refused on every Blob call, not backed by the connection string")

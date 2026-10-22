@@ -144,9 +144,9 @@ def test_an_unquoted_sas_token_is_refused_and_either_login_will_do():
     assert "AZURE_STORAGE_ACCOUNT_URL + AZURE_STORAGE_SAS_TOKEN, or AZURE_STORAGE_CONNECTION_STRING" in SCRIPT
 
 
-def _login_check(tmp_path: Path, env_text: str) -> subprocess.CompletedProcess:
+def _login_check(tmp_path: Path, env_text: str, **environ: str) -> subprocess.CompletedProcess:
     """Run the script's .env checks, from its quoting checks to its login check,
-    against ``env_text`` as the pod's .env."""
+    against ``env_text`` as the pod's .env (and ``environ`` as the process's)."""
     start = SCRIPT.index("env_value() {")
     end = SCRIPT.index("\n# --- 3 and 4.", start)
     (tmp_path / ".env").write_text(env_text, encoding="utf-8", newline="\n")
@@ -160,7 +160,7 @@ def _login_check(tmp_path: Path, env_text: str) -> subprocess.CompletedProcess:
     )
     # Only PATH: a login in the test runner's own environment must not leak in.
     return subprocess.run([BASH, "-c", check], cwd=tmp_path, capture_output=True, text=True,
-                          env={"PATH": "/usr/bin:/bin"})
+                          env={"PATH": "/usr/bin:/bin", **environ})
 
 
 _URL = "AZURE_STORAGE_ACCOUNT_URL=https://acct.blob.core.windows.net\n"
@@ -189,6 +189,54 @@ def test_a_quoted_exported_token_is_read_whole(tmp_path):
     done = _login_check(tmp_path, _URL + 'export AZURE_STORAGE_SAS_TOKEN="sv=1&sig=fake"\n')
     assert done.returncode == 0, done.stderr
     assert done.stdout.splitlines() == ["TOKEN=sv=1&sig=fake"]
+
+
+_MAIN = 'AZURE_STORAGE_SAS_TOKEN="sv=1&sig=main-fake"\n'
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+@pytest.mark.parametrize("line, token", [
+    # The value ends at the blanks; the comment, '&' and all, is not part of it.
+    ("AZURE_RAW_SAS_TOKEN=   # empty: the account SAS serves raw & main\n", "sv=1&sig=main-fake"),
+    ("AZURE_STORAGE_SAS_TOKEN=sv=1\\&sig=fake\n", "sv=1&sig=fake"),
+    ('AZURE_STORAGE_SAS_TOKEN="sv=1&sig=fake"  # rotated by hand & monthly\n', "sv=1&sig=fake"),
+    ('AZURE_STORAGE_SAS_TOKEN="sv=1&sig=fake"\r\n', "sv=1&sig=fake"),
+])
+def test_a_line_bash_reads_whole_is_not_refused(tmp_path, line, token):
+    """The quoting check reads a value as bash reads it when sourcing .env: an
+    unquoted ` # comment` after it is a comment, an '&' escaped with a backslash
+    is an '&', and a CR is the line's end. Read as raw text, the first two were
+    refused."""
+    done = _login_check(tmp_path, _URL + _MAIN + line)
+    assert done.returncode == 0, done.stderr
+    # No PENDING: the commented raw token is empty, so no half raw login either.
+    assert done.stdout.splitlines() == [f"TOKEN={token}"]
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+@pytest.mark.parametrize("line", [
+    "AZURE_STORAGE_SAS_TOKEN=sv=1&sig=fake  # a comment does not quote it\n",
+    "AZURE_STORAGE_SAS_TOKEN=sv=1\\\\&sig=fake\n",      # an escaped backslash, then a bare '&'
+])
+def test_an_unquoted_ampersand_is_refused_beside_a_comment_or_an_escape(tmp_path, line):
+    done = _login_check(tmp_path, _URL + line)
+    assert done.returncode == 1, done.stdout
+    assert "AZURE_STORAGE_SAS_TOKEN in .env contains '&' but is not quoted" in done.stderr
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+def test_a_carriage_return_is_no_login(tmp_path):
+    """Linux bash sources `AZURE_RAW_SAS_TOKEN=` from a .env saved on Windows as
+    a lone CR. Python strips it to nothing (azure_from_environment), so it is no
+    half SAS login there, and must not be one here."""
+    done = _login_check(tmp_path, _CONN, AZURE_STORAGE_ACCOUNT_URL="\r", AZURE_RAW_SAS_TOKEN=" \r")
+    assert done.returncode == 0, done.stderr
+    assert "PENDING" not in done.stdout, done.stdout
+
+    crlf = (_CONN + "AZURE_STORAGE_ACCOUNT_URL=\nAZURE_STORAGE_SAS_TOKEN=\nAZURE_RAW_SAS_TOKEN=\n")
+    done = _login_check(tmp_path, crlf.replace("\n", "\r\n"))
+    assert done.returncode == 0, done.stderr
+    assert "PENDING" not in done.stdout, done.stdout
 
 
 @pytest.mark.skipif(BASH is None, reason="needs bash")
