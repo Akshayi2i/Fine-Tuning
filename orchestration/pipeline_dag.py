@@ -14,8 +14,9 @@ Four properties are requirements, not aspirations:
   no-op, not a duplicate — which is what makes ``--from-stage`` safe to reach for
   after a mid-pipeline failure.
 * **Stage 6 is a hard stop.** A candidate that regresses any gating metric does
-  not merge, and there is no override path. ``all`` therefore never reaches
-  ``package`` on a failed gate.
+  not merge, and there is no way round it but a named, written override of the
+  gates that failed (arch §15.5), recorded in the decision and the bundle.
+  ``all`` therefore never reaches ``package`` on a failed gate.
 """
 
 from __future__ import annotations
@@ -150,15 +151,17 @@ class StageContext:
     cross_type_evidence: dict[str, dict[str, dict[str, float]]] | None = None
     #: A named, written waiver of specific gates (arch v2.1 §15.5), recorded in
     #: the gate decision and the release bundle. ``None`` is the normal case.
+    #: From the CLI's ``--override-*`` flags (``run.gate_override_from``).
     gate_override: Any = None
     #: The documented defect this release fixes (a ticket or a sentence). It
     #: satisfies the gate's improvement rule (§15.5) and nothing else: floors
     #: and non-inferiority still apply. ``None`` is the normal case.
     fixes_defect: str | None = None
     #: ``{metric: (current_scores, candidate_scores)}`` aligned by document, for
-    #: the gate's paired bootstrap. Injected by tests; ``None`` reads both eval
-    #: reports' per-document scores (:func:`paired_document_scores`).
-    per_document: dict[str, tuple[list[float], list[float]]] | None = None
+    #: the gate's paired bootstrap, optionally with ``current_weights,
+    #: candidate_weights`` after them. Injected by tests; ``None`` reads both
+    #: eval reports' per-document scores (:func:`paired_document_scores`).
+    per_document: dict[str, tuple[list[float], ...]] | None = None
 
     #: Staged checkpoint directories from the training run (arch v2.1 §11.2).
     #: Supplied by the trainer in a real cycle; empty in a dry run, where nothing
@@ -1536,44 +1539,133 @@ def _promoted_eval_report_key(ctx: StageContext) -> str | None:
 
 
 def paired_document_scores(
-    ctx: StageContext,
-) -> dict[str, tuple[list[float], list[float]]] | None:
+    ctx: StageContext, warnings: list[str] | None = None,
+) -> dict[str, tuple[list[float], list[float], list[float], list[float]]] | None:
     """Each gate metric's per-document scores, promoted vs candidate, paired.
 
     Read from the two eval reports (``EvalReport.per_document_scores``) and
     aligned on the documents both scored, in sorted order: that alignment is
-    what the paired bootstrap resamples. ``None`` when either report lacks
-    per-document scores (one written before they were kept): the gate then
-    falls back to a point comparison and records ``point_estimate``.
+    what the paired bootstrap resamples. Each comes as ``(current, candidate,
+    current_weights, candidate_weights)``: a document counts in the bootstrap as
+    it counts in the reported metric (``EvalReport.per_document_weights``; one
+    each in a report written before they were kept).
+
+    Paired only when both reports were scored on the same frozen set of this
+    tenant (``eval_set``, :func:`evaluation.run_eval.eval_set_record`). Source ids
+    are numbered per tenant and reused when a set is frozen again, and the
+    report path names no tenant, so matching on ids alone paired documents
+    across two yardsticks. ``None`` whenever pairing is not possible - another
+    set or tenant, no shared documents, a report without per-document scores or
+    without the set it was scored on - with the reason added to ``warnings``:
+    the gate then compares point estimates and cannot enforce the improvement
+    rule, and the decision has to say so.
     """
+    notes = warnings if warnings is not None else []
     promoted_key = _promoted_eval_report_key(ctx)
+    if promoted_key is None:
+        return None
     candidate_key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
-    if promoted_key is None or not ctx.client.exists(candidate_key):
+    if not ctx.client.exists(candidate_key):
+        _not_paired(notes, f"the candidate has no eval report at {candidate_key}")
         return None
-    current = ctx.client.read_json(promoted_key).get("per_document") or {}
-    candidate = ctx.client.read_json(candidate_key).get("per_document") or {}
-    if not current or not candidate:
-        log.warning(
-            "%s has no per-document scores, so non-inferiority falls back to a point comparison "
-            "and the improvement rule cannot be enforced. Re-score it to gate on a bootstrap.",
-            promoted_key if not current else candidate_key,
-        )
+    promoted_report = ctx.client.read_json(promoted_key)
+    candidate_report = ctx.client.read_json(candidate_key)
+    reason = _unpairable(ctx, promoted_key, promoted_report, candidate_key, candidate_report)
+    if reason:
+        _not_paired(notes, reason)
         return None
-    paired: dict[str, tuple[list[float], list[float]]] = {}
+    current, candidate = promoted_report["per_document"], candidate_report["per_document"]
+    current_w = promoted_report.get("per_document_weights") or {}
+    candidate_w = candidate_report.get("per_document_weights") or {}
+    paired: dict[str, tuple[list[float], list[float], list[float], list[float]]] = {}
     for name in sorted(set(current) & set(candidate)):
         shared = sorted(set(current[name]) & set(candidate[name]))
         if set(current[name]) != set(candidate[name]):
-            log.warning(
-                "%s: the two eval reports scored different documents (%d promoted, %d candidate, "
-                "%d shared). Paired on the shared ones; the frozen set should not change.",
-                name, len(current[name]), len(candidate[name]), len(shared),
+            note = (
+                f"{name}: the two eval reports scored different documents of one frozen set "
+                f"({len(current[name])} promoted, {len(candidate[name])} candidate, "
+                f"{len(shared)} shared); paired on the shared ones."
             )
+            log.warning("%s", note)
+            notes.append(note)
         if shared:
             paired[name] = (
                 [float(current[name][d]) for d in shared],
                 [float(candidate[name][d]) for d in shared],
+                [float((current_w.get(name) or {}).get(d, 1.0)) for d in shared],
+                [float((candidate_w.get(name) or {}).get(d, 1.0)) for d in shared],
             )
+    if not paired:
+        _not_paired(notes, f"{promoted_key} and {candidate_key} share no scored document")
     return paired or None
+
+
+def _unpairable(ctx: StageContext, promoted_key: str, promoted: dict[str, Any],
+                candidate_key: str, candidate: dict[str, Any]) -> str | None:
+    """Why two eval reports' per-document scores cannot be paired; ``None`` when they can."""
+    from evaluation.run_eval import EVAL_SET_IDENTITY
+
+    for key, report in ((promoted_key, promoted), (candidate_key, candidate)):
+        if not report.get("per_document"):
+            return f"{key} has no per-document scores (written before they were kept)"
+        if not all((report.get("eval_set") or {}).get(k) for k in EVAL_SET_IDENTITY):
+            return (f"{key} does not record which frozen eval set it was scored on (written "
+                    "before reports recorded it), so its documents cannot be shown to be these")
+    promoted_set, candidate_set = promoted["eval_set"], candidate["eval_set"]
+    tenant = paths._tenant(ctx.tenant_id)
+    if {promoted_set["tenant_id"], candidate_set["tenant_id"]} != {tenant}:
+        return (f"the promoted report was scored on tenant {promoted_set['tenant_id']!r}'s set "
+                f"and the candidate on tenant {candidate_set['tenant_id']!r}'s, gating tenant "
+                f"{tenant!r}; source ids are numbered per tenant")
+    if any(promoted_set[k] != candidate_set[k] for k in EVAL_SET_IDENTITY):
+        return (f"the two reports were scored on different frozen sets (promoted: frozen "
+                f"{promoted_set['frozen_at']} from {promoted_set['frozen_from_corpus']}; "
+                f"candidate: frozen {candidate_set['frozen_at']} from "
+                f"{candidate_set['frozen_from_corpus']}), so one source id may be another "
+                "document or another gold")
+    return None
+
+
+def _not_paired(notes: list[str], reason: str) -> None:
+    note = (f"per-document scores were not paired: {reason}. Non-inferiority falls back to a "
+            "point comparison.")
+    log.warning("%s", note)
+    notes.append(note)
+
+
+def scope_eval_set_size(ctx: StageContext, manifest: dict[str, Any]) -> tuple[dict[str, int], str]:
+    """How many frozen documents of each type this scope was scored on, and
+    where the count was read: ``(counts, source)``.
+
+    From the candidate's own eval report when it records them (``eval_set``):
+    exactly the documents it was scored on, after the scope's doc types and
+    lines. Otherwise from the frozen manifest: a line-scoped policy scope counts
+    the documents of its lines (``documents_by_line``, which counts every
+    document recording a line, so it can only overstate), any other scope its
+    types (``documents_by_doc_type``). Empty when neither says.
+
+    Not the manifest's ``small_set_accepted``: that describes the whole set. A
+    GL-only scope scored on 9 GL policies of a set frozen with 150 policies was
+    let through to production, and a policy scope scored on 200 policies was
+    capped because the set held 9 Loss Runs.
+    """
+    key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
+    report = ctx.client.read_json(key) if ctx.client.exists(key) else {}
+    recorded_set = report.get("eval_set") or {}
+    recorded = recorded_set.get("documents_by_doc_type")
+    # The report path names no tenant: another tenant's report says nothing here.
+    if (isinstance(recorded, dict) and recorded
+            and recorded_set.get("tenant_id") == paths._tenant(ctx.tenant_id)):
+        return {t: int(recorded.get(t) or 0) for t in ctx.scope.doc_types}, "eval_report"
+    if not manifest:
+        return {}, "unknown"
+    if ctx.scope.lines:
+        by_line = manifest.get("documents_by_line") or {}
+        # A package's lines are joined with "+" (split_groups.line_of).
+        count = sum(int(n) for line, n in by_line.items() if ctx.scope.covers_lob(line.split("+")))
+        return {t: count for t in ctx.scope.doc_types}, "frozen_manifest.documents_by_line"
+    by_type = manifest.get("documents_by_doc_type") or {}
+    return {t: int(by_type.get(t) or 0) for t in ctx.scope.doc_types}, "frozen_manifest.documents_by_doc_type"
 
 
 def stage_evaluation_gate(ctx: StageContext) -> StageResult:
@@ -1584,22 +1676,25 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
     the build: the merged model exists on the staging volume, but nothing is
     published, the release bundle is never written, and the command exits
     non-zero with per-metric verdicts. There is no ``--force``. There is a named,
-    written override (``ctx.gate_override``, §15.5), recorded in the gate decision
-    and the bundle.
+    written override (``ctx.gate_override``, §15.5; ``--override-approver``,
+    ``--override-reason`` and ``--override-gate`` on ``package`` and ``all``),
+    recorded in the gate decision and the bundle.
     """
-    from evaluation.freeze_eval_set import frozen_manifest
+    from evaluation.freeze_eval_set import MIN_FROZEN_DOCS_PER_TYPE, frozen_manifest
     from evaluation.gating import apply_to_manifest, promotion_gate
 
     provider = ctx.metrics_provider or eval_report_metrics
     candidate = provider(ctx)
     baseline = ctx.baseline_metrics
     per_document = ctx.per_document
+    # Why per-document scores could not be paired, for the decision's warnings.
+    pairing: list[str] = []
     if baseline is None:
         baseline = default_baseline_metrics(ctx)
         # Paired only against the promoted report's own documents: an injected
         # baseline has no per-document scores to pair with.
         if per_document is None and baseline is not None:
-            per_document = paired_document_scores(ctx)
+            per_document = paired_document_scores(ctx, warnings=pairing)
 
     # Read the manifest back from the registry when this run did not train it —
     # a resume, or --from-stage evaluation_gate, leaves ctx.manifests empty, and
@@ -1622,13 +1717,18 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
                 "one must show cross-type regression evidence before promotion (arch §12). "
                 f"Re-run training for this version rather than gating blind ({exc})."
             ) from exc
-    # The set the candidate was scored on. One accepted below its minimum size
-    # (--allow-small) caps the release at interim, with a warning.
+    # The set the candidate was scored on. A scope scored on fewer than the
+    # minimum documents of a type it covers caps the release at interim, with a
+    # warning - whatever the whole set's own flag says (scope_eval_set_size).
+    # A count nothing records is not shown to be large enough.
     eval_set = frozen_manifest(ctx.client, tenant_id=ctx.tenant_id)
+    scored_on, counted_from = scope_eval_set_size(ctx, eval_set)
+    small = not scored_on or any(n < MIN_FROZEN_DOCS_PER_TYPE for n in scored_on.values())
     result = promotion_gate(
         candidate,
         baseline,
-        small_eval_set=bool(eval_set.get("small_set_accepted")),
+        small_eval_set=small,
+        warnings=pairing,
         # Per-document scores turn non-inferiority into a paired bootstrap and
         # let the improvement rule be enforced (arch §15.5).
         per_document=per_document,
@@ -1676,6 +1776,13 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
             "small_set_accepted": bool(eval_set.get("small_set_accepted")),
             "documents_by_doc_type": eval_set.get("documents_by_doc_type", {}),
             "frozen_from_corpus": eval_set.get("frozen_from_corpus"),
+            "frozen_at": eval_set.get("frozen_at"),
+            # What decided the interim cap: this scope's documents per type,
+            # where that count was read, and the minimum it was held to.
+            "scope_documents_by_doc_type": scored_on,
+            "scope_documents_counted_from": counted_from,
+            "minimum_per_doc_type": MIN_FROZEN_DOCS_PER_TYPE,
+            "small_for_scope": small,
         },
         "warnings": list(result.warnings),
         # Fideon SPEC_09 §6: production (field match >= 0.92) or interim; None if

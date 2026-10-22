@@ -106,12 +106,22 @@ def paired_bootstrap(
     resamples: int = RESAMPLES,
     seed: int = SEED,
     aggregate: Callable[[Sequence[float]], float] | None = None,
+    current_weights: Sequence[float] | None = None,
+    candidate_weights: Sequence[float] | None = None,
 ) -> ConfidenceInterval:
     """The 95% CI of (candidate − current), resampling documents with replacement.
 
     ``current`` and ``candidate`` are **per-document** scores, aligned by index —
     element *i* of each is the same document. That alignment is the pairing, and
     it is what makes the interval tight enough to be useful on a small eval set.
+
+    ``current_weights`` / ``candidate_weights``: how much each document counts in
+    its side's metric, aligned the same way. Given, each side of a resample is
+    the weighted mean, sum(w·x) / sum(w), over the documents drawn. A metric the
+    report averages over ITEMS rather than documents needs it: list_field_recall
+    is the mean over every table in the set, so a policy with four tables counts
+    four times, and an unweighted mean of per-document scores tested a different
+    number from the one the gate reports and the floor reads.
     """
     if len(current) != len(candidate):
         raise ValueError(
@@ -123,8 +133,11 @@ def paired_bootstrap(
     if n == 0:
         raise ValueError(f"{metric}: no documents to bootstrap over")
 
-    mean = aggregate or (lambda xs: sum(xs) / len(xs))
-    observed = mean(candidate) - mean(current)
+    if (current_weights is not None or candidate_weights is not None) and aggregate is not None:
+        raise ValueError(f"{metric}: give weights or an aggregate, not both")
+    current_mean = _side_mean(metric, "baseline", current, current_weights, aggregate)
+    candidate_mean = _side_mean(metric, "candidate", candidate, candidate_weights, aggregate)
+    observed = candidate_mean(range(n)) - current_mean(range(n))
 
     if n == 1:
         # One document resamples to itself every time, so the interval would be
@@ -145,14 +158,39 @@ def paired_bootstrap(
         # Drawing separate indices for each side would compare different
         # document samples and inflate every interval.
         picks = [rng.randrange(n) for _ in range(n)]
-        deltas.append(
-            mean([candidate[i] for i in picks]) - mean([current[i] for i in picks])
-        )
+        deltas.append(candidate_mean(picks) - current_mean(picks))
 
     deltas.sort()
     lower = deltas[int(0.025 * resamples)]
     upper = deltas[min(int(0.975 * resamples), resamples - 1)]
     return ConfidenceInterval(metric, observed, lower, upper, resamples, n)
+
+
+def _side_mean(
+    metric: str,
+    side: str,
+    scores: Sequence[float],
+    weights: Sequence[float] | None,
+    aggregate: Callable[[Sequence[float]], float] | None,
+) -> Callable[[Sequence[int]], float]:
+    """One side's metric over the documents at ``picks``: the weighted mean with
+    ``weights``, else ``aggregate`` (the plain mean by default)."""
+    if weights is None:
+        mean = aggregate or (lambda xs: sum(xs) / len(xs))
+        return lambda picks: mean([scores[i] for i in picks])
+    weights = [float(w) for w in weights]
+    if len(weights) != len(scores):
+        raise ValueError(
+            f"{metric}: {len(weights)} {side} weights for {len(scores)} documents. Weights are "
+            "per document and aligned with the scores."
+        )
+    # Positive, so no resample can draw a total weight of zero.
+    if any(not w > 0 for w in weights):
+        raise ValueError(f"{metric}: every {side} weight must be above zero")
+    products = [w * float(x) for w, x in zip(weights, scores, strict=True)]
+    return lambda picks: (
+        sum(map(products.__getitem__, picks)) / sum(map(weights.__getitem__, picks))
+    )
 
 
 def binomial_upper_bound(successes: int, trials: int, *, confidence: float = 0.95) -> float:

@@ -452,6 +452,7 @@ def promotion_gate(
     override: GateOverrideRecord | None = None,
     scope: Any = None,
     small_eval_set: bool = False,
+    warnings: Sequence[str] | None = None,
 ) -> GateResult:
     """Decide whether a candidate release may be promoted.
 
@@ -459,9 +460,13 @@ def promotion_gate(
         candidate_metrics: aggregate scores over the frozen golden eval set.
         current_metrics: the promoted release's scores, or ``None`` for the first.
         per_document: ``{metric: (current_scores, candidate_scores)}``, aligned by
-            index. Supplied, each metric is judged by a paired bootstrap rather
-            than by comparing two point estimates — which is the whole reason
-            this gate can be passed at all.
+            index, or ``(current_scores, candidate_scores, current_weights,
+            candidate_weights)`` for a metric each document counts in by its
+            weight (``paired_bootstrap``). Supplied, each metric is judged by a
+            paired bootstrap rather than by comparing two point estimates —
+            which is the whole reason this gate can be passed at all. A metric
+            with fewer than two paired documents is compared as a point
+            estimate instead, with a warning.
         floors: absolute floors, defaulting to the §0d pilot-exit table. A scope's
             own overrides are applied when ``scope`` is given and ``floors`` is not.
         scope: what the run covered (``common.scopes``). Decides which metrics are
@@ -469,20 +474,29 @@ def promotion_gate(
             supplies per-scope floors. Omitted, the gate behaves exactly as it did
             before scopes existed.
         fixes_defect: satisfies the improvement requirement when a release exists
-            to fix something rather than to score higher.
+            to fix something rather than to score higher. Checked
+            (:func:`documented_defect`): a blank or placeholder value is refused.
         override: a named, written waiver. Validated — an override that cannot be
             attributed is refused.
-        small_eval_set: the frozen eval set was accepted below its minimum size
-            (``freeze-eval-set --allow-small``). Its scores say too little to call
-            a release production, so a pass is capped at ``interim`` and warned.
+        small_eval_set: the release was scored on fewer eval documents of a type
+            than the frozen set's minimum (a set accepted with ``freeze-eval-set
+            --allow-small``, or a scope scored on only part of a set). Its scores
+            say too little to call a release production, so a pass is capped at
+            ``interim`` and warned.
+        warnings: what the caller knows about the evidence that a reader of the
+            decision must see (per-document scores it could not pair, and why).
+            Recorded first in ``GateResult.warnings``.
     """
     result = GateResult(passed=True, is_first_version=current_metrics is None)
+    result.warnings.extend(warnings or ())
     baseline = current_metrics or {}
     floor_table = floors_for(scope) if floors is None else floors
     not_applicable = not_applicable_for(scope)
     samples = per_document or {}
     result.scope = getattr(scope, "name", None)
 
+    if fixes_defect is not None:
+        fixes_defect = documented_defect(fixes_defect)
     if override is not None:
         override.validate()
         result.override = override
@@ -503,14 +517,31 @@ def promotion_gate(
             or (name in CONDITIONAL_METRICS and baseline.get(name) is not None),
         )
         if name in samples and verdict.current is not None:
-            current_scores, candidate_scores = samples[name]
-            # Sign-normalise for lower-is-better metrics so "improvement" means
-            # the same direction for every interval, and the CI can be read the
-            # same way regardless of which metric it belongs to.
-            if direction == "lower_is_better":
-                current_scores = [-x for x in current_scores]
-                candidate_scores = [-x for x in candidate_scores]
-            verdict.interval = paired_bootstrap(name, current_scores, candidate_scores)
+            current_scores, candidate_scores, *weights = samples[name]
+            current_weights, candidate_weights = (list(weights) + [None, None])[:2]
+            if len(current_scores) == len(candidate_scores) < 2:
+                # One document resamples to itself, so the bootstrap widens its
+                # interval to the whole range, and that fails non-inferiority for
+                # ever: a frozen set holding one scanned document blocked every
+                # later candidate on scanned_accuracy, identical scores or not, and
+                # a frozen set cannot grow. Too few to bootstrap is judged as a
+                # point estimate instead, and says so.
+                result.warnings.append(
+                    f"{name}: only {len(current_scores)} paired document(s), too few to "
+                    "bootstrap, so it is compared as a point estimate against δ and cannot "
+                    "count as an improvement."
+                )
+            else:
+                # Sign-normalise for lower-is-better metrics so "improvement" means
+                # the same direction for every interval, and the CI can be read the
+                # same way regardless of which metric it belongs to.
+                if direction == "lower_is_better":
+                    current_scores = [-x for x in current_scores]
+                    candidate_scores = [-x for x in candidate_scores]
+                verdict.interval = paired_bootstrap(
+                    name, current_scores, candidate_scores,
+                    current_weights=current_weights, candidate_weights=candidate_weights,
+                )
         result.verdicts.append(verdict)
 
         if verdict.unmeasured:
@@ -533,8 +564,8 @@ def promotion_gate(
             detail = (
                 f"95% CI lower bound {bound:+.4f} is below -{verdict.delta:.3f}"
                 if bound is not None else
-                f"dropped by more than {verdict.delta:.3f} (point estimate; no per-document "
-                "scores were supplied, so this is weaker evidence than a bootstrap)"
+                f"dropped by more than {verdict.delta:.3f} (point estimate; no paired "
+                "per-document scores to bootstrap, so this is weaker evidence than one)"
             )
             _block(result, name, f"{name} is not non-inferior: {detail}")
 
@@ -559,9 +590,10 @@ def promotion_gate(
 
     if small_eval_set:
         result.warnings.append(
-            "the frozen eval set was accepted below its minimum size per document type "
-            "(freeze-eval-set --allow-small): its intervals are wide, so a pass is capped at "
-            "interim until the set is re-frozen at full size."
+            "this release was scored on fewer eval documents of a type than a frozen set's "
+            "minimum (a set frozen with freeze-eval-set --allow-small, or a scope scored on only "
+            "part of the set): its intervals are wide, so a pass is capped at interim until it "
+            "is scored on a full-size set."
         )
     result.passed = not result.blocking_reasons
     result.tier = (
@@ -600,6 +632,34 @@ def _block(result: GateResult, gate: str, reason: str) -> None:
     result.blocks.append((gate, reason))
 
 
+#: Words that name no defect. ``--fixes-defect`` lifts the improvement rule, so a
+#: placeholder would lift it for nothing.
+_NOT_A_DEFECT = frozenset({
+    "none", "nil", "null", "nothing", "tbd", "todo", "fix", "fixes", "fixed", "bug", "bugs",
+    "bugfix", "hotfix", "defect", "issue", "ticket", "yes", "true", "test", "wip", "misc",
+    "unknown", "various",
+})
+
+
+def documented_defect(text: str) -> str:
+    """``text`` stripped, when it names a defect: a ticket id (``TICKET-12``) or a
+    sentence. Refused when blank or a placeholder (``-``, ``n/a``, ``fix``).
+
+    A release that names the defect it fixes skips the improvement rule, so the
+    name has to be something a later reader can look up. Any text at all did it
+    before: ``--fixes-defect " "`` lifted the rule.
+    """
+    named = str(text or "").strip()
+    letters = "".join(ch for ch in named.lower() if ch.isalnum())
+    if len(letters) < 3 or letters in _NOT_A_DEFECT:
+        raise GateError(
+            f"fixes_defect {text!r} names no defect. It stands in for an improvement, so it must "
+            "say which documented defect this release fixes - a ticket id (TICKET-12) or a "
+            "sentence a later reviewer can check."
+        )
+    return named
+
+
 def _require_improvement(result: GateResult, fixes_defect: str | None) -> None:
     """At least one primary metric must improve, or a defect must be named.
 
@@ -618,12 +678,16 @@ def _require_improvement(result: GateResult, fixes_defect: str | None) -> None:
     if not measurable:
         # No per-document scores means no interval, so "improved" is unknowable
         # rather than false. Blocking here would make the improvement rule fire
-        # on missing evidence rather than on a missing improvement.
-        log.warning(
-            "no per-document scores for %s, so the improvement requirement cannot be "
-            "evaluated and is not enforced. Supply per_document scores to enforce it.",
-            list(PRIMARY_METRICS),
+        # on missing evidence rather than on a missing improvement. Said in the
+        # decision, not only the log: a release that passed with the rule
+        # unenforced must not read as one that improved.
+        warning = (
+            f"the improvement rule was not enforced: no primary metric {list(PRIMARY_METRICS)} "
+            "had paired per-document scores to bootstrap, so whether one improved is unknowable "
+            "and non-inferiority was a point comparison."
         )
+        log.warning("%s", warning)
+        result.warnings.append(warning)
         return
     _block(
         result, "improvement",

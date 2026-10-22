@@ -936,6 +936,90 @@ def test_the_improvement_rule_does_not_fire_on_missing_evidence():
     assert "improvement" not in result.failed_gates
 
 
+def test_the_improvement_rule_left_unenforced_is_said_in_the_decision():
+    """Only logged, a release that passed with the rule unenforced read in its
+    decision exactly like one that improved."""
+    from evaluation.gating import promotion_gate
+
+    result = promotion_gate(_metrics(), _metrics())
+    assert result.passed
+    assert any("improvement rule was not enforced" in w for w in result.warnings)
+    assert result.as_dict()["warnings"] == result.warnings
+    # Nothing to say for a first release, or one that names the defect it fixes.
+    assert not promotion_gate(_metrics(), None).warnings
+    assert not promotion_gate(_metrics(), _metrics(), fixes_defect="TICKET-12").warnings
+
+
+def test_a_metric_one_document_measures_is_a_point_estimate_not_a_permanent_block():
+    """At n=1 the bootstrap widens the interval to [-1, 1], which fails
+    non-inferiority: a frozen set holding one scanned document blocked every
+    later candidate on scanned_accuracy, identical scores or not, and the set
+    cannot grow once frozen."""
+    from evaluation.gating import promotion_gate
+
+    result = promotion_gate(
+        _metrics(scanned_accuracy=0.80), _metrics(scanned_accuracy=0.80),
+        per_document={
+            **_paired("field_normalized_match", 0.90, 0.96),
+            **_paired("list_field_recall", 0.96, 0.96),
+            "scanned_accuracy": ([0.80], [0.80]),
+        },
+    )
+    assert result.passed, result.report()
+    verdict = next(v for v in result.verdicts if v.name == "scanned_accuracy")
+    assert verdict.basis == "point_estimate" and verdict.non_inferior and not verdict.improved
+    assert any("scanned_accuracy" in w and "1 paired document" in w for w in result.warnings)
+
+    # Still a point comparison against δ: a real drop on that one document blocks.
+    dropped = promotion_gate(
+        _metrics(scanned_accuracy=0.70), _metrics(scanned_accuracy=0.80),
+        per_document={**_paired("field_normalized_match", 0.90, 0.96),
+                      "scanned_accuracy": ([0.80], [0.70])},
+    )
+    assert "scanned_accuracy" in dropped.failed_gates
+
+
+def test_weights_make_each_side_a_weighted_mean():
+    from evaluation.bootstrap import paired_bootstrap
+
+    current, candidate = [0.6, 1.0] * 10, [1.0, 0.85] * 10
+    plain = paired_bootstrap("m", current, candidate)
+    ones = paired_bootstrap("m", current, candidate, current_weights=[1.0] * 20,
+                            candidate_weights=[1.0] * 20)
+    assert ones.observed == pytest.approx(plain.observed)
+    assert ones.lower == pytest.approx(plain.lower) and ones.upper == pytest.approx(plain.upper)
+
+    weights = [1.0, 4.0] * 10
+    weighted = paired_bootstrap("m", current, candidate, current_weights=weights,
+                                candidate_weights=weights)
+    assert weighted.observed == pytest.approx((1.0 + 4 * 0.85) / 5 - (0.6 + 4 * 1.0) / 5)
+
+    with pytest.raises(ValueError, match="not both"):
+        paired_bootstrap("m", current, candidate, current_weights=weights, aggregate=max)
+    with pytest.raises(ValueError, match="aligned with the scores"):
+        paired_bootstrap("m", current, candidate, current_weights=[1.0])
+    with pytest.raises(ValueError, match="above zero"):
+        paired_bootstrap("m", current, candidate, candidate_weights=[0.0] * 20)
+
+
+@pytest.mark.parametrize("value", [" ", "-", "n/a", "none", "fix", "TBD", ""])
+def test_a_blank_or_placeholder_defect_does_not_lift_the_improvement_rule(value):
+    """`--fixes-defect " "` lifted the rule: any text at all did."""
+    from evaluation.gating import GateError, documented_defect, promotion_gate
+
+    with pytest.raises(GateError, match="names no defect"):
+        promotion_gate(_metrics(), _metrics(), fixes_defect=value)
+    with pytest.raises(GateError):
+        documented_defect(value)
+
+
+def test_a_ticket_id_names_a_defect():
+    from evaluation.gating import documented_defect
+
+    assert documented_defect("  TICKET-12 ") == "TICKET-12"
+    assert documented_defect("FID-204: claim rows dropped on page boundaries").startswith("FID-204")
+
+
 def test_every_pending_metric_names_what_turns_it_on():
     """A metric listed as gating that nothing produces makes the gate
     permanently unpassable — precisely the defect this rewrite exists to fix. So

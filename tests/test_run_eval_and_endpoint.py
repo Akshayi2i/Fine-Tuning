@@ -205,6 +205,120 @@ def test_each_document_s_own_score_is_kept_for_the_gate_s_bootstrap():
     assert "per_document" not in report.full_set()[0].as_dict()
 
 
+def _score_lists_as(monkeypatch, recalls: dict[str, list[float]]) -> None:
+    """Score each document's list fields as ``recalls`` says, looked up by its
+    insured name: one table per entry, so the number of tables is chosen too."""
+    from evaluation.metrics import field_accuracy
+    from evaluation.metrics.field_accuracy import ListFieldReport
+
+    def score_all_list_fields(expected, got, *, common_model=False):
+        return {
+            f"table_{i}": ListFieldReport(f"table_{i}", expected_rows=20,
+                                          got_rows=round(r * 20), matched_rows=round(r * 20))
+            for i, r in enumerate(recalls[expected["insured_name"]])
+        }
+
+    monkeypatch.setattr(field_accuracy, "score_all_list_fields", score_all_list_fields)
+
+
+def _read_in_modes(names: list[str], doc_type: str, modes: tuple[str, ...], **meta) -> list:
+    return [
+        ({**GOLDEN, "insured_name": name}, {**GOLDEN, "insured_name": name},
+         {"source_id": f"{doc_type}_{i:02d}", "doc_type": doc_type, "modality_mode": mode,
+          "page_count": 1, **meta})
+        for i, name in enumerate(names) for mode in modes
+    ]
+
+
+def _weighted_mean(scores: dict[str, float], weights: dict[str, float]) -> float:
+    return sum(scores[d] * weights[d] for d in scores) / sum(weights[d] for d in scores)
+
+
+def _paired_from(current: dict, candidate: dict, name: str) -> tuple[list, list, list, list]:
+    """One metric paired from two written reports, as the gate stage pairs them."""
+    ids = sorted(current["per_document"][name])
+    return (
+        [current["per_document"][name][d] for d in ids],
+        [candidate["per_document"][name][d] for d in ids],
+        [current["per_document_weights"][name][d] for d in ids],
+        [candidate["per_document_weights"][name][d] for d in ids],
+    )
+
+
+def test_list_recall_is_bootstrapped_as_the_gate_reports_it(monkeypatch):
+    """The review's case: 15 documents with one table and 15 with four, each read
+    in three modes. The baseline recalls 0.6 on the one-table documents and 1.0
+    on the four-table ones; the candidate 1.0 and 0.85. Reported recall - a mean
+    over every table, the number the floor reads - falls 0.92 -> 0.88. The
+    bootstrap averaged documents instead, saw +0.125, and called it improved."""
+    from evaluation.bootstrap import paired_bootstrap
+    from evaluation.gating import GATING_METRICS, promotion_gate
+
+    names = [f"Insured {i:02d}" for i in range(30)]
+    documents = _read_in_modes(names, "lossrun", ("ocr_plus_image", "noisy_ocr_image", "image_only"))
+    _score_lists_as(monkeypatch, {n: [0.6] if i < 15 else [1.0] * 4 for i, n in enumerate(names)})
+    current = build_report("v1", documents)
+    _score_lists_as(monkeypatch, {n: [1.0] if i < 15 else [0.85] * 4 for i, n in enumerate(names)})
+    candidate = build_report("v2", documents)
+
+    reported = {r.model_version: r.gate_metrics()["list_field_recall"] for r in (current, candidate)}
+    assert reported == {"v1": pytest.approx(0.92), "v2": pytest.approx(0.88)}
+    for report in (current, candidate):
+        scores = report.per_document_scores()["list_field_recall"]
+        weights = report.per_document_weights()["list_field_recall"]
+        assert _weighted_mean(scores, weights) == pytest.approx(reported[report.model_version])
+
+    paired = _paired_from(current.as_dict(), candidate.as_dict(), "list_field_recall")
+    ci = paired_bootstrap("list_field_recall", paired[0], paired[1],
+                          current_weights=paired[2], candidate_weights=paired[3])
+    assert ci.observed == pytest.approx(-0.04, abs=1e-4), "the bootstrap tests the reported delta"
+    assert not ci.improved and not ci.non_inferior(0.010)
+    # What the unweighted per-document mean said: the opposite verdict.
+    unweighted = paired_bootstrap("list_field_recall", paired[0], paired[1])
+    assert unweighted.observed == pytest.approx(0.125, abs=1e-4) and unweighted.improved
+
+    metrics = {name: 0.96 for name in GATING_METRICS}
+    metrics.update(schema_validity_rate=1.0, ece_confidence=0.04, confusable_misattribution_rate=0.02,
+                   false_null_rate=0.03, auto_accept_error_rate=0.01)
+    result = promotion_gate(
+        {**metrics, "list_field_recall": reported["v2"]},
+        {**metrics, "list_field_recall": reported["v1"]},
+        per_document={"list_field_recall": paired},
+    )
+    verdict = next(v for v in result.verdicts if v.name == "list_field_recall")
+    assert verdict.meets_floor and not verdict.non_inferior and not verdict.improved
+    assert "list_field_recall" in result.failed_gates
+
+
+def test_each_per_document_metric_weighted_is_the_metric_the_gate_reports(monkeypatch):
+    """Field match, exact match, schema validity, list recall and the subset
+    accuracies: each weighted mean of per-document scores is the gate metric,
+    across two doc types read in different numbers of modes and holding
+    different numbers of tables."""
+    lossrun = [f"Loss Run {i}" for i in range(4)]
+    acord = [f"Certificate {i}" for i in range(3)]
+    documents = _read_in_modes(lossrun, "lossrun", ("ocr_plus_image", "noisy_ocr_image", "image_only"))
+    documents += _read_in_modes(acord, "acord", ("ocr_plus_image", "noisy_ocr_image"), acord_form="25")
+    # Some readings wrong, so the documents' field match differ.
+    for index in (1, 4, 5, 13):
+        expected, got, meta = documents[index]
+        documents[index] = (expected, {**got, "policy_number": "WRONG-1"}, meta)
+    _score_lists_as(monkeypatch, {
+        **{n: [0.5] * (i + 1) for i, n in enumerate(lossrun)},
+        **{n: [0.25, 1.0][: 1 + (i == 2)] for i, n in enumerate(acord)},
+    })
+    report = build_report("v2", documents)
+    metrics, scores, weights = report.gate_metrics(), report.per_document_scores(), report.per_document_weights()
+
+    assert set(scores) >= {"field_normalized_match", "field_exact_match", "list_field_recall",
+                           "schema_validity_rate", "image_only_accuracy", "ocr_arbitration_accuracy"}
+    for name, by_source in scores.items():
+        assert set(weights[name]) == set(by_source), name
+        assert _weighted_mean(by_source, weights[name]) == pytest.approx(metrics[name]), name
+    written = report.as_dict()
+    assert set(written["per_document_weights"]) == set(written["per_document"])
+
+
 def test_error_records_are_kept_not_just_aggregates():
     """vit_gate needs the perception-vs-reasoning split, and failure-mode
     analysis needs real material."""

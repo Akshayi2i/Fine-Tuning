@@ -25,6 +25,7 @@ import logging
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from artifact_registry.blob_client import BlobClient, for_ingestion
 from common.constants import ACTIVE_DOC_TYPES, DAY_ZERO_MIN_LABELS_PER_TYPE
@@ -41,6 +42,9 @@ from orchestration.pipeline_dag import (
 )
 from orchestration.runpod_controller import RunPodController
 from orchestration.settings import backoff_seconds, defaults, retry_policy
+
+if TYPE_CHECKING:
+    from evaluation.gating import GateOverrideRecord
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +86,8 @@ def build_context(args: argparse.Namespace, *, client: BlobClient | None = None,
         "skip_quantize": getattr(args, "skip_quantize", False),
         "keep_staging": getattr(args, "keep_staging", False),
         "from_blob": getattr(args, "from_blob", False),
-        "fixes_defect": getattr(args, "fixes_defect", None),
+        "fixes_defect": fixes_defect_for(getattr(args, "fixes_defect", None), scope, scopes),
+        "gate_override": gate_override_from(args, scopes),
         "git_commit": commit,
         "max_attempts": int(retry_policy()["max_attempts"]),
         "retry_backoff_seconds": backoff_seconds(),
@@ -127,6 +132,104 @@ def release_id_for(
         # `assert_release_id` refuses it by name, with the next free id.
         return ""
     return bare[0] if len(bare) == 1 else ""
+
+
+class FixesDefectError(ValueError):
+    """Raised when --fixes-defect names no defect, or cannot be told apart per scope."""
+
+
+def fixes_defect_for(
+    given: list[str] | str | None, scope: Scope, scopes: Sequence[Scope] = ()
+) -> str | None:
+    """This scope's ``--fixes-defect``, or ``None``.
+
+    One bare value when a single scope runs; ``scope=TICKET`` pairs when several
+    do, as ``--release-id`` takes them. A scope no pair names fixes nothing. It
+    lifts the improvement rule for the release it names, so one value under
+    ``all --scope policy --scope lossrun`` lifted it for both - including the
+    release that fixed nothing. Every value is checked before any work, and a
+    blank or placeholder one (``" "``, ``-``) is refused
+    (``evaluation.gating.documented_defect``).
+    """
+    from evaluation.gating import GateError, documented_defect
+
+    values = [given] if isinstance(given, str) else list(given or [])
+    names = {s.name for s in scopes} or {scope.name}
+    known = set(load_scopes())
+    bare: list[str] = []
+    pairs: dict[str, str] = {}
+    for value in values:
+        # Only a known scope's name makes a pair: a defect's own sentence may hold "=".
+        name, sep, text = value.partition("=")
+        if sep and name.strip() in known:
+            if name.strip() in pairs:
+                raise FixesDefectError(f"--fixes-defect names scope {name.strip()!r} twice")
+            pairs[name.strip()] = text
+        else:
+            bare.append(value)
+    for value in [*bare, *pairs.values()]:
+        try:
+            documented_defect(value)
+        except GateError as exc:
+            raise FixesDefectError(f"--fixes-defect: {exc}") from exc
+    outside = sorted(set(pairs) - names)
+    if outside:
+        raise FixesDefectError(
+            f"--fixes-defect names scope(s) {outside}, which this run does not include "
+            f"({sorted(names)})."
+        )
+    if bare and (pairs or len(bare) > 1 or len(names) > 1):
+        raise FixesDefectError(
+            f"--fixes-defect {bare[0]!r} does not say which release it is for. It lifts the "
+            "improvement rule for that release alone, so when several scopes run, or several "
+            "values are given, name each scope: --fixes-defect "
+            f"{scope.name}={bare[0]} [--fixes-defect <other-scope>=<its defect>]"
+        )
+    if scope.name in pairs:
+        return documented_defect(pairs[scope.name])
+    return documented_defect(bare[0]) if bare else None
+
+
+class GateOverrideError(ValueError):
+    """Raised when the --override-* flags do not make a valid written override."""
+
+
+def gate_override_from(
+    args: argparse.Namespace, scopes: Sequence[Scope] = ()
+) -> GateOverrideRecord | None:
+    """The written gate override (arch §15.5) the ``--override-*`` flags name, or ``None``.
+
+    The one way past a gate that failed: a named person, a written reason and
+    the gates it waives, all three or none, validated before any work exactly
+    as the gate validates it (``GateOverrideRecord.validate``), and recorded in
+    the gate decision and the release bundle as waived, never as passed. It
+    lifts only the named gates that failed. One scope per run, because a waiver
+    is a decision about one release.
+    """
+    approver = getattr(args, "override_approver", None)
+    reason = getattr(args, "override_reason", None)
+    gates = [g.strip() for g in getattr(args, "override_gates", None) or [] if g.strip()]
+    if approver is None and reason is None and not gates:
+        return None
+    from evaluation.gating import GateError, GateOverrideRecord
+
+    if len(scopes) > 1:
+        raise GateOverrideError(
+            f"a gate override was given for {len(scopes)} scopes. A waiver is a decision about one "
+            "release: run the scope whose gate it waives on its own (package --scope NAME "
+            "--from-stage evaluation_gate ...)."
+        )
+    override = GateOverrideRecord(
+        approver=(approver or "").strip(), reason=(reason or "").strip(), waived_gates=gates,
+    )
+    try:
+        override.validate()
+    except GateError as exc:
+        raise GateOverrideError(
+            f"{exc} An override needs --override-approver, --override-reason and at least one "
+            "--override-gate."
+        ) from exc
+    return override
 
 
 def _selected_stages(command: str, from_stage: str | None) -> Sequence[pipeline_dag.Stage]:
@@ -248,9 +351,21 @@ def _add_package_flags(parser: argparse.ArgumentParser, *, version_required: boo
     parser.add_argument("--dtype", default=defaults().get("dtype", "bf16"), choices=["bf16", "fp16"])
     # Satisfies the gate's improvement rule only (arch §15.5): floors and
     # non-inferiority still apply, and the text is recorded in the decision.
-    parser.add_argument("--fixes-defect", dest="fixes_defect", default=None,
-                        help="the documented defect this release fixes (ticket or sentence); "
-                             "stands in for 'a primary metric improved' and nothing else")
+    parser.add_argument("--fixes-defect", dest="fixes_defect", action="append", default=[],
+                        help="the documented defect this release fixes (ticket or sentence), or "
+                             "scope=TICKET when several scopes are named; stands in for 'a "
+                             "primary metric improved' and nothing else")
+    # The written override of arch §15.5, never a bypass: all three together,
+    # validated before any work, recorded as waived in the decision and bundle.
+    parser.add_argument("--override-approver", dest="override_approver", default=None,
+                        help="written gate override: the person accountable for it (not a "
+                             "system identity); needs --override-reason and --override-gate")
+    parser.add_argument("--override-reason", dest="override_reason", default=None,
+                        help="written gate override: why this ships despite the gate "
+                             "(20 characters or more)")
+    parser.add_argument("--override-gate", dest="override_gates", action="append", default=[],
+                        help="written gate override: a failed gate to waive, as the gate decision "
+                             "names it (repeatable); only gates that failed are lifted")
     if version_required:
         # Standalone `package` only — under `all` these come from the finetune
         # flags and adding them twice is an argparse conflict.

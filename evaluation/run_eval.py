@@ -125,6 +125,39 @@ def eval_set_source_ids(client: BlobClient, tenant_id: str | None = None) -> set
     }
 
 
+def eval_set_record(
+    client: BlobClient, tenant_id: str | None, doc_types: Iterable[str]
+) -> dict[str, Any]:
+    """Which frozen set, of which tenant, an eval report was scored on, and how
+    many of its documents per type (``doc_types``: one entry per document scored).
+
+    The gate pairs two reports' per-document scores only when both were scored
+    on the same set of the same tenant: source ids are numbered per tenant, and
+    a set deleted and frozen again (corrected golds) reuses them, so
+    ``policy_0001`` in two reports is not always one document against one gold.
+    The counts are what the scope was scored on, which decides whether it was
+    scored on too few documents to be called production.
+    """
+    from collections import Counter
+
+    from evaluation.freeze_eval_set import frozen_manifest
+
+    manifest = frozen_manifest(client, tenant_id=tenant_id)
+    return {
+        "tenant_id": paths._tenant(tenant_id),
+        # A set frozen again is a new freeze: its frozen_at differs, whatever
+        # corpus it came from.
+        "frozen_at": manifest.get("frozen_at"),
+        "frozen_from_corpus": manifest.get("frozen_from_corpus"),
+        "documents_by_doc_type": dict(sorted(Counter(doc_types).items())),
+    }
+
+
+#: What :func:`eval_set_record` writes that names the set itself. Two reports
+#: are scored on one yardstick when these agree.
+EVAL_SET_IDENTITY: tuple[str, ...] = ("tenant_id", "frozen_at", "frozen_from_corpus")
+
+
 def assert_eval_set_disjoint(
     client: BlobClient, corpus_version: str, tenant_id: str | None = None
 ) -> None:
@@ -174,6 +207,11 @@ class SubsetReport:
     #: the gate's paired bootstrap needs (:meth:`EvalReport.per_document_scores`).
     #: Kept out of :meth:`as_dict`; the report carries them once, at the top.
     per_document: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: ``{metric: {source_id: items}}``: how many items each document's score is
+    #: the mean of - its list fields for ``list_field_recall``, its readings for
+    #: the others. The subset's metric is the mean over items, so this is how
+    #: much each document counts in it (:meth:`EvalReport.per_document_weights`).
+    per_document_items: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -261,19 +299,50 @@ class EvalReport:
         field match, as in :meth:`gate_metrics`.
         """
         scores: dict[str, dict[str, float]] = {}
-        for report in self.full_set():
-            for name, by_source in report.per_document.items():
-                scores.setdefault(name, {}).update(by_source)
+        for report, name, source_metric in self._per_document_sources():
+            scores.setdefault(name, {}).update(report.per_document.get(source_metric, {}))
+        return {name: by_source for name, by_source in scores.items() if by_source}
+
+    def per_document_weights(self) -> dict[str, dict[str, float]]:
+        """``{gate metric: {source_id: weight}}``, aligned with
+        :meth:`per_document_scores`: how much each document counts in the metric
+        :meth:`gate_metrics` reports.
+
+        The weighted mean of the per-document scores is that metric, so the
+        bootstrap tests the number the gate reports and the floor reads. Without
+        it, ``list_field_recall`` - a mean over every table in the set - was
+        bootstrapped as a mean over documents: a release whose reported recall
+        fell from 0.92 to 0.88 bootstrapped as +0.125 and passed as improved.
+
+        A document's weight is its items (list fields, readings) times its doc
+        type's readings over that type's items: each type's metric is a mean
+        over its items, and ``gate_metrics`` weights each type's metric by its
+        readings (``SubsetReport.documents``).
+        """
+        weights: dict[str, dict[str, float]] = {}
+        for report, name, source_metric in self._per_document_sources():
+            items = report.per_document_items.get(source_metric, {})
+            total = sum(items.values())
+            if total and report.documents:
+                scale = report.documents / total
+                weights.setdefault(name, {}).update(
+                    {source: n * scale for source, n in items.items()})
+        return {name: by_source for name, by_source in weights.items() if by_source}
+
+    def _per_document_sources(self) -> list[tuple[SubsetReport, str, str]]:
+        """``(subset report, gate metric, its per-document metric)``: the full
+        set's own metrics, and the subset accuracies from their subsets' field
+        match, as in :meth:`gate_metrics`."""
+        sources = [(report, name, name)
+                   for report in self.full_set() for name in report.per_document]
         for subset, gate_name in (
             ("image_only", "image_only_accuracy"),
             ("scanned", "scanned_accuracy"),
             ("noisy_ocr", "ocr_arbitration_accuracy"),
         ):
-            for report in self.subsets:
-                if report.subset == subset:
-                    scores.setdefault(gate_name, {}).update(
-                        report.per_document.get("field_normalized_match", {}))
-        return {name: by_source for name, by_source in scores.items() if by_source}
+            sources.extend((report, gate_name, "field_normalized_match")
+                           for report in self.subsets if report.subset == subset)
+        return sources
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -293,6 +362,12 @@ class EvalReport:
             "per_document": {
                 name: {source: round(score, 6) for source, score in sorted(by_source.items())}
                 for name, by_source in sorted(self.per_document_scores().items())
+            },
+            # Read with per_document: a report without them (written before they
+            # were kept) pairs as one document, one weight.
+            "per_document_weights": {
+                name: {source: round(weight, 6) for source, weight in sorted(by_source.items())}
+                for name, by_source in sorted(self.per_document_weights().items())
             },
         }
 
@@ -573,6 +648,16 @@ def score_subset(
             source: 1.0 - min(invalid_by_source[source], n) / n
             for source, n in validity_readings.items() if source and n
         },
+    }
+    # What each score above is the mean of. The metrics below are means over
+    # these items, not over documents: list recall over every list field, so a
+    # policy with four tables counts four times and one with one table once.
+    report.per_document_items = {
+        "field_normalized_match": {source: len(r) for source, r in readings_by_source.items()},
+        "field_exact_match": {source: len(r) for source, r in readings_by_source.items()},
+        "list_field_recall": {source: len(r) for source, r in recalls_by_source.items() if r},
+        "schema_validity_rate": {
+            source: n for source, n in validity_readings.items() if source and n},
     }
     if unselectable:
         log.warning(

@@ -287,6 +287,12 @@ def evaluate_version(
     # them every field is flagged, and the gate must not reuse this report
     # once the release has calibrators (pipeline_dag.eval_report_metrics).
     body["calibrated"] = calibrators is not None
+    # Which frozen set of which tenant this was scored on, and how many of its
+    # documents: the gate pairs two reports only on one set, and decides from
+    # the counts whether the scope was scored on enough to be production.
+    from evaluation.run_eval import eval_set_record
+
+    body["eval_set"] = eval_set_record(client, tenant_id, [d.doc_type for d in documents])
     body.update(real_only_section(version, triples, corpus_version=corpus_version, scope=scope))
     body["windowing_ceiling"] = windowing_ceiling(documents)
     # P95 latency per adapter and peak GPU memory, for the release bundle

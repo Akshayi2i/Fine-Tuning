@@ -536,6 +536,7 @@ def test_per_document_scores_in_both_reports_gate_on_a_paired_bootstrap(client, 
     for version in ("v1", "v1.1", "v1.2"):
         client.write_json(paths.eval_report(version), {
             "gate_metrics": dict(PASSING_METRICS), "per_document": per_document,
+            "eval_set": _scored_on(),
         })
 
     ctx = make_context(client, controller, out_version="v1.1", release_id="release-2026.9.2",
@@ -571,6 +572,223 @@ def test_an_eval_set_accepted_small_caps_the_release_at_interim(client, controll
     assert decision["tier"] == "interim"
     assert decision["eval_set"]["small_set_accepted"] is True
     assert decision["warnings"]
+
+
+def _scored_on(tenant: str | None = None, frozen_at: str = "2026-10-01T00:00:00+00:00",
+               **documents: int) -> dict:
+    """An eval report's record of the frozen set it was scored on
+    (``run_eval.eval_set_record``)."""
+    return {"tenant_id": paths._tenant(tenant), "frozen_at": frozen_at,
+            "frozen_from_corpus": "v1", "documents_by_doc_type": documents}
+
+
+@pytest.mark.parametrize("case, why", [
+    ("refrozen", "different frozen sets"),
+    ("other_tenant", "tenant 'other-tenant'"),
+    ("no_shared_documents", "share no scored document"),
+    ("unrecorded_set", "does not record which frozen eval set"),
+])
+def test_reports_that_cannot_be_paired_say_so_in_the_decision(client, controller, case, why):
+    """Pairing on source_id alone paired documents across two yardsticks: a set
+    frozen again with corrected golds reuses its ids, another tenant numbers its
+    own, and the report path names neither. Each falls back to a point
+    comparison, and the decision says the improvement rule was not enforced and
+    why - before, only a log line did, or nothing."""
+    from registry_utils.query_registry import get
+    from registry_utils.write_run_manifest import mark_promoted
+
+    seed_corpus(client)
+    run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
+    mark_promoted(get("extractor-v1", client), client, promoted_by="test")
+    scores = {f"doc_{i:02d}": 0.9 for i in range(20)}
+    promoted = {"gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(),
+                "per_document": {"field_normalized_match": scores, "list_field_recall": scores}}
+    if case == "refrozen":
+        promoted["eval_set"] = _scored_on(frozen_at="2026-09-01T00:00:00+00:00")
+    elif case == "other_tenant":
+        promoted["eval_set"] = _scored_on(tenant="other-tenant")
+    elif case == "no_shared_documents":
+        other = {f"other_{i:02d}": 0.9 for i in range(20)}
+        promoted["per_document"] = {"field_normalized_match": other, "list_field_recall": other}
+    else:
+        del promoted["eval_set"]
+    client.write_json(paths.eval_report("v1"), promoted)
+    client.write_json(paths.eval_report("v1.1"), {
+        "gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(),
+        "per_document": {"field_normalized_match": scores, "list_field_recall": scores},
+    })
+
+    ctx = make_context(client, controller, out_version="v1.1", release_id="release-2026.9.2",
+                       metrics_provider=None)
+    assert run_stages(ctx, stages_for("all"), command="all").ok
+    decision = client.read_json(paths.gate_decision("v1.1"))
+    assert decision["paired_documents"] == {}
+    assert {v["basis"] for v in decision["verdicts"] if v["current"] is not None} == {"point_estimate"}
+    assert any("not paired" in w and why in w for w in decision["warnings"]), decision["warnings"]
+    assert any("improvement rule was not enforced" in w for w in decision["warnings"])
+
+
+def test_an_old_report_without_weights_still_pairs(client, controller):
+    """A report written before per-document weights were kept pairs each
+    document at weight one, as the bootstrap did before."""
+    from orchestration.pipeline_dag import paired_document_scores
+    from registry_utils.query_registry import get
+    from registry_utils.write_run_manifest import mark_promoted
+
+    seed_corpus(client)
+    run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
+    mark_promoted(get("extractor-v1", client), client, promoted_by="test")
+    scores = {"doc_01": 0.5, "doc_02": 1.0}
+    client.write_json(paths.eval_report("v1"), {
+        "gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(),
+        "per_document": {"list_field_recall": scores},
+    })
+    client.write_json(paths.eval_report("v1.1"), {
+        "gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(),
+        "per_document": {"list_field_recall": scores},
+        "per_document_weights": {"list_field_recall": {"doc_01": 1.0, "doc_02": 4.0}},
+    })
+    warnings: list[str] = []
+    paired = paired_document_scores(make_context(client, controller, out_version="v1.1"), warnings)
+    assert paired == {"list_field_recall": ([0.5, 1.0], [0.5, 1.0], [1.0, 1.0], [1.0, 4.0])}
+    assert warnings == []
+
+
+def test_the_interim_cap_follows_what_the_scope_was_scored_on(client, controller):
+    """small_set_accepted describes the whole set. A GL-only scope scored on 9 GL
+    policies of a set frozen with 160 policies reached production; a policy
+    scope scored on 200 policies was capped because the set held 9 Loss Runs."""
+    from evaluation.freeze_eval_set import MIN_FROZEN_DOCS_PER_TYPE
+    from orchestration.pipeline_dag import scope_eval_set_size
+
+    gl = _scoped_ctx(client, controller, "casualty_fleet")
+    large_set = {"small_set_accepted": False, "documents_by_doc_type": {"policy": 160},
+                 "documents_by_line": {"general_liability": 9, "homeowners": 151}}
+    assert scope_eval_set_size(gl, large_set) == (
+        {"policy": 9}, "frozen_manifest.documents_by_line")
+    # The candidate's own report, when it records them, is what it was scored on.
+    client.write_json(paths.eval_report("v1", scope="casualty_fleet"),
+                      {"eval_set": _scored_on(policy=9)})
+    assert scope_eval_set_size(gl, large_set) == ({"policy": 9}, "eval_report")
+    # Another tenant's report at the same path says nothing about this one.
+    client.write_json(paths.eval_report("v1", scope="casualty_fleet"),
+                      {"eval_set": _scored_on(tenant="other-tenant", policy=400)})
+    assert scope_eval_set_size(gl, large_set)[1] == "frozen_manifest.documents_by_line"
+    assert scope_eval_set_size(gl, {}) == ({}, "unknown")
+    assert MIN_FROZEN_DOCS_PER_TYPE == 150
+
+    from evaluation.freeze_eval_set import manifest_key
+
+    seed_corpus(client)
+    client.write_json(manifest_key(), {
+        "small_set_accepted": True, "documents_by_doc_type": {"policy": 200, "lossrun": 9},
+        "frozen_from_corpus": "corpus/v1",
+    })
+    client.write_json(paths.eval_report("v1", scope="policy"), {"eval_set": _scored_on(policy=200)})
+    policy = _scoped_ctx(client, controller, "policy", metrics_provider=lambda _c: dict(PASSING_METRICS))
+    assert run_stages(policy, stages_for("all"), command="all").ok
+    decision = client.read_json(paths.gate_decision("v1", scope="policy"))
+    assert decision["tier"] == "production"
+    assert decision["eval_set"]["scope_documents_by_doc_type"] == {"policy": 200}
+    assert decision["eval_set"]["scope_documents_counted_from"] == "eval_report"
+    assert decision["eval_set"]["small_for_scope"] is False
+
+    unified = _scoped_ctx(client, controller, "unified")
+    assert run_stages(unified, stages_for("all"), command="all").ok
+    decision = client.read_json(paths.gate_decision("v1"))
+    assert decision["tier"] == "interim"
+    assert decision["eval_set"]["scope_documents_by_doc_type"] == {
+        "acord": 0, "policy": 200, "lossrun": 9}
+
+
+def _cli_context(client, controller, argv: list[str], **over):
+    args = cli.build_parser().parse_args(argv)
+    return cli.build_context(
+        args, client=client, controller=controller, raw_client=ingestion_client(client),
+        skip_ingest=True, dry_run=True, min_labels_per_type=1, **over,
+    )
+
+
+_REASON = "list recall fell on the relabelled GL schedules only; TICKET-31 re-labels them"
+
+
+def test_a_written_override_can_be_given_on_the_command_line(client, controller):
+    """ctx.gate_override had no flag, so the gate's one exception - a named,
+    written override - could not be given at all. The flags build that same
+    record, validated as the gate validates it, and it is recorded as a waiver."""
+    from evaluation.gating import GateOverrideRecord
+
+    seed_corpus(client)
+    regressed = {**PASSING_METRICS, "list_field_recall": 0.60}
+    ctx = _cli_context(client, controller, [
+        "all", "--input", "./intake", "--out-version", "v1", "--release-id", "release-2026.9.1",
+        "--override-approver", "A. Reviewer", "--override-reason", _REASON,
+        "--override-gate", "list_field_recall",
+    ], baseline_metrics=dict(PASSING_METRICS), metrics_provider=lambda _c: dict(regressed))
+    assert isinstance(ctx.gate_override, GateOverrideRecord)
+    assert ctx.gate_override.waived_gates == ["list_field_recall"]
+
+    report = cli.run_command("all", ctx)
+    assert report.ok, report.render()
+    decision = client.read_json(paths.gate_decision("v1"))
+    assert decision["waived_gates"] == ["list_field_recall"]
+    assert decision["override"]["approver"] == "A. Reviewer"
+    bundle = client.read_json(paths.release_bundle("release-2026.9.1"))
+    assert bundle["override"]["approver"] == "A. Reviewer"
+
+
+@pytest.mark.parametrize("flags, match", [
+    (["--override-gate", "list_field_recall"], "name the person"),
+    (["--override-approver", "A. Reviewer", "--override-gate", "improvement"], "written reason"),
+    (["--override-approver", "ci", "--override-reason", _REASON, "--override-gate", "improvement"],
+     "name the person"),
+    (["--override-approver", "A. Reviewer", "--override-reason", _REASON], "name the gates"),
+    (["--override-approver", "A. Reviewer", "--override-reason", "too busy",
+      "--override-gate", "improvement"], "written reason"),
+])
+def test_an_override_flag_alone_is_no_way_round_the_gate(client, controller, flags, match):
+    """All three or none: a named person, a reason of 20 characters or more and
+    the gates waived. Refused before any work, never a bare bypass."""
+    base = ["all", "--out-version", "v1", "--release-id", "release-2026.9.1"]
+    with pytest.raises(cli.GateOverrideError, match=match):
+        _cli_context(client, controller, base + flags)
+
+
+def test_one_override_cannot_cover_several_scopes(client, controller):
+    with pytest.raises(cli.GateOverrideError, match="one release"):
+        _cli_context(client, controller, [
+            "all", "--out-version", "v1", "--scope", "policy", "--scope", "lossrun",
+            "--release-id", "policy=release-2026.9.1", "--release-id", "lossrun=release-2026.9.2",
+            "--override-approver", "A. Reviewer", "--override-reason", _REASON,
+            "--override-gate", "improvement",
+        ])
+
+
+def test_fixes_defect_is_checked_and_given_per_scope(client, controller):
+    """`--fixes-defect " "` lifted the improvement rule, and one value under
+    `all --scope policy --scope lossrun` lifted it for both releases."""
+    from common.scopes import get_scope
+
+    policy, lossrun = get_scope("policy"), get_scope("lossrun")
+    for blank in (" ", "-", "n/a"):
+        with pytest.raises(cli.FixesDefectError, match="names no defect"):
+            cli.fixes_defect_for([blank], policy, [policy])
+    assert cli.fixes_defect_for(["TICKET-12"], policy, [policy]) == "TICKET-12"
+    assert cli.fixes_defect_for([], policy, [policy]) is None
+    # A defect's own sentence may hold "=": only a scope's name makes a pair.
+    assert cli.fixes_defect_for(["FID-9: rate=0 on endorsements"], policy, [policy]).startswith("FID-9")
+
+    both = [policy, lossrun]
+    with pytest.raises(cli.FixesDefectError, match="which release"):
+        cli.fixes_defect_for(["TICKET-12"], policy, both)
+    with pytest.raises(cli.FixesDefectError, match="does not include"):
+        cli.fixes_defect_for(["unified=TICKET-12"], policy, both)
+
+    argv = ["all", "--out-version", "v1", "--scope", "policy", "--scope", "lossrun",
+            "--release-id", "policy=release-2026.9.1", "--release-id", "lossrun=release-2026.9.2",
+            "--fixes-defect", "policy=TICKET-12"]
+    assert _cli_context(client, controller, argv, scope=policy).fixes_defect == "TICKET-12"
+    assert _cli_context(client, controller, argv, scope=lossrun).fixes_defect is None
 
 
 def test_a_model_drafted_label_nobody_reviewed_never_trains(client, controller):
