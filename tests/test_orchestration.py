@@ -2037,6 +2037,25 @@ def test_a_resumed_package_finds_the_calibrators_in_blob(client, controller):
     assert not any("no calibrator" in r for r in reasons)
 
 
+def test_a_policy_corpus_built_with_another_window_plan_neither_trains_nor_packages(client, controller):
+    """The prompt hash is computed at packaging, from the packaging code, so it
+    cannot tell that the adapter was trained on windows this code no longer plans."""
+    from orchestration.pipeline_dag import build_release_bundle, stage_training
+
+    seed_corpus(client)
+    ctx = make_context(client, controller, release_id="release-2026.11.1")
+    assert run_stages(ctx, stages_for("all"), command="all").ok
+    key = paths.corpus_manifest(ctx.corpus, ctx.tenant_id)
+    manifest = client.read_json(key)
+    assert "policy" in manifest["doc_types"]
+
+    client.write_json(key, {**manifest, "window_plan_version": "1"})
+    with pytest.raises(PipelineError, match="Rebuild the corpus and retrain"):
+        stage_training(ctx)
+    with pytest.raises(PipelineError, match="release release-2026.11.1 rests on a corpus built with window plan 1"):
+        build_release_bundle(ctx)
+
+
 def test_a_family_with_any_synthetic_member_stays_in_train():
     """A family moves as a unit. Made splittable by its one real member, it could
     carry its generated labels into val or test, where eval scores the generator."""

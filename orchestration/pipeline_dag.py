@@ -1096,6 +1096,24 @@ def _is_trained(ctx: StageContext) -> bool:
     return ctx.volume.exists(adapter_dir)
 
 
+def _assert_window_plan(corpus_manifest: dict[str, Any], what: str) -> None:
+    """Refuse a corpus holding policies whose windows this code no longer plans.
+
+    The prompt hash cannot catch it: it is computed when the release is
+    packaged, from the code doing the packaging, so an adapter trained on
+    another window plan carried this code's hash. Serving would then read the
+    adapter windows it was never shown (``policy_windows.assert_window_plan``).
+    """
+    from data_pipeline.dataset_builder.policy_windows import assert_window_plan
+
+    if "policy" not in (corpus_manifest.get("doc_types") or []):
+        return
+    try:
+        assert_window_plan(corpus_manifest, what=what)
+    except ValueError as exc:
+        raise PipelineError(str(exc)) from exc
+
+
 def stage_training(ctx: StageContext) -> StageResult:
     """ONE unified extractor run (arch v2.1 §4.1).
 
@@ -1111,6 +1129,7 @@ def stage_training(ctx: StageContext) -> StageResult:
     from training.train import count_examples, train
 
     corpus_manifest = ctx.client.read_json(paths.corpus_manifest(ctx.corpus, ctx.tenant_id))
+    _assert_window_plan(corpus_manifest, f"training run {ctx.out_version}")
     try:
         # A layout family part-way to the common model is two output shapes:
         # no scope trains on documents of both until the family has moved.
@@ -2309,6 +2328,7 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
     root = Path(__file__).resolve().parent.parent
     base = base_model_config()["model"]
     corpus_manifest = ctx.client.read_json(paths.corpus_manifest(ctx.corpus, ctx.tenant_id))
+    _assert_window_plan(corpus_manifest, f"release {ctx.release_id}")
 
     formats = ["bf16"] if ctx.skip_quantize else list(ctx.formats)
     serving_formats = {
