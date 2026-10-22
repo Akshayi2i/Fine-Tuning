@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,8 +49,9 @@ DENSE_WINDOW = (1, 0)   # > 25 rows/page -> single page, no overlap
 
 #: OCR markdown charged per page when sizing a window. Deliberately thin:
 #: this decides how many pages a call is given, and over-estimating the text
-#: leaves capacity unused while under-estimating is caught by ``cap_check``,
-#: which rejects the row rather than truncating it.
+#: leaves capacity unused. A page of denser text than this is charged what its
+#: own text costs (:func:`fit_windows_to_text`), so a window of policy-form
+#: wording is split rather than run past the sequence cap.
 OCR_TOKENS_PER_PAGE = 700
 
 #: Estimated output tokens per claim row. Used by the planner to shrink a window
@@ -411,11 +412,7 @@ def pages_per_extraction_call(
         TEMPLATE_OVERHEAD_TOKENS,
     )
 
-    task = str(Task.EXTRACT)
-    if sections:
-        from common.schema_sections import task_for
-
-        task = task_for(sections)
+    task = _call_task(sections)
     budget = sequence_for_task(task, doc_type)
     prompt = len(
         render_system_prompt(doc_type, "ocr_plus_image", acord_form, lob, sections)
@@ -428,5 +425,88 @@ def pages_per_extraction_call(
     )
     per_page = vision_for_task(task)["max_pixels"] // 1024 + ocr_tokens_per_page
     return max(1, int(room // per_page))
+
+
+def _call_task(sections: str | None) -> str:
+    """The task one extraction call is sized against: its group's own, or the
+    whole-schema ``extract`` call's."""
+    if sections:
+        from common.schema_sections import task_for
+
+        return task_for(sections)
+    return str(Task.EXTRACT)
+
+
+def window_page_room(
+    doc_type: str,
+    acord_form: str | None = None,
+    lob: str | list[str] | None = None,
+    sections: str | None = None,
+) -> int:
+    """The tokens one extraction call has for its pages, counted as the corpus
+    build's cap check counts a row (``cap_check.estimate_row``): the task's
+    sequence cap less its answer reservation, the template and the system prompt.
+
+    The answer is reserved whole, as serving reserves it, so a window that fits
+    here fits with any answer the reservation allows.
+    """
+    from common.config import sequence_for_task
+    from common.prompts import render_system_prompt
+    from data_pipeline.dataset_builder.cap_check import TEMPLATE_OVERHEAD_TOKENS, estimate_text_tokens
+
+    budget = sequence_for_task(_call_task(sections), doc_type)
+    prompt = estimate_text_tokens(
+        render_system_prompt(doc_type, "ocr_plus_image", acord_form, lob, sections)
+    )
+    return (int(budget["max_seq_len"]) - int(budget["max_output_tokens"])
+            - TEMPLATE_OVERHEAD_TOKENS - prompt)
+
+
+def page_tokens(text: str | None, page: int, total: int, sections: str | None = None) -> int:
+    """One page's cost in an extraction call, counted as the cap check counts it:
+    its image at the task's pixel budget, and its text block - the page marker
+    and the page's OCR text, as ``inference_core.input_builder`` writes it."""
+    from data_pipeline.dataset_builder.cap_check import estimate_text_tokens, estimate_visual_tokens
+    from inference_core.input_builder import EMPTY_PAGE_TEXT, PAGE_MARKER
+
+    block = (PAGE_MARKER.format(page=page, total=total) + "\n\n"
+             + (text if (text or "").strip() else EMPTY_PAGE_TEXT))
+    return estimate_visual_tokens(1, _call_task(sections)) + estimate_text_tokens(block)
+
+
+def fit_windows_to_text(
+    windows: list[list[int]], cost: Callable[[int], int], room: int,
+) -> list[list[int]]:
+    """``windows`` with each one whose pages cost more than ``room`` split into
+    the fewest consecutive windows that fit, as evenly as they allow.
+
+    A window's page count is sized for a typical page (:data:`OCR_TOKENS_PER_PAGE`).
+    Policy-form wording runs to twice that, and a declarations window over five
+    pages of it needed ~34,000 tokens against a 32,768 cap: the corpus build set
+    the whole document aside, and serving would have sent a prompt the engine
+    refuses. A window that fits is left exactly as planned, so a typical
+    document reads as it did. A page that cannot fit even alone keeps a window
+    of its own: the cap check names it, with the arithmetic.
+    """
+    out: list[list[int]] = []
+    for window in windows:
+        if sum(cost(page) for page in window) <= room:
+            out.append(window)
+            continue
+        # The fewest windows: filled in page order. Then as evenly as the same
+        # number allows, when every one of the even split fits too.
+        greedy: list[list[int]] = []
+        used = 0
+        for page in window:
+            if greedy and greedy[-1] and used + cost(page) <= room:
+                greedy[-1].append(page)
+                used += cost(page)
+            else:
+                greedy.append([page])
+                used = cost(page)
+        even = _split_evenly(window, -(-len(window) // len(greedy)))
+        fits = len(even) == len(greedy) and all(sum(cost(p) for p in w) <= room for w in even)
+        out.extend(even if fits else greedy)
+    return out
 
 

@@ -77,9 +77,24 @@ class PolicyWindowPlan:
     group: str
     window_index: int
     pages: tuple[int, ...]
-    #: The group reads its pages in one window. A value with no recorded page
-    #: can only be placed when there is one window to place it in.
+    #: The group reads its pages in one window.
     single: bool
+    #: The first window of a group its declarations pages lead (``decl``, and
+    #: ``dtd`` where the line carries it).
+    leads: bool = False
+
+    @property
+    def holds_unpaged(self) -> bool:
+        """Whether a value with no recorded page is taught here: in a group's only
+        window, or in the window its declarations pages lead.
+
+        A value the label rules could not place on a page - a scan's, mostly - is
+        a policy-level value: the declarations print it. Before every page was
+        read, the declarations group was one window and taught it there; read
+        over several windows, it was left out of all of them, and the window that
+        shows the declarations was taught to leave out what it shows.
+        """
+        return self.single or self.leads
 
     @property
     def task(self) -> str:
@@ -140,21 +155,58 @@ def pages_to_read(
     return pages, plan_pages(texts).declarations_page
 
 
+#: Bumped whenever the windows a policy is read with change for the same input,
+#: and pinned in the corpus manifest: an adapter is served only the window plan
+#: its corpus was built with (``assert_window_plan``). "2": every page read, each
+#: window sized by its pages' own text (decisions 2026-10-19 and 2026-10-22).
+WINDOW_PLAN_VERSION = "2"
+
+
+def assert_window_plan(corpus_manifest: dict[str, Any], *, what: str = "this run") -> None:
+    """Refuse to serve a policy adapter windows its corpus never had.
+
+    A corpus with no pin predates the version: built when the declarations
+    group read only its leading pages, so its adapter was never shown a
+    declarations window over policy wording, and asked one it can invent the
+    policy-level values the merge keeps wherever the first window had none.
+    """
+    pinned = corpus_manifest.get("window_plan_version")
+    if pinned != WINDOW_PLAN_VERSION:
+        raise ValueError(
+            f"{what} rests on a corpus built with window plan {pinned or 'unversioned'}, "
+            f"and this code reads policies with plan {WINDOW_PLAN_VERSION}. Rebuild the corpus "
+            "and retrain: a model is served only the windows it trained on."
+        )
+
+
 def plan_windows(
     lob: str | list[str] | None,
     every_page: Sequence[int],
     declarations_page: int | None = None,
+    page_texts: Mapping[int, str | None] | Sequence[str | None] | None = None,
 ) -> list[PolicyWindowPlan]:
     """Every window a policy is read with, in group order then page order.
 
     ``every_page`` is the pages to read - every page (:func:`pages_to_read`).
+    ``page_texts`` is the OCR text the call will carry, by page number or in
+    page order; a window whose pages' text would run past the call's budget is
+    split (``expand_tasks.fit_windows_to_text``). None for ``image_only``, whose
+    pages carry no text: a window is then sized by its page count alone.
     """
     from common.schema_sections import groups_for, leading_pages, pages_for, run_overlap
     from data_pipeline.dataset_builder.expand_tasks import (
+        fit_windows_to_text,
+        page_tokens,
         pages_per_extraction_call,
         plan_policy_windows,
+        window_page_room,
     )
 
+    texts: dict[int, str | None] | None = None
+    if page_texts is not None:
+        texts = (dict(page_texts) if isinstance(page_texts, Mapping)
+                 else dict(enumerate(page_texts, start=1)))
+    total = max(every_page, default=0)
     plans: list[PolicyWindowPlan] = []
     for group in groups_for(lob):
         pages = pages_for(group, list(every_page))
@@ -162,13 +214,17 @@ def plan_windows(
         # A declarations group's first window is its leading pages and the page
         # the declarations were found on, read together; every other page
         # follows, packed by runs, as every other group's are.
+        lead = leading_pages(group, pages, declarations_page=declarations_page)
         windows = plan_policy_windows(
-            pages, pages_per_window=capacity,
-            leading=leading_pages(group, pages, declarations_page=declarations_page),
-            overlap=run_overlap(lob),
+            pages, pages_per_window=capacity, leading=lead, overlap=run_overlap(lob),
         )
+        if texts is not None:
+            costs = {page: page_tokens(texts.get(page), page, total, group) for page in pages}
+            windows = fit_windows_to_text(
+                windows, costs.__getitem__, window_page_room("policy", None, lob, group))
         plans.extend(
-            PolicyWindowPlan(group, index, tuple(window), single=len(windows) == 1)
+            PolicyWindowPlan(group, index, tuple(window), single=len(windows) == 1,
+                             leads=index == 0 and bool(lead))
             for index, window in enumerate(windows)
         )
     return plans
@@ -180,11 +236,13 @@ MIN_PLACEABLE_CHARS = 4
 
 
 def multi_window_sections(lob: str | list[str] | None, plans: Sequence[PolicyWindowPlan]) -> set[str]:
-    """The label sections read over several windows: the only ones where a
-    value with no recorded page cannot be placed."""
+    """The label sections read over several windows with none to take a value
+    that records no page (:attr:`PolicyWindowPlan.holds_unpaged`): the only ones
+    where such a value cannot be placed."""
     from common.schema_sections import sections_for
 
-    return {name for plan in plans if not plan.single for name in sections_for(plan.group, lob)}
+    homed = {plan.group for plan in plans if plan.holds_unpaged}
+    return {name for plan in plans if plan.group not in homed for name in sections_for(plan.group, lob)}
 
 
 def with_inferred_pages(
@@ -203,10 +261,11 @@ def with_inferred_pages(
     A copy when anything is placed; ``label`` itself otherwise.
 
     ``sections`` limits the search to those top-level sections
-    (:func:`multi_window_sections`). A group read in ONE window keeps a value
-    with no page as it is; given a page there, a declarations value whose only
-    exact match was a notice on page 7 was moved to page 7 and then dropped
-    from the declarations window it had always been taught in.
+    (:func:`multi_window_sections`). A group with a window that takes a value
+    with no page - its only one, or the one its declarations lead - keeps the
+    value as it is; given a page there, a declarations value whose only exact
+    match was a notice on page 7 was moved to page 7 and then dropped from the
+    declarations window it had always been taught in.
     """
     import copy
     import re
@@ -554,7 +613,7 @@ def _on_pages(
     """
     refs = {int(p) for p in node.get("page_ref") or []}
     if not refs:
-        if plan.single:
+        if plan.holds_unpaged:
             return node
         if report is not None and plan.window_index == 0:
             report.unplaced.append(f"{plan.group}:{path}")
@@ -628,7 +687,7 @@ def _entry_on_pages(
     value_refs = {int(p) for p in (value.get("page_ref") if isinstance(value, dict) else None) or []}
     refs = entry_refs | value_refs
     if not refs:
-        if plan.single:
+        if plan.holds_unpaged:
             return entry
         if report is not None and plan.window_index == 0:
             report.unplaced.append(f"{plan.group}:{path}")
@@ -760,13 +819,13 @@ def _cited_only_here(node: Any, pages: set[int], plan: PolicyWindowPlan) -> bool
     included, that this window teaches and no page outside it cites - a value
     that, left out here, no window would teach. Read on the label, not the
     fragment: the fragment's ``page_ref`` is already narrowed to these pages.
-    A value with no page is in the window only when the window is the whole
-    document (:func:`_on_pages`), and then it is cited nowhere else."""
+    A value with no page is in the window only when the window takes such
+    values (:func:`_on_pages`), and then it is cited nowhere else."""
     if is_field_value(node):
         if node.get("raw") is None and node.get("parsed") is None:
             return False
         refs = {int(p) for p in node.get("page_ref") or []}
-        return refs <= pages if refs else plan.single
+        return refs <= pages if refs else plan.holds_unpaged
     if isinstance(node, dict):
         return any(_cited_only_here(value, pages, plan) for value in node.values())
     if isinstance(node, list):

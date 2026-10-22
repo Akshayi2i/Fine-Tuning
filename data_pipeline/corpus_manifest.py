@@ -25,6 +25,7 @@ from common.constants import LOB_COVERAGE_TARGET, MODALITY_MIX, MODALITY_MODES
 from common.lob import compute_coverage
 from common.prompts import PROMPT_TEMPLATE_VERSION
 from common.schemas import schema_version
+from data_pipeline.dataset_builder.policy_windows import WINDOW_PLAN_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -248,6 +249,9 @@ def build_manifest(
         # underneath a corpus that claimed to be reproducible.
         "schema_versions": _schema_pins(doc_types),
         "prompt_template_version": PROMPT_TEMPLATE_VERSION,
+        # How a policy is cut into windows: an adapter is served only the plan
+        # its corpus was built with (policy_windows.assert_window_plan).
+        "window_plan_version": WINDOW_PLAN_VERSION,
         "builder_git_commit": git_commit,
         "seed": seed,
 

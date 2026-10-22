@@ -366,6 +366,15 @@ def _generate_once(
 WINDOW_FAILED_FLAG = "window_failed"
 
 
+#: The most windows sent to the model in one batch. A 200-page policy is some
+#: 190 windows and 800 page images, every one decoded before the engine starts
+#: on any: in one batch that is gigabytes of images held at once, and one prompt
+#: the engine refuses fails all of them. A batch of this many still fills the
+#: engine's continuous batching. Chosen, not measured: record a pod measurement
+#: here when one is taken.
+MAX_WINDOWS_PER_BATCH = 32
+
+
 def _extract_policy_windows(
     request: ExtractionRequest,
     model: LoadedModel,
@@ -380,10 +389,10 @@ def _extract_policy_windows(
     model-form document and its spans, in the shape the single-call path
     returns, so confidence, completeness and the envelope run on it unchanged.
 
-    **Concurrent.** Every window of a round goes to the model in one batch; vLLM
-    schedules them together, so a 17-window policy costs roughly the time of its
-    slowest window rather than the sum of all of them. ``latency_ms`` is the
-    wall time actually spent.
+    **Concurrent.** The windows of a round go to the model in batches of up to
+    :data:`MAX_WINDOWS_PER_BATCH`; vLLM schedules a batch together, so a
+    17-window policy costs roughly the time of its slowest window rather than
+    the sum of all of them. ``latency_ms`` is the wall time actually spent.
 
     **One bad window does not lose the document.** A window whose output is not
     parseable JSON, or was cut off at the token limit — the usual cause on a
@@ -404,11 +413,12 @@ def _extract_policy_windows(
     if not image_only:
         texts = dict(request.page_texts) or dict(enumerate(_all_page_texts(request), start=1))
 
-    # Every page, with the declarations found in the same text by the same
-    # rule as the training rows were.
+    # Every page, with the declarations found, and each window sized, from the
+    # same text by the same rule as the training rows were.
     every_page, declarations_page = pages_to_read(texts or None, page_count)
     pending: list[tuple[str, list[int]]] = [
-        (plan.group, list(plan.pages)) for plan in plan_windows(lob, every_page, declarations_page)
+        (plan.group, list(plan.pages))
+        for plan in plan_windows(lob, every_page, declarations_page, None if image_only else texts)
     ]
 
     windows: list[PolicyWindow] = []
@@ -418,25 +428,27 @@ def _extract_policy_windows(
     rounds = 0
     while pending:
         rounds += 1
-        requests = [
-            (*_build_request(
-                model, route_,
-                [_image_for(request, page) for page in pages],
-                None if image_only else [texts.get(page) or _EMPTY_PAGE for page in pages],
-                request.modality_mode,
-                page_numbers=pages, total_pages=page_count,
-                lob=lob, sections=group,
-            ), _window_answer_cap(group, route_.schema_doc_type))
-            for group, pages in pending
-        ]
-        started = time.perf_counter()
-        results = generate_batch(model, requests, adapter=route_.adapter)
-        round_ms = (time.perf_counter() - started) * 1000
-        wall_ms += round_ms
-        if latencies is not None:
-            # One entry per round: its windows run together, and vLLM gives each
-            # the round's wall time, so one per window would count it n times.
-            latencies.append(round(round_ms, 1))
+        results: list[Any] = []
+        for start in range(0, len(pending), MAX_WINDOWS_PER_BATCH):
+            requests = [
+                (*_build_request(
+                    model, route_,
+                    [_image_for(request, page) for page in pages],
+                    None if image_only else [texts.get(page) or _EMPTY_PAGE for page in pages],
+                    request.modality_mode,
+                    page_numbers=pages, total_pages=page_count,
+                    lob=lob, sections=group,
+                ), _window_answer_cap(group, route_.schema_doc_type))
+                for group, pages in pending[start:start + MAX_WINDOWS_PER_BATCH]
+            ]
+            started = time.perf_counter()
+            results += generate_batch(model, requests, adapter=route_.adapter)
+            batch_ms = (time.perf_counter() - started) * 1000
+            wall_ms += batch_ms
+            if latencies is not None:
+                # One entry per batch: its windows run together, and vLLM gives
+                # each the batch's wall time, so one per window would count it n times.
+                latencies.append(round(batch_ms, 1))
 
         retry: list[tuple[str, list[int]]] = []
         for (group, pages), result in zip(pending, results, strict=True):

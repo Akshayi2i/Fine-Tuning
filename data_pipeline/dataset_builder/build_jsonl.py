@@ -254,12 +254,14 @@ def _policy_window_rows(
 ) -> list[dict[str, Any]]:
     """One row per window, planned exactly as serving plans them.
 
-    Every page is read; the declarations page is found in the OCR text THIS row
-    carries - clean, corrupted or none - as serving finds it for the same input.
+    Every page is read; the declarations page is found, and each window sized,
+    from the OCR text THIS row carries - clean or none - as serving does for the
+    same input. A noisy row plans on the clean text: its corruption is drawn per
+    window, after the plan, and keeps each page's length.
     """
     page_count = len(document.image_paths)
     every_page, declarations_page = pages_to_read(ocr_pages, page_count)
-    plans = plan_windows(document.lob, every_page, declarations_page)
+    plans = plan_windows(document.lob, every_page, declarations_page, ocr_pages)
 
     report = TargetReport()
     # A value a rule added to a synthetic label is taught only if the document's
@@ -386,7 +388,8 @@ def _unprinted_values(label: dict[str, Any], paths: list[str]) -> list[tuple[str
 
 def _held_unprinted(plan: Any, lob: Any, unprinted: list[tuple[str, str, set[int]]]) -> list[str]:
     """The unprinted values this window's target would hold: its group's
-    sections, on its pages - or, citing no page, any single-window group."""
+    sections, on its pages - or, citing no page, the window that takes values
+    with no page (``PolicyWindowPlan.holds_unpaged``)."""
     from common.schema_sections import sections_for
 
     if not unprinted:
@@ -394,7 +397,7 @@ def _held_unprinted(plan: Any, lob: Any, unprinted: list[tuple[str, str, set[int
     sections = set(sections_for(plan.group, lob))
     window = set(plan.pages)
     return [path for path, section, pages in unprinted
-            if section in sections and (pages & window if pages else plan.single)]
+            if section in sections and (pages & window if pages else plan.holds_unpaged)]
 
 
 def classify_rows(
