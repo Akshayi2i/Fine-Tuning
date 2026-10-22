@@ -222,7 +222,7 @@ The same real-world field appears under many surface labels across documents. Th
 | Page reading | **Every page, chunk by chunk, never selected pages** (decision 2026-10-19). A policy is read as section group × page window over all its pages, planned by one function in training and serving; the declarations group's first window is pages 1–5 plus the detected declarations page, read together (§13.1). |
 | Gold and training data | **No frontier model, ever** (decision 2026-10-19): drafts come from the self-hosted Qwen3-VL only, and every gold needs a review record to train, be frozen or score — `reviewer_id` and `review_date` in its metadata, a twin's inherited from its seed (decision 2026-10-22; IMPL-04). |
 | Latency | Recorded per release (P95 per adapter, peak GPU memory), **not gated**: no latency SLA is agreed (decision 2026-10-19). |
-| Release tier | **production** at field match ≥ 0.92 (kept, decision 2026-10-19), **interim** below that or when the scope was scored on fewer than 150 frozen documents of a type it covers (IMPL-08). |
+| Release tier | **production** at field match ≥ 0.92 (kept, decision 2026-10-19), **interim** below that or when the scope was scored on fewer than 150 real frozen documents of a type it covers, twins not counted (IMPL-08). A baseline on another yardstick (frozen set, tenant or scoring code) is judged on floors alone. |
 
 ---
 
@@ -704,10 +704,10 @@ What the build does now that the sections above did not describe. Each module sp
   helper the preflight reads).
 - **The golden eval set is frozen once per tenant** at `golden-eval-set/{tenant}/` from that tenant's corpus
   test split (`python -m orchestration.run freeze-eval-set --corpus vN [--tenant T]`); refused twice, refused
-  below 150 test documents per type (arch §15.4) unless `--allow-small`, and a set left at the old unscoped
+  below 150 real test documents per type (arch §15.4; twins do not count) unless `--allow-small`, and a set left at the old unscoped
   root is refused with the move to make. A gold with no review record is refused before anything is copied;
   each frozen document carries its record, and the gate refuses a frozen gold without one
-  (`freeze-eval-set --mark-reviewed` copies records into a set frozen earlier). Later builds exclude its
+  (`freeze-eval-set --mark-reviewed` copies records into a set frozen earlier, only onto a gold unchanged since). Later builds exclude its
   documents and their families and split new documents into train/val only.
 - **Scopes** (`configs/scopes.yaml`): `unified`, `policy`, `lossrun`, and two line-scoped policy adapters.
   `personal_lines` covers homeowners, personal_auto (classic auto is read as personal auto), dwelling_fire,
@@ -722,12 +722,14 @@ What the build does now that the sections above did not describe. Each module sp
   and a real build with no val rows, or no test rows while the eval set is not yet frozen.
 - **Purge plans** report and never delete (`python -m data_pipeline.ingestion.pull_raw_pdfs --purge-plan
   SOURCE_ID`, `--tenant-purge-plan`): a document's raw, processed, label and frozen-eval-set prefixes, the
-  tenant's exports, the delivered copies in `intake/` and on the pod's volume, the corpus versions to rebuild,
-  and every run trained on it — with its weights, staged copy, eval report, calibrator and releases, "needs
+  tenant's exports, the delivered copies in `intake/` (found by every folder and batch it was imported from)
+  and on the pod's volume (training, golden-eval and harness caches, harness results, adapter cache), the
+  corpus versions to rebuild, and every run trained on it — with its weights (every quantized format), staged
+  copy, eval report, calibrator and releases, "needs
   retrain or delete" — since trained weights are not tenant-prefixed yet; a tenant's plan covers every prefix
   in `paths.TENANT_SCOPED`. Every prefix ends in `/`, so `policy_1` never reaches `policy_10`. A run that
-  continued from a checkpoint, or a per-type adapter on a listed Foundation, is listed too; a manifest that
-  cannot be read is listed "check by hand", naming the error type only.
+  continued from a checkpoint, or a per-type adapter on a listed Foundation, is listed too; a manifest or
+  storage call that cannot be read is listed "check by hand", naming the error type only.
 
 ### 13.3 Training, selection, merge, packaging
 - ms-swift 3 CLI; staged rows in ms-swift's own format on the pod volume; before launch the real tokenizer
@@ -787,7 +789,9 @@ What the build does now that the sections above did not describe. Each module sp
   (`MINERU_TOOLS_CONFIG_JSON=/workspace/mineru.json`, `MINERU_DEVICE_MODE=cuda`,
   `MINERU_MODEL_SOURCE=local`; a Blob login, either `AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`
   (with `AZURE_RAW_SAS_TOKEN` for the raw container) or `AZURE_STORAGE_CONNECTION_STRING`, an unquoted value
-  refused, `export` and indented lines included, half a SAS login listed as still to do), **two environments** on the volume (`/workspace/venv` for training and
+  refused as bash reads it — `export` and indented lines included, an unquoted trailing ` # comment`, an
+  escaped `\&`/`\;` and a trailing CR set aside — and half a SAS login listed as still to do, a blank or
+  CR-only value counting as empty), **two environments** on the volume (`/workspace/venv` for training and
   serving; `/workspace/venv-ocr` for MinerU, whose dependency set is kept apart from the training stack),
   MinerU's pinned pipeline weights (`scripts/download_mineru_models.sh`, which writes `mineru.json`; OCR
   refuses to run without it, and a MinerU 1.x config is refused), the pinned base model, the spike. OCR runs
@@ -893,3 +897,6 @@ What the build does now that the sections above did not describe. Each module sp
 - §13.2: on a policy the carrier hold-out counts real carriers only — a placeholder is no carrier, and a carrier a synthetic family trains is never held out; `freeze-eval-set --mark-reviewed`.
 - §13.4 and §13.5: the preflight's review-record check; serving's conventions on common-model lines.
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22; the current target (policy documents only) and a table of what v2.5 changed.
+- Purge plans find every import folder and batch, the pod-volume caches and every quantized format; a failed storage call is listed by error type. The bootstrap reads `.env` values as bash does (comment, escapes, CR).
+- `reviewer_id` names a person (any script), never a model or system; `--mark-reviewed` copies only onto an unchanged frozen gold; carrier keys read underscores as spaces.
+- The 150 minimum counts real documents only; a baseline on another yardstick is judged on floors alone.

@@ -126,6 +126,7 @@ CLI + functions:
 - [ ] A re-push of the same adapter or merged model writes nothing; a blob that records no MD5 is sent again; `upload_dir(names=...)` refuses a named file that is not there.
 - [ ] Each tenant pushes and pulls only its own golden eval set (`golden-eval-set/{tenant}/`).
 - [ ] With `AZURE_STORAGE_ACCOUNT_URL` and `AZURE_STORAGE_SAS_TOKEN` both set the client logs in with the SAS token; with one of them alone it refuses, naming the missing one; with neither it uses `AZURE_STORAGE_CONNECTION_STRING`. With `AZURE_RAW_SAS_TOKEN` set too, calls to the raw container use it and calls to the main container do not; it is refused without the URL and main token, or with no separate raw container, and no message holds a token.
+- [ ] A `BlobClient` built from the environment sends read, list and exists calls on `raw-documents/`, `intake/` and `exports/` keys to the raw container with the raw token, and every other key to the main container with the main token.
 
 ---
 
@@ -162,7 +163,8 @@ an empty prefix that would read as a published model.
   `push_adapter`, `push_corpus_version` and `push_golden_eval_set` upload everything.
 
 **Run manifest** records `tenant_id` and the manifest's `quantized_model` points at the first *quantized*
-format — bf16 is the merged model, never an export.
+format — bf16 is the merged model, never an export. `quantized_formats` lists every exported format, and the
+purge plans name each one's directory (IMPL-03).
 
 **Release bundle** (`registry_utils/models.py::ReleaseBundle`) also records `tier` (`production` at field
 match ≥ 0.92, `interim` when it passed every floor below that, or when its scope was scored on fewer than
@@ -196,3 +198,5 @@ into the per-corpus cache atomically (unique `.part` names, renamed into place).
 - §2: the raw container's own SAS token (`AZURE_RAW_SAS_TOKEN`), routed per call; two new refusals. New acceptance item.
 - Release bundle tier: `interim` follows what the release's scope was scored on (fewer than 150 frozen documents of a type it covers), not the whole set's `--allow-small` (IMPL-08).
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
+- The release bundle records `window_plan_version`, the window plan of the corpus behind a policy release; serving refuses a mismatch (IMPL-11).
+- Acceptance: a `BlobClient` routes raw-layer calls to the raw login and the rest to the main one; the purge plans name every quantized format's directory.

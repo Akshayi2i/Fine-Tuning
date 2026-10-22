@@ -137,13 +137,16 @@ over every page (`pages_to_read`: every page, and the declarations page `serving
 finds in the same text the training rows were planned on), whatever the document's length. The routed
 single-call branch, the page threshold and `long_doc_types` are gone from `extract`. Each round's windows
 go to vLLM in **batches of at most 32** (`MAX_WINDOWS_PER_BATCH`, chosen, not measured; `generate_batch`), so a
-200-page policy's page images are not all decoded at once and one refused prompt cannot fail every window; each window's answer limit is its section task's reserved budget
+200-page policy's page images are not all decoded at once. vLLM fails every prompt of a batch when it refuses one, so a batch whose windows all failed with one error is read again window by window, and only the window that caused it fails. Each window's answer limit is its section task's reserved budget
 (`common.config.answer_cap(task_for(group))`), its page references are bounded to its own pages
 (`common.schemas.with_page_bounds`), and an answer cut at the token limit is refused even if it parses. A
 window that fails is **split in half and retried** in the next round (decoding is greedy, so an unchanged
 retry would write the same thing); one that still fails at a single page is dropped and flagged
 `window_failed:<group>:p<page>`. Only when no window succeeds is the request an error. `window_latencies_ms`
-holds one entry per round. This is how **200+ page policies** are served.
+holds one entry per batch (and per window read alone after a whole-batch failure). This is how **200+ page
+policies** are served. At cold start `assert_window_plan_served` refuses a release serving policies whose
+`window_plan_version` is not this code's `window_plan_id()` — one that records none was packaged before every
+page was read.
 
 **The window merge** (`serving/policy_merge.py::merge_policy_windows`):
 - *Self-contained lines* (the frozen non-SPEC_21 schemas): windows merged in group order then page order, so
@@ -273,3 +276,5 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - Windows split by their pages' own OCR text, by the rule the corpus build uses (`fit_windows_to_text`); `image_only` windows by page count alone.
 - A round's windows go to vLLM in batches of at most 32 (`MAX_WINDOWS_PER_BATCH`, chosen, not measured), one latency entry per batch.
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
+- A batch whose windows all failed with one error is read again window by window; latency is one entry per batch.
+- Cold start refuses a policy release whose recorded window plan is not this code's (`assert_window_plan_served`).

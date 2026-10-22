@@ -119,7 +119,7 @@ Writes `manifest.json` per corpus version — this is what training and eval rea
 - [ ] Every flat assistant JSON validates against its schema and contains `line_of_business`; every common-model window target validates against its slice of the model view.
 - [ ] A window target cites only the window's own pages; no window holding a value no page prints is built; no coverage row is taught on a multi-window window that shows none of its home pages.
 - [ ] Every page of a policy is in a window of every group planned for its line, whatever its length; the declarations group's (and `dtd`'s) first window is pages 1–5 plus the detected declarations page; the corpus holds no `page_select` rows.
-- [ ] A drawn split holds one carrier out of train and val per line only where the line's real documents name at least 10 carriers; a line with fewer holds none out and is recorded in `lines_below_carrier_minimum`. A delivered split stays as delivered. On a policy only real carriers count: a placeholder ("N/A", "Unknown", blank) is no carrier, a carrier any synthetic family trains is never held out, and a seed family's real carrier still counts toward the 10 (`GroupRecord.holds_real`); a delivered split asked for a hold-out counts and chooses the same way.
+- [ ] A drawn split holds one carrier out of train and val per line only where the line's real documents name at least 10 carriers; a line with fewer holds none out and is recorded in `lines_below_carrier_minimum`. A delivered split stays as delivered. On a policy only real carriers count: a placeholder ("N/A", "Unknown", "Unknown Insurance Company", blank) is no carrier ("Other Mutual" is one), a carrier any synthetic family trains is never held out, and a seed family's real carrier still counts toward the 10 (`GroupRecord.holds_real`); a delivered split asked for a hold-out counts and chooses the same way.
 - [ ] A gold with no review record (`reviewer_id`, `review_date`; decision 2026-10-22), or a twin whose seed has none, stops the corpus build.
 - [ ] On a common-model policy line the corpus build reads a stored gold exactly as the gate scores it — a form's edition moved out of its number (`load_golden_label`) — and on a self-contained line as stored.
 - [ ] No `lossrun_totals` example is built while the Loss Run schema declares no `totals`.
@@ -176,7 +176,14 @@ tokens. A window whose pages' **own** text would not fit that budget (policy-for
 reserved whole, as serving reserves it, and each page costs its image plus its marker and OCR text, counted as
 the cap check counts a row. A window that fits is left as planned. `image_only` rows carry no text and are sized
 by page count alone; a noisy row is planned on the clean text, since its corruption is drawn per window after
-the plan. The corpus manifest pins `window_plan_version` (`policy_windows.WINDOW_PLAN_VERSION`, now `"2"`).
+the plan. A run split with overlapping windows is refitted as one run, each window again opening on the
+last `run_overlap_pages` of the one before, so no page break goes unread (`_fit_overlapping`). The corpus
+manifest pins `window_plan_version` = `policy_windows.window_plan_id()`: the rule's version
+(`WINDOW_PLAN_VERSION`, now `"3"`) and a fingerprint of everything the planner sizes windows from — the
+section map, each policy task's sequence budget and visual tokens per page, the per-page estimates and the
+prompt hash — so a budget edit that moves windows changes the pin. It also pins `review_rule_version`
+(`corpus_manifest.REVIEW_RULE_VERSION`, now `"2"`: every gold reviewed). Training and packaging refuse a
+corpus whose pins differ from the code's (IMPL-13).
 
 **Window targets** (`window_target`): the group's sections, narrowed to values printed on the window's pages.
 
@@ -188,12 +195,14 @@ the plan. The corpus manifest pins `window_plan_version` (`policy_windows.WINDOW
 - `text_sections` is never in a target (`EXCLUDED_FROM_TARGETS`). Each `additional_fields` entry is placed by
   its own `page_ref` — on a common-model line, by its own pages and its value's — trimmed the same way, and
   kept in SPEC_21's shape (label, value, section_hint, page_ref).
-- A value with no `page_ref` is taught as it is in the window that takes such values
-  (`PolicyWindowPlan.holds_unpaged`): a group's only window, or the first window its declarations pages lead
-  (`decl`, and `dtd` where the line carries it), so a policy-level value the label rules could not place is
-  taught where the declarations print it. In any other group read over several windows
-  (`multi_window_sections`) it is given a page by `with_inferred_pages` when the clean OCR prints it (at least
-  4 characters, on word boundaries) on exactly one page, and is otherwise reported `unplaced`. Values printed only on pages no window of their group reads are reported `unread`;
+- A value with no `page_ref`, in a group read over several windows (`multi_window_sections`, the
+  declarations group included), is first given a page by `with_inferred_pages` when the clean OCR prints it
+  (at least 4 characters, on word boundaries) on exactly one page. One still without a page is taught in the
+  window that takes such values (`PolicyWindowPlan.holds_unpaged`): a group's only window, or the window its
+  declarations pages lead (`decl`, and `dtd` where the line carries it) — the one holding the declarations
+  page when those pages are split (`_home_window`). In a group the declarations do not lead it is reported
+  `unplaced`. A value no page prints (`unprinted_values`) with no page recorded is taught nowhere in a group
+  read over several windows; only a group's only window is left out for holding one. Values printed only on pages no window of their group reads are reported `unread`;
   with every page read, that is now only a value citing a page the document does not have.
 
 On a **common-model** line, additionally:
@@ -288,8 +297,9 @@ tokenizer re-measures every staged row before launch (IMPL-06).
 - **any family with a synthetic member stays in train** (the old rule — synthetic only if *every* member
   was — let a mixed family carry generated labels into test);
 - **carriers are compared normalised** (`common.normalize.normalize_carrier`: "The Travelers Indemnity
-  Company" = "TRAVELERS"; a bundle's own `carrier` first, else the label's), so a held-out carrier is not
-  still in train under another spelling;
+  Company" = "TRAVELERS"; an underscore separates words, so `dryden_mutual` is Dryden Mutual; a name word is
+  kept where dropping it would leave a placeholder, so "Other Mutual" stays a carrier; a bundle's own `carrier`
+  first, else the label's), so a held-out carrier is not still in train under another spelling;
 - **held-out carrier, one per line** (Fideon SPEC_09 amendment item 4; decision 2026-10-19): a line whose real
   documents name at least `MIN_CARRIERS_PER_LINE_FOR_HELD_OUT` (10) carriers holds one carrier out of train
   and val — every real family of it in that line goes to test (`held_out_carriers_by_line`,
@@ -302,7 +312,9 @@ tokenizer re-measures every staged row before launch (IMPL-06).
   doc type once 6 exist" and takes effect when a corpus is next split (a frozen eval set draws no new test
   documents);
 - **on a policy, real carriers only** (decision 2026-10-22): a placeholder carrier
-  (`split_groups.is_placeholder_carrier`: "N/A", "Unknown", "none", "TBD", "various", blank …) is no carrier — it
+  (`common.normalize.is_placeholder_carrier`, re-exported by `split_groups`: "N/A", "Unknown", "Unknown Insurance
+  Company", "Multiple Insurers", "Not Stated", "To be determined", "Undisclosed", "none", "TBD", "various", blank …,
+  read on the name's own words, never its key; "Other Mutual" and "Pending Mutual" are carriers) is no carrier — it
   never counts toward the 10 and is never held out; a carrier any synthetic family trains in the line is never
   the one held out (twins train wherever they sit, so its layouts are seen), though a family holding a real seed
   and its twins counts its real carrier (`GroupRecord.holds_real`, set by `pipeline_dag.group_records`, which
@@ -321,7 +333,8 @@ Example — 1,920 personal-lines policies: ≈1,523 train / 206 val / 191 test, 
 the building tenant's counts): the build drops the frozen documents **and every document in their
 families**, splits new documents into **train and val only** (train:val kept in proportion, no carrier held
 out), records the frozen set's held-out carriers on the split (`frozen_eval_set: true`), and warns when a
-carrier the frozen set held out — per doc type or per line — starts training.
+carrier the frozen set held out — per doc type or per line, by the split or by the delivery; a line may list
+several — starts training. Both sides are compared as `normalize_carrier` keys.
 
 **Guards**: render-only and zero-page documents are skipped with a reason; documents read by more than one
 MinerU version are refused (`assert_one_mineru_version`); a build with no train rows is refused before
@@ -422,3 +435,7 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 - Split, policies only: a placeholder carrier is no carrier; a carrier any synthetic family trains is never held out; a seed family's real carrier counts toward the 10 (`GroupRecord.holds_real`); a delivered split counts and chooses from real carriers.
 - Acceptance checklist: the review-record refusal, the corpus build reading golds as the gate does, real carriers only.
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
+- A split keeps its runs' shared pages; the declarations-led window is the one holding the declarations page; declarations values get a page from the text too; a value no page prints no longer drops the declarations window.
+- `window_plan_version` is `window_plan_id()` (version `"3"` plus a fingerprint of the planner's inputs); the manifest also pins `review_rule_version`.
+- `normalize_carrier` reads an underscore as a space and keeps a name word where dropping it would leave a placeholder; `is_placeholder_carrier` moved to `common.normalize` with more variants.
+- The frozen-carrier warning covers carriers the delivery held out, several per line, compared as keys.

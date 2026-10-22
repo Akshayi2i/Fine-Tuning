@@ -110,7 +110,7 @@ Integration config for an external labeling tool (Label Studio or Argilla) OR a 
 
 ### 5. `data_pipeline/labeling/export_golden_labels.py`
 - Writes verified labels to `golden-labels/{tenant_id}/{doc_type}/{source_id}/golden.json` and `label_metadata.json`.
-- **`label_metadata.json` records provenance, not just the label** (arch §7 step 5): `reviewer_id` (required by `export_golden_label`, and refused when blank or a placeholder), `review_date` (the time of export), `draft_backend` (which backend produced the draft — base model or fine-tuned; `unknown` when not given), `double_annotated`, `agreement_score`, `review_requirement` in force at time of labeling, `accepted_without_review`, `field_provenance`. This matters later for debugging — if a document type's accuracy regresses, you want to check whether the *labels* for that batch were lower quality rather than only suspecting the model.
+- **`label_metadata.json` records provenance, not just the label** (arch §7 step 5): `reviewer_id` (required by `export_golden_label`; a person in any script, refused when blank, a placeholder, or a model, system or generator name), `review_date` (the time of export), `draft_backend` (which backend produced the draft — base model or fine-tuned; `unknown` when not given), `double_annotated`, `agreement_score`, `review_requirement` in force at time of labeling, `accepted_without_review`, `field_provenance`. This matters later for debugging — if a document type's accuracy regresses, you want to check whether the *labels* for that batch were lower quality rather than only suspecting the model.
 - **`field_provenance` — the observed surface label per canonical field** (master §1.4). Golden JSON keys are always canonical; this records what the document actually said:
 
   ```json
@@ -135,7 +135,7 @@ Integration config for an external labeling tool (Label Studio or Argilla) OR a 
 - Idempotent; re-export overwrites only with a new `label_metadata` version.
 
 **Every gold needs a review record (decision 2026-10-22; decision 2026-10-19, arch §0e, §7c).** A gold trains, is frozen into the eval set or is scored only when its metadata records who reviewed it and when. `export_golden_labels.review_problem(label, metadata)` returns why a gold may not, or `None`; `has_review_record(metadata)` is the same test as a yes or no. It reads the metadata alone:
-- **`reviewer_id`** — a string, not blank and not a placeholder ("pending", "none", "N/A", "TBD", "unknown", "-", "null" …, case and punctuation aside);
+- **`reviewer_id`** — a string naming a person, in any script ("李明" and "Иван Петров" pass): not blank, not a placeholder ("pending", "none", "N/A", "TBD", "unknown", "-", "null" …, case and punctuation aside), and not made only of model, system or generator words with their versions ("claude", "gpt-4o", "Qwen3-VL-8B-Instruct", "system", "auto", "fideon_synth", "label_studio", "pre_annotate" …; `_names_a_machine`). A name such as "Claude Dupont" passes; a bare "Claude" or "AI" does not;
 - **`review_date`** — an ISO date or date-time, not in the future (a date with no zone is in the future only once it is ahead in every zone, UTC+14);
 - **a synthetic twin** is reviewed only when its seed was: its record is the seed's, inherited when the bundle is prepared, and `review_inherited_from` names that seed (IMPL-03). A twin naming no seed is not reviewed, whatever record it holds of its own.
 
@@ -164,7 +164,7 @@ Once a model version exists (arch §7 step 6, §13 step 11):
 
 ## Acceptance checklist
 - [ ] `pre_annotate` produces a draft with the self-hosted backend; `BACKENDS` is exactly `base_qwen3vl`, `own_finetuned`; `external_frontier` asked for by name is **refused** with the decision in the message, and stops a whole batch; no external pre-annotation setting remains in the code or `.env.example`.
-- [ ] `review_problem` refuses every gold without a real `reviewer_id` (blank and placeholders refused) and an ISO `review_date` not in the future, and a twin naming no seed it inherited its record from, whatever its notes or `draft_backend` say; `check_bundle`, `import_prepared`, the preflight, the corpus build, the freeze and the gate's golden eval all refuse it, and the harness does not score it; `export_golden_label` refuses a draft accepted without review and a placeholder reviewer, writing nothing.
+- [ ] `review_problem` refuses every gold without a real `reviewer_id` (blank, placeholders and model, system or generator names refused; a person's name in any script passes) and an ISO `review_date` not in the future, and a twin naming no seed it inherited its record from, whatever its notes or `draft_backend` say; `check_bundle`, `import_prepared`, the preflight, the corpus build, the freeze and the gate's golden eval all refuse it, and the harness does not score it; `export_golden_label` refuses a draft accepted without review and a placeholder reviewer, writing nothing, and a relabel keeps what the delivery recorded (`DELIVERY_KEYS`: import folders, carrier, split, held-out mark …).
 - [ ] `review_requirement` returns `"full"` below 25 labels/type and `"confidence_routed"` at/above it.
 - [ ] `export_golden_labels` rejects a label missing `line_of_business`, one with an out-of-enum LoB value, and one failing schema validation.
 - [ ] An ACORD label without `acord_form` is rejected.
@@ -221,7 +221,7 @@ Once a model version exists (arch §7 step 6, §13 step 11):
   page. The agreed convention (applied at bundling, below) is that a value
   appears **once**, in its proper field, citing **every page that prints it** — and a form number cites every
   page whose header or footer prints it, so a window over a form's fourth page is taught the form it shows. A
-  value with no `page_ref` is taught in its group's only window, or in the window the declarations lead; in
+  value with no `page_ref` is first given a page from the text where it is printed on exactly one; one still without a page is taught in its group's only window, or in the window holding the declarations page; in
   any other multi-window group it is reported as *unplaced*, and a value on pages no window reads as *unread* — both logged per document at corpus build. A window whose target would hold a value no
   page prints (`unprinted_values`) is left out of training whole (`build_jsonl._held_unprinted`).
 - **Line of business** for a policy comes from `label_metadata.json` (`lob`), not from the label; it
@@ -239,7 +239,8 @@ Once a model version exists (arch §7 step 6, §13 step 11):
   `render_mode`, `unprinted_values`, `synthetic`, `split` (the delivery's, when it has one), `reviewer_id`,
   `review_date`, `draft_backend` and `review_inherited_from` (from the bundle's metadata; what `review_problem`
   reads), `labeled_at`,
-  `imported_from`, `awaiting_ocr: true` and `held_out_carrier` (the bundler's unseen-carrier mark, which the
+  `imported_from`, `imported_from_history` (every folder and pulled batch, this import last; what the purge
+  plan looks up), `awaiting_ocr: true` and `held_out_carrier` (the bundler's unseen-carrier mark, which the
   corpus build and the freeze read; IMPL-03). `import_prepared` records the same four review keys.
 
 **Labels corrected at bundling** (`data_pipeline/ingestion/prepare_bundles.py::corrected_gold`, for SPEC_21
@@ -355,3 +356,7 @@ row per value. Page text is normalised once per page.
 - What the importer records: `review_inherited_from` beside the review record.
 - Constraints and acceptance checklist: the review-record rule and the form-edition rule's lines.
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
+- A value with no `page_ref` is first placed by the text, then taught in the window holding the declarations page.
+- Label metadata records `imported_from_history` beside `imported_from`.
+- `reviewer_id` must name a person, in any script; a model, system or generator name is refused.
+- A relabel (`export_golden_label`) keeps the delivery's keys (`DELIVERY_KEYS`), so a re-reviewed gold keeps its split, held-out mark and import folders.

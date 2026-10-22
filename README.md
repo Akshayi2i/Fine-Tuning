@@ -40,8 +40,10 @@ python -m orchestration.run finetune --input ./intake --corpus-version v1 --out-
 # 2  quantize -> calibrate -> GATE -> push real weights + release bundle to Azure Blob
 python -m orchestration.run package --version v2 --release-id release-2026.11.1 --formats bf16 --scope policy
 #    a release that improves no primary metric needs --fixes-defect "<ticket>" (scope=TICKET when several
-#    scopes run; a blank or placeholder value is refused). A scope scored on fewer than 150 frozen documents
-#    of a type it covers is capped at interim. A failed gate ships only with a written override:
+#    scopes run; a blank or placeholder value is refused). A scope scored on fewer than 150 real frozen
+#    documents of a type it covers (twins do not count) is capped at interim. A promoted release scored on
+#    another frozen set, tenant or scoring code is no baseline: the candidate is judged on floors alone.
+#    A failed gate ships only with a written override, naming real gates:
 #    --override-approver "<person>" --override-reason "<why, 20+ chars>" --override-gate <gate> (one scope)
 
 # 3  extraction through the serving pipeline, on documents already imported and OCR'd
@@ -219,11 +221,12 @@ A set frozen before sets were per tenant sits at `golden-eval-set/` itself and
 is refused until its files are moved under `golden-eval-set/{tenant}/` for the
 tenant it was frozen from (its `manifest.json` names it).
 
-It refuses fewer than 150 test documents per type (arch §15.4) unless `--allow-small`. It copies that corpus's test split (labels, metadata, page images, OCR) into the
+It refuses fewer than 150 real test documents per type (arch §15.4; synthetic twins do not count) unless `--allow-small`. It copies that corpus's test split (labels, metadata, page images, OCR) into the
 frozen set and records `manifest.json`. From then on every corpus build leaves the
 frozen documents and their families out, and splits new documents into train
 and val only. Freezing again is refused; replacing the set is a deliberate delete
-followed by a new freeze, after which older scores are not comparable.
+followed by a new freeze, after which older scores are not comparable: the next candidate is gated on the
+floors alone.
 
 ## Check the data before training
 
@@ -258,20 +261,23 @@ duplicated. Every merged label must pass the schema. After OCR, the audit checks
 
 **Every gold needs a review record.** Frontier models are never used for gold, synthetic or training data
 (decision 2026-10-19), and a gold trains, is frozen into the eval set or is scored only when its
-`metadata.json` names who reviewed it and when: `reviewer_id` (a person, not "pending" or "N/A") and
+`metadata.json` names who reviewed it and when: `reviewer_id` (a person, in any script; not "pending", "N/A"
+or a model, system or generator such as "claude", "system" or "fideon_synth") and
 `review_date` (an ISO date, not in the future) (decision 2026-10-22). Nothing is guessed from the gold's
 notes. A synthetic twin carries its seed's record (`review_inherited_from`, written by `prepare_bundles`), so a
 twin of an unreviewed seed is unreviewed too. Real documents delivered without a manifest take theirs from
-`<input>/reviews.csv` (`document,reviewer_id,review_date,draft_backend`). The audit, the import, the preflight,
+`<input>/reviews.csv` (`document,reviewer_id,review_date,draft_backend`; Excel's "CSV UTF-8" is fine). The audit, the import, the preflight,
 the corpus build, the freeze, the gate and the harness all refuse a gold without one. A set frozen before the
-freeze carried records is fixed with `freeze-eval-set --tenant T --mark-reviewed`.
+freeze carried records is fixed with `freeze-eval-set --tenant T --mark-reviewed`, which copies a record only
+onto a frozen gold unchanged since the freeze; one that changed means freezing the set again. It can be
+given with `--mark-held-out`, and both run.
 
 **The delivered split is used as given.** The generator put each source document and its ten synthetic twins
 in one of Train/Val/Test, so a test layout is one the model never trained on. The corpus build takes that
 split when every document carries one (`split_groups.assign_delivered_splits`): one family per source, a source
 in two splits refused, synthetic twins allowed in val and test only then. A split the build draws itself holds
 one carrier out of train and val per line of business, only in a line naming 10 or more carriers. On policies, a
-placeholder carrier ("N/A", "Unknown") is no carrier, and a carrier seen through a synthetic family is never the one held out. The gate report adds a
+placeholder carrier ("N/A", "Unknown", "Unknown Insurance Company", "Not Stated") is no carrier ("Other Mutual" is one), and a carrier seen through a synthetic family is never the one held out. The gate report adds a
 **`real_only`** section, the same metrics over the real documents alone, and the composition of the set.
 
 It reports blockers (one PDF + `golden.json` + `metadata.json` per folder, PDF readable, `lob` valid and in
@@ -397,7 +403,7 @@ test suite is not evidence about extraction quality.
   evaluation material. The model does the semantic mapping.
 - **The promotion gate has no bypass flag.** The one way past it is a written
   override (`--override-approver`, `--override-reason`, `--override-gate`, all three
-  together), recorded as a waiver in the gate decision and the release bundle.
+  together, naming real gates), recorded as a waiver in the gate decision and the release bundle.
 - **Every page is read, chunk by chunk, never selected pages** - in training and
   in serving, by one window planner (decision 2026-10-19). A window whose pages'
   own text would not fit its call is split into windows that do (decision
