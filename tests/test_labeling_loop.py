@@ -321,6 +321,28 @@ def test_a_placeholder_reviewer_names_nobody(reviewer):
     assert "reviewer_id" in missing and "review_date" not in missing
 
 
+@pytest.mark.parametrize("reviewer", ["李明", "Иван Петров", "José Álvarez", "محمد علي", "a.reviewer",
+                                      "Claude Dupont", "Ai Tanaka", "annotator_1", "reviewer 2"])
+def test_a_person_s_name_in_any_script_is_a_reviewer(reviewer):
+    """Names were read on a-z and 0-9 alone: "李明" was "", a name of nobody."""
+    from data_pipeline.labeling.export_golden_labels import has_review_record
+
+    assert has_review_record({**REVIEWED, "reviewer_id": reviewer})
+
+
+@pytest.mark.parametrize("reviewer", ["claude", "Claude", "system", "auto", "fideon_synth", "gpt", "GPT-4o",
+                                      "chatgpt", "qwen", "Qwen3-VL-8B-Instruct", "base_qwen3vl", "label_studio",
+                                      "Label Studio", "pre_annotate", "pre-annotation", "auto reviewer", "AI",
+                                      "bot", "pipeline"])
+def test_a_model_system_or_generator_is_no_reviewer(reviewer):
+    """Only a person's name shows a person checked a gold (frontier models are
+    never used for data)."""
+    from data_pipeline.labeling.export_golden_labels import review_problem
+
+    missing = review_problem({}, {**REVIEWED, "reviewer_id": reviewer}).split(". A person")[0]
+    assert "names a model, system or generator, not a person" in missing and "review_date" not in missing
+
+
 @pytest.mark.parametrize("when", ["TBD", "pending", "20/10/2026", "2026-13-01", "", 20261020, "2099-01-01",
                                   "2099-01-01T00:00:00+00:00"])
 def test_a_review_date_must_be_an_iso_date_not_in_the_future(when):

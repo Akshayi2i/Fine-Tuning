@@ -25,9 +25,18 @@ from common.constants import LOB_COVERAGE_TARGET, MODALITY_MIX, MODALITY_MODES
 from common.lob import compute_coverage
 from common.prompts import PROMPT_TEMPLATE_VERSION
 from common.schemas import schema_version
-from data_pipeline.dataset_builder.policy_windows import WINDOW_PLAN_VERSION
+from data_pipeline.dataset_builder.policy_windows import window_plan_id
 
 log = logging.getLogger(__name__)
+
+#: The review rule every gold in a corpus passed (``export_golden_labels.review_problem``).
+#: "1": a gold a model drafted needed a review record (decision 2026-10-19).
+#: "2": every gold needs one - a person's reviewer_id and a review_date not in
+#: the future - and a twin carries its seed's (decision 2026-10-22). Training
+#: and packaging refuse a corpus built under an older rule
+#: (``orchestration.pipeline_dag._assert_corpus_pins``): its golds were never
+#: checked against this one.
+REVIEW_RULE_VERSION = "2"
 
 #: A surface label seen on fewer documents than this is under-represented. The
 #: model will be weak on it, and per-alias eval will have too little support to
@@ -251,7 +260,9 @@ def build_manifest(
         "prompt_template_version": PROMPT_TEMPLATE_VERSION,
         # How a policy is cut into windows: an adapter is served only the plan
         # its corpus was built with (policy_windows.assert_window_plan).
-        "window_plan_version": WINDOW_PLAN_VERSION,
+        "window_plan_version": window_plan_id(),
+        # Which review rule every gold passed (REVIEW_RULE_VERSION).
+        "review_rule_version": REVIEW_RULE_VERSION,
         "builder_git_commit": git_commit,
         "seed": seed,
 

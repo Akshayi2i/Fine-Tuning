@@ -494,11 +494,41 @@ def test_the_gate_reads_an_existing_eval_report_when_no_provider_is_given(client
     from artifact_registry import paths
 
     seed_corpus(client)
-    client.write_json(paths.eval_report("v1"), {"gate_metrics": dict(PASSING_METRICS)})
+    client.write_json(paths.eval_report("v1"), {"gate_metrics": dict(PASSING_METRICS),
+                                                "eval_set": _scored_on()})
 
     ctx = make_context(client, controller, metrics_provider=None)
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.ok, report.render()
+
+
+@pytest.mark.parametrize("eval_set, why", [
+    ("other_tenant", "tenant 'acme''s frozen set"),
+    ("unrecorded", "does not record which tenant"),
+])
+def test_an_eval_report_not_recorded_for_this_tenant_is_scored_again(client, controller, eval_set, why):
+    """The report path names no tenant. A report at this version's key scored on
+    another tenant's set - or saying nothing of whose - was reused as this
+    candidate's metrics, and reached production on another tenant's documents."""
+    from orchestration.pipeline_dag import eval_report_metrics
+
+    report = {"gate_metrics": {**PASSING_METRICS, "field_normalized_match": 0.97}}
+    if eval_set == "other_tenant":
+        report["eval_set"] = _scored_on(tenant="acme", policy=160)
+    client.write_json(paths.eval_report("v1"), report)
+
+    with pytest.raises(PipelineError, match=f"not reused.*{why}.*metrics nobody measured"):
+        eval_report_metrics(make_context(client, controller, metrics_provider=None))
+
+    class Loaded(Exception):
+        pass
+
+    def loader(_ctx, _fmt):
+        raise Loaded
+    # Off a dry run it is scored again, as when there is no report at all.
+    with pytest.raises(Loaded):
+        eval_report_metrics(make_context(client, controller, metrics_provider=None, dry_run=False,
+                                         serving_model_loader=loader))
 
 
 def test_the_baseline_comes_from_the_promoted_version_s_own_report(client, controller):
@@ -575,45 +605,96 @@ def test_an_eval_set_accepted_small_caps_the_release_at_interim(client, controll
 
 
 def _scored_on(tenant: str | None = None, frozen_at: str = "2026-10-01T00:00:00+00:00",
-               **documents: int) -> dict:
-    """An eval report's record of the frozen set it was scored on
-    (``run_eval.eval_set_record``)."""
+               fingerprint: str | None = None, **documents: int) -> dict:
+    """An eval report's record of the yardstick it was scored on
+    (``run_eval.eval_set_record``): the frozen set, the scoring code - the
+    running code's, unless ``fingerprint`` says otherwise - and the documents
+    per type, all of them real."""
+    from evaluation.run_eval import scoring_fingerprint
+
     return {"tenant_id": paths._tenant(tenant), "frozen_at": frozen_at,
-            "frozen_from_corpus": "v1", "documents_by_doc_type": documents}
+            "frozen_from_corpus": "v1", "scoring_fingerprint": fingerprint or scoring_fingerprint(),
+            "documents_by_doc_type": documents, "real_documents_by_doc_type": documents}
 
 
-@pytest.mark.parametrize("case, why", [
-    ("refrozen", "different frozen sets"),
-    ("other_tenant", "tenant 'other-tenant'"),
-    ("no_shared_documents", "share no scored document"),
-    ("unrecorded_set", "does not record which frozen eval set"),
-])
-def test_reports_that_cannot_be_paired_say_so_in_the_decision(client, controller, case, why):
-    """Pairing on source_id alone paired documents across two yardsticks: a set
-    frozen again with corrected golds reuses its ids, another tenant numbers its
-    own, and the report path names neither. Each falls back to a point
-    comparison, and the decision says the improvement rule was not enforced and
-    why - before, only a log line did, or nothing."""
+def _promoted_and_candidate(client, controller, promoted: dict, candidate: dict) -> None:
+    """extractor-v1 promoted with ``promoted`` as its eval report, and ``candidate``
+    as v1.1's."""
     from registry_utils.query_registry import get
     from registry_utils.write_run_manifest import mark_promoted
 
     seed_corpus(client)
     run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
     mark_promoted(get("extractor-v1", client), client, promoted_by="test")
+    client.write_json(paths.eval_report("v1"), promoted)
+    client.write_json(paths.eval_report("v1.1"), candidate)
+
+
+@pytest.mark.parametrize("case, why", [
+    ("refrozen", "the set was frozen again"),
+    ("other_tenant", "tenant 'other-tenant'"),
+    ("other_scoring_code", "different scoring code"),
+    ("unrecorded_set", "does not record which frozen eval set"),
+])
+def test_a_promoted_release_on_another_yardstick_is_not_compared(client, controller, case, why):
+    """Decision 2026-10-22. The set frozen again with corrected golds, another
+    tenant's set, or the same golds read under other label rules: the promoted
+    release's numbers say nothing about this candidate's. Compared as a point
+    estimate, its 0.99 on the old yardstick blocked a 0.93 on the new one as a
+    regression. The candidate is judged on its floors alone, with no
+    non-inferiority and no improvement rule, and the decision says why."""
     scores = {f"doc_{i:02d}": 0.9 for i in range(20)}
-    promoted = {"gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(),
-                "per_document": {"field_normalized_match": scores, "list_field_recall": scores}}
+    per_document = {"field_normalized_match": scores, "list_field_recall": scores}
+    promoted = {"gate_metrics": {**PASSING_METRICS, "field_normalized_match": 0.99},
+                "eval_set": _scored_on(), "per_document": per_document}
     if case == "refrozen":
         promoted["eval_set"] = _scored_on(frozen_at="2026-09-01T00:00:00+00:00")
     elif case == "other_tenant":
         promoted["eval_set"] = _scored_on(tenant="other-tenant")
-    elif case == "no_shared_documents":
+    elif case == "other_scoring_code":
+        promoted["eval_set"] = _scored_on(fingerprint="0123456789abcdef")
+    else:
+        del promoted["eval_set"]
+    _promoted_and_candidate(client, controller, promoted, {
+        "gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(), "per_document": per_document,
+    })
+
+    ctx = make_context(client, controller, out_version="v1.1", release_id="release-2026.9.2",
+                       metrics_provider=None)
+    report = run_stages(ctx, stages_for("all"), command="all")
+    assert report.ok, report.render()
+    decision = client.read_json(paths.gate_decision("v1.1"))
+    assert decision["failed_gates"] == [] and decision["paired_documents"] == {}
+    assert {v["basis"] for v in decision["verdicts"]} == {"floor_only"}
+    assert decision["baseline_metrics"] is None
+    assert decision["baseline_metrics_not_compared"]["field_normalized_match"] == 0.99
+    assert why in decision["baseline_not_comparable"]
+    assert any("were not compared" in w and why in w and "floors alone" in w
+               for w in decision["warnings"]), decision["warnings"]
+    # Not a first release, and no improvement rule to report as unenforced.
+    assert not any("improvement rule was not enforced" in w for w in decision["warnings"])
+    gate = next(r for r in report.results if r.name == "evaluation_gate")
+    assert "another yardstick" in gate.detail
+
+
+@pytest.mark.parametrize("case, why", [
+    ("no_shared_documents", "share no scored document"),
+    ("no_per_document_scores", "has no per-document scores"),
+])
+def test_reports_on_one_yardstick_that_cannot_be_paired_say_so_in_the_decision(
+        client, controller, case, why):
+    """Two reports of one yardstick whose per-document scores cannot be paired
+    fall back to a point comparison, and the decision says the improvement rule
+    was not enforced and why - before, only a log line did, or nothing."""
+    scores = {f"doc_{i:02d}": 0.9 for i in range(20)}
+    promoted = {"gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(),
+                "per_document": {"field_normalized_match": scores, "list_field_recall": scores}}
+    if case == "no_shared_documents":
         other = {f"other_{i:02d}": 0.9 for i in range(20)}
         promoted["per_document"] = {"field_normalized_match": other, "list_field_recall": other}
     else:
-        del promoted["eval_set"]
-    client.write_json(paths.eval_report("v1"), promoted)
-    client.write_json(paths.eval_report("v1.1"), {
+        del promoted["per_document"]
+    _promoted_and_candidate(client, controller, promoted, {
         "gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(),
         "per_document": {"field_normalized_match": scores, "list_field_recall": scores},
     })
@@ -622,36 +703,46 @@ def test_reports_that_cannot_be_paired_say_so_in_the_decision(client, controller
                        metrics_provider=None)
     assert run_stages(ctx, stages_for("all"), command="all").ok
     decision = client.read_json(paths.gate_decision("v1.1"))
-    assert decision["paired_documents"] == {}
+    assert decision["paired_documents"] == {} and decision["baseline_not_comparable"] is None
     assert {v["basis"] for v in decision["verdicts"] if v["current"] is not None} == {"point_estimate"}
     assert any("not paired" in w and why in w for w in decision["warnings"]), decision["warnings"]
     assert any("improvement rule was not enforced" in w for w in decision["warnings"])
 
 
-def test_an_old_report_without_weights_still_pairs(client, controller):
-    """A report written before per-document weights were kept pairs each
-    document at weight one, as the bootstrap did before."""
+def test_a_report_without_weights_pairs_unweighted_on_both_sides(client, controller):
+    """A weight missing on one side defaulted to one there only, so the bootstrap
+    compared the promoted report's plain mean with the candidate's weighted one:
+    identical per-document scores read as +0.15 and satisfied the improvement
+    rule. Either side without weights is unweighted on both, and said so."""
+    from evaluation.gating import promotion_gate
     from orchestration.pipeline_dag import paired_document_scores
-    from registry_utils.query_registry import get
-    from registry_utils.write_run_manifest import mark_promoted
 
-    seed_corpus(client)
-    run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
-    mark_promoted(get("extractor-v1", client), client, promoted_by="test")
-    scores = {"doc_01": 0.5, "doc_02": 1.0}
-    client.write_json(paths.eval_report("v1"), {
+    scores = {f"doc_{i:02d}": (0.5, 1.0)[i % 2] for i in range(20)}
+    weights = {f"doc_{i:02d}": (1.0, 4.0)[i % 2] for i in range(20)}
+    _promoted_and_candidate(client, controller, {
         "gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(),
         "per_document": {"list_field_recall": scores},
-    })
-    client.write_json(paths.eval_report("v1.1"), {
+    }, {
         "gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(),
         "per_document": {"list_field_recall": scores},
-        "per_document_weights": {"list_field_recall": {"doc_01": 1.0, "doc_02": 4.0}},
+        "per_document_weights": {"list_field_recall": weights},
     })
     warnings: list[str] = []
-    paired = paired_document_scores(make_context(client, controller, out_version="v1.1"), warnings)
-    assert paired == {"list_field_recall": ([0.5, 1.0], [0.5, 1.0], [1.0, 1.0], [1.0, 4.0])}
-    assert warnings == []
+    ctx = make_context(client, controller, out_version="v1.1")
+    paired = paired_document_scores(ctx, warnings)
+    same = [scores[d] for d in sorted(scores)]
+    assert paired == {"list_field_recall": (same, same)}
+    assert any("promoted report(s) hold no per-document weights" in w and "unweighted" in w
+               for w in warnings), warnings
+    result = promotion_gate(dict(PASSING_METRICS), dict(PASSING_METRICS), per_document=paired)
+    assert result.improved_metrics == [] and "improvement" in result.failed_gates
+
+    # Both sides weighted: each document counts as it counts in the report.
+    client.write_json(paths.eval_report("v1"), {
+        **client.read_json(paths.eval_report("v1")), "per_document_weights": {"list_field_recall": weights},
+    })
+    assert paired_document_scores(ctx, []) == {"list_field_recall": (
+        same, same, [weights[d] for d in sorted(weights)], [weights[d] for d in sorted(weights)])}
 
 
 def test_the_interim_cap_follows_what_the_scope_was_scored_on(client, controller):
@@ -663,9 +754,11 @@ def test_the_interim_cap_follows_what_the_scope_was_scored_on(client, controller
 
     gl = _scoped_ctx(client, controller, "casualty_fleet")
     large_set = {"small_set_accepted": False, "documents_by_doc_type": {"policy": 160},
-                 "documents_by_line": {"general_liability": 9, "homeowners": 151}}
+                 "documents_by_line": {"general_liability": 9, "homeowners": 151},
+                 "real_documents_by_doc_type": {"policy": 160},
+                 "real_policies_by_line": {"general_liability": 9, "homeowners": 151}}
     assert scope_eval_set_size(gl, large_set) == (
-        {"policy": 9}, "frozen_manifest.documents_by_line")
+        {"policy": 9}, "frozen_manifest.real_policies_by_line")
     # The candidate's own report, when it records them, is what it was scored on.
     client.write_json(paths.eval_report("v1", scope="casualty_fleet"),
                       {"eval_set": _scored_on(policy=9)})
@@ -673,7 +766,7 @@ def test_the_interim_cap_follows_what_the_scope_was_scored_on(client, controller
     # Another tenant's report at the same path says nothing about this one.
     client.write_json(paths.eval_report("v1", scope="casualty_fleet"),
                       {"eval_set": _scored_on(tenant="other-tenant", policy=400)})
-    assert scope_eval_set_size(gl, large_set)[1] == "frozen_manifest.documents_by_line"
+    assert scope_eval_set_size(gl, large_set)[1] == "frozen_manifest.real_policies_by_line"
     assert scope_eval_set_size(gl, {}) == ({}, "unknown")
     assert MIN_FROZEN_DOCS_PER_TYPE == 150
 
@@ -682,6 +775,7 @@ def test_the_interim_cap_follows_what_the_scope_was_scored_on(client, controller
     seed_corpus(client)
     client.write_json(manifest_key(), {
         "small_set_accepted": True, "documents_by_doc_type": {"policy": 200, "lossrun": 9},
+        "real_documents_by_doc_type": {"policy": 200, "lossrun": 9},
         "frozen_from_corpus": "corpus/v1",
     })
     client.write_json(paths.eval_report("v1", scope="policy"), {"eval_set": _scored_on(policy=200)})
@@ -699,6 +793,126 @@ def test_the_interim_cap_follows_what_the_scope_was_scored_on(client, controller
     assert decision["tier"] == "interim"
     assert decision["eval_set"]["scope_documents_by_doc_type"] == {
         "acord": 0, "policy": 200, "lossrun": 9}
+
+
+def test_synthetic_twins_do_not_count_toward_the_production_minimum(client, controller):
+    """Decision 2026-10-22: the 150 documents per type that decide production
+    count real documents only. A policy scope scored on 160 policies, 60 of them
+    twins, was scored on 100 real ones: interim. A manifest frozen before it
+    counted real documents cannot say, so its count is unknown: interim, and
+    the decision says why."""
+    from types import SimpleNamespace
+
+    from evaluation.freeze_eval_set import manifest_key
+    from evaluation.run_eval import eval_set_record
+    from orchestration.pipeline_dag import scope_eval_set_size
+
+    scored = ([SimpleNamespace(doc_type="policy", synthetic=False)] * 100
+              + [SimpleNamespace(doc_type="policy", synthetic=True)] * 60)
+    record = eval_set_record(client, None, scored)
+    assert record["documents_by_doc_type"] == {"policy": 160}
+    assert record["real_documents_by_doc_type"] == {"policy": 100}
+
+    seed_corpus(client)
+    client.write_json(paths.eval_report("v1", scope="policy"), {"eval_set": record})
+    production = {**PASSING_METRICS, "field_normalized_match": 0.97}
+    policy = _scoped_ctx(client, controller, "policy", metrics_provider=lambda _c: dict(production))
+    assert run_stages(policy, stages_for("all"), command="all").ok
+    decision = client.read_json(paths.gate_decision("v1", scope="policy"))
+    assert decision["eval_set"]["scope_documents_by_doc_type"] == {"policy": 100}
+    assert decision["tier"] == "interim"
+
+    # The report records no real counts, and the manifest predates them.
+    old_manifest = {"frozen_at": "2026-10-01T00:00:00+00:00", "frozen_from_corpus": "v1",
+                    "documents_by_doc_type": {"policy": 400}}
+    client.write_json(manifest_key(), old_manifest)
+    client.write_json(paths.eval_report("v1", scope="policy"),
+                      {"eval_set": {**record, "real_documents_by_doc_type": None}})
+    warnings: list[str] = []
+    assert scope_eval_set_size(policy, old_manifest, warnings) == ({}, "unknown")
+    assert any("no real_documents_by_doc_type" in w and "interim" in w for w in warnings), warnings
+
+
+def test_the_baseline_is_this_tenant_s_promoted_release(client, controller):
+    """latest_promoted took the newest promoted run of the lineage whatever its
+    tenant, so one tenant's candidate was gated against another's release."""
+    from datetime import timedelta
+
+    from registry_utils.query_registry import get, latest_promoted
+    from registry_utils.write_run_manifest import mark_promoted, write_manifest
+
+    seed_corpus(client)
+    run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
+    own = mark_promoted(get("extractor-v1", client), client, promoted_by="test")
+    other = own.model_copy(update={"run_id": "extractor-v2", "tenant_id": "acme",
+                                   "created_at": own.created_at + timedelta(days=1)})
+    write_manifest(other, client)
+
+    assert latest_promoted(client, "unified", scope="unified") == "extractor-v2"
+    assert latest_promoted(client, "unified", scope="unified", tenant="acme") == "extractor-v2"
+    assert latest_promoted(client, "unified", scope="unified",
+                           tenant=paths._tenant(None)) == "extractor-v1"
+    from orchestration.pipeline_dag import _promoted_eval_report_key
+
+    client.write_json(paths.eval_report("v1"), {"gate_metrics": dict(PASSING_METRICS)})
+    client.write_json(paths.eval_report("v2"), {"gate_metrics": dict(PASSING_METRICS)})
+    probe = make_context(client, controller, out_version="v3")
+    assert _promoted_eval_report_key(probe) == paths.eval_report("v1")
+
+
+def test_paired_documents_records_only_what_was_bootstrapped(client, controller):
+    """A metric paired on one document is compared as a point estimate, and the
+    decision recorded it as paired on 1."""
+    ctx = make_context(client, controller, baseline_metrics=dict(PASSING_METRICS), per_document={
+        "field_normalized_match": ([0.9] * 20, [0.95] * 20),
+        "scanned_accuracy": ([0.8], [0.8]),
+    })
+    seed_corpus(client)
+    assert run_stages(ctx, stages_for("all"), command="all").ok
+    decision = client.read_json(paths.gate_decision("v1"))
+    assert decision["paired_documents"] == {"field_normalized_match": 20}
+    basis = {v["name"]: v["basis"] for v in decision["verdicts"]}
+    assert basis["scanned_accuracy"] == "point_estimate"
+
+
+def test_an_unreviewed_frozen_gold_is_refused_before_the_model_loads_and_once(client, controller):
+    """The gate loaded the merged bf16 model, then learned from the frozen set
+    that a gold had no review record - and the stage was retried, loading the
+    model a second time to learn it again."""
+    from evaluation.freeze_eval_set import manifest_key
+    from orchestration.pipeline_dag import Stage, stage_evaluation_gate
+
+    root = paths.golden_eval_set_dir()
+    client.write_json(manifest_key(), {"frozen_at": "2026-10-01T00:00:00+00:00",
+                                       "frozen_from_corpus": "v1", "source_ids": ["policy_0001"]})
+    client.write_json(f"{root}/policy_0001/metadata.json", {"doc_type": "policy", "lob": "homeowners"})
+    client.write_json(f"{root}/policy_0001/golden.json", {})
+    client.write_bytes(f"{root}/policy_0001/page_1.png", b"png")
+    loads: list[str] = []
+    attempts: list[int] = []
+
+    def gate(stage_ctx):
+        attempts.append(1)
+        return stage_evaluation_gate(stage_ctx)
+
+    ctx = make_context(client, controller, metrics_provider=None, dry_run=False, max_attempts=2,
+                       retry_backoff_seconds=0, serving_model_loader=lambda _c, fmt: loads.append(fmt))
+    report = run_stages(ctx, [Stage(10, "evaluation_gate", "finetune", True, gate)], command="finetune")
+    assert report.failed_at == "evaluation_gate"
+    assert "no review record" in report.results[-1].detail
+    assert loads == [], "refused before the model was loaded"
+    assert attempts == [1], "an unreviewed gold is not retried"
+
+
+def test_the_gate_s_own_refusals_are_not_retried():
+    from evaluation.freeze_eval_set import FreezeError
+    from evaluation.gating import GateError
+    from evaluation.golden_eval import GoldenEvalError
+    from evaluation.run_eval import EvalSetLeakage
+    from orchestration.pipeline_dag import _deterministic_errors
+
+    for error in (GoldenEvalError, EvalSetLeakage, FreezeError, GateError):
+        assert issubclass(error, _deterministic_errors())
 
 
 def _cli_context(client, controller, argv: list[str], **over):
@@ -752,6 +966,66 @@ def test_an_override_flag_alone_is_no_way_round_the_gate(client, controller, fla
     base = ["all", "--out-version", "v1", "--release-id", "release-2026.9.1"]
     with pytest.raises(cli.GateOverrideError, match=match):
         _cli_context(client, controller, base + flags)
+
+
+def test_an_override_names_real_gates_and_says_when_it_waived_nothing(client, controller):
+    """A misspelt gate was accepted, waived nothing, and left the release
+    blocked; a waiver of a gate that passed showed only in the log."""
+    base = ["all", "--input", "./intake", "--out-version", "v1", "--release-id", "release-2026.9.1",
+            "--override-approver", "A. Reviewer", "--override-reason", _REASON]
+    with pytest.raises(cli.GateOverrideError, match=r"\['list_recall'\], which is not a gate"):
+        _cli_context(client, controller, base + ["--override-gate", "list_recall"])
+    for gate in ("improvement", "cross_type_regression_evidence", "cross_type:lossrun", "table_f1"):
+        assert _cli_context(client, controller, base + ["--override-gate", gate]).gate_override
+
+    seed_corpus(client)
+    ctx = _cli_context(client, controller, base + ["--override-gate", "list_field_recall"],
+                       metrics_provider=lambda _c: dict(PASSING_METRICS))
+    assert cli.run_command("all", ctx).ok
+    decision = client.read_json(paths.gate_decision("v1"))
+    assert decision["waived_gates"] == []
+    assert any("['list_field_recall'], which did not fail" in w for w in decision["warnings"])
+
+
+def test_flags_are_refused_before_the_command_detaches_on_the_pod(monkeypatch, capsys):
+    """On the pod, main() detached before build_context checked --fixes-defect and
+    --override-*: the operator's command exited 0 and the refusal surfaced only
+    inside tmux. Off the pod it was a traceback."""
+    import orchestration.detach as detach
+
+    started: list[object] = []
+    monkeypatch.setattr(detach, "should_detach", lambda: True)
+    monkeypatch.setattr(detach, "detach", lambda command, hint: started.append(command) or "all-test")
+    base = ["all", "--input", "./intake", "--out-version", "v9", "--release-id", "release-2026.10.1"]
+    for flags, said in ((["--fixes-defect", " "], "names no defect"),
+                        (["--override-gate", "list_field_recall"], "name the person"),
+                        (["--override-approver", "A. Reviewer", "--override-reason", _REASON,
+                          "--override-gate", "list_recall"], "not a gate")):
+        with pytest.raises(SystemExit) as exited:
+            cli.main(base + flags)
+        assert exited.value.code == 2 and said in capsys.readouterr().err
+    assert started == [], "nothing was detached"
+
+    for flags in (["--mark-held-out", "--corpus", "v1"], ["--mark-reviewed", "--allow-small"], []):
+        with pytest.raises(SystemExit):
+            cli.main(["freeze-eval-set", "--tenant", "t", *flags])
+    assert started == []
+
+
+def test_mark_held_out_and_mark_reviewed_both_run(monkeypatch, capsys):
+    """Given together, --mark-reviewed was skipped without a word."""
+    import evaluation.freeze_eval_set as freeze
+    import orchestration.detach as detach
+
+    ran: list[str] = []
+    monkeypatch.setattr(detach, "should_detach", lambda: False)
+    monkeypatch.setattr(cli, "BlobClient", lambda: None)
+    monkeypatch.setattr(freeze, "mark_held_out", lambda _c, tenant_id: ran.append("held_out") or ["p1"])
+    monkeypatch.setattr(freeze, "mark_reviewed", lambda _c, tenant_id: ran.append("reviewed") or {})
+    assert cli.main(["freeze-eval-set", "--tenant", "t", "--mark-held-out", "--mark-reviewed"]) == 0
+    assert ran == ["held_out", "reviewed"]
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == {"held_out_source_ids": ["p1"], "still_without_review_record": {}}
 
 
 def test_one_override_cannot_cover_several_scopes(client, controller):
@@ -1930,9 +2204,11 @@ def test_the_gate_reads_its_own_scopes_eval_report(client, controller):
     seed_corpus(client)
     ctx = _scoped_ctx(client, controller, "policy")
 
-    client.write_json(paths.eval_report("v1"), {"gate_metrics": {"field_exact_match": 0.10}})
+    client.write_json(paths.eval_report("v1"), {"gate_metrics": {"field_exact_match": 0.10},
+                                                "eval_set": _scored_on()})
     client.write_json(
-        paths.eval_report("v1", scope="policy"), {"gate_metrics": {"field_exact_match": 0.99}}
+        paths.eval_report("v1", scope="policy"), {"gate_metrics": {"field_exact_match": 0.99},
+                                                  "eval_set": _scored_on()}
     )
 
     assert eval_report_metrics(ctx)["field_exact_match"] == 0.99
@@ -2053,6 +2329,30 @@ def test_a_policy_corpus_built_with_another_window_plan_neither_trains_nor_packa
     with pytest.raises(PipelineError, match="Rebuild the corpus and retrain"):
         stage_training(ctx)
     with pytest.raises(PipelineError, match="release release-2026.11.1 rests on a corpus built with window plan 1"):
+        build_release_bundle(ctx)
+
+
+def test_a_corpus_built_before_the_review_rule_neither_trains_nor_packages(client, controller):
+    """Reused with --corpus-version, a corpus skips the dataset build and its
+    check of every gold's review record, so one built before the rule would
+    train its unreviewed golds."""
+    from data_pipeline.corpus_manifest import REVIEW_RULE_VERSION
+    from data_pipeline.dataset_builder.policy_windows import window_plan_id
+    from orchestration.pipeline_dag import build_release_bundle, stage_training
+
+    seed_corpus(client)
+    ctx = make_context(client, controller, release_id="release-2026.11.1")
+    assert run_stages(ctx, stages_for("all"), command="all").ok
+    bundle, _reasons = build_release_bundle(ctx)
+    assert bundle.window_plan_version == window_plan_id()             # serving checks it
+    key = paths.corpus_manifest(ctx.corpus, ctx.tenant_id)
+    manifest = client.read_json(key)
+    assert manifest["review_rule_version"] == REVIEW_RULE_VERSION
+
+    client.write_json(key, {k: v for k, v in manifest.items() if k != "review_rule_version"})
+    with pytest.raises(PipelineError, match="review rule unrecorded"):
+        stage_training(ctx)
+    with pytest.raises(PipelineError, match="review rule unrecorded"):
         build_release_bundle(ctx)
 
 

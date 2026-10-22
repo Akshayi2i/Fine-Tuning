@@ -23,10 +23,11 @@ from data_pipeline.dataset_builder.expand_tasks import (
     window_page_room,
 )
 from data_pipeline.dataset_builder.policy_windows import (
-    WINDOW_PLAN_VERSION,
+    _home_window,
     assert_window_plan,
     pages_to_read,
     plan_windows,
+    window_plan_id,
 )
 from data_pipeline.dataset_builder.split_groups import GroupRecord, assign_group_splits
 from inference_core.model_runner import EchoBackend, load_model
@@ -200,7 +201,177 @@ def test_a_value_with_no_page_is_taught_in_the_window_the_declarations_lead():
 
 
 def test_a_corpus_built_with_another_window_plan_is_refused():
-    assert_window_plan({"window_plan_version": WINDOW_PLAN_VERSION})
-    for manifest in ({}, {"window_plan_version": "1"}):
+    assert_window_plan({"window_plan_version": window_plan_id()})
+    for manifest in ({}, {"window_plan_version": "1"}, {"window_plan_version": "3"}):
         with pytest.raises(ValueError, match="Rebuild the corpus and retrain"):
             assert_window_plan(manifest)
+
+
+def test_the_window_plan_follows_the_budgets_the_planner_reads(monkeypatch):
+    """Raising the declarations answer from 4,096 to 6,144 tokens turned four
+    declarations windows into seven with the version and prompt hash unchanged."""
+    import common.config as config
+    from common.schema_sections import task_for
+
+    before = window_plan_id()
+    real = config.sequence_for_task
+
+    def larger_answer(task, doc_type=None):
+        budget = dict(real(task, doc_type))
+        if task == task_for("decl"):
+            budget["max_output_tokens"] = int(budget["max_output_tokens"]) + 2048
+        return budget
+
+    monkeypatch.setattr(config, "sequence_for_task", larger_answer)
+    assert window_plan_id() != before
+
+
+def test_serving_refuses_a_policy_release_cut_with_another_window_plan():
+    from types import SimpleNamespace
+
+    from serving.vllm_entrypoint import ColdStartError, assert_window_plan_served
+
+    def plan(*releases):
+        return SimpleNamespace(served=list(releases))
+
+    def release(doc_types, version):
+        return SimpleNamespace(release_id="release-1", doc_types=doc_types, window_plan_version=version)
+
+    assert_window_plan_served(plan(release(["policy"], window_plan_id())))
+    assert_window_plan_served(plan(release(["acord"], None)))          # serves no policy
+    for stale in (release(["policy"], "2"), release([], None)):        # [] is every type
+        with pytest.raises(ColdStartError, match="window plan"):
+            assert_window_plan_served(plan(stale))
+
+
+# --------------------------------------------------------------------------
+# A split keeps the rules a planned window keeps
+# --------------------------------------------------------------------------
+
+
+DECL_PAGE = 9
+
+
+def _notices_first(total=20):
+    """Dense notices and a policy jacket first, the declarations on page 9."""
+    return [("Policy Declarations. Named Insured: Rivera Fabrication LLC. Carrier Granite Mutual"
+             if p == DECL_PAGE else _wording(5500, p)) for p in range(1, total + 1)]
+
+
+def _taught(rows, key):
+    """The window pages of the declarations rows whose target holds policy.``key``."""
+    return [r["window_pages"] for r in rows if r["sections"] == "decl"
+            and key in (json.loads(r["messages"][-1]["content"]).get("policy") or {})]
+
+
+def test_the_declarations_led_window_is_the_one_holding_the_declarations_page():
+    assert _home_window([[1, 2, 3], [4, 5, 9], [6, 7, 8]], [1, 2, 3, 4, 5, 9], 9) == 1
+    assert _home_window([[1, 2, 3], [4, 5]], [1, 2, 3, 4, 5], 4) == 1
+    assert _home_window([[1, 2, 3], [4, 5]], [1, 2, 3, 4, 5], None) == 0
+    assert _home_window([[1, 2], [3, 4]], [], None) is None
+
+    texts = _notices_first()
+    pages, declarations = pages_to_read(texts, len(texts))
+    assert declarations == DECL_PAGE
+    decl = [plan for plan in plan_windows(LOB, pages, declarations, texts) if plan.group == "decl"]
+    assert DECL_PAGE not in decl[0].pages                               # the lead was split
+    (home,) = [plan for plan in decl if plan.leads]
+    assert DECL_PAGE in home.pages and all(plan.homed for plan in decl)
+
+
+def test_a_value_with_no_page_is_taught_where_the_declarations_page_is_read():
+    """Pages [1, 2, 3] were taught a policy number the declarations print on
+    page 9, and the window showing page 9 was taught to leave it out."""
+    texts = _notices_first()
+    label = {
+        "carrier": {"company_name": _fv("Granite Mutual", [DECL_PAGE])},
+        "named_insured": {"primary_name": _fv("Rivera Fabrication LLC", [DECL_PAGE])},
+        "policy": {"policy_number": _fv("WC-99999", [])},              # in no page's text
+        "locations": [{"location_number": _fv("1", [12]), "address": {"city": _fv("Toledo", [12])}}],
+    }
+    rows, details = expand_document(_document("p1", texts, label), "train", modes=("ocr_plus_image",))
+    taught = _taught(rows, "policy_number")
+    assert len(taught) == 1 and DECL_PAGE in taught[0]
+    assert not [d for d in details if "unplaced" in d]
+
+
+def test_a_declarations_value_printed_only_on_a_later_page_is_taught_there():
+    texts = ["Standard conditions and definitions."] * 15
+    texts[0] = "Common Policy Declarations. Named Insured Rivera Fabrication LLC"
+    texts[11] = "Endorsement. This endorsement changes Policy Number WC-77881."
+    label = {
+        "carrier": {"company_name": _fv("Granite Mutual", [1])},
+        "named_insured": {"primary_name": _fv("Rivera Fabrication LLC", [1])},
+        "policy": {"policy_number": _fv("WC-77881", [])},
+        "locations": [{"location_number": _fv("1", [7]), "address": {"city": _fv("Toledo", [7])}}],
+    }
+    rows, _ = expand_document(_document("p1", texts, label), "train", modes=("ocr_plus_image",))
+    taught = _taught(rows, "policy_number")
+    assert taught and all(12 in pages for pages in taught)
+
+
+def test_a_value_no_page_prints_does_not_cost_the_declarations_window():
+    texts = (["Common Policy Declarations. Named Insured Rivera Fabrication LLC"]
+             + ["Standard conditions and definitions."] * 14)
+    label = {**LABEL, "policy": {"policy_number": _fv("WC-1", [1]), "policy_term_months": _fv("12", [])}}
+    document = _document("p1", texts, label)
+    document.unprinted_values = ["policy.policy_term_months"]
+    rows, details = expand_document(document, "train", modes=("ocr_plus_image",))
+    decl = [r for r in rows if r["sections"] == "decl"]
+    assert decl and decl[0]["window_pages"][0] == 1
+    assert not _taught(rows, "policy_term_months")
+    assert not [d for d in details if "left out" in d]
+
+
+def test_a_dense_run_keeps_the_pages_its_windows_share():
+    """Fitted window by window, a dense personal-auto schedule became twelve
+    calls where seven were planned, five page breaks read by no window."""
+    cost = dict.fromkeys(range(1, 8), 10).__getitem__
+    assert fit_windows_to_text([[1, 2, 3], [3, 4, 5], [5, 6, 7]], cost, 25, overlap=1) == [
+        [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 7]]
+
+    texts = ["Personal Auto Declarations. Named Insured: Rivera."] + [_wording(5500, p) for p in range(2, 15)]
+    pages, declarations = pages_to_read(texts, len(texts))
+    arrays = [list(plan.pages) for plan in plan_windows("personal_auto", pages, declarations, texts)
+              if plan.group == "arrays"]
+    assert {p for w in arrays for p in w} == set(pages)
+    assert not [w for w in arrays if any(set(w) < set(other) for other in arrays)]
+    spanned = {(a, a + 1) for w in arrays for a in w if a + 1 in w}
+    assert {(a, a + 1) for a in range(min(pages), max(pages))} <= spanned
+
+
+def test_one_refused_prompt_fails_only_its_own_window(client):
+    """vLLM fails every prompt of a batch when it refuses one: innocent windows
+    were split into shapes never trained, or dropped and flagged."""
+    texts = (["Common Policy Declarations. Named Insured Rivera Fabrication LLC"]
+             + ["Standard conditions and definitions."] * 11)
+
+    class RefusesPageSeven(EchoBackend):
+        def generate_batch(self, messages_list, configs, adapter=None):
+            if any("<page 7 of" in json.dumps(m) for m in messages_list):
+                return [RuntimeError("the decoder prompt is longer than the model length")] * len(messages_list)
+            return super().generate_batch(messages_list, configs, adapter=adapter)
+
+    response = {
+        "carrier": {"company_name": {"raw": "Granite Mutual", "parsed": "Granite Mutual", "page_ref": [1]}},
+        "named_insured": {"primary_name": {"raw": "Rivera", "parsed": "Rivera", "page_ref": [1]}},
+        "policy": {"policy_number": {"raw": "WC-1", "parsed": "WC-1", "page_ref": [1]}},
+    }
+    backend = RefusesPageSeven(json.dumps(response))
+    result = extract(
+        ExtractionRequest(
+            source_id="policy_0001",
+            image_paths=[f"processed/default/policy/policy_0001/page_{p}.png" for p in range(1, 13)],
+            page_texts={p: t for p, t in enumerate(texts, start=1)},
+            known_doc_type="policy", known_lob=LOB,
+        ),
+        load_model("base", client, backend_impl=backend), StaticClassifier("policy"),
+        CalibrationParams(method="temperature", doc_type="policy", model_version="v1", temperature=1.0),
+    )
+    failed = [flag for flag in result.review_flags if flag.startswith("window_failed")]
+    assert failed and all(flag.endswith(":p7") for flag in failed)
+    planned = [list(plan.pages) for plan in plan_windows(LOB, *pages_to_read(texts, 12), texts)]
+    read = [[int(n) for n in re.findall(r"<page (\d+) of \d+>", json.dumps(call["messages"]))]
+            for call in backend.calls]
+    innocent = [w for w in planned if 7 not in w]
+    assert all(w in read for w in innocent)                            # read whole, never split

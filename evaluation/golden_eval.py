@@ -260,6 +260,60 @@ def evaluate(
     return triples
 
 
+def assert_scoreable(
+    client: BlobClient, doc_types: Sequence[str] | None = None, *, tenant_id: str | None = None,
+) -> None:
+    """Refuse, before any model is loaded, a frozen set the gate cannot score: a
+    freeze that was interrupted, or a frozen gold of ``doc_types`` with no review
+    record (decision 2026-10-22, checked as :func:`load_golden_set` checks it).
+
+    Reads each frozen document's metadata and nothing else. Without it the gate
+    loaded the merged bf16 model, then learned from load_golden_set that a gold
+    had no record - and, retried, loaded the model again to learn it twice.
+    """
+    from data_pipeline.labeling.export_golden_labels import review_problem
+    from evaluation.run_eval import eval_set_keys
+
+    _refuse_interrupted_freeze(client, tenant_id)
+    prefix = paths.golden_eval_set_dir(tenant_id)
+    keys = set(eval_set_keys(client, tenant_id))
+    unreviewed: list[tuple[str, str]] = []
+    for key in sorted(keys):
+        rest = key[len(prefix):].strip("/")
+        source_id, _sep, name = rest.partition("/")
+        if name != "golden.json":
+            continue
+        base = f"{prefix}/{source_id}"
+        metadata = (
+            client.read_json(f"{base}/metadata.json") if f"{base}/metadata.json" in keys else {}
+        )
+        if doc_types and metadata.get("doc_type") not in doc_types:
+            continue
+        if problem := review_problem(None, metadata):
+            unreviewed.append((source_id, problem))
+    if unreviewed:
+        raise GoldenEvalError(
+            f"{len(unreviewed)} frozen document(s) have no review record, so they cannot score "
+            f"(decision 2026-10-22): {unreviewed[0][0]}: {unreviewed[0][1]}. Others: "
+            f"{[s for s, _ in unreviewed[1:6]]}. Record each one's review in its label metadata and "
+            "copy it into the frozen set (evaluation.freeze_eval_set.mark_reviewed), or delete the "
+            "set and freeze again from a corpus of reviewed golds. Refused before any model was loaded."
+        )
+
+
+def _refuse_interrupted_freeze(client: BlobClient, tenant_id: str | None) -> None:
+    from evaluation.freeze_eval_set import is_frozen
+    from evaluation.run_eval import eval_set_keys
+
+    # is_frozen first, always: it is also what refuses a set still frozen at the
+    # root, which this tenant's empty prefix would otherwise let pass unnoticed.
+    if not is_frozen(client, tenant_id=tenant_id) and eval_set_keys(client, tenant_id):
+        raise GoldenEvalError(
+            "the golden eval set has documents but no manifest: a freeze was interrupted. Re-run "
+            "freeze-eval-set from the same corpus to finish it before gating on it."
+        )
+
+
 def evaluate_version(
     client: BlobClient,
     model: Any,
@@ -273,16 +327,9 @@ def evaluate_version(
 ) -> dict[str, Any]:
     """Evaluate on this tenant's frozen set, write the eval report where the gate
     reads it, return its dict."""
-    from evaluation.freeze_eval_set import is_frozen
-    from evaluation.run_eval import assert_eval_set_disjoint, build_report, eval_set_keys
+    from evaluation.run_eval import assert_eval_set_disjoint, build_report
 
-    # is_frozen first, always: it is also what refuses a set still frozen at the
-    # root, which this tenant's empty prefix would otherwise let pass unnoticed.
-    if not is_frozen(client, tenant_id=tenant_id) and eval_set_keys(client, tenant_id):
-        raise GoldenEvalError(
-            "the golden eval set has documents but no manifest: a freeze was interrupted. Re-run "
-            "freeze-eval-set from the same corpus to finish it before gating on it."
-        )
+    _refuse_interrupted_freeze(client, tenant_id)
     # Before anything is evaluated: a leaked eval set makes every number meaningless.
     assert_eval_set_disjoint(client, corpus_version, tenant_id)
     documents = [d for d in load_golden_set(client, scope.doc_types, tenant_id=tenant_id)
@@ -308,12 +355,13 @@ def evaluate_version(
     # them every field is flagged, and the gate must not reuse this report
     # once the release has calibrators (pipeline_dag.eval_report_metrics).
     body["calibrated"] = calibrators is not None
-    # Which frozen set of which tenant this was scored on, and how many of its
-    # documents: the gate pairs two reports only on one set, and decides from
-    # the counts whether the scope was scored on enough to be production.
+    # Which frozen set of which tenant this was scored on, under which scoring
+    # code, and how many of its documents: the gate compares two reports only
+    # on one yardstick, and decides from the real documents' counts whether the
+    # scope was scored on enough to be production (synthetic twins do not count).
     from evaluation.run_eval import eval_set_record
 
-    body["eval_set"] = eval_set_record(client, tenant_id, [d.doc_type for d in documents])
+    body["eval_set"] = eval_set_record(client, tenant_id, documents)
     body.update(real_only_section(version, triples, corpus_version=corpus_version, scope=scope))
     body["windowing_ceiling"] = windowing_ceiling(documents)
     # P95 latency per adapter and peak GPU memory, for the release bundle

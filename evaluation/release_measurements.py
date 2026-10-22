@@ -3,7 +3,7 @@
 Recorded in the eval report and copied into the release bundle; not gated
 until SPEC_06 sets a target. Measured during the golden eval, which serves
 every eval document through :func:`serving.pipeline.extract` on the target
-GPU: the P95 of every generation round - the windows of a policy or a Loss Run
+GPU: the P95 of every generation batch - the windows of a policy or a Loss Run
 that run together, or a whole short document read in one call - per adapter,
 and the most GPU memory in use while the eval ran, sampled every few seconds.
 
@@ -37,7 +37,7 @@ def p95(values: Sequence[float]) -> float | None:
 
 def latency_by_adapter(scored: Sequence[tuple[Any, Any, dict[str, Any]]], *,
                        served_as: str | None = None) -> dict[str, dict[str, Any]]:
-    """Per adapter: the P95 latency of one generation round in milliseconds, and how many.
+    """Per adapter: the P95 latency of one generation batch in milliseconds, and how many.
 
     ``served_as`` names what a call with no adapter ran on: in the golden eval,
     the release's own merged model, not the base model.
@@ -115,5 +115,5 @@ def measurements(scored: Sequence[tuple[Any, Any, dict[str, Any]]], *, served_as
         "latency_p95_ms_by_adapter": latency_by_adapter(scored, served_as=served_as),
         "peak_gpu_memory_mb": peak_mb if peak_mb is not None else peak_gpu_memory_mb(),
         "measured_with": "the golden eval: this release's merged bf16 model alone, on the target GPU; "
-                         "latency per generation round, memory the peak sampled during the eval",
+                         "latency per generation batch, memory the peak sampled during the eval",
     }

@@ -79,9 +79,14 @@ class PolicyWindowPlan:
     pages: tuple[int, ...]
     #: The group reads its pages in one window.
     single: bool
-    #: The first window of a group its declarations pages lead (``decl``, and
-    #: ``dtd`` where the line carries it).
+    #: The window of a group its declarations pages lead (``decl``, and ``dtd``
+    #: where the line carries it): the one holding the declarations page when
+    #: those pages are split over several windows, else the first.
     leads: bool = False
+    #: The group has a window that takes a value with no recorded page - its
+    #: only one, or the one its declarations lead - so such a value is never
+    #: reported unplaced from another of its windows.
+    homed: bool = False
 
     @property
     def holds_unpaged(self) -> bool:
@@ -159,22 +164,66 @@ def pages_to_read(
 #: and pinned in the corpus manifest: an adapter is served only the window plan
 #: its corpus was built with (``assert_window_plan``). "2": every page read, each
 #: window sized by its pages' own text (decisions 2026-10-19 and 2026-10-22).
-WINDOW_PLAN_VERSION = "2"
+#: "3": a split keeps its runs' shared pages, and the declarations-led window is
+#: the one holding the declarations page. Bump it whenever the rule changes;
+#: changes to the planner's inputs are caught by :func:`window_plan_id`.
+WINDOW_PLAN_VERSION = "3"
+
+
+def window_plan_id() -> str:
+    """The window plan this code reads policies with: :data:`WINDOW_PLAN_VERSION`
+    and a fingerprint of every input the planner sizes windows from.
+
+    The version alone missed them: raising ``policy_declarations``'
+    ``max_output_tokens`` from 4,096 to 6,144 turned four declarations windows
+    into seven with the version and the prompt hash unchanged. So the
+    fingerprint covers the section map (groups, page rules, leading pages,
+    overlap), each policy task's sequence budget and visual tokens per page,
+    the estimates a page is charged by, and the prompt hash, whose prompts take
+    their share of every window's room.
+    """
+    import hashlib
+    import json
+
+    from common.config import CONFIG_DIR, load_yaml, sequence_for_task
+    from common.prompts import prompt_hash
+    from common.schema_sections import task_for
+    from data_pipeline.dataset_builder.cap_check import (
+        CHARS_PER_TOKEN,
+        TEMPLATE_OVERHEAD_TOKENS,
+        estimate_visual_tokens,
+    )
+    from data_pipeline.dataset_builder.expand_tasks import OCR_TOKENS_PER_PAGE
+
+    section_map = load_yaml(CONFIG_DIR / "schema_sections.yaml")
+    tasks = sorted({task_for(group) for group in section_map["groups"]})
+    inputs = {
+        "section_map": section_map,
+        "budgets": {task: {"sequence": sequence_for_task(task, "policy"),
+                           "visual_tokens_per_page": estimate_visual_tokens(1, task)}
+                    for task in tasks},
+        "page_estimates": [OCR_TOKENS_PER_PAGE, CHARS_PER_TOKEN, TEMPLATE_OVERHEAD_TOKENS],
+        "prompt_hash": prompt_hash(),
+    }
+    digest = hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode()).hexdigest()
+    return f"{WINDOW_PLAN_VERSION}:{digest[:12]}"
 
 
 def assert_window_plan(corpus_manifest: dict[str, Any], *, what: str = "this run") -> None:
-    """Refuse to serve a policy adapter windows its corpus never had.
+    """Refuse a policy adapter windows its corpus never had.
 
-    A corpus with no pin predates the version: built when the declarations
-    group read only its leading pages, so its adapter was never shown a
-    declarations window over policy wording, and asked one it can invent the
-    policy-level values the merge keeps wherever the first window had none.
+    A corpus with no pin predates it: built when the declarations group read
+    only its leading pages, so its adapter was never shown a declarations
+    window over policy wording, and asked one it can invent the policy-level
+    values the merge keeps wherever the first window had none. A corpus with
+    another pin was cut into other windows - another rule, budget or prompt.
     """
     pinned = corpus_manifest.get("window_plan_version")
-    if pinned != WINDOW_PLAN_VERSION:
+    current = window_plan_id()
+    if pinned != current:
         raise ValueError(
             f"{what} rests on a corpus built with window plan {pinned or 'unversioned'}, "
-            f"and this code reads policies with plan {WINDOW_PLAN_VERSION}. Rebuild the corpus "
+            f"and this code reads policies with plan {current}. Rebuild the corpus "
             "and retrain: a model is served only the windows it trained on."
         )
 
@@ -215,19 +264,38 @@ def plan_windows(
         # the declarations were found on, read together; every other page
         # follows, packed by runs, as every other group's are.
         lead = leading_pages(group, pages, declarations_page=declarations_page)
-        windows = plan_policy_windows(
-            pages, pages_per_window=capacity, leading=lead, overlap=run_overlap(lob),
-        )
+        overlap = run_overlap(lob)
+        windows = plan_policy_windows(pages, pages_per_window=capacity, leading=lead, overlap=overlap)
         if texts is not None:
             costs = {page: page_tokens(texts.get(page), page, total, group) for page in pages}
             windows = fit_windows_to_text(
-                windows, costs.__getitem__, window_page_room("policy", None, lob, group))
+                windows, costs.__getitem__, window_page_room("policy", None, lob, group),
+                overlap=overlap)
+        home = _home_window(windows, lead, declarations_page)
+        single = len(windows) == 1
         plans.extend(
-            PolicyWindowPlan(group, index, tuple(window), single=len(windows) == 1,
-                             leads=index == 0 and bool(lead))
+            PolicyWindowPlan(group, index, tuple(window), single=single, leads=index == home,
+                             homed=single or home is not None)
             for index, window in enumerate(windows)
         )
     return plans
+
+
+def _home_window(windows: list[list[int]], lead: Sequence[int], declarations_page: int | None) -> int | None:
+    """The window the declarations lead: of the windows the leading pages were
+    split into, the one holding the declarations page, else the first. None
+    for a group the declarations do not lead.
+
+    Not simply the first: a ``dtd`` window holds three pages on some lines,
+    and dense notices on pages 1-5 split a declarations window too, so pages
+    [1, 2, 3] were taught the policy number the declarations print on page 4
+    or 9 while the window showing it was taught to leave it out.
+    """
+    led = set(lead)
+    pieces = [index for index, window in enumerate(windows) if led and set(window) <= led]
+    if not pieces:
+        return None
+    return next((index for index in pieces if declarations_page in windows[index]), pieces[0])
 
 
 #: A printed value shorter than this is too common to place by searching:
@@ -236,13 +304,14 @@ MIN_PLACEABLE_CHARS = 4
 
 
 def multi_window_sections(lob: str | list[str] | None, plans: Sequence[PolicyWindowPlan]) -> set[str]:
-    """The label sections read over several windows with none to take a value
-    that records no page (:attr:`PolicyWindowPlan.holds_unpaged`): the only ones
-    where such a value cannot be placed."""
+    """The label sections read over several windows: where a value that records
+    no page is given one from the text (:func:`with_inferred_pages`) before any
+    window takes it. One left without a page is taught in the window the
+    declarations lead (:attr:`PolicyWindowPlan.holds_unpaged`), or reported
+    unplaced in a group they do not lead."""
     from common.schema_sections import sections_for
 
-    homed = {plan.group for plan in plans if plan.holds_unpaged}
-    return {name for plan in plans if plan.group not in homed for name in sections_for(plan.group, lob)}
+    return {name for plan in plans if not plan.single for name in sections_for(plan.group, lob)}
 
 
 def with_inferred_pages(
@@ -261,11 +330,11 @@ def with_inferred_pages(
     A copy when anything is placed; ``label`` itself otherwise.
 
     ``sections`` limits the search to those top-level sections
-    (:func:`multi_window_sections`). A group with a window that takes a value
-    with no page - its only one, or the one its declarations lead - keeps the
-    value as it is; given a page there, a declarations value whose only exact
-    match was a notice on page 7 was moved to page 7 and then dropped from the
-    declarations window it had always been taught in.
+    (:func:`multi_window_sections`). The declarations group is searched too: a
+    policy number printed only on an endorsement on page 12 was taught in pages
+    1-5, which never show it, and left out of the window that does. Printed on
+    the declarations page and elsewhere it matches several pages and stays
+    unplaced, so the declarations-led window still takes it.
     """
     import copy
     import re
@@ -615,7 +684,7 @@ def _on_pages(
     if not refs:
         if plan.holds_unpaged:
             return node
-        if report is not None and plan.window_index == 0:
+        if report is not None and plan.window_index == 0 and not plan.homed:
             report.unplaced.append(f"{plan.group}:{path}")
         return None
     seen = refs & pages
@@ -689,7 +758,7 @@ def _entry_on_pages(
     if not refs:
         if plan.holds_unpaged:
             return entry
-        if report is not None and plan.window_index == 0:
+        if report is not None and plan.window_index == 0 and not plan.homed:
             report.unplaced.append(f"{plan.group}:{path}")
         return None
     seen = refs & pages

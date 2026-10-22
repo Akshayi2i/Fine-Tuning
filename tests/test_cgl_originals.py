@@ -301,6 +301,58 @@ def test_real_documents_carry_the_review_record_their_reviews_file_gives(tmp_pat
     assert metas["dec_03"]["reviewer_id"] is None and report.unreviewed == 1
 
 
+def test_one_carrier_printed_two_ways_is_one_carrier_to_the_draw(tmp_path):
+    """Nine carriers, one printed "Travelers Indemnity Company" and "TRAVELERS".
+    Keyed by the printed name they were ten: one was held out against the
+    ten-carrier rule, and a carrier that trained was marked unseen."""
+    from common.normalize import normalize_carrier
+
+    docs = {("Broker", f"doc{n:03d}"): _gl_gold(f"INSURED {n}", carrier=f"Carrier{n // 4} Insurance Company")
+            for n in range(32)}
+    docs |= {("Broker", f"doc{n:03d}"): _gl_gold(f"INSURED {n}", carrier="Travelers Indemnity Company")
+             for n in range(32, 36)}
+    docs[("Broker", "doc036")] = _gl_gold("INSURED 36", carrier="TRAVELERS")
+    printed = {f"gl__broker__{name}": gold["carrier"]["name"]["raw"] for (_, name), gold in docs.items()}
+    root = _source(tmp_path, docs)
+    for seed in (42, 43, 44, 45):
+        out = tmp_path / f"bundles_{seed}"
+        prepare_original_bundles(root, out, lob="gl", seed=seed)
+        with (out / "split.csv").open(encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        trained = {normalize_carrier(printed[r["document"]]) for r in rows if r["split"] == "train"}
+        for row in rows:
+            unseen = row["split"] == "test" and normalize_carrier(printed[row["document"]]) not in trained
+            assert (row["held_out_carrier"] == "True") is unseen, (seed, row)
+        # Nine carriers hold none out: here every one of them trains.
+        assert trained == {normalize_carrier(name) for name in printed.values()}, seed
+        assert len(trained) == 9 and not [r for r in rows if r["held_out_carrier"] == "True"], seed
+
+
+def test_a_reviews_file_excel_saved_as_csv_utf8_is_read(tmp_path):
+    """Excel's "CSV UTF-8" starts with a byte-order mark: read as plain UTF-8,
+    the first column was "\ufeffdocument" and the file was refused."""
+    root = _source(tmp_path, {("Utica First", "dec_01"): _gl_gold("A")})
+    (root / "reviews.csv").write_text(
+        "document,reviewer_id,review_date,draft_backend\r\nUtica First/dec_01,李明,2026-10-20,\r\n",
+        encoding="utf-8-sig")
+    out = tmp_path / "bundles"
+    report = prepare_original_bundles(root, out, lob="gl")
+    meta = json.loads((out / "gl__utica_first__dec_01" / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["reviewer_id"] == "李明" and report.unreviewed == 0
+
+
+def test_a_reviews_file_without_its_columns_says_what_its_header_has(tmp_path):
+    from data_pipeline.ingestion.prepare_bundles import read_reviews
+
+    path = tmp_path / "reviews.csv"
+    path.write_text("doc,reviewer\nUtica First/dec_01,a.reviewer\n", encoding="utf-8-sig")
+    with pytest.raises(BundleError, match=r"needs the columns document,reviewer_id,review_date.*\['doc', 'reviewer'\]"):
+        read_reviews(path)
+    path.write_bytes("document,reviewer_id,review_date\nUtica First/dec_01,José,2026-10-20\n".encode("cp1252"))
+    with pytest.raises(BundleError, match="not UTF-8 text.*CSV UTF-8"):
+        read_reviews(path)
+
+
 def test_the_corpus_build_records_the_delivered_held_out_documents():
     """So the frozen set marks them and the gate reports them apart."""
     from types import SimpleNamespace

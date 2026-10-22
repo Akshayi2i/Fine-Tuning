@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
@@ -173,12 +174,48 @@ def validate_golden_label(
 REVIEW_KEYS = ("reviewer_id", "review_date", "draft_backend", "review_inherited_from")
 
 #: ``reviewer_id`` values that name nobody - a field filled in before anyone
-#: reviewed the label. Compared with case, spaces and punctuation aside, so
-#: "N/A" is "na" and "-" is "".
+#: reviewed the label. Compared on its letters and digits, in any script, with
+#: case, spaces and punctuation aside, so "N/A" is "na" and "-" is "".
 _NOBODY = frozenset({
     "", "pending", "none", "na", "nil", "null", "tbd", "tba", "todo", "unknown", "unassigned",
     "unreviewed", "notreviewed", "nobody", "noone",
 })
+
+#: Words naming a model, a system or a generator: a ``reviewer_id`` made of
+#: them (with :data:`_MACHINE_EXTRAS` and version numbers) names no person.
+#: Only a person's name shows a person checked a gold; frontier models are
+#: never used for data (decision 2026-10-19). Also matched with the words run
+#: together: "label_studio" is "labelstudio".
+_MACHINES = frozenset({
+    # models and their makers
+    "claude", "anthropic", "gpt", "chatgpt", "openai", "gemini", "bard", "llama", "mistral", "mixtral",
+    "copilot", "qwen", "deepseek", "grok", "llm", "vlm", "ai",
+    # this repository's drafters and generators
+    "fideon", "fideonsynth", "synth", "synthetic", "generator", "generated", "labelstudio",
+    "preannotate", "preannotation", "preannotator", "preannotated", "autolabel", "autolabeled",
+    "mineru", "ocr",
+    # systems and automation
+    "system", "auto", "automatic", "automated", "automation", "bot", "robot", "script", "pipeline",
+    "machine", "computer", "service", "admin", "root", "default",
+})
+#: Words that go with a machine's name without naming a person: "GPT-4 Turbo",
+#: "Qwen3-VL Instruct", "auto reviewer". Never enough on their own.
+_MACHINE_EXTRAS = frozenset({
+    "base", "model", "vl", "instruct", "chat", "turbo", "mini", "pro", "flash", "sonnet", "opus", "haiku",
+    "label", "labels", "labeler", "labeller", "studio", "pre", "annotate", "annotation", "annotator",
+    "review", "reviewer", "reviewed", "check", "checker", "judge", "draft", "drafter", "account", "user",
+    "the", "an", "a", "v",
+})
+
+#: What the delivery recorded about a document, which a review does not change:
+#: where it was imported from (the purge plan looks up every folder,
+#: ``pull_raw_pdfs.purge_plan``) and what decides its split and hold-out. A
+#: relabel keeps them; rewritten without them, a re-reviewed gold lost its
+#: delivered split and held-out mark, and the purge its intake copies.
+DELIVERY_KEYS = (
+    "imported_from", "imported_from_history", "carrier", "twin_index", "synthetic", "split",
+    "held_out_carrier", "template_id", "render_mode", "document_kind",
+)
 
 #: A date with no time zone is the reviewer's own: it is in the future only
 #: once it is still ahead in the earliest time zone, UTC+14.
@@ -189,11 +226,13 @@ def review_problem(label: Any, metadata: dict[str, Any] | None) -> str | None:
     """Why a gold may not train, be frozen into the eval set or score; ``None`` when it may.
 
     Every gold needs a review record (decision 2026-10-22): its metadata names
-    the person who reviewed it (``reviewer_id``, not blank and not a placeholder
-    such as "pending") and when (``review_date``, an ISO date or date-time, not
-    in the future). Nothing else stands in for one - not the gold's own notes,
-    which can be read either way, and not what drafted it (``draft_backend`` is
-    recorded as information): only a person's name says a person checked it.
+    the person who reviewed it (``reviewer_id``, in any script, not blank, not a
+    placeholder such as "pending" and not a model, system or generator such as
+    "claude", "system" or "fideon_synth") and when (``review_date``, an ISO date
+    or date-time, not in the future). Nothing else stands in for one - not the
+    gold's own notes, which can be read either way, and not what drafted it
+    (``draft_backend`` is recorded as information): only a person's name says
+    a person checked it.
 
     A synthetic twin is reviewed only when its seed was. Its record is the
     seed's, inherited when the bundle was prepared, and ``review_inherited_from``
@@ -233,9 +272,25 @@ def _reviewer_problem(value: Any) -> str | None:
         return "reviewer_id is missing"
     if not isinstance(value, str):
         return f"reviewer_id {value!r} is not a person's name or id"
-    if "".join(re.findall(r"[a-z0-9]+", value.casefold())) in _NOBODY:
+    # Letters and digits in any script: "李明" and "Иван Петров" are people.
+    words = re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", value).casefold())
+    if "".join(words) in _NOBODY:
         return f"reviewer_id {value!r} names nobody"
+    if _names_a_machine(words):
+        return (f"reviewer_id {value!r} names a model, system or generator, not a person: only a person's "
+                "name shows a person checked the gold")
     return None
+
+
+def _names_a_machine(words: list[str]) -> bool:
+    """Whether ``words`` (a reviewer_id's, casefolded) name a model, a system or a
+    generator (:data:`_MACHINES`) and nobody else."""
+    if "".join(words) in _MACHINES:
+        return True
+    # A version is no name: "gpt-4o" is "gpt", "qwen3vl" is "qwen".
+    stems = [match.group() for word in words if (match := re.match(r"[^\W\d_]+", word))]
+    return (any(stem in _MACHINES for stem in stems)
+            and all(stem in _MACHINES or stem in _MACHINE_EXTRAS for stem in stems))
 
 
 def _review_date_problem(value: Any) -> str | None:
@@ -315,9 +370,14 @@ def export_golden_label(
         raise LabelValidationError(f"golden label for {source_id} rejected: {problem}")
 
     label_key = paths.golden_label(doc_type, source_id, tenant_id)
+    metadata_key = paths.label_metadata(doc_type, source_id, tenant_id)
+    previous = client.read_json(metadata_key) if client.exists(metadata_key) else {}
+    delivered = {key: previous[key] for key in DELIVERY_KEYS
+                 if isinstance(previous, dict) and key in previous}
     client.write_json(label_key, label)
 
     metadata = {
+        **delivered,
         "source_id": source_id,
         "doc_type": doc_type,
         "acord_form": acord_form,
@@ -337,7 +397,7 @@ def export_golden_label(
         # lets IMPL-08 slice accuracy per surface variant (arch §0c).
         "field_provenance": field_provenance or {},
     }
-    client.write_json(paths.label_metadata(doc_type, source_id, tenant_id), metadata)
+    client.write_json(metadata_key, metadata)
 
     log.info("exported golden label for %s (reviewer=%s, requirement=%s)",
              source_id, reviewer_id, requirement)

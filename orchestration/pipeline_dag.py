@@ -840,14 +840,25 @@ def warn_on_held_out_carriers(manifest: dict[str, Any], documents: list[Any]) ->
     The frozen set's held-out carriers are what makes its "unseen carrier"
     numbers mean anything. Training on a later document of theirs is allowed —
     the data is real — but from then on those numbers measure a seen carrier.
+
+    Held out by the split, or by the delivery (the freeze records a carrier its
+    documents are marked with, ``held_out_carrier``). A line's entry is one
+    carrier, or a list where more than one is held out of it. Both sides are
+    compared as :func:`common.normalize.normalize_carrier` keys, so a carrier
+    recorded under an older key ("dryden_mutual") still matches its documents.
     """
+    from common.normalize import normalize_carrier
     from data_pipeline.dataset_builder.split_groups import line_of
 
-    held = {c for carriers in (manifest.get("held_out_carriers") or {}).values() for c in carriers}
+    def keys(carriers: Any) -> set[str]:
+        listed = [carriers] if isinstance(carriers, str) else list(carriers or ())
+        return {key for c in listed if isinstance(c, str) and (key := normalize_carrier(c))}
+
+    held = keys([c for carriers in (manifest.get("held_out_carriers") or {}).values() for c in carriers])
     by_line = manifest.get("held_out_carriers_by_line") or {}
-    seen = sorted({d.carrier for d in documents if d.carrier in held} | {
+    seen = sorted({d.carrier for d in documents if keys(d.carrier) & held} | {
         f"{d.carrier} ({line_of(getattr(d, 'lob', None))})" for d in documents
-        if d.carrier and (by_line.get(d.doc_type) or {}).get(line_of(getattr(d, "lob", None))) == d.carrier
+        if keys(d.carrier) & keys((by_line.get(d.doc_type) or {}).get(line_of(getattr(d, "lob", None))))
     })
     if seen:
         log.warning(
@@ -1103,16 +1114,29 @@ def _is_trained(ctx: StageContext) -> bool:
     return ctx.volume.exists(adapter_dir)
 
 
-def _assert_window_plan(corpus_manifest: dict[str, Any], what: str) -> None:
-    """Refuse a corpus holding policies whose windows this code no longer plans.
+def _assert_corpus_pins(corpus_manifest: dict[str, Any], what: str) -> None:
+    """Refuse a corpus this code would not build today.
 
-    The prompt hash cannot catch it: it is computed when the release is
-    packaged, from the code doing the packaging, so an adapter trained on
-    another window plan carried this code's hash. Serving would then read the
-    adapter windows it was never shown (``policy_windows.assert_window_plan``).
+    - **Its golds' review rule.** A corpus built before every gold needed a
+      review record skips the dataset build's check when reused
+      (``--corpus-version``), so its unreviewed golds would train.
+    - **A policy corpus's window plan.** The prompt hash cannot catch it: it is
+      computed when the release is packaged, from the code doing the
+      packaging, so an adapter trained on another window plan carried this
+      code's hash. Serving would then read the adapter windows it was never
+      shown (``policy_windows.assert_window_plan``).
     """
+    from data_pipeline.corpus_manifest import REVIEW_RULE_VERSION
     from data_pipeline.dataset_builder.policy_windows import assert_window_plan
 
+    rule = corpus_manifest.get("review_rule_version")
+    if rule != REVIEW_RULE_VERSION:
+        raise PipelineError(
+            f"{what} rests on a corpus built under review rule {rule or 'unrecorded'}, and every "
+            f"gold must now pass rule {REVIEW_RULE_VERSION}: a person's review record on every "
+            "gold, a twin its seed's (decision 2026-10-22). Rebuild the corpus, so the dataset "
+            "build checks each gold, and retrain."
+        )
     if "policy" not in (corpus_manifest.get("doc_types") or []):
         return
     try:
@@ -1136,7 +1160,7 @@ def stage_training(ctx: StageContext) -> StageResult:
     from training.train import count_examples, train
 
     corpus_manifest = ctx.client.read_json(paths.corpus_manifest(ctx.corpus, ctx.tenant_id))
-    _assert_window_plan(corpus_manifest, f"training run {ctx.out_version}")
+    _assert_corpus_pins(corpus_manifest, f"training run {ctx.out_version}")
     try:
         # A layout family part-way to the common model is two output shapes:
         # no scope trains on documents of both until the family has moved.
@@ -1446,7 +1470,10 @@ def eval_report_metrics(ctx: StageContext) -> dict[str, Any]:
     Runs IMPL-08's ``run_eval`` — the same code the promotion gate's numbers are
     supposed to come from — after asserting the eval set does not overlap the
     corpus. If an eval report for this version already exists (a resumed run, or
-    a scoring pass done separately), it is read rather than recomputed.
+    a scoring pass done separately), it is read rather than recomputed - when it
+    records that it was scored on this tenant's frozen set. The report path
+    names no tenant, so another tenant's report there, or one that does not say
+    whose set it was scored on, is scored again as if it were absent.
 
     Wiring this in is what makes ``finetune`` completable: the CLI supplied no
     provider at all, so every real run trained a Foundation and three adapters on
@@ -1461,21 +1488,34 @@ def eval_report_metrics(ctx: StageContext) -> dict[str, Any]:
     # failed — while stage_push recorded the scoped key on the manifest.
     summary_key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
     calibrators, thresholds = release_calibration(ctx, "bf16")
+    not_reused: str | None = None
     if ctx.client.exists(summary_key):
         report = ctx.client.read_json(summary_key)
         metrics = report.get("gate_metrics") or report.get("candidate_metrics") or {}
-        if metrics and calibrators is not None and report.get("calibrated") is not True:
+        recorded = report.get("eval_set") or {}
+        tenant = paths._tenant(ctx.tenant_id)
+        if not metrics:
+            not_reused = "it holds no gate metrics"
+        elif not recorded.get("tenant_id"):
+            not_reused = ("it does not record which tenant's frozen set it was scored on (written "
+                          "before reports recorded it), so it cannot be shown to be this tenant's")
+        elif recorded["tenant_id"] != tenant:
+            not_reused = (f"it was scored on tenant {recorded['tenant_id']!r}'s frozen set, and this "
+                          f"candidate gates tenant {tenant!r}")
+        elif calibrators is not None and report.get("calibrated") is not True:
             # Scored before this release had calibrators: every field was
-            # flagged, so auto_accept_error_rate read a trivial 0.0. Not reused.
-            log.info("the eval report at %s was made without calibrators; scoring again "
-                     "with the release's", summary_key)
-        elif metrics:
+            # flagged, so auto_accept_error_rate read a trivial 0.0.
+            not_reused = "it was made without calibrators, and this release has them"
+        else:
             log.info("gate metrics read from %s", summary_key)
             return dict(metrics)
+        log.info("the eval report at %s is not reused: %s. Scoring again.", summary_key, not_reused)
 
     if ctx.dry_run:
+        found = (f"the eval report at {summary_key} is not reused ({not_reused})" if not_reused
+                 else f"no eval report at {summary_key}")
         raise PipelineError(
-            f"no eval report at {summary_key}, and a dry run loads no model to produce one. "
+            f"{found}, and a dry run loads no model to produce one. "
             "The gate will not judge a candidate on metrics nobody measured."
         )
 
@@ -1483,9 +1523,13 @@ def eval_report_metrics(ctx: StageContext) -> dict[str, Any]:
     # pipeline with the merged bf16 model and the release's own bf16 calibrators,
     # so the gate measures what production would serve — windows, merge, date
     # post-process and calibrated confidence included.
-    from evaluation.golden_eval import evaluate_version
+    from evaluation.golden_eval import assert_scoreable, evaluate_version
     from inference_core.model_runner import release_model
 
+    # Before the model is loaded: a frozen gold with no review record is refused
+    # by the scoring, and learning that after loading the merged model bought
+    # nothing.
+    assert_scoreable(ctx.client, ctx.scope.doc_types, tenant_id=ctx.tenant_id)
     loader = ctx.serving_model_loader or _staged_serving_model
     model = loader(ctx, "bf16")
     try:
@@ -1531,6 +1575,10 @@ def default_baseline_metrics(ctx: StageContext) -> dict[str, Any] | None:
 
     ``None`` means there is no promoted version yet — a genuine first version,
     which the gate handles. It never means "could not find one".
+
+    This tenant's promoted version (``latest_promoted(tenant=...)``), never
+    another tenant's newer one. Whether its scores can be compared with the
+    candidate's at all is :func:`baseline_not_comparable`.
     """
     key = _promoted_eval_report_key(ctx)
     if key is None:
@@ -1539,12 +1587,42 @@ def default_baseline_metrics(ctx: StageContext) -> dict[str, Any] | None:
     return report.get("gate_metrics") or report.get("candidate_metrics") or None
 
 
+def baseline_not_comparable(ctx: StageContext) -> str | None:
+    """Why the promoted release's eval report is not on the candidate's
+    yardstick; ``None`` when it is, or when there is no promoted report.
+
+    Another yardstick is another frozen set (the set was frozen again), another
+    tenant's set, or other scoring code (``run_eval.yardstick_difference``), or a
+    report that does not record which. Decision 2026-10-22: the gate then judges
+    the candidate on its floors alone, says why in the decision, and does not
+    score the old release again.
+
+    The candidate's yardstick is its own eval report's record. A candidate with
+    no record (scores a metrics provider supplied) is taken as scored on the set
+    and the code as they stand now.
+    """
+    from evaluation.run_eval import eval_set_record, yardstick_difference
+
+    promoted_key = _promoted_eval_report_key(ctx)
+    if promoted_key is None:
+        return None
+    promoted = ctx.client.read_json(promoted_key).get("eval_set")
+    candidate_key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
+    candidate = (ctx.client.read_json(candidate_key).get("eval_set")
+                 if ctx.client.exists(candidate_key) else None)
+    if not candidate:
+        candidate = eval_set_record(ctx.client, ctx.tenant_id, [])
+    reason = yardstick_difference(promoted, candidate, ctx.tenant_id)
+    return f"{reason} (promoted report {promoted_key})" if reason else None
+
+
 def _promoted_eval_report_key(ctx: StageContext) -> str | None:
-    """Where the promoted version's eval report lives; ``None`` with no report."""
+    """Where this tenant's promoted version's eval report lives; ``None`` with no report."""
     from registry_utils.query_registry import latest_promoted
 
     promoted = latest_promoted(
-        ctx.client, _promoted_lineage(ctx.scope), scope=ctx.scope.name
+        ctx.client, _promoted_lineage(ctx.scope), scope=ctx.scope.name,
+        tenant=paths._tenant(ctx.tenant_id),
     )
     if not promoted:
         return None
@@ -1566,26 +1644,31 @@ def _promoted_eval_report_key(ctx: StageContext) -> str | None:
 
 def paired_document_scores(
     ctx: StageContext, warnings: list[str] | None = None,
-) -> dict[str, tuple[list[float], list[float], list[float], list[float]]] | None:
+) -> dict[str, tuple[list[float], ...]] | None:
     """Each gate metric's per-document scores, promoted vs candidate, paired.
 
     Read from the two eval reports (``EvalReport.per_document_scores``) and
     aligned on the documents both scored, in sorted order: that alignment is
     what the paired bootstrap resamples. Each comes as ``(current, candidate,
     current_weights, candidate_weights)``: a document counts in the bootstrap as
-    it counts in the reported metric (``EvalReport.per_document_weights``; one
-    each in a report written before they were kept).
+    it counts in the reported metric (``EvalReport.per_document_weights``). A
+    metric either report holds no weights for (written before they were kept)
+    comes as ``(current, candidate)`` and is bootstrapped unweighted on both
+    sides, with a warning: weighting one side only compared a weighted mean with
+    an unweighted one, and identical scores bootstrapped as an improvement.
 
-    Paired only when both reports were scored on the same frozen set of this
-    tenant (``eval_set``, :func:`evaluation.run_eval.eval_set_record`). Source ids
-    are numbered per tenant and reused when a set is frozen again, and the
-    report path names no tenant, so matching on ids alone paired documents
-    across two yardsticks. ``None`` whenever pairing is not possible - another
-    set or tenant, no shared documents, a report without per-document scores or
-    without the set it was scored on - with the reason added to ``warnings``:
-    the gate then compares point estimates and cannot enforce the improvement
-    rule, and the decision has to say so.
+    Paired only when both reports were scored on one yardstick
+    (:func:`evaluation.run_eval.yardstick_difference`): source ids are numbered
+    per tenant and reused when a set is frozen again, the report path names no
+    tenant, and a gold is read under the running code's label rules. The gate
+    does not ask for pairs then (:func:`baseline_not_comparable`: floors only).
+    ``None`` whenever pairing is not possible - another yardstick, no shared
+    documents, a report without per-document scores - with the reason added to
+    ``warnings``; on one yardstick the gate then compares point estimates and
+    cannot enforce the improvement rule, and the decision has to say so.
     """
+    from evaluation.run_eval import yardstick_difference
+
     notes = warnings if warnings is not None else []
     promoted_key = _promoted_eval_report_key(ctx)
     if promoted_key is None:
@@ -1596,6 +1679,14 @@ def paired_document_scores(
         return None
     promoted_report = ctx.client.read_json(promoted_key)
     candidate_report = ctx.client.read_json(candidate_key)
+    # The yardstick first: two yardsticks' scores are not paired even where both
+    # reports hold per-document scores, and are not compared at all.
+    different = yardstick_difference(
+        promoted_report.get("eval_set"), candidate_report.get("eval_set"), ctx.tenant_id)
+    if different:
+        _not_paired(notes, different, "The candidate is judged on its floors alone (decision "
+                    "2026-10-22, baseline_not_comparable).")
+        return None
     reason = _unpairable(ctx, promoted_key, promoted_report, candidate_key, candidate_report)
     if reason:
         _not_paired(notes, reason)
@@ -1603,7 +1694,7 @@ def paired_document_scores(
     current, candidate = promoted_report["per_document"], candidate_report["per_document"]
     current_w = promoted_report.get("per_document_weights") or {}
     candidate_w = candidate_report.get("per_document_weights") or {}
-    paired: dict[str, tuple[list[float], list[float], list[float], list[float]]] = {}
+    paired: dict[str, tuple[list[float], ...]] = {}
     for name in sorted(set(current) & set(candidate)):
         shared = sorted(set(current[name]) & set(candidate[name]))
         if set(current[name]) != set(candidate[name]):
@@ -1614,13 +1705,25 @@ def paired_document_scores(
             )
             log.warning("%s", note)
             notes.append(note)
-        if shared:
-            paired[name] = (
-                [float(current[name][d]) for d in shared],
-                [float(candidate[name][d]) for d in shared],
-                [float((current_w.get(name) or {}).get(d, 1.0)) for d in shared],
-                [float((candidate_w.get(name) or {}).get(d, 1.0)) for d in shared],
-            )
+        if not shared:
+            continue
+        scores = ([float(current[name][d]) for d in shared],
+                  [float(candidate[name][d]) for d in shared])
+        weights = [w.get(name) or {} for w in (current_w, candidate_w)]
+        if all(d in side for side in weights for d in shared):
+            current_weights, candidate_weights = ([float(side[d]) for d in shared] for side in weights)
+            paired[name] = (*scores, current_weights, candidate_weights)
+            continue
+        unweighted = [side for side, w in zip(("promoted", "candidate"), weights, strict=True)
+                      if not all(d in w for d in shared)]
+        note = (
+            f"{name}: the {' and '.join(unweighted)} report(s) hold no per-document weights "
+            "for it (written before they were kept), so both sides are bootstrapped "
+            "unweighted, each document once - not the item-weighted mean the report shows."
+        )
+        log.warning("%s", note)
+        notes.append(note)
+        paired[name] = scores
     if not paired:
         _not_paired(notes, f"{promoted_key} and {candidate_key} share no scored document")
     return paired or None
@@ -1628,70 +1731,74 @@ def paired_document_scores(
 
 def _unpairable(ctx: StageContext, promoted_key: str, promoted: dict[str, Any],
                 candidate_key: str, candidate: dict[str, Any]) -> str | None:
-    """Why two eval reports' per-document scores cannot be paired; ``None`` when they can."""
-    from evaluation.run_eval import EVAL_SET_IDENTITY
-
+    """Why two eval reports of one yardstick cannot have their per-document
+    scores paired; ``None`` when they can. Two yardsticks are refused before
+    this (:func:`paired_document_scores`)."""
     for key, report in ((promoted_key, promoted), (candidate_key, candidate)):
         if not report.get("per_document"):
             return f"{key} has no per-document scores (written before they were kept)"
-        if not all((report.get("eval_set") or {}).get(k) for k in EVAL_SET_IDENTITY):
-            return (f"{key} does not record which frozen eval set it was scored on (written "
-                    "before reports recorded it), so its documents cannot be shown to be these")
-    promoted_set, candidate_set = promoted["eval_set"], candidate["eval_set"]
-    tenant = paths._tenant(ctx.tenant_id)
-    if {promoted_set["tenant_id"], candidate_set["tenant_id"]} != {tenant}:
-        return (f"the promoted report was scored on tenant {promoted_set['tenant_id']!r}'s set "
-                f"and the candidate on tenant {candidate_set['tenant_id']!r}'s, gating tenant "
-                f"{tenant!r}; source ids are numbered per tenant")
-    if any(promoted_set[k] != candidate_set[k] for k in EVAL_SET_IDENTITY):
-        return (f"the two reports were scored on different frozen sets (promoted: frozen "
-                f"{promoted_set['frozen_at']} from {promoted_set['frozen_from_corpus']}; "
-                f"candidate: frozen {candidate_set['frozen_at']} from "
-                f"{candidate_set['frozen_from_corpus']}), so one source id may be another "
-                "document or another gold")
     return None
 
 
-def _not_paired(notes: list[str], reason: str) -> None:
-    note = (f"per-document scores were not paired: {reason}. Non-inferiority falls back to a "
-            "point comparison.")
+def _not_paired(notes: list[str], reason: str,
+                consequence: str = "Non-inferiority falls back to a point comparison.") -> None:
+    note = f"per-document scores were not paired: {reason}. {consequence}"
     log.warning("%s", note)
     notes.append(note)
 
 
-def scope_eval_set_size(ctx: StageContext, manifest: dict[str, Any]) -> tuple[dict[str, int], str]:
-    """How many frozen documents of each type this scope was scored on, and
-    where the count was read: ``(counts, source)``.
+def scope_eval_set_size(
+    ctx: StageContext, manifest: dict[str, Any], warnings: list[str] | None = None,
+) -> tuple[dict[str, int], str]:
+    """How many frozen REAL documents of each type this scope was scored on, and
+    where the count was read: ``(counts, source)``. Synthetic twins do not count
+    toward the production minimum (decision 2026-10-22).
 
-    From the candidate's own eval report when it records them (``eval_set``):
-    exactly the documents it was scored on, after the scope's doc types and
-    lines. Otherwise from the frozen manifest: a line-scoped policy scope counts
-    the documents of its lines (``documents_by_line``, which counts every
-    document recording a line, so it can only overstate), any other scope its
-    types (``documents_by_doc_type``). Empty when neither says.
+    From the candidate's own eval report when it records them
+    (``eval_set.real_documents_by_doc_type``): exactly the documents it was
+    scored on, after the scope's doc types and lines. Otherwise from the frozen
+    manifest: a line-scoped policy scope counts the real policies of its lines
+    (``real_policies_by_line``), any other scope the real documents of its
+    types (``real_documents_by_doc_type``). Empty when neither says - a manifest
+    frozen before it counted real documents, with a report that does not either
+    - and the reason is added to ``warnings``: its counts include twins, so
+    they cannot show the minimum was met, and the release is capped at interim.
 
     Not the manifest's ``small_set_accepted``: that describes the whole set. A
     GL-only scope scored on 9 GL policies of a set frozen with 150 policies was
     let through to production, and a policy scope scored on 200 policies was
     capped because the set held 9 Loss Runs.
     """
+    notes = warnings if warnings is not None else []
     key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
     report = ctx.client.read_json(key) if ctx.client.exists(key) else {}
     recorded_set = report.get("eval_set") or {}
-    recorded = recorded_set.get("documents_by_doc_type")
+    recorded = recorded_set.get("real_documents_by_doc_type")
     # The report path names no tenant: another tenant's report says nothing here.
-    if (isinstance(recorded, dict) and recorded
+    if (isinstance(recorded, dict)
             and recorded_set.get("tenant_id") == paths._tenant(ctx.tenant_id)):
         return {t: int(recorded.get(t) or 0) for t in ctx.scope.doc_types}, "eval_report"
     if not manifest:
         return {}, "unknown"
+    counted = "real_policies_by_line" if ctx.scope.lines else "real_documents_by_doc_type"
+    counts = manifest.get(counted)
+    if not isinstance(counts, dict):
+        note = (
+            f"how many real documents this scope was scored on is unknown: the frozen manifest has "
+            f"no {counted} (frozen before the manifest counted real documents apart from synthetic "
+            "twins, which do not count toward the minimum, decision 2026-10-22) and the "
+            "candidate's eval report does not record them, so the release is capped at interim. "
+            "Scoring the candidate again records them in its report."
+        )
+        log.warning("%s", note)
+        notes.append(note)
+        return {}, "unknown"
     if ctx.scope.lines:
-        by_line = manifest.get("documents_by_line") or {}
-        # A package's lines are joined with "+" (split_groups.line_of).
-        count = sum(int(n) for line, n in by_line.items() if ctx.scope.covers_lob(line.split("+")))
-        return {t: count for t in ctx.scope.doc_types}, "frozen_manifest.documents_by_line"
-    by_type = manifest.get("documents_by_doc_type") or {}
-    return {t: int(by_type.get(t) or 0) for t in ctx.scope.doc_types}, "frozen_manifest.documents_by_doc_type"
+        # A package's lines are joined with "+" (split_groups.line_of). Line
+        # scopes are policy scopes (configs/scopes.yaml).
+        count = sum(int(n) for line, n in counts.items() if ctx.scope.covers_lob(line.split("+")))
+        return {t: count for t in ctx.scope.doc_types}, f"frozen_manifest.{counted}"
+    return {t: int(counts.get(t) or 0) for t in ctx.scope.doc_types}, f"frozen_manifest.{counted}"
 
 
 def stage_evaluation_gate(ctx: StageContext) -> StageResult:
@@ -1713,13 +1820,19 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
     candidate = provider(ctx)
     baseline = ctx.baseline_metrics
     per_document = ctx.per_document
-    # Why per-document scores could not be paired, for the decision's warnings.
+    # Why per-document scores could not be paired, or the scope's size could
+    # not be counted, for the decision's warnings.
     pairing: list[str] = []
+    # Why the promoted release is on another yardstick, when it is: the
+    # candidate is then judged on its floors alone (decision 2026-10-22).
+    not_comparable: str | None = None
     if baseline is None:
         baseline = default_baseline_metrics(ctx)
+        if baseline is not None:
+            not_comparable = baseline_not_comparable(ctx)
         # Paired only against the promoted report's own documents: an injected
         # baseline has no per-document scores to pair with.
-        if per_document is None and baseline is not None:
+        if per_document is None and baseline is not None and not not_comparable:
             per_document = paired_document_scores(ctx, warnings=pairing)
 
     # Read the manifest back from the registry when this run did not train it —
@@ -1748,11 +1861,12 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
     # warning - whatever the whole set's own flag says (scope_eval_set_size).
     # A count nothing records is not shown to be large enough.
     eval_set = frozen_manifest(ctx.client, tenant_id=ctx.tenant_id)
-    scored_on, counted_from = scope_eval_set_size(ctx, eval_set)
+    scored_on, counted_from = scope_eval_set_size(ctx, eval_set, warnings=pairing)
     small = not scored_on or any(n < MIN_FROZEN_DOCS_PER_TYPE for n in scored_on.values())
     result = promotion_gate(
         candidate,
         baseline,
+        baseline_not_comparable=not_comparable,
         small_eval_set=small,
         warnings=pairing,
         # Per-document scores turn non-inferiority into a paired bootstrap and
@@ -1784,7 +1898,11 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         "version": ctx.out_version,
         "candidate_metrics": candidate,
         "gate_metrics": candidate,
-        "baseline_metrics": baseline,
+        # A promoted release on another yardstick is recorded, never compared:
+        # its scores sit apart, with why (decision 2026-10-22).
+        "baseline_metrics": None if not_comparable else baseline,
+        "baseline_not_comparable": not_comparable,
+        "baseline_metrics_not_compared": baseline if not_comparable else None,
         "passed": result.passed and not cascade_blocked,
         "cascade_blocked": cascade.describe() if cascade_blocked else None,
         "failed_gates": result.failed_gates,
@@ -1794,17 +1912,21 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         "improved_metrics": result.improved_metrics,
         "waived_gates": sorted(result.waived),
         "override": result.override.as_dict() if result.override else None,
-        # How many documents each metric's bootstrap paired; empty when the gate
-        # compared point estimates (a first release, or reports without them).
-        "paired_documents": {name: len(pair[0]) for name, pair in sorted((per_document or {}).items())},
+        # How many documents each metric's bootstrap paired: the metrics the
+        # gate judged by a paired bootstrap, and no other. A metric paired on
+        # one document is compared as a point estimate, so it is not here.
+        "paired_documents": {
+            v.name: v.interval.documents for v in result.verdicts if v.interval is not None
+        },
         "fixes_defect": ctx.fixes_defect,
         "eval_set": {
             "small_set_accepted": bool(eval_set.get("small_set_accepted")),
             "documents_by_doc_type": eval_set.get("documents_by_doc_type", {}),
+            "real_documents_by_doc_type": eval_set.get("real_documents_by_doc_type"),
             "frozen_from_corpus": eval_set.get("frozen_from_corpus"),
             "frozen_at": eval_set.get("frozen_at"),
-            # What decided the interim cap: this scope's documents per type,
-            # where that count was read, and the minimum it was held to.
+            # What decided the interim cap: this scope's real documents per
+            # type, where that count was read, and the minimum it was held to.
             "scope_documents_by_doc_type": scored_on,
             "scope_documents_counted_from": counted_from,
             "minimum_per_doc_type": MIN_FROZEN_DOCS_PER_TYPE,
@@ -1853,7 +1975,9 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
 
     return StageResult(
         "evaluation_gate", "completed",
-        "gate passed" + (" (first version, no baseline)" if result.is_first_version else ""),
+        "gate passed" + (" (first version, no baseline)" if result.is_first_version else
+                         " (floors only: the promoted release is on another yardstick)"
+                         if result.baseline_not_comparable else ""),
         {"metrics": candidate, "failed_gates": [], "cascade_dependents": cascade.dependents},
     )
 
@@ -2335,7 +2459,7 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
     root = Path(__file__).resolve().parent.parent
     base = base_model_config()["model"]
     corpus_manifest = ctx.client.read_json(paths.corpus_manifest(ctx.corpus, ctx.tenant_id))
-    _assert_window_plan(corpus_manifest, f"release {ctx.release_id}")
+    _assert_corpus_pins(corpus_manifest, f"release {ctx.release_id}")
 
     formats = ["bf16"] if ctx.skip_quantize else list(ctx.formats)
     serving_formats = {
@@ -2407,6 +2531,7 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
             calibrators=calibrators,
             gate_reports=gate_reports,
             prompt_hash=prompt_hash(),
+            window_plan_version=corpus_manifest.get("window_plan_version"),
             schema_versions={
                 str(k): str(v) for k, v in (corpus_manifest.get("schema_versions") or {}).items()
             },
@@ -2738,16 +2863,24 @@ def _deterministic_errors() -> tuple[type[BaseException], ...]:
     for a crash at hour five, after a second full training run. Retries are for
     transient faults (a throttled Blob read), not for these. Imported lazily so
     the DAG stays importable without the training stack.
+
+    The gate's own refusals too: an unreviewed or interrupted frozen set, a
+    leaked eval set, a refused override. A retry loaded the merged bf16 model
+    again to fail on the same frozen gold.
     """
     import subprocess
 
+    from evaluation.freeze_eval_set import FreezeError
+    from evaluation.gating import GateError
+    from evaluation.golden_eval import GoldenEvalError
+    from evaluation.run_eval import EvalError
     from training.corpus_view import CorpusViewError
     from training.length_check import LengthCheckError
     from training.stage_data import StagingError
     from training.train import TrainingError
 
     return (TrainingError, StagingError, LengthCheckError, CorpusViewError,
-            subprocess.CalledProcessError)
+            subprocess.CalledProcessError, GoldenEvalError, EvalError, FreezeError, GateError)
 
 
 @dataclass(frozen=True)

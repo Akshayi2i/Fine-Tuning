@@ -26,6 +26,9 @@ analysis needs real material.
 from __future__ import annotations
 
 import argparse
+import ast
+import functools
+import hashlib
 import json
 import logging
 import re
@@ -33,6 +36,7 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from artifact_registry import paths
@@ -126,22 +130,29 @@ def eval_set_source_ids(client: BlobClient, tenant_id: str | None = None) -> set
 
 
 def eval_set_record(
-    client: BlobClient, tenant_id: str | None, doc_types: Iterable[str]
+    client: BlobClient, tenant_id: str | None, documents: Iterable[Any]
 ) -> dict[str, Any]:
-    """Which frozen set, of which tenant, an eval report was scored on, and how
-    many of its documents per type (``doc_types``: one entry per document scored).
+    """Which frozen set, of which tenant, an eval report was scored on, under
+    which scoring code, and how many of its documents per type (``documents``:
+    the documents scored, each with a ``doc_type`` and a ``synthetic`` flag).
 
-    The gate pairs two reports' per-document scores only when both were scored
-    on the same set of the same tenant: source ids are numbered per tenant, and
-    a set deleted and frozen again (corrected golds) reuses them, so
-    ``policy_0001`` in two reports is not always one document against one gold.
-    The counts are what the scope was scored on, which decides whether it was
-    scored on too few documents to be called production.
+    The gate compares two reports, and pairs their per-document scores, only
+    when both were scored on one yardstick (:data:`EVAL_SET_IDENTITY`): the same
+    set of the same tenant, read and scored by the same code. Source ids are
+    numbered per tenant, and a set deleted and frozen again (corrected golds)
+    reuses them, so ``policy_0001`` in two reports is not always one document
+    against one gold; and a frozen gold is read under the label rules of the
+    code that scores it (:func:`scoring_fingerprint`).
+
+    ``real_documents_by_doc_type`` is what the scope was scored on, which
+    decides whether it was scored on too few documents to be called production:
+    real documents only, because a synthetic twin does not count toward the
+    minimum (decision 2026-10-22). ``documents_by_doc_type`` counts every
+    document scored.
     """
-    from collections import Counter
-
     from evaluation.freeze_eval_set import frozen_manifest
 
+    scored = [(d.doc_type, bool(getattr(d, "synthetic", False))) for d in documents]
     manifest = frozen_manifest(client, tenant_id=tenant_id)
     return {
         "tenant_id": paths._tenant(tenant_id),
@@ -149,13 +160,158 @@ def eval_set_record(
         # corpus it came from.
         "frozen_at": manifest.get("frozen_at"),
         "frozen_from_corpus": manifest.get("frozen_from_corpus"),
-        "documents_by_doc_type": dict(sorted(Counter(doc_types).items())),
+        "scoring_fingerprint": scoring_fingerprint(),
+        "documents_by_doc_type": dict(sorted(Counter(t for t, _s in scored).items())),
+        "real_documents_by_doc_type": dict(sorted(
+            Counter(t for t, synthetic in scored if not synthetic).items())),
     }
 
 
-#: What :func:`eval_set_record` writes that names the set itself. Two reports
-#: are scored on one yardstick when these agree.
-EVAL_SET_IDENTITY: tuple[str, ...] = ("tenant_id", "frozen_at", "frozen_from_corpus")
+#: What :func:`eval_set_record` writes that names the yardstick: the set, and
+#: the code that read and scored it. Two reports are scored on one yardstick
+#: when all of these agree (:func:`yardstick_difference`).
+EVAL_SET_IDENTITY: tuple[str, ...] = (
+    "tenant_id", "frozen_at", "frozen_from_corpus", "scoring_fingerprint",
+)
+
+#: The code that turns a frozen gold and an extraction into a score, hashed by
+#: :func:`scoring_fingerprint`: how the gold is read (the label rules, label
+#: verification, and golden_eval, which loads it and builds each mode's input,
+#: with the noisy OCR mode's corruption), how values are compared and aligned
+#: (evaluation.metrics, and the normalisation, grounding, canonical-value, row
+#: and line code they use), and how a report aggregates them (this module).
+#:
+#: Whole modules, not named functions: a helper a scorer starts calling lives
+#: in a module listed here, where a hash of named functions would miss it. A
+#: change to the unrelated code these modules also hold moves the fingerprint
+#: too, and costs one release judged on its floors alone; pairing two
+#: yardsticks as one is the mistake this exists to stop. Left out on purpose:
+#: serving and the model, which are the candidate being measured, not the
+#: yardstick; and the schemas and configs, which are versioned on their own
+#: (``schema_versions``) and move the training targets with them.
+SCORING_CODE: tuple[str, ...] = (
+    "data_pipeline/ingestion/label_rules.py",
+    "data_pipeline/dataset_builder/label_verification.py",
+    "data_pipeline/dataset_builder/noisy_ocr_augment.py",
+    "evaluation/golden_eval.py",
+    "evaluation/run_eval.py",
+    "evaluation/metrics/*.py",
+    "common/normalize.py",
+    "common/grounding.py",
+    "common/canonical.py",
+    "common/structural_ids.py",
+    "common/schema_sections.py",
+    "common/aliases.py",
+    "common/lob.py",
+)
+
+
+def scoring_fingerprint() -> str:
+    """A short hash of the scoring code (:data:`SCORING_CODE`) as it runs now.
+
+    Recorded in every eval report (``eval_set``) and part of
+    :data:`EVAL_SET_IDENTITY`. A frozen gold is read under the label rules of
+    the running code, not frozen with them: one gold read before and after the
+    edition rule was scoped is two answer keys. So two reports of one frozen set
+    scored by code with different label rules or scorers are two yardsticks,
+    and the gate does not compare them (decision 2026-10-22).
+
+    Hashed from each module's syntax tree with its docstrings left out, not
+    from its bytes: a comment, a docstring, a line ending (the pod's checkout is
+    LF, a Windows one CRLF) or a re-wrapped line cannot change a score, and a
+    fingerprint that moved on them would make every edit a reason to compare
+    nothing. Any change to the code itself moves it, including one that turns
+    out to change no score.
+    """
+    return _scoring_fingerprint()
+
+
+@functools.lru_cache(maxsize=1)
+def _scoring_fingerprint() -> str:
+    return code_fingerprint(Path(__file__).resolve().parent.parent, SCORING_CODE)
+
+
+def code_fingerprint(root: Path, patterns: Iterable[str]) -> str:
+    """A short hash of what the modules under ``root`` matching ``patterns`` do
+    (:func:`code_shape`), in a fixed order."""
+    digest = hashlib.sha256()
+    for pattern in patterns:
+        files = sorted(root.glob(pattern))
+        if not files:
+            # A module renamed or moved changes the fingerprint; it never just
+            # drops out of it (test_the_scoring_fingerprint_covers_real_modules).
+            digest.update(f"{pattern}: missing\n".encode())
+        for path in files:
+            digest.update(f"{path.relative_to(root).as_posix()}\n".encode())
+            digest.update(code_shape(path.read_text(encoding="utf-8")).encode())
+    return digest.hexdigest()[:16]
+
+
+def code_shape(source: str) -> str:
+    """What a module's code does, as text: its syntax tree without docstrings,
+    comments or layout. What :func:`scoring_fingerprint` hashes."""
+    return repr(_shape(ast.parse(source)))
+
+
+_DOCUMENTED = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _shape(node: Any) -> Any:
+    if isinstance(node, list):
+        return [_shape(item) for item in node]
+    if not isinstance(node, ast.AST):
+        return node
+    fields = []
+    for name in node._fields:
+        value = getattr(node, name, None)
+        if (name == "body" and isinstance(node, _DOCUMENTED) and value
+                and isinstance(value[0], ast.Expr) and isinstance(value[0].value, ast.Constant)
+                and isinstance(value[0].value.value, str)):
+            value = value[1:]
+        shaped = _shape(value)
+        # Empty and absent fields are left out, so a Python release that adds
+        # one (type_params in 3.12) does not move the hash of unchanged code.
+        if shaped is None or shaped == []:
+            continue
+        fields.append((name, shaped))
+    return type(node).__name__, fields
+
+
+def yardstick_difference(
+    promoted: dict[str, Any] | None, candidate: dict[str, Any] | None, tenant_id: str | None
+) -> str | None:
+    """Why the promoted release's and the candidate's eval reports, gating
+    ``tenant_id``, were not scored on one yardstick; ``None`` when they were.
+
+    Read from each report's ``eval_set`` (:func:`eval_set_record`). A report
+    that does not record every part of :data:`EVAL_SET_IDENTITY` (written
+    before reports recorded it) cannot be shown to be on the other's yardstick,
+    so it is not.
+    """
+    tenant = paths._tenant(tenant_id)
+    promoted, candidate = promoted or {}, candidate or {}
+    for side, record in (("promoted", promoted), ("candidate", candidate)):
+        missing = [k for k in EVAL_SET_IDENTITY if not record.get(k)]
+        if missing:
+            return (f"the {side} report does not record which frozen eval set, tenant and scoring "
+                    f"code it was scored on ({', '.join(missing)} missing: written before reports "
+                    "recorded them), so it cannot be shown to be on the other's yardstick")
+    for side, record in (("promoted release", promoted), ("candidate", candidate)):
+        if record["tenant_id"] != tenant:
+            return (f"the {side} was scored on tenant {record['tenant_id']!r}'s frozen set, "
+                    f"gating tenant {tenant!r}; source ids are numbered per tenant")
+    if (promoted["frozen_at"], promoted["frozen_from_corpus"]) != (
+            candidate["frozen_at"], candidate["frozen_from_corpus"]):
+        return (f"the set was frozen again: the promoted release was scored on the set frozen "
+                f"{promoted['frozen_at']} from {promoted['frozen_from_corpus']}, the candidate on "
+                f"the set frozen {candidate['frozen_at']} from {candidate['frozen_from_corpus']}, "
+                "so one source id may be another document or another gold")
+    if promoted["scoring_fingerprint"] != candidate["scoring_fingerprint"]:
+        return (f"the two were scored by different scoring code (label rules, label verification "
+                f"or scorers; scoring fingerprint {promoted['scoring_fingerprint']} against "
+                f"{candidate['scoring_fingerprint']}), so one frozen gold was not read and scored "
+                "the same way for both")
+    return None
 
 
 def assert_eval_set_disjoint(

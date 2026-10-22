@@ -65,6 +65,13 @@ from typing import Any, Literal
 
 from common.constants import SplitRatio, split_ratio_for
 
+# A placeholder carrier ("N/A", "Unknown", "Not stated", blank) is no carrier:
+# on a policy it never counts toward a line's carriers and is never the one
+# held out. Read on the name's own words ("Other Mutual" names a carrier), and
+# defined beside normalize_carrier, whose key must never turn a carrier's name
+# into a placeholder.
+from common.normalize import PLACEHOLDER_CARRIERS, is_placeholder_carrier  # noqa: F401
+
 log = logging.getLogger(__name__)
 
 Split = Literal["train", "val", "test"]
@@ -84,26 +91,6 @@ MIN_GROUPS_TO_REPAIR = 3
 #: below it, every carrier trains - one carrier of a few is too large a share
 #: of the line's layouts to give up.
 MIN_CARRIERS_PER_LINE_FOR_HELD_OUT = 10
-
-#: What a label or a delivery writes for a carrier it does not know, as words
-#: (case and punctuation aside: "N/A" is "n a"). Not a carrier: on a policy it
-#: never counts toward the minimum and is never the one held out.
-PLACEHOLDER_CARRIERS = frozenset({
-    "n a", "na", "none", "null", "nil", "unknown", "unknown carrier", "tbd", "tba", "pending",
-    "various", "various carriers", "various insurers", "multiple", "multiple carriers", "other",
-    "not applicable", "not available", "not provided", "not known", "no carrier", "see schedule",
-})
-
-
-def is_placeholder_carrier(carrier: Any) -> bool:
-    """Whether ``carrier`` names no carrier: blank, or a placeholder
-    (:data:`PLACEHOLDER_CARRIERS`) however it is written or normalised."""
-    import re
-
-    from common.normalize import normalize_carrier
-
-    words = " ".join(re.findall(r"[a-z0-9]+", str(carrier or "").casefold()))
-    return not words or words in PLACEHOLDER_CARRIERS or (normalize_carrier(words) or "") in PLACEHOLDER_CARRIERS
 
 
 class SplitError(RuntimeError):

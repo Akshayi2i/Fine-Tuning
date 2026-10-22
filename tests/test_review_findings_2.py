@@ -61,7 +61,8 @@ def test_added_paths_are_the_merged_labels_own_and_survive_a_second_fill():
 
 # 3 - package knows the corpus its version trained on
 def _ctx(client, **over):
-    scope = SimpleNamespace(name="personal_lines", run_id=lambda version: f"personal_lines-{version}")
+    scope = SimpleNamespace(name="personal_lines", doc_types=("policy",),
+                            run_id=lambda version: f"personal_lines-{version}")
     base = dict(client=client, corpus_version="", out_version="v1", dry_run=False, tenant_id=None,
                 scope=scope, from_blob=False, release_id="release-2026.10.1",
                 calibrators={}, thresholds={})
@@ -235,7 +236,9 @@ def test_a_cached_eval_report_made_without_calibrators_is_not_reused(client, mon
 
     ctx = _ctx(client, serving_model_loader=lambda c, fmt: object(), corpus="v1")
     key = paths.eval_report("v1", scope="personal_lines")
-    client.write_json(key, {"gate_metrics": {"auto_accept_error_rate": 0.0}, "calibrated": False})
+    # Recorded for this tenant, so the missing calibrators are what refuse it.
+    client.write_json(key, {"gate_metrics": {"auto_accept_error_rate": 0.0}, "calibrated": False,
+                            "eval_set": {"tenant_id": paths._tenant(None)}})
     monkeypatch.setattr(pipeline_dag, "release_calibration", lambda c, fmt: ("cal", "thr"))
     rescored = {}
 

@@ -147,12 +147,21 @@ def latest_promoted(
     doc_type: str | None = None,
     *,
     scope: str | None = None,
+    tenant: str | None = None,
 ) -> str | None:
     """The run currently serving for this lineage, or ``None``.
 
     ``scope`` matters once more than one adapter is in flight: the baseline a
     policy run is gated against is the previous POLICY run, not whichever run
     happens to be newest.
+
+    ``tenant`` (a tenant id, ``paths._tenant(...)``; ``None`` narrows nothing)
+    narrows it to that tenant's runs, read from each run's manifest - the index
+    row does not carry the tenant. The baseline a tenant's candidate is gated
+    against is that tenant's previous release, not another tenant's newer one,
+    trained and gated on other documents. A manifest naming no tenant (written
+    before training recorded it) is kept: the gate also checks the tenant its
+    eval report was scored on.
     """
     rows = [
         r
@@ -160,9 +169,17 @@ def latest_promoted(
             client, run_type=run_type, doc_type=doc_type, scope=scope, status="promoted"
         )
     ]
+    if tenant is not None:
+        rows = [r for r in rows if (_run_tenant(r["run_id"], client) or tenant) == tenant]
     if not rows:
         return None
     return max(rows, key=lambda r: r.get("created_at") or "")["run_id"]
+
+
+def _run_tenant(run_id: str, client: BlobClient) -> str | None:
+    """The tenant a run's manifest records, or ``None`` when it records none."""
+    tenant = get(run_id, client).tenant_id
+    return paths._tenant(tenant) if tenant else None
 
 
 # --------------------------------------------------------------------------

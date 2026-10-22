@@ -221,6 +221,44 @@ _CARRIER_TRAILING = frozenset({
     "america", "corp", "corporation", "exchange",
 })
 
+#: What a label or a delivery writes for a carrier it does not know, as words
+#: (case and punctuation aside: "N/A" is "n a"). Not a carrier: on a policy it
+#: never counts toward a line's carriers and is never the one held out
+#: (data_pipeline.dataset_builder.split_groups).
+PLACEHOLDER_CARRIERS = frozenset({
+    "n a", "na", "none", "null", "nil", "unknown", "unknown carrier", "tbd", "tba", "tbc", "pending",
+    "various", "various carriers", "various insurers", "multiple", "multiple carriers", "multiple insurers",
+    "other", "not applicable", "not available", "not provided", "not known", "not stated", "not specified",
+    "unspecified", "not disclosed", "undisclosed", "to be determined", "to be advised", "to be confirmed",
+    "no carrier", "see schedule",
+})
+
+#: Insurer words that say only "an insurer", never which one: after a
+#: placeholder they leave it one ("Unknown Insurance Company" names no more than
+#: "Unknown"). The other insurer words make a name: "Other Mutual" and "Pending
+#: Mutual" are carriers.
+_INSURER_ONLY = frozenset({
+    "insurance", "ins", "insurer", "insurers", "company", "companies", "co", "carrier", "carriers",
+    "corp", "corporation", "inc", "incorporated", "llc", "ltd", "limited", "plc", "and", "of",
+})
+
+
+def is_placeholder_carrier(value: Any) -> bool:
+    """Whether ``value`` names no carrier: blank, or a placeholder
+    (:data:`PLACEHOLDER_CARRIERS`).
+
+    Read on the name's own words - case, punctuation, a leading "the" and
+    trailing words that say only "an insurer" aside - in any script. Never on
+    a key that dropped the words that make a name: read that way, "Other
+    Mutual" was "other", a placeholder (:func:`normalize_carrier` keeps them).
+    """
+    words = re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", str(value or "")).casefold())
+    if words and words[0] == "the":
+        words = words[1:]
+    while len(words) > 1 and words[-1] in _INSURER_ONLY:
+        words.pop()
+    return not words or " ".join(words) in PLACEHOLDER_CARRIERS
+
 
 def normalize_carrier(value: Any) -> str | None:
     """One key per insurer, for the held-out-carrier split and family grouping.
@@ -232,12 +270,24 @@ def normalize_carrier(value: Any) -> str | None:
     each variant looked like a small carrier, skewing which ones were chosen.
 
     Conservative past that: only a TRAILING run of insurer words goes, so
-    ``Great American`` and ``Great Northern`` stay apart.
+    ``Great American`` and ``Great Northern`` stay apart - and not an insurer
+    word that makes the name where dropping it would leave a placeholder
+    (:func:`is_placeholder_carrier`): ``Other Mutual`` is a carrier, ``other``
+    is not.
+
+    An underscore separates words, as a space does: a slugged ``dryden_mutual``
+    is ``Dryden Mutual``. Every caller keys carriers (the split, its hold-out
+    and family grouping); field values are compared by
+    :func:`normalize_entity_name`, which this leaves as it is.
     """
-    tokens = (normalize_entity_name(value) or "").split()
+    if value is None:
+        return None
+    text = unicodedata.normalize("NFKC", str(value)).replace("_", " ")
+    tokens = (normalize_entity_name(text) or "").split()
     if tokens and tokens[0] == "the":
         tokens = tokens[1:]
-    while len(tokens) > 1 and tokens[-1] in _CARRIER_TRAILING:
+    while len(tokens) > 1 and tokens[-1] in _CARRIER_TRAILING and (
+            tokens[-1] in _INSURER_ONLY or not is_placeholder_carrier(" ".join(tokens[:-1]))):
         tokens.pop()
     return " ".join(tokens) or None
 

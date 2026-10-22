@@ -277,14 +277,24 @@ def _policy_window_rows(
     label, checked = cached
     # Only in sections read over several windows: one window keeps a value
     # that records no page as it is (policy_windows.with_inferred_pages).
-    label = with_inferred_pages(label, document.ocr_pages, report,
-                                sections=multi_window_sections(document.lob, plans))
+    multi = multi_window_sections(document.lob, plans)
+    label = with_inferred_pages(label, document.ocr_pages, report, sections=multi)
     # Where the clean text prints a coverage's form numbers, which carry no page
     # of their own: they are taught on the windows that show them.
     printed = getattr(document, "_printed_pages", None)
     if printed is None and document.ocr_pages:
         printed = document._printed_pages = printed_pages_in(document.ocr_pages)
     unprinted = _unprinted_values(label, document.unprinted_values)
+    # A value no page prints and none is recorded for, in a section read over
+    # several windows: taught nowhere, as before every page was read. The
+    # declarations-led window takes values with no page, and holding this one
+    # it was left out whole - the window that shows the declarations lost to
+    # one derived value. Taught there, it would be a value to invent.
+    unpaged = [path for path, section, pages in unprinted if not pages and section in multi]
+    if unpaged:
+        label = _without_paths(label, unpaged)
+        report.unplaced.extend(f"{path.split('.', 1)[0].split('[', 1)[0]}:{path}" for path in unpaged)
+        unprinted = [entry for entry in unprinted if entry[0] not in unpaged]
     rows: list[dict[str, Any]] = []
     for plan in plans:
         held = _held_unprinted(plan, document.lob, unprinted)
@@ -386,10 +396,30 @@ def _unprinted_values(label: dict[str, Any], paths: list[str]) -> list[tuple[str
     return out
 
 
+def _without_paths(label: dict[str, Any], paths: list[str]) -> dict[str, Any]:
+    """A copy of ``label`` without the values at ``paths`` (``policy.term``,
+    ``coverages[2].limit``); a path that leads nowhere is skipped."""
+    import copy
+    import re
+
+    out = copy.deepcopy(label)
+    for path in paths:
+        steps = [int(index) if index else key for key, index in re.findall(r"([^.\[\]]+)|\[(\d+)\]", path)]
+        node: Any = out
+        try:
+            for step in steps[:-1]:
+                node = node[step]
+        except (KeyError, IndexError, TypeError):
+            continue
+        if isinstance(node, dict):
+            node.pop(steps[-1], None)
+    return out
+
+
 def _held_unprinted(plan: Any, lob: Any, unprinted: list[tuple[str, str, set[int]]]) -> list[str]:
     """The unprinted values this window's target would hold: its group's
-    sections, on its pages - or, citing no page, the window that takes values
-    with no page (``PolicyWindowPlan.holds_unpaged``)."""
+    sections, on its pages - or, citing no page, its group's only window (one
+    read over several windows has them removed first)."""
     from common.schema_sections import sections_for
 
     if not unprinted:
@@ -397,7 +427,7 @@ def _held_unprinted(plan: Any, lob: Any, unprinted: list[tuple[str, str, set[int
     sections = set(sections_for(plan.group, lob))
     window = set(plan.pages)
     return [path for path, section, pages in unprinted
-            if section in sections and (pages & window if pages else plan.holds_unpaged)]
+            if section in sections and (pages & window if pages else plan.single)]
 
 
 def classify_rows(

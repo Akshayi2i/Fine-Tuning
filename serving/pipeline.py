@@ -123,9 +123,10 @@ class ExtractionResult:
     #: A Loss Run's claims against its printed totals (calibration.reconciliation);
     #: None for every other type.
     reconciliation: dict[str, Any] | None = None
-    #: Milliseconds of every generation round this document took - one per round
-    #: of windows (a round's windows run together), or one for a document read
-    #: in one call (release measurements).
+    #: Milliseconds of every generation batch this document took - one per batch
+    #: of windows (a batch's windows run together: a policy's in batches of up to
+    #: MAX_WINDOWS_PER_BATCH, a Loss Run's one batch per round), or one for a
+    #: document read in one call (release measurements).
     window_latencies_ms: list[float] = field(default_factory=list)
 
     @property
@@ -394,6 +395,11 @@ def _extract_policy_windows(
     17-window policy costs roughly the time of its slowest window rather than
     the sum of all of them. ``latency_ms`` is the wall time actually spent.
 
+    **One refused prompt does not fail its batch.** vLLM fails every prompt of a
+    batch when it refuses one - a page too large for the context window, say -
+    so a batch whose windows all failed with one error is read again window by
+    window, and only the window that caused it fails.
+
     **One bad window does not lose the document.** A window whose output is not
     parseable JSON, or was cut off at the token limit — the usual cause on a
     dense schedule page — is split in half and retried in the next round, since
@@ -441,14 +447,24 @@ def _extract_policy_windows(
                 ), _window_answer_cap(group, route_.schema_doc_type))
                 for group, pages in pending[start:start + MAX_WINDOWS_PER_BATCH]
             ]
-            started = time.perf_counter()
-            results += generate_batch(model, requests, adapter=route_.adapter)
-            batch_ms = (time.perf_counter() - started) * 1000
-            wall_ms += batch_ms
+            batch, batch_ms = _timed_batch(model, requests, route_.adapter)
+            batches = [batch_ms]
+            if len(requests) > 1 and _whole_batch_failed(batch):
+                log.warning(
+                    "%s: every window of a batch of %d failed with one error (%s); reading them "
+                    "one by one", request.source_id, len(requests), batch[0],
+                )
+                batch = []
+                for one in requests:
+                    single, single_ms = _timed_batch(model, [one], route_.adapter)
+                    batch += single
+                    batches.append(single_ms)
+            results += batch
+            wall_ms += sum(batches)
             if latencies is not None:
                 # One entry per batch: its windows run together, and vLLM gives
                 # each the batch's wall time, so one per window would count it n times.
-                latencies.append(round(batch_ms, 1))
+                latencies.extend(round(ms, 1) for ms in batches)
 
         retry: list[tuple[str, list[int]]] = []
         for (group, pages), result in zip(pending, results, strict=True):
@@ -489,6 +505,21 @@ def _extract_policy_windows(
         len(every_page), rounds, merged.duplicates_collapsed, len(merged.conflicts), len(failed),
     )
     return merged.extraction, merged.spans, round(wall_ms, 1), sorted(every_page), flags
+
+
+def _timed_batch(model: LoadedModel, requests: list[Any], adapter: Any) -> tuple[list[Any], float]:
+    """``generate_batch`` and its wall time in milliseconds."""
+    started = time.perf_counter()
+    results = generate_batch(model, requests, adapter=adapter)
+    return results, (time.perf_counter() - started) * 1000
+
+
+def _whole_batch_failed(results: list[Any]) -> bool:
+    """Whether every result is the same error: the engine refused the batch, not
+    each window on its own (``VLLMBackend.generate_batch`` gives every slot the
+    exception)."""
+    return (bool(results) and all(isinstance(r, Exception) for r in results)
+            and len({str(r) for r in results}) == 1)
 
 
 def _likely_missed(extraction: dict[str, Any], page_texts: dict[int, str], lob: Any) -> list[str]:

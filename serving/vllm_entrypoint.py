@@ -437,6 +437,7 @@ def cold_start(
         )
 
     assert_prompt_hash(plan)
+    assert_window_plan_served(plan)
     runtimes = load_release_runtimes(
         plan, client, adapter_root=adapter_root or Path(paths.staging_root()) / "serving-adapters",
     )
@@ -496,6 +497,33 @@ def assert_prompt_hash(plan: Any) -> None:
                 f"{release.release_id} was packaged with prompt hash {release.prompt_hash[:12]}, "
                 f"and this code renders {current[:12]}: a template, schema or section map changed "
                 "since it was trained. Serve the code it was packaged from, or retrain."
+            )
+
+
+def assert_window_plan_served(plan: Any) -> None:
+    """Refuse to serve a policy release cut into other windows than this code reads.
+
+    Checked at cold start with the prompt hash, which cannot tell: a window rule
+    or a token budget changes where a policy's windows fall, not what any prompt
+    says. A release serving policies records the window plan of the corpus it
+    was trained on (``ReleaseBundle.window_plan_version``); one that records none
+    was packaged before every page was read and is refused too.
+    """
+    from data_pipeline.dataset_builder.policy_windows import window_plan_id
+
+    current = window_plan_id()
+    served = getattr(plan, "served", None)
+    releases = {r.release_id: r for r in (served if served is not None
+                                          else getattr(plan, "by_doc_type", {}).values())}
+    for release in releases.values():
+        if release.doc_types and "policy" not in release.doc_types:
+            continue
+        if release.window_plan_version != current:
+            raise ColdStartError(
+                f"{release.release_id} was trained on policies cut with window plan "
+                f"{release.window_plan_version or 'unrecorded'}, and this code reads them with "
+                f"{current}: serving it would show the model windows it never trained on. Serve the "
+                "code it was packaged from, or rebuild the corpus and retrain."
             )
 
 

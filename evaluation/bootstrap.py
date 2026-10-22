@@ -121,7 +121,9 @@ def paired_bootstrap(
     report averages over ITEMS rather than documents needs it: list_field_recall
     is the mean over every table in the set, so a policy with four tables counts
     four times, and an unweighted mean of per-document scores tested a different
-    number from the one the gate reports and the floor reads.
+    number from the one the gate reports and the floor reads. Both sides or
+    neither: a weighted mean against an unweighted one is a difference between
+    two different numbers, and bootstrapped identical scores as an improvement.
     """
     if len(current) != len(candidate):
         raise ValueError(
@@ -135,6 +137,11 @@ def paired_bootstrap(
 
     if (current_weights is not None or candidate_weights is not None) and aggregate is not None:
         raise ValueError(f"{metric}: give weights or an aggregate, not both")
+    if (current_weights is None) != (candidate_weights is None):
+        raise ValueError(
+            f"{metric}: weights for one side only. A weighted mean against an unweighted one "
+            "compares two different numbers: give both sides' weights, or neither."
+        )
     current_mean = _side_mean(metric, "baseline", current, current_weights, aggregate)
     candidate_mean = _side_mean(metric, "candidate", candidate, candidate_weights, aggregate)
     observed = candidate_mean(range(n)) - current_mean(range(n))

@@ -127,6 +127,63 @@ def test_an_empty_eval_set_does_not_pass_by_being_empty(client):
 
 
 # --------------------------------------------------------------------------
+# The yardstick an eval report records
+# --------------------------------------------------------------------------
+
+
+def test_two_reports_are_one_yardstick_only_when_set_tenant_and_scoring_code_agree():
+    """The identity was (tenant, frozen_at, corpus): two reports of one frozen
+    gold read under different label rules - the edition rule on every gold, or
+    only where the rules hold - paired as one yardstick."""
+    from evaluation.run_eval import EVAL_SET_IDENTITY, yardstick_difference
+
+    assert "scoring_fingerprint" in EVAL_SET_IDENTITY
+    record = {"tenant_id": "default", "frozen_at": "2026-10-01T00:00:00+00:00",
+              "frozen_from_corpus": "v1", "scoring_fingerprint": "0123456789abcdef"}
+    assert yardstick_difference(record, dict(record), None) is None
+    assert "frozen again" in yardstick_difference({**record, "frozen_at": "2026-09-01"}, record, None)
+    assert "tenant 'acme'" in yardstick_difference({**record, "tenant_id": "acme"}, record, None)
+    assert "gating tenant 'acme'" in yardstick_difference(record, record, "acme")
+    assert "different scoring code" in yardstick_difference(
+        {**record, "scoring_fingerprint": "fedcba9876543210"}, record, None)
+    before_fingerprints = {k: v for k, v in record.items() if k != "scoring_fingerprint"}
+    assert "scoring_fingerprint missing" in yardstick_difference(before_fingerprints, record, None)
+    assert "promoted report does not record" in yardstick_difference(None, record, None)
+
+
+def test_a_label_rule_change_moves_the_fingerprint_and_a_comment_does_not(tmp_path):
+    """Hashed from the syntax tree: a comment, a docstring or a CRLF checkout
+    cannot change a score, so they leave the fingerprint alone; a change to the
+    rule itself does not."""
+    from evaluation.run_eval import code_fingerprint
+
+    rules = tmp_path / "label_rules.py"
+    rules.write_bytes(b'def applies(doc_type, lob):\n    return lob != "commercial_auto"\n')
+    before = code_fingerprint(tmp_path, ["label_rules.py"])
+    rules.write_bytes(b'# scoped to the policy lines\r\ndef applies(doc_type, lob):\r\n'
+                      b'    """Where the edition rule holds."""\r\n\r\n'
+                      b'    return lob != "commercial_auto"  # self-contained lines\r\n')
+    assert code_fingerprint(tmp_path, ["label_rules.py"]) == before
+    rules.write_bytes(b"def applies(doc_type, lob):\n    return True\n")
+    assert code_fingerprint(tmp_path, ["label_rules.py"]) != before
+    rules.unlink()
+    assert code_fingerprint(tmp_path, ["label_rules.py"]) != before
+
+
+def test_the_scoring_fingerprint_covers_real_modules():
+    """A module renamed or moved would quietly stop being part of the yardstick."""
+    from pathlib import Path
+
+    from evaluation.run_eval import SCORING_CODE, scoring_fingerprint
+
+    root = Path(__file__).resolve().parent.parent
+    assert [p for p in SCORING_CODE if not list(root.glob(p))] == []
+    assert {"data_pipeline/ingestion/label_rules.py", "evaluation/metrics/*.py",
+            "common/normalize.py"} <= set(SCORING_CODE)
+    assert len(scoring_fingerprint()) == 16
+
+
+# --------------------------------------------------------------------------
 # Subset breakdown
 # --------------------------------------------------------------------------
 

@@ -184,6 +184,45 @@ def test_the_frozen_metadata_carries_the_review_record_the_gate_checks(client):
     assert [d.source_id for d in load_golden_set(client, tenant_id="t")] == ["policy_0001", "policy_0002"]
 
 
+def test_the_manifest_counts_real_documents_and_real_policies_per_line(client):
+    """Decision 2026-10-22: the gate's 150-per-type minimum counts real documents
+    only, and per line real policies only. A synthetic twin counted, and so did
+    an ACORD form naming the line, which is no document of its policy model."""
+    import json
+
+    twin = {"synthetic": True, "review_inherited_from": "homeowners/seed_1"}
+    _seed_test_split(client, "t", "v1", {"policy_0001": {}, "policy_0002": {}}, metadata={"policy_0002": twin})
+    client.write_text(paths.corpus_eval_split("v1", "test", "t"),
+                      client.read_text(paths.corpus_eval_split("v1", "test", "t"))
+                      + json.dumps({"source_id": "acord_0001", "doc_type": "acord"}) + "\n")
+    client.write_json(paths.golden_label("acord", "acord_0001", "t"), {})
+    client.write_json(paths.label_metadata("acord", "acord_0001", "t"),
+                      {"lob": "homeowners", "acord_form": "25", **REVIEWED})
+    client.write_json(paths.ocr_meta("acord", "acord_0001", "t"), {"page_count": 1})
+    client.write_bytes(paths.processed_page("acord", "acord_0001", 1, "png", "t"), b"png")
+
+    manifest = freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)
+    assert manifest["documents_by_doc_type"] == {"acord": 1, "policy": 2}
+    assert manifest["real_documents_by_doc_type"] == {"acord": 1, "policy": 1}
+    assert manifest["documents_by_line"] == {"homeowners": 3}
+    assert manifest["real_policies_by_line"] == {"homeowners": 1}
+
+
+def test_synthetic_twins_do_not_count_toward_the_freeze_minimum(client, monkeypatch):
+    """Decision 2026-10-22, as the gate's minimum: three test documents, two of
+    them twins of one seed, are one real document."""
+    import evaluation.freeze_eval_set as F
+
+    monkeypatch.setattr(F, "MIN_FROZEN_DOCS_PER_TYPE", 2)
+    twin = {"synthetic": True, "review_inherited_from": "homeowners/seed_1"}
+    _seed_test_split(client, "t", "v1", {"policy_0001": {}, "policy_0002": {}, "policy_0003": {}},
+                     metadata={"policy_0002": twin, "policy_0003": twin})
+    with pytest.raises(FreezeError, match=r"only \{'policy': 1\} real document"):
+        freeze_eval_set(client, "v1", tenant_id="t")
+    assert not client.list(paths.golden_eval_set_dir("t"))
+    assert freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)["small_set_accepted"] is True
+
+
 def test_a_set_frozen_before_the_rule_is_refused_until_its_records_are_copied_in(client):
     """The gate refuses, never narrows: skipping a frozen gold would score a
     smaller yardstick than earlier versions were scored on."""
@@ -408,3 +447,127 @@ def test_the_cli_can_mark_a_frozen_set_reviewed():
 
     args = cli.build_parser().parse_args(["freeze-eval-set", "--tenant", "t", "--mark-reviewed"])
     assert args.mark_reviewed and not args.mark_held_out
+
+
+# --------------------------------------------------------------------------
+# A review record belongs to one gold; a delivery's held-out carrier is recorded
+# --------------------------------------------------------------------------
+
+
+def _as_an_older_freeze_wrote_it(client, tenant, source_id):
+    """Drop the review keys from a frozen document's metadata."""
+    key = f"{paths.golden_eval_set_dir(tenant)}/{source_id}/metadata.json"
+    frozen = client.read_json(key)
+    client.write_json(key, {k: v for k, v in frozen.items()
+                            if k not in ("reviewer_id", "review_date", "draft_backend", "review_inherited_from")})
+
+
+def test_a_review_record_is_never_copied_onto_a_frozen_gold_that_has_since_changed(client):
+    """Gold v1 was frozen unreviewed; v2 corrected it and was imported with its
+    record. Copied onto the frozen v1, that record would let v1 score."""
+    from evaluation.freeze_eval_set import mark_reviewed
+    from evaluation.golden_eval import GoldenEvalError
+
+    v1 = {"policy": {"policy_number": {"raw": "WRONG-123", "parsed": "WRONG-123"}}}
+    _seed_test_split(client, "t", "v1", {"policy_0001": v1})
+    freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)
+    _as_an_older_freeze_wrote_it(client, "t", "policy_0001")
+    v2 = {"policy": {"policy_number": {"raw": "HO-998877", "parsed": "HO-998877"}}}
+    client.write_json(paths.golden_label("policy", "policy_0001", "t"), v2)
+    client.write_json(paths.label_metadata("policy", "policy_0001", "t"),
+                      {"lob": "homeowners", "reviewer_id": "b.reviewer", "review_date": "2026-10-21"})
+
+    missing = mark_reviewed(client, tenant_id="t")
+    assert list(missing) == ["policy_0001"]
+    assert "gold changed since the freeze" in missing["policy_0001"]
+    assert "freeze again" in missing["policy_0001"]
+    frozen = client.read_json(f"{paths.golden_eval_set_dir('t')}/policy_0001/metadata.json")
+    assert frozen.get("reviewer_id") is None                                  # nothing copied
+    with pytest.raises(GoldenEvalError, match="policy_0001"):
+        load_golden_set(client, tenant_id="t")
+
+
+def test_a_gold_frozen_before_the_edition_rule_is_still_the_same_gold(client):
+    """Read as the freeze reads golds (under the edition rule), a gold frozen as
+    it was stored is the gold in golden-labels/: its record is copied."""
+    from evaluation.freeze_eval_set import mark_reviewed
+
+    stored = {"forms_and_endorsements": [{"form_number": {"raw": "CG 00 01 04 13", "parsed": "CG 00 01 04 13"}}]}
+    _seed_test_split(client, "t", "v1", {"policy_0001": stored})
+    freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)
+    root = paths.golden_eval_set_dir("t")
+    assert client.read_json(f"{root}/policy_0001/golden.json") != stored     # the freeze moved the edition
+    client.write_json(f"{root}/policy_0001/golden.json", stored)             # as a freeze before the rule did
+    _as_an_older_freeze_wrote_it(client, "t", "policy_0001")
+
+    assert mark_reviewed(client, tenant_id="t") == {}
+    assert client.read_json(f"{root}/policy_0001/metadata.json")["reviewer_id"] == REVIEWED["reviewer_id"]
+    assert client.read_json(f"{root}/policy_0001/golden.json") == stored     # only the record changed
+
+
+def _gl_carrier_gold(name):
+    return {"carrier": {"name": {"raw": name, "parsed": name}}}
+
+
+def _delivered_hold_out(client, held_out):
+    """A delivered gl test split, the documents in ``held_out`` marked as the
+    draw's unseen carrier's (prepare_bundles): the split itself holds none out."""
+    labels = {"policy_0001": _gl_carrier_gold("Diamond State Insurance Company"),
+              "policy_0002": _gl_carrier_gold("Utica First Insurance Co."),
+              "policy_0003": _gl_carrier_gold("N/A")}
+    _seed_test_split(client, "t", "v1", labels, metadata={
+        sid: {"lob": "gl", "carrier": None, "held_out_carrier": sid in held_out} for sid in labels})
+    client.write_json(paths.corpus_manifest("v1", "t"), {"doc_types": ["policy"], "split_assignment": {
+        "delivered": True, "held_out_carriers": {}, "held_out_carriers_by_line": {},
+        "held_out_source_ids": sorted(held_out)}})
+
+
+def test_a_carrier_the_delivery_held_out_is_recorded_so_a_later_build_is_warned(client, caplog):
+    """The CGL draw marks its held-out carrier on its documents alone. The freeze
+    records it, by line, so training a later document of it is warned of."""
+    from evaluation.freeze_eval_set import frozen_manifest
+    from orchestration.pipeline_dag import warn_on_held_out_carriers
+
+    _delivered_hold_out(client, {"policy_0001", "policy_0003"})                # 0003: a placeholder carrier
+    manifest = freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)
+    assert manifest["held_out_carriers_by_line"] == {"policy": {"gl": "diamond state"}}
+    assert frozen_manifest(client, tenant_id="t") == manifest
+    root = paths.golden_eval_set_dir("t")
+    assert client.read_json(f"{root}/policy_0001/metadata.json")["carrier"] == "diamond state"
+    assert client.read_json(f"{root}/policy_0002/metadata.json")["carrier"] == "utica first"
+
+    warn_on_held_out_carriers(manifest, [SimpleNamespace(carrier="utica first", doc_type="policy", lob="gl")])
+    assert "held out" not in caplog.text                                     # a carrier that trained anyway
+    warn_on_held_out_carriers(manifest, [SimpleNamespace(carrier="diamond state", doc_type="policy", lob="gl")])
+    assert "diamond state (gl)" in caplog.text
+
+
+def test_two_carriers_held_out_of_one_line_are_both_recorded(client, caplog):
+    from orchestration.pipeline_dag import warn_on_held_out_carriers
+
+    _delivered_hold_out(client, {"policy_0001", "policy_0002"})
+    manifest = freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)
+    assert manifest["held_out_carriers_by_line"] == {"policy": {"gl": ["diamond state", "utica first"]}}
+    warn_on_held_out_carriers(manifest, [SimpleNamespace(carrier="utica first", doc_type="policy", lob="gl")])
+    assert "utica first (gl)" in caplog.text
+
+
+def test_marking_an_existing_set_records_the_carrier_the_delivery_held_out(client):
+    """A set frozen before the freeze recorded a delivery's held-out carrier: the
+    mark records it, and changes nothing the gate scores."""
+    from evaluation.freeze_eval_set import mark_held_out
+
+    _delivered_hold_out(client, {"policy_0001"})
+    freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)
+    root = paths.golden_eval_set_dir("t")
+    manifest = client.read_json(manifest_key(tenant_id="t"))
+    client.write_json(manifest_key(tenant_id="t"), {**manifest, "held_out_carriers_by_line": {}})
+    meta = client.read_json(f"{root}/policy_0001/metadata.json")
+    client.write_json(f"{root}/policy_0001/metadata.json", {**meta, "carrier": None})   # as an older freeze wrote it
+    golden_before = client.read_json(f"{root}/policy_0001/golden.json")
+
+    assert mark_held_out(client, tenant_id="t") == ["policy_0001"]
+    assert client.read_json(manifest_key(tenant_id="t"))["held_out_carriers_by_line"] == {
+        "policy": {"gl": "diamond state"}}
+    assert client.read_json(f"{root}/policy_0001/metadata.json")["carrier"] == "diamond state"
+    assert client.read_json(f"{root}/policy_0001/golden.json") == golden_before

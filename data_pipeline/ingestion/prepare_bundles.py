@@ -585,11 +585,19 @@ def _insured_family(gold: dict, line: str, fallback: str) -> str:
 
 
 def _printed_carrier_key(gold: dict) -> str | None:
-    """The carrier the gold names, case and punctuation aside - a folder is not
-    always one carrier (a broker's folder holds several)."""
-    name = (gold.get("carrier") or {}).get("name")
-    name = name.get("raw") if isinstance(name, dict) else name
-    return (_slug(str(name)) or None) if name else None
+    """The carrier the gold names, read and keyed as the corpus build reads and
+    keys it (``pipeline_dag._declared_carrier``: its value, else as printed;
+    :func:`common.normalize.normalize_carrier`): "Travelers Indemnity Company"
+    and "TRAVELERS" are one carrier, so the draw counts carriers, holds one out
+    and finds the unseen ones as the build does, and the freeze records the key
+    a later build is warned by. From the gold, never the folder: a folder is
+    not always one carrier (a broker's holds several)."""
+    from common.canonical import values_view
+    from common.normalize import normalize_carrier
+
+    carrier = values_view(gold.get("carrier") or {})
+    name = (carrier.get("company_name") or carrier.get("name")) if isinstance(carrier, dict) else None
+    return normalize_carrier(name) if isinstance(name, str) and name.strip() else None
 
 
 def prepare_original_bundles(
@@ -676,17 +684,17 @@ def prepare_original_bundles(
                for group, docs in sorted(members.items())]
     assignment = assign_group_splits({"policy": records}, seed=seed, with_test=not frozen,
                                      hold_out_carriers=not frozen).assignment
-    # Carriers the model trains on; a test document of any other is its reading
-    # of a carrier it never saw.
+    # Carriers the model trains on, by the key the draw counted them by; a test
+    # document of any other is its reading of a carrier it never saw.
     # A placeholder carrier ("N/A", "Unknown", none at all) is no carrier, so
     # never an unseen one (split_groups.is_placeholder_carrier).
     from data_pipeline.dataset_builder.split_groups import is_placeholder_carrier
 
-    trained = {_printed_carrier_key(gold) for name, (_, gold, _, _) in kept.items()
-               if assignment[family[name]] == "train"}
-    unseen = {name for name, (_, gold, _, _) in kept.items()
-              if assignment[family[name]] == "test" and _printed_carrier_key(gold) not in trained
-              and not is_placeholder_carrier(_printed_carrier_key(gold))}
+    carrier_of = {name: _printed_carrier_key(gold) for name, (_, gold, _, _) in kept.items()}
+    trained = {carrier_of[name] for name in kept if assignment[family[name]] == "train"}
+    unseen = {name for name in kept
+              if assignment[family[name]] == "test" and carrier_of[name] not in trained
+              and not is_placeholder_carrier(carrier_of[name])}
     key_of = {name: key for key, name in names.items()}
 
     for name, (pdf, gold, notes, gold_path) in sorted(kept.items()):
@@ -793,10 +801,21 @@ def read_reviews(path: Path) -> dict[str, dict[str, str | None]]:
     CSV (real documents alone, :data:`REVIEWS_FILE`); empty when there is none."""
     if not path.is_file():
         return {}
-    with path.open(encoding="utf-8", newline="") as fh:
-        rows = list(csv.DictReader(fh))
-    if rows and not {"document", "reviewer_id", "review_date"} <= set(rows[0]):
-        raise BundleError(f"{path} needs the columns document,reviewer_id,review_date[,draft_backend]")
+    # utf-8-sig: Excel's "CSV UTF-8" starts the file with a byte-order mark,
+    # which read as utf-8 makes the first column "\ufeffdocument".
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as fh:
+            reader = csv.DictReader(fh)
+            rows = list(reader)
+            columns = [str(name).strip() for name in reader.fieldnames or ()]
+    except UnicodeDecodeError as exc:
+        raise BundleError(
+            f"{path} is not UTF-8 text ({exc.reason} at byte {exc.start}). Save it as CSV UTF-8 "
+            "(in Excel: Save As, CSV UTF-8), so every reviewer's name keeps its letters.") from exc
+    if columns and not {"document", "reviewer_id", "review_date"} <= set(columns):
+        raise BundleError(f"{path} needs the columns document,reviewer_id,review_date[,draft_backend]; "
+                          f"its header has {columns}")
+    rows = [{str(key).strip(): value for key, value in row.items()} for row in rows]
     return {r["document"].strip().replace("\\", "/"): row_review(r) for r in rows if (r["document"] or "").strip()}
 
 

@@ -126,6 +126,21 @@ def frozen_manifest(client: BlobClient, *, tenant_id: str | None = None) -> dict
     return client.read_json(key) if client.exists(key) else {}
 
 
+def _refuse_small(per_type: dict[str, int], allow_small: bool, *, real: bool) -> dict[str, int]:
+    """The types under :data:`MIN_FROZEN_DOCS_PER_TYPE`; refused unless ``allow_small``.
+    ``real``: ``per_type`` counts real documents only."""
+    small = {t: n for t, n in sorted(per_type.items()) if n < MIN_FROZEN_DOCS_PER_TYPE}
+    if small and not allow_small:
+        counted = "real document(s)" if real else "document(s)"
+        raise FreezeError(
+            f"the test split would freeze only {small} {counted} for these types, under "
+            f"the {MIN_FROZEN_DOCS_PER_TYPE} real documents a permanent eval set needs (synthetic "
+            "twins do not count). The set cannot grow once frozen, so freeze from a build holding most of the "
+            "labeled documents. To freeze a smaller set anyway (a pilot), pass --allow-small."
+        )
+    return small
+
+
 def freeze_eval_set(
     client: BlobClient,
     corpus_version: str,
@@ -140,9 +155,11 @@ def freeze_eval_set(
     reads or changes another's.
 
     Refused when any document type would freeze with fewer than
-    :data:`MIN_FROZEN_DOCS_PER_TYPE` documents, unless ``allow_small``: the frozen
-    set is the size of the build it came from, permanently, so freezing a pilot
-    build fixes a pilot-sized yardstick for every later version.
+    :data:`MIN_FROZEN_DOCS_PER_TYPE` real documents, unless ``allow_small``: the
+    frozen set is the size of the build it came from, permanently, so freezing a
+    pilot build fixes a pilot-sized yardstick for every later version. Synthetic
+    twins do not count (decision 2026-10-22), as the gate's minimum does not
+    (``pipeline_dag.scope_eval_set_size``).
 
     Refused, before anything is copied, when any gold has no review record
     (``export_golden_labels.review_problem``, decision 2026-10-22): a gold
@@ -192,21 +209,21 @@ def freeze_eval_set(
     )
     # Every type the corpus holds, not only those that drew test documents: a
     # type with NONE in test would otherwise pass the guard and be missing from
-    # the frozen set for good, its quality never gated.
+    # the frozen set for good, its quality never gated. Real documents only
+    # (decision 2026-10-22): twins of a few seeds measure those seeds' layouts.
+    # Counted on every document first, before any label is read, then on the
+    # real ones.
     per_type: dict[str, int] = {t: 0 for t in corpus_manifest.get("doc_types") or ()}
     for doc_type in documents.values():
         per_type[doc_type] = per_type.get(doc_type, 0) + 1
-    small = {t: n for t, n in sorted(per_type.items()) if n < MIN_FROZEN_DOCS_PER_TYPE}
-    if small and not allow_small:
-        raise FreezeError(
-            f"the test split would freeze only {small} document(s) for these types, under the "
-            f"{MIN_FROZEN_DOCS_PER_TYPE} a permanent eval set needs. The set cannot grow once "
-            "frozen, so freeze from a build holding most of the labeled documents. To freeze a "
-            "smaller set anyway (a pilot), pass --allow-small."
-        )
-
+    _refuse_small(per_type, allow_small, real=False)
     loaded = {source_id: load_golden_label(source_id, doc_type, client, tenant_id)
               for source_id, doc_type in sorted(documents.items())}
+    real_per_type = dict.fromkeys(per_type, 0)
+    for source_id, doc_type in documents.items():
+        if not (loaded[source_id][1] or {}).get("synthetic", False):
+            real_per_type[doc_type] += 1
+    small = _refuse_small(real_per_type, allow_small, real=True)
     unreviewed = [(source_id, problem) for source_id, (label, metadata) in loaded.items()
                   if (problem := review_problem(label, metadata))]
     if unreviewed:
@@ -224,6 +241,8 @@ def freeze_eval_set(
 
     by_type: dict[str, int] = {}
     by_line: dict[str, int] = {}
+    real_by_type: dict[str, int] = {}
+    real_policies_by_line: dict[str, int] = {}
     for source_id, doc_type in sorted(documents.items()):
         label, metadata = loaded[source_id]
         ocr_meta = client.read_json(paths.ocr_meta(doc_type, source_id, tenant_id))
@@ -250,10 +269,13 @@ def freeze_eval_set(
             # reports the real documents' scores apart (golden_eval "real_only").
             "synthetic": bool(metadata.get("synthetic", False)),
             "frozen_from_corpus": corpus_version,
+            # The carrier as the corpus build keys it (normalised: the delivery's
+            # record, else the one the label names) - what a later build's
+            # warning compares its documents with.
+            "carrier": document_carrier(metadata, label),
             # Whether this document's carrier is absent from train and val (Fideon
             # SPEC_09 amendment item 4): held out by the split, or marked so by the
             # delivery. Evaluation reports these apart.
-            "carrier": metadata.get("carrier"),
             "held_out_carrier": held_out_carrier(source_id, metadata, held_out_ids),
             # Who reviewed the gold and when, what drafted it, and a twin's seed:
             # the gate scores a frozen gold only with a review record here.
@@ -269,6 +291,14 @@ def freeze_eval_set(
         line = line_of(metadata.get("lob"))
         if line:
             by_line[line] = by_line.get(line, 0) + 1
+        # What the gate's minimum counts (decision 2026-10-22): real documents
+        # only, a synthetic twin not among them; per line, real policies only -
+        # an ACORD form or a Loss Run naming a line is not a document of that
+        # line's policy model, and counting them overstated the line.
+        if not metadata.get("synthetic", False):
+            real_by_type[doc_type] = real_by_type.get(doc_type, 0) + 1
+            if line and doc_type == "policy":
+                real_policies_by_line[line] = real_policies_by_line.get(line, 0) + 1
 
     manifest = {
         "frozen_at": datetime.now(UTC).isoformat(),
@@ -278,13 +308,22 @@ def freeze_eval_set(
         "source_ids": sorted(documents),
         "documents_by_doc_type": dict(sorted(by_type.items())),
         # What the gate can say something about, per line. A line absent here is
-        # not measured by the gate at all.
+        # not measured by the gate at all. Every document recording the line.
         "documents_by_line": dict(sorted(by_line.items())),
+        # What the gate's production minimum reads (MIN_FROZEN_DOCS_PER_TYPE,
+        # pipeline_dag.scope_eval_set_size): real documents per type, and real
+        # policies per line. A manifest written before these has neither, and
+        # the gate then counts its scope's documents as unknown.
+        "real_documents_by_doc_type": dict(sorted(real_by_type.items())),
+        "real_policies_by_line": dict(sorted(real_policies_by_line.items())),
         "small_set_accepted": bool(small),
         # The carriers the split held out entirely. They are "unseen" to the model
         # only while no document of theirs trains; the build warns when one does.
         "held_out_carriers": split.get("held_out_carriers", {}),
-        "held_out_carriers_by_line": split.get("held_out_carriers_by_line", {}),
+        # With each carrier a delivery held out (marked on its documents only).
+        "held_out_carriers_by_line": with_delivered_carriers(
+            split.get("held_out_carriers_by_line", {}),
+            [(doc_type, *loaded[source_id]) for source_id, doc_type in sorted(documents.items())]),
         # The frozen documents reported apart as unseen carriers' (the split's own
         # hold-out and the delivery's marks alike).
         "held_out_source_ids": sorted(frozen_held_out),
@@ -303,15 +342,57 @@ def held_out_carrier(source_id: str, metadata: dict[str, Any], held_out_ids: set
     return source_id in held_out_ids or bool(metadata.get("held_out_carrier", False))
 
 
+def document_carrier(metadata: dict[str, Any], label: dict[str, Any]) -> str | None:
+    """A document's carrier as the corpus build keys it: normalised
+    (:func:`common.normalize.normalize_carrier`), the delivery's record when it
+    has one, else the carrier the label names (pipeline_dag's own reading)."""
+    from orchestration.pipeline_dag import _document_carrier
+
+    return _document_carrier(metadata, label)
+
+
+def with_delivered_carriers(
+    by_line: dict[str, dict[str, Any]] | None, documents: list[tuple[str, dict[str, Any], dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    """The split's held-out carriers (``{doc_type: {line: carrier}}``) with the
+    carrier of each document the delivery marks ``held_out_carrier``, in its line.
+
+    A carrier held out upstream - prepare_bundles' draw of real documents holds
+    one out of a line naming ten or more - is marked on its documents alone,
+    and the split records none. Recorded here, a later build that trains it is
+    warned (pipeline_dag.warn_on_held_out_carriers). A line's entry is one
+    carrier, or a sorted list when more than one is held out of it. Nothing for
+    a document with no line or no carrier, or a policy's placeholder carrier.
+    ``documents``: ``(doc_type, label, label metadata)`` per frozen document.
+    """
+    from data_pipeline.dataset_builder.split_groups import is_placeholder_carrier, line_of
+
+    merged = {doc_type: dict(lines or {}) for doc_type, lines in (by_line or {}).items()}
+    for doc_type, label, metadata in documents:
+        if not metadata.get("held_out_carrier"):
+            continue
+        line, carrier = line_of(metadata.get("lob")), document_carrier(metadata, label)
+        if not line or not carrier or (doc_type == "policy" and is_placeholder_carrier(carrier)):
+            continue
+        lines = merged.setdefault(doc_type, {})
+        known = lines.get(line)
+        carriers = ({known} if isinstance(known, str) else set(known or ())) | {carrier}
+        lines[line] = carrier if len(carriers) == 1 else sorted(carriers)
+    return {doc_type: dict(sorted(lines.items())) for doc_type, lines in sorted(merged.items())}
+
+
 def mark_held_out(client: BlobClient, *, tenant_id: str | None = None) -> list[str]:
     """Mark, in an existing frozen set, the documents the delivery calls unseen
     carriers'. Returns them.
 
     For a set frozen while the importer still dropped the delivery's
-    ``held_out_carrier`` flag: re-import the batch so the label metadata carries
-    it, then run this. Only that flag changes - never the documents, labels or
-    pages - so the yardstick stays the one every version was scored on; the gate
-    can now report these documents apart.
+    ``held_out_carrier`` flag, or before the freeze recorded the carrier a
+    delivery held out: re-import the batch so the label metadata carries the
+    flag, then run this. Only the marks change - the flag, the carrier each
+    marked document is held out by, and the manifest's held-out documents and
+    carriers by line - never the documents, labels or pages, so the yardstick
+    stays the one every version was scored on; the gate can now report these
+    documents apart, and a later build that trains the carrier is warned.
     """
     from data_pipeline.labeling.export_golden_labels import load_golden_label
 
@@ -320,15 +401,23 @@ def mark_held_out(client: BlobClient, *, tenant_id: str | None = None) -> list[s
     if not manifest:
         raise FreezeError(f"no frozen eval set at {root}/ to mark")
     marked: list[str] = []
+    marked_documents: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     for source_id in manifest.get("source_ids") or []:
         key = f"{root}/{source_id}/metadata.json"
         frozen = client.read_json(key)
         _label, metadata = load_golden_label(source_id, frozen["doc_type"], client, tenant_id)
         if held_out_carrier(source_id, metadata, set()) or frozen.get("held_out_carrier"):
             marked.append(source_id)
-            if not frozen.get("held_out_carrier"):
-                client.write_json(key, {**frozen, "held_out_carrier": True})
-    client.write_json(manifest_key(tenant_id=tenant_id), {**manifest, "held_out_source_ids": sorted(marked)})
+            gold = client.read_json(f"{root}/{source_id}/golden.json")
+            carrier = document_carrier(metadata, gold)
+            if not frozen.get("held_out_carrier") or frozen.get("carrier") != carrier:
+                client.write_json(key, {**frozen, "held_out_carrier": True, "carrier": carrier})
+            marked_documents.append((frozen["doc_type"], gold, metadata))
+    client.write_json(manifest_key(tenant_id=tenant_id), {
+        **manifest, "held_out_source_ids": sorted(marked),
+        "held_out_carriers_by_line": with_delivered_carriers(
+            manifest.get("held_out_carriers_by_line"), marked_documents),
+    })
     log.info("marked %d frozen document(s) in %s as unseen carriers': %s", len(marked), root, marked)
     return marked
 
@@ -339,11 +428,20 @@ def mark_reviewed(client: BlobClient, *, tenant_id: str | None = None) -> dict[s
 
     For a set frozen before the freeze carried the record: the gate refuses a
     frozen gold with none (golden_eval.load_golden_set). Only the review keys
-    change, and only to a real record - never the documents, labels or pages -
-    so the yardstick stays the one every version was scored on. A document
-    still listed has no record in its label metadata either: review it and
-    import it again, or delete the set and freeze again.
+    change, and only to a real record of the frozen gold itself - never the
+    documents, labels or pages - so the yardstick stays the one every version
+    was scored on.
+
+    A record is copied only while the gold in golden-labels/, read as the freeze
+    reads it (under the edition rule), is the frozen gold. A gold corrected and
+    imported again since the freeze carries the record of its new version:
+    copied onto the old frozen one, it would let a gold nobody reviewed score.
+
+    A document still listed either has no record in its label metadata (review
+    it and import it again) or its gold changed since the freeze (delete the set
+    and freeze again).
     """
+    from data_pipeline.ingestion.label_rules import under_edition_rule
     from data_pipeline.labeling.export_golden_labels import load_golden_label, review_problem, review_record
 
     root = paths.golden_eval_set_dir(tenant_id)
@@ -356,8 +454,22 @@ def mark_reviewed(client: BlobClient, *, tenant_id: str | None = None) -> dict[s
         frozen = client.read_json(key)
         if review_problem(None, frozen) is None:
             continue
-        _label, metadata = load_golden_label(source_id, frozen["doc_type"], client, tenant_id)
-        if problem := review_problem(None, metadata):
+        doc_type = frozen["doc_type"]
+        if not (client.exists(paths.golden_label(doc_type, source_id, tenant_id))
+                and client.exists(paths.label_metadata(doc_type, source_id, tenant_id))):
+            missing[source_id] = ("its gold is no longer in golden-labels/, so no review record of the frozen "
+                                  "gold is there to copy. Delete the set and freeze again")
+            continue
+        label, metadata = load_golden_label(source_id, doc_type, client, tenant_id)
+        # Each read as its reader reads it: the gate reads the frozen gold under
+        # the edition rule by the frozen line, the freeze read the label by its own.
+        frozen_gold = under_edition_rule(client.read_json(f"{root}/{source_id}/golden.json"), doc_type,
+                                         frozen.get("lob"))
+        if frozen_gold != label:
+            missing[source_id] = ("gold changed since the freeze: the review record in its label metadata is "
+                                  "the new gold's, not the frozen one's. Delete the set and freeze again")
+            continue
+        if problem := review_problem(label, metadata):
             missing[source_id] = problem
             continue
         client.write_json(key, {**frozen, **review_record(metadata)})

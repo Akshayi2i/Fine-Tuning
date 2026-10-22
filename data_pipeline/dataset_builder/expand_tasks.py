@@ -475,7 +475,7 @@ def page_tokens(text: str | None, page: int, total: int, sections: str | None = 
 
 
 def fit_windows_to_text(
-    windows: list[list[int]], cost: Callable[[int], int], room: int,
+    windows: list[list[int]], cost: Callable[[int], int], room: int, *, overlap: int = 0,
 ) -> list[list[int]]:
     """``windows`` with each one whose pages cost more than ``room`` split into
     the fewest consecutive windows that fit, as evenly as they allow.
@@ -487,26 +487,74 @@ def fit_windows_to_text(
     refuses. A window that fits is left exactly as planned, so a typical
     document reads as it did. A page that cannot fit even alone keeps a window
     of its own: the cap check names it, with the arithmetic.
+
+    A run split with ``overlap`` shared pages (consecutive windows sharing
+    pages) is refitted as one run, each window again opening on the last
+    ``overlap`` pages of the one before (:func:`_fit_overlapping`). Fitted window
+    by window, a dense personal-auto schedule became twelve calls where seven
+    were planned, five page breaks covered by no window.
     """
     out: list[list[int]] = []
-    for window in windows:
-        if sum(cost(page) for page in window) <= room:
-            out.append(window)
-            continue
-        # The fewest windows: filled in page order. Then as evenly as the same
-        # number allows, when every one of the even split fits too.
-        greedy: list[list[int]] = []
-        used = 0
-        for page in window:
-            if greedy and greedy[-1] and used + cost(page) <= room:
-                greedy[-1].append(page)
-                used += cost(page)
-            else:
-                greedy.append([page])
-                used = cost(page)
-        even = _split_evenly(window, -(-len(window) // len(greedy)))
-        fits = len(even) == len(greedy) and all(sum(cost(p) for p in w) <= room for w in even)
-        out.extend(even if fits else greedy)
+    for chain in _overlap_chains(windows):
+        if all(sum(cost(page) for page in window) <= room for window in chain):
+            out.extend(chain)
+        elif overlap and len(chain) > 1:
+            run = sorted({page for window in chain for page in window})
+            out.extend(_fit_overlapping(run, cost, room, overlap))
+        else:
+            for window in chain:
+                out.extend(_fit_window(window, cost, room))
     return out
+
+
+def _overlap_chains(windows: list[list[int]]) -> list[list[list[int]]]:
+    """``windows`` grouped into chains of consecutive windows that share pages:
+    one split run each, every other window a chain of its own."""
+    chains: list[list[list[int]]] = []
+    for window in windows:
+        if chains and set(chains[-1][-1]) & set(window):
+            chains[-1].append(window)
+        else:
+            chains.append([window])
+    return chains
+
+
+def _fit_overlapping(run: list[int], cost: Callable[[int], int], room: int, overlap: int) -> list[list[int]]:
+    """A run in page order as windows that fit ``room``, each after the first
+    opening on the last ``overlap`` pages of the one before. A window that
+    could hold no page beyond the shared ones starts after them, as
+    :func:`_split_overlapping` does."""
+    out: list[list[int]] = []
+    start = 0
+    while start < len(run):
+        end, used = start, 0
+        while end < len(run) and (end == start or used + cost(run[end]) <= room):
+            used += cost(run[end])
+            end += 1
+        out.append(run[start:end])
+        if end >= len(run):
+            break
+        start = end - overlap if end - overlap > start else end
+    return out
+
+
+def _fit_window(window: list[int], cost: Callable[[int], int], room: int) -> list[list[int]]:
+    """One window as the fewest consecutive windows that fit, filled in page
+    order, then as evenly as the same number allows when every one of the even
+    split fits too."""
+    if sum(cost(page) for page in window) <= room:
+        return [window]
+    greedy: list[list[int]] = []
+    used = 0
+    for page in window:
+        if greedy and greedy[-1] and used + cost(page) <= room:
+            greedy[-1].append(page)
+            used += cost(page)
+        else:
+            greedy.append([page])
+            used = cost(page)
+    even = _split_evenly(window, -(-len(window) // len(greedy)))
+    fits = len(even) == len(greedy) and all(sum(cost(p) for p in w) <= room for w in even)
+    return even if fits else greedy
 
 

@@ -997,9 +997,67 @@ def test_weights_make_each_side_a_weighted_mean():
     with pytest.raises(ValueError, match="not both"):
         paired_bootstrap("m", current, candidate, current_weights=weights, aggregate=max)
     with pytest.raises(ValueError, match="aligned with the scores"):
-        paired_bootstrap("m", current, candidate, current_weights=[1.0])
+        paired_bootstrap("m", current, candidate, current_weights=[1.0], candidate_weights=weights)
     with pytest.raises(ValueError, match="above zero"):
-        paired_bootstrap("m", current, candidate, candidate_weights=[0.0] * 20)
+        paired_bootstrap("m", current, candidate, current_weights=weights, candidate_weights=[0.0] * 20)
+
+
+def test_weights_for_one_side_only_are_refused():
+    """A weighted mean against an unweighted one is a difference between two
+    different numbers: identical scores bootstrapped as +0.15, improved."""
+    from evaluation.bootstrap import paired_bootstrap
+
+    scores = [0.5, 1.0] * 10
+    for side in ("current_weights", "candidate_weights"):
+        with pytest.raises(ValueError, match="one side only"):
+            paired_bootstrap("m", scores, scores, **{side: [1.0, 4.0] * 10})
+    same = paired_bootstrap("m", scores, scores, current_weights=[1.0, 4.0] * 10,
+                            candidate_weights=[1.0, 4.0] * 10)
+    assert same.observed == 0.0 and not same.improved
+
+
+def test_a_baseline_on_another_yardstick_is_judged_on_floors_alone():
+    """Decision 2026-10-22: the promoted release's scores from another frozen
+    set, tenant or scoring code are not compared - not as a bootstrap, not as a
+    point estimate, not for the improvement rule. The floors still apply."""
+    metrics = {name: 0.96 for name in GATING_METRICS}
+    metrics.update(ece_confidence=0.04, confusable_misattribution_rate=0.02, false_null_rate=0.03,
+                   auto_accept_error_rate=0.01, schema_validity_rate=1.0)
+    better = {**metrics, "field_normalized_match": 0.995, "list_field_recall": 0.999}
+    compared = promotion_gate(dict(metrics), better)
+    assert "field_normalized_match" in compared.failed_gates
+
+    reason = "the set was frozen again"
+    result = promotion_gate(dict(metrics), better, baseline_not_comparable=reason,
+                            per_document={"list_field_recall": ([1.0] * 20, [0.5] * 20)})
+    assert result.passed and not result.is_first_version, result.report()
+    assert result.baseline_not_comparable == reason
+    assert {v.basis for v in result.verdicts} == {"floor_only"}
+    assert any("were not compared" in w and reason in w for w in result.warnings)
+    assert "another yardstick" in result.report()
+
+    floor = promotion_gate({**metrics, "list_field_recall": 0.60}, better,
+                           baseline_not_comparable=reason)
+    assert floor.failed_gates == ["list_field_recall"]
+
+
+def test_an_override_must_name_real_gates_and_says_what_it_did_not_waive():
+    from evaluation.gating import GateError, GateOverrideRecord, is_gate
+
+    reason = "classifier retrain tracked in FID-118, shipping the extractor gain now"
+    with pytest.raises(GateError, match="not a gate"):
+        GateOverrideRecord("A. Reviewer", reason, ["doc_type_classifier"]).validate()
+    assert all(is_gate(g) for g in [*GATING_METRICS, "improvement", "cross_type_regression_evidence",
+                                    "cross_type:acord"])
+    assert not is_gate("cross_type:invoice") and not is_gate("alias_accuracy")
+
+    result = promotion_gate(
+        {**_passing(), "doc_type_classifier_accuracy": 0.90}, None,
+        override=GateOverrideRecord(reason=reason, approver="A. Reviewer",
+                                    waived_gates=["doc_type_classifier_accuracy", "ece_confidence"]),
+    )
+    assert result.passed and result.waived == ["doc_type_classifier_accuracy"]
+    assert any("['ece_confidence'], which did not fail" in w for w in result.warnings)
 
 
 @pytest.mark.parametrize("value", [" ", "-", "n/a", "none", "fix", "TBD", ""])

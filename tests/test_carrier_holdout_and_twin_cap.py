@@ -236,6 +236,50 @@ def test_a_doc_type_with_no_line_holds_out_as_before():
     assert held_out_carrier_per_line(lined, seed=42, split_of=splits).held == {"commercial_auto": "N/A"}
 
 
+@pytest.mark.parametrize("name", ["Multiple Insurers", "Not Stated", "To be determined", "Undisclosed",
+                                  "Not disclosed", "Unknown Insurance Company", "The Other Insurance Co", "n/a"])
+def test_every_way_of_writing_no_carrier_is_a_placeholder(name):
+    from common.normalize import normalize_carrier
+    from data_pipeline.dataset_builder.split_groups import is_placeholder_carrier
+
+    assert is_placeholder_carrier(name) and is_placeholder_carrier(normalize_carrier(name))
+
+
+@pytest.mark.parametrize("name", ["Other Mutual", "Pending Mutual", "None Mutual",
+                                  "Other Mutual Insurance Company", "Unknown Indemnity Company"])
+def test_a_carrier_whose_name_starts_with_a_placeholder_word_is_a_carrier(name):
+    """Read on normalize_carrier's key, which drops trailing insurer words,
+    "Other Mutual" was "other" - a placeholder, never counted or held out."""
+    from common.normalize import normalize_carrier
+    from data_pipeline.dataset_builder.split_groups import is_placeholder_carrier
+
+    assert not is_placeholder_carrier(name)
+    assert not is_placeholder_carrier(normalize_carrier(name))              # the key the corpus build keeps
+    assert normalize_carrier(name) != normalize_carrier(name.split()[0])
+
+
+def test_a_carrier_named_with_a_placeholder_word_counts_toward_the_minimum():
+    """Keyed as the corpus build keys it: nine carriers and "Other Mutual" are ten."""
+    from common.normalize import normalize_carrier
+
+    records, splits = _ten_carriers()
+    nine = [r for r in records if not r.group_id.startswith("c9-")]
+    nine_splits = {g: s for g, s in splits.items() if not g.startswith("c9-")}
+    other = [_record(f"om-{s}", normalize_carrier("Other Mutual Insurance Company"), size=20)
+             for s in ("train", "val", "test")]
+    other_splits = {f"om-{s}": s for s in ("train", "val", "test")}
+    choice = held_out_carrier_per_line(nine + other, seed=42, split_of={**nine_splits, **other_splits})
+    assert not choice.below_minimum and choice.held == {"homeowners": "carrier 0"}
+
+
+def test_a_slugged_carrier_is_the_carrier_it_spells():
+    """A delivery's carrier column may be a slug; the label prints the name."""
+    from common.normalize import normalize_carrier
+
+    assert normalize_carrier("dryden_mutual") == normalize_carrier("Dryden Mutual Insurance Company") == "dryden"
+    assert normalize_carrier("great_american") != normalize_carrier("great_northern")
+
+
 # --------------------------------------------------------------------------
 # Twin cap
 # --------------------------------------------------------------------------
@@ -340,6 +384,19 @@ def test_after_freezing_a_carrier_held_out_of_a_line_is_watched_in_that_line(cap
     same_line = SimpleNamespace(carrier="acme", doc_type="policy", lob="homeowners")
     warn_on_held_out_carriers(manifest, [same_line])
     assert "acme (homeowners)" in caplog.text
+
+
+def test_a_line_holding_out_several_carriers_or_an_older_key_is_still_watched(caplog):
+    """The freeze lists the carriers held out of one line when there are more
+    than one, and a carrier recorded under an older key still matches."""
+    from orchestration.pipeline_dag import warn_on_held_out_carriers
+
+    manifest = {"held_out_carriers": {}, "held_out_carriers_by_line": {"policy": {"gl": ["dryden_mutual", "zenith"]}}}
+    warn_on_held_out_carriers(manifest, [SimpleNamespace(carrier="acme", doc_type="policy", lob="gl")])
+    assert "held out" not in caplog.text
+    warn_on_held_out_carriers(manifest, [SimpleNamespace(carrier="zenith", doc_type="policy", lob="gl"),
+                                         SimpleNamespace(carrier="dryden", doc_type="policy", lob="gl")])
+    assert "dryden (gl)" in caplog.text and "zenith (gl)" in caplog.text
 
 
 def test_the_render_mode_comes_from_the_manifest_or_the_gold(tmp_path):

@@ -226,6 +226,24 @@ DEFAULT_DELTA = 0.015
 #: defect. They are the metrics the business actually experiences.
 PRIMARY_METRICS: tuple[str, ...] = ("field_normalized_match", "list_field_recall")
 
+#: The gates beside GATING_METRICS that promotion_gate can fail, by the names an
+#: override waives them under: the improvement rule, and a continued run's
+#: missing cross-type evidence. A continued run's per-type regression is
+#: ``cross_type:<doc_type>`` (:func:`is_gate`).
+OTHER_GATES: tuple[str, ...] = ("improvement", "cross_type_regression_evidence")
+
+
+def is_gate(name: str) -> bool:
+    """Whether ``name`` is a gate :func:`promotion_gate` can fail, so an override
+    can waive it: a gating metric, one of :data:`OTHER_GATES`, or
+    ``cross_type:<doc_type>`` for an active document type."""
+    from common.constants import ACTIVE_DOC_TYPES
+
+    if name in GATING_METRICS or name in OTHER_GATES:
+        return True
+    kind, sep, doc_type = name.partition(":")
+    return bool(sep) and kind == "cross_type" and doc_type in ACTIVE_DOC_TYPES
+
 
 class GateError(RuntimeError):
     """Raised when a gate decision cannot be made."""
@@ -351,6 +369,15 @@ class GateOverrideRecord:
                 "an override must name the gates it waives. A blanket override is the "
                 "unaccountable waiver in a different costume."
             )
+        # A misspelt gate waives nothing, and the release it was written for
+        # stays blocked by the gate the approver meant.
+        unknown = sorted(g for g in self.waived_gates if not is_gate(g))
+        if unknown:
+            raise GateError(
+                f"an override names {unknown}, which is not a gate. Name each gate as the gate "
+                f"decision names it: a gating metric ({', '.join(sorted(GATING_METRICS))}), "
+                f"{' or '.join(OTHER_GATES)}, or cross_type:<doc_type>."
+            )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -393,6 +420,12 @@ class GateResult:
     #: an eval set accepted below its minimum size, for one.
     warnings: list[str] = field(default_factory=list)
 
+    #: Why the promoted release's scores were not compared with the candidate's
+    #: (another frozen set, another tenant's set, other scoring code), when they
+    #: were not: the candidate was then judged on its floors alone. Not a first
+    #: release - there is a predecessor, on another yardstick.
+    baseline_not_comparable: str | None = None
+
     @property
     def improved_metrics(self) -> list[str]:
         return [v.name for v in self.verdicts if v.improved]
@@ -404,6 +437,11 @@ class GateResult:
         lines = [f"promotion gate: {verdict}"]
         if self.is_first_version:
             lines.append("  first release — gated on absolute floors alone (arch v2.1 §15.5)")
+        if self.baseline_not_comparable:
+            lines.append(
+                "  promoted release on another yardstick — gated on absolute floors alone: "
+                f"{self.baseline_not_comparable}"
+            )
         lines.extend(f"  {v.describe()}" for v in self.verdicts if not v.unmeasured)
         lines.extend(
             f"  UNMEASURED: {v.name}" for v in self.verdicts if v.unmeasured and v.applicable
@@ -426,6 +464,7 @@ class GateResult:
             "passed": self.passed,
             "scope": self.scope,
             "is_first_version": self.is_first_version,
+            "baseline_not_comparable": self.baseline_not_comparable,
             "not_applicable": sorted(
                 v.name for v in self.verdicts if v.unmeasured and not v.applicable
             ),
@@ -453,6 +492,7 @@ def promotion_gate(
     scope: Any = None,
     small_eval_set: bool = False,
     warnings: Sequence[str] | None = None,
+    baseline_not_comparable: str | None = None,
 ) -> GateResult:
     """Decide whether a candidate release may be promoted.
 
@@ -486,9 +526,25 @@ def promotion_gate(
         warnings: what the caller knows about the evidence that a reader of the
             decision must see (per-document scores it could not pair, and why).
             Recorded first in ``GateResult.warnings``.
+        baseline_not_comparable: why ``current_metrics`` are not on the
+            candidate's yardstick - scored on a set frozen again, on another
+            tenant's set, or under other scoring code (decision 2026-10-22).
+            Given, the candidate is judged on its floors alone: no
+            non-inferiority comparison and no improvement rule, and the reason
+            is a warning in the decision. The old release is not scored again.
     """
     result = GateResult(passed=True, is_first_version=current_metrics is None)
     result.warnings.extend(warnings or ())
+    if baseline_not_comparable and current_metrics is not None:
+        # Numbers from two yardsticks say nothing about each other: a drop may be
+        # the new golds, a rise the new label rules.
+        result.baseline_not_comparable = baseline_not_comparable
+        result.warnings.append(
+            f"the promoted release's scores were not compared: {baseline_not_comparable}. The "
+            "candidate was judged on its floors alone (decision 2026-10-22): no non-inferiority "
+            "comparison and no improvement rule."
+        )
+        current_metrics, per_document = None, None
     baseline = current_metrics or {}
     floor_table = floors_for(scope) if floors is None else floors
     not_applicable = not_applicable_for(scope)
@@ -583,10 +639,15 @@ def promotion_gate(
         result.blocking_reasons = [r for _, r in result.blocks]
         unused = sorted(set(result.override.waived_gates) - set(waived))
         if unused:
-            log.warning(
-                "override names %s, which did not fail. Recorded as written, but the waiver "
-                "covers nothing there.", unused,
+            # In the decision, not only the log: a reader of a passed release
+            # must not take a waiver of a gate that never failed for one that
+            # was needed.
+            warning = (
+                f"the override names {unused}, which did not fail here, so it waived nothing "
+                "there. Recorded as written."
             )
+            log.warning("%s", warning)
+            result.warnings.append(warning)
 
     if small_eval_set:
         result.warnings.append(
@@ -665,9 +726,11 @@ def _require_improvement(result: GateResult, fixes_defect: str | None) -> None:
 
     Without this a model could pass forever on non-inferiority alone — every
     release no worse than the last, none better, and the cycle producing nothing.
-    The first release is exempt: there is nothing to improve on.
+    The first release is exempt: there is nothing to improve on. So is a
+    release whose predecessor was scored on another yardstick: there is nothing
+    to measure an improvement against.
     """
-    if result.is_first_version or fixes_defect:
+    if result.is_first_version or result.baseline_not_comparable or fixes_defect:
         return
     improved = [v.name for v in result.verdicts if v.name in PRIMARY_METRICS and v.improved]
     if improved:

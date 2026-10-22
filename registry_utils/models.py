@@ -474,6 +474,11 @@ class ReleaseBundle(_Base):
     gate_reports: dict[str, str] = Field(default_factory=dict)
 
     prompt_hash: str
+    #: The window plan the corpus behind a policy release was cut with
+    #: (``policy_windows.window_plan_id``). Serving refuses a policy release
+    #: whose plan is not the one its code reads with: the prompt hash cannot
+    #: tell, since budgets and the window rule change windows, not prompts.
+    window_plan_version: str | None = None
     schema_versions: dict[str, str] = Field(default_factory=dict)
     ocr_pin: dict[str, Any] = Field(default_factory=dict)
     vision_config_hash: str

@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 from artifact_registry.blob_client import BlobClient, for_ingestion
 from common.constants import ACTIVE_DOC_TYPES, DAY_ZERO_MIN_LABELS_PER_TYPE
-from common.scopes import Scope, load_scopes, parse_scopes
+from common.scopes import Scope, ScopeError, load_scopes, parse_scopes
 from orchestration import pipeline_dag
 from orchestration.pipeline_dag import (
     MultiScopeReport,
@@ -201,10 +201,11 @@ def gate_override_from(
 
     The one way past a gate that failed: a named person, a written reason and
     the gates it waives, all three or none, validated before any work exactly
-    as the gate validates it (``GateOverrideRecord.validate``), and recorded in
-    the gate decision and the release bundle as waived, never as passed. It
-    lifts only the named gates that failed. One scope per run, because a waiver
-    is a decision about one release.
+    as the gate validates it (``GateOverrideRecord.validate``, which also refuses
+    a name that is not a gate), and recorded in the gate decision and the
+    release bundle as waived, never as passed. It lifts only the named gates
+    that failed. One scope per run, because a waiver is a decision about one
+    release.
     """
     approver = getattr(args, "override_approver", None)
     reason = getattr(args, "override_reason", None)
@@ -461,11 +462,49 @@ def build_parser() -> argparse.ArgumentParser:
 QUICK_COMMANDS = frozenset({"deploy-endpoint", "rollback-endpoint"})
 
 
+def flag_problem(args: argparse.Namespace) -> str | None:
+    """Why these flags cannot make a run; ``None`` when they can.
+
+    Checked by :func:`main` before the command detaches on the pod. While only
+    :func:`build_context` checked them, after the detach, a refused
+    ``--fixes-defect`` or ``--override-*`` surfaced inside tmux with the
+    operator's command already exited 0, and off the pod as a traceback. Every
+    scope's ``--release-id`` and ``--fixes-defect`` and the written override are
+    read here exactly as ``build_context`` reads them.
+    """
+    if args.command == "freeze-eval-set":
+        marks = [flag for flag, given in (("--mark-held-out", args.mark_held_out),
+                                          ("--mark-reviewed", args.mark_reviewed)) if given]
+        if marks and (args.corpus or args.allow_small):
+            # Given together, the freeze flags were dropped without a word.
+            return (f"freeze-eval-set {' '.join(marks)} changes the tenant's EXISTING frozen set "
+                    "and freezes nothing, so it takes no --corpus or --allow-small")
+        if not marks and not args.corpus:
+            return "freeze-eval-set needs --corpus (or --mark-held-out / --mark-reviewed on a frozen set)"
+        return None
+    if args.command not in ("finetune", "package", "all"):
+        return None
+    try:
+        scopes = parse_scopes(getattr(args, "scopes", None))
+        for scope in scopes:
+            release_id_for(getattr(args, "release_id", None), scope, scope_count=len(scopes))
+            fixes_defect_for(getattr(args, "fixes_defect", None), scope, scopes)
+        gate_override_from(args, scopes)
+    except (ScopeError, ReleaseIdError, FixesDefectError, GateOverrideError) as exc:
+        return str(exc)
+    return None
+
+
 def main(argv: Iterable[str] | None = None) -> int:
-    args = build_parser().parse_args(list(argv) if argv is not None else None)
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
     from common.logging_setup import setup as setup_logging
 
     setup_logging(logging.DEBUG if args.verbose else logging.INFO)
+
+    # Before the detach below: a refusal after it is seen by nobody.
+    if problem := flag_problem(args):
+        parser.error(problem)
 
     # On the pod, every long command runs detached in tmux, so shutting the laptop
     # or losing Wi-Fi cannot stop it. Flipping the endpoint takes seconds.
@@ -482,18 +521,19 @@ def main(argv: Iterable[str] | None = None) -> int:
         from evaluation.freeze_eval_set import freeze_eval_set, mark_held_out, mark_reviewed
         from registry_utils.write_run_manifest import capture_git_commit
 
-        if args.mark_held_out:
-            marked = mark_held_out(BlobClient(), tenant_id=args.tenant)
-            print(json.dumps({"held_out_source_ids": marked}, indent=2))
-            return 0
-        if args.mark_reviewed:
+        if args.mark_held_out or args.mark_reviewed:
+            # Each one named runs: given together, --mark-reviewed was skipped
+            # without a word.
+            marked: dict[str, object] = {}
+            if args.mark_held_out:
+                marked["held_out_source_ids"] = mark_held_out(BlobClient(), tenant_id=args.tenant)
+            missing: dict[str, str] = {}
+            if args.mark_reviewed:
+                missing = mark_reviewed(BlobClient(), tenant_id=args.tenant)
+                marked["still_without_review_record"] = missing
+            print(json.dumps(marked, indent=2, ensure_ascii=False))
             # Non-zero while any frozen gold still has no record: the gate refuses the set.
-            missing = mark_reviewed(BlobClient(), tenant_id=args.tenant)
-            print(json.dumps({"still_without_review_record": missing}, indent=2, ensure_ascii=False))
             return 1 if missing else 0
-        if not args.corpus:
-            build_parser().error(
-                "freeze-eval-set needs --corpus (or --mark-held-out / --mark-reviewed on a frozen set)")
         manifest = freeze_eval_set(
             BlobClient(), args.corpus, tenant_id=args.tenant, git_commit=capture_git_commit(),
             allow_small=args.allow_small,

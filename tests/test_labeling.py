@@ -294,6 +294,31 @@ def test_export_writes_label_and_provenance(client):
     assert meta["lob"] == "workers_comp"
 
 
+def test_a_relabel_keeps_what_the_delivery_recorded(client):
+    """Rewritten from the review alone, a re-reviewed gold lost its delivered
+    split and held-out mark, and the purge plan the folders to find its copies."""
+    from data_pipeline.labeling.export_golden_labels import DELIVERY_KEYS
+
+    delivered = {
+        "imported_from": "HO_0002", "split": "test", "held_out_carrier": True, "carrier": "Dryden Mutual",
+        "twin_index": None, "synthetic": False, "template_id": "t1", "render_mode": "scan",
+        "document_kind": "original",
+        "imported_from_history": [{"folder": "HO_0001", "batch": "personal-v1"},
+                                  {"folder": "HO_0002", "batch": None}],
+    }
+    assert set(delivered) == set(DELIVERY_KEYS)
+    key = paths.label_metadata("policy", "policy_0001")
+    client.write_json(key, {**delivered, "reviewer_id": "bob", "review_date": "2026-10-01",
+                            "unprinted_values": ["policy.policy_term_months"]})
+
+    export_golden_label(_policy_label(), "policy_0001", "policy", client, reviewer_id="alice",
+                        lob="property")
+    meta = client.read_json(key)
+    assert {k: meta[k] for k in DELIVERY_KEYS} == delivered
+    assert meta["reviewer_id"] == "alice" and meta["review_date"] != "2026-10-01"
+    assert "unprinted_values" not in meta                              # read from the old label
+
+
 def test_labeled_source_ids_are_listed(client):
     for source_id in ("policy_0001", "policy_0002"):
         export_golden_label(_policy_label(), source_id, "policy", client, reviewer_id="alice",
