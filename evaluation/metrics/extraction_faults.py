@@ -1,6 +1,6 @@
-"""False nulls, hallucinations and page-selection recall (arch v2.1 §15.2).
+"""False nulls and hallucinations (arch v2.1 §15.2).
 
-Three gating metrics that share a shape — each counts a specific way an
+Metrics that share a shape — each counts a specific way an
 extraction can be wrong that **field accuracy cannot see** — and that is why they
 are separate metrics rather than folded into one number.
 
@@ -16,10 +16,8 @@ are separate metrics rather than folded into one number.
   wrong value is worse than an absent one, because an absent one gets reviewed
   and a confident wrong one gets used.
 
-* **Page-selection recall.** For routed policies: a field-bearing page the
-  selector did not choose. The extraction that follows cannot be right about a
-  page it never saw, so this caps everything downstream of it — and it fails
-  silently, because the extraction looks complete against the pages it did get.
+Page-selection recall is gone: every page is read, chunk by chunk, never
+selected pages (decision 2026-10-19), so there is no selector to score.
 """
 
 from __future__ import annotations

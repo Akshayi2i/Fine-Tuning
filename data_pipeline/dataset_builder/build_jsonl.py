@@ -234,7 +234,7 @@ def expand_document(
             lob=document.lob,
             tenant_id=document.tenant_id,
             split=split,
-            # Recorded, not enforced: de-identification is blocked (IMPL-05 §1).
+            # Recorded, not enforced: no de-identification, Option A (IMPL-05 §1).
             deidentified=False,
         )
         row["mode_index"] = mode_index
@@ -258,8 +258,8 @@ def _policy_window_rows(
     carries - clean, corrupted or none - as serving finds it for the same input.
     """
     page_count = len(document.image_paths)
-    routed, declarations_page = pages_to_read(ocr_pages, page_count)
-    plans = plan_windows(document.lob, routed, declarations_page)
+    every_page, declarations_page = pages_to_read(ocr_pages, page_count)
+    plans = plan_windows(document.lob, every_page, declarations_page)
 
     report = TargetReport()
     # A value a rule added to a synthetic label is taught only if the document's

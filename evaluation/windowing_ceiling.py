@@ -68,8 +68,8 @@ def oracle(source_id: str, label: dict, lob: Any, page_count: int,
 
     line = ", ".join(lob) if isinstance(lob, list) else str(lob)
     result = DocumentResult(source_id, line, synthetic, page_count)
-    routed, declarations_page = pages_to_read(ocr_pages, page_count)
-    plans = plan_windows(lob, routed, declarations_page)
+    every_page, declarations_page = pages_to_read(ocr_pages, page_count)
+    plans = plan_windows(lob, every_page, declarations_page)
     report = TargetReport()
     # As the dataset build does: pages placed from the OCR text, when there is one.
     placed = with_inferred_pages(label, ocr_pages, report,

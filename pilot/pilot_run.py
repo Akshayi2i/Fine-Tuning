@@ -1,7 +1,7 @@
 """Experiment C — the pilot training run (IMPL-15 §3, arch §16c).
 
-25–30 annotated documents per type, pilot split ratios (~70/18/12), Foundation
-plus per-type adapters, evaluated on the held-out pilot test split.
+25–30 annotated documents per type, pilot split ratios (~70/18/12), one adapter
+per training scope (arch v2.1 §4.1), evaluated on the held-out pilot test split.
 
 This is the **minimum experiment that tests the architecture's generalisation
 claim**. Experiments A and B cannot: A uses no fine-tuning, and B evaluates on
@@ -127,7 +127,7 @@ PILOT_CRITERIA: tuple[Criterion, ...] = (
     _from_floor(
         "schema_validity_rate",
         "Prompt rules — no fences, explicit null handling — and JSON structural discipline in the "
-        "Foundation corpus. Below the floor the model is improvising structure: read the "
+        "training corpus. Below the floor the model is improvising structure: read the "
         "validation errors before anything else.",
     ),
     Criterion(

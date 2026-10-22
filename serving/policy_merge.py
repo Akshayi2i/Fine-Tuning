@@ -1,9 +1,9 @@
 """Merge a policy's section windows into one canonical document (arch v2.1 §7b).
 
 A long policy is read as a cross product of section groups and page windows
-(``configs/schema_sections.yaml``): ``decl`` over the declarations pages,
-``arrays`` and ``lineblk`` over every routed page in several windows, ``dtd`` where
-the line carries it. Each window returns its slice of the model form. This module
+(``configs/schema_sections.yaml``): every group over every page in several
+windows, ``decl`` (and ``dtd``, where the line carries it) led by the declarations
+pages. Each window returns its slice of the model form. This module
 turns those partial answers into one document — and carries each value's token
 spans with it, so confidence and ``flagged`` land on the value they describe.
 

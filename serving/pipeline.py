@@ -406,9 +406,9 @@ def _extract_policy_windows(
 
     # Every page, with the declarations found in the same text by the same
     # rule as the training rows were.
-    routed, declarations_page = pages_to_read(texts or None, page_count)
+    every_page, declarations_page = pages_to_read(texts or None, page_count)
     pending: list[tuple[str, list[int]]] = [
-        (plan.group, list(plan.pages)) for plan in plan_windows(lob, routed, declarations_page)
+        (plan.group, list(plan.pages)) for plan in plan_windows(lob, every_page, declarations_page)
     ]
 
     windows: list[PolicyWindow] = []
@@ -472,11 +472,11 @@ def _extract_policy_windows(
     merged = merge_policy_windows(windows, lob=lob)
     flags = merged.review_flags + [f"{WINDOW_FAILED_FLAG}:{entry}" for entry in failed]
     log.info(
-        "%s read in %d window(s) over %d routed page(s) in %d round(s); %d duplicate row(s) "
+        "%s read in %d window(s) over %d page(s) in %d round(s); %d duplicate row(s) "
         "collapsed, %d conflict(s), %d window(s) unreadable", request.source_id, len(windows),
-        len(routed), rounds, merged.duplicates_collapsed, len(merged.conflicts), len(failed),
+        len(every_page), rounds, merged.duplicates_collapsed, len(merged.conflicts), len(failed),
     )
-    return merged.extraction, merged.spans, round(wall_ms, 1), sorted(routed), flags
+    return merged.extraction, merged.spans, round(wall_ms, 1), sorted(every_page), flags
 
 
 def _likely_missed(extraction: dict[str, Any], page_texts: dict[int, str], lob: Any) -> list[str]:
@@ -1229,9 +1229,9 @@ def extract(
     values = values_view(extraction)
 
     # --- confidence --------------------------------------------------------
-    # One span map for one generation, on both paths: a routed request is now a
-    # single interleaved call rather than one call per page, so the spans
-    # describe exactly the document that was returned. The previous per-page
+    # One span map for the answer returned, on both paths: one interleaved
+    # call, or windows whose spans the merge re-keyed - never one call per
+    # page, so the spans describe exactly the document that was returned. The previous per-page
     # loop left `all_spans` holding only the last page's map while `extraction`
     # was the merged document, so fields merged from earlier pages carried no
     # confidence and a field the declarations page won still reported the

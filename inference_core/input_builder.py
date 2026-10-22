@@ -18,8 +18,8 @@ What this module guarantees:
   correspondence, and — because a blank line ends a Markdown table — split every
   table that crossed a page boundary into two, the second half without its
   header;
-* a routed subset of pages is the **same structure with fewer pairs**, so a long
-  policy is served in a shape the model actually trained on;
+* a window of a long document is the **same structure with fewer pairs**, so a
+  long policy is served in a shape the model actually trained on;
 * the resolution cap comes from config and matches the cap the corpus was built
   with — asserted, not assumed (arch §11).
 """
@@ -43,8 +43,8 @@ from common.schemas import schema_version
 
 #: Prefixed to each page's OCR text. Deliberately visible text rather than an
 #: HTML comment: models attend to visible tokens far more reliably, and this
-#: marker has a second job — on a routed request it tells the model it is
-#: looking at a fragment of a longer document, so the fields that are absent are
+#: marker has a second job — on a window of a longer document it tells the
+#: model it is looking at a fragment of it, so the fields that are absent are
 #: absent because they live on pages it was not shown. Angle brackets are not
 #: Markdown syntax, so the marker cannot be mistaken for document content the
 #: way a `#` heading or a `---` rule would be.
@@ -215,7 +215,7 @@ def build_messages(
             Omitted at inference, where the assistant turn is what gets generated.
         check_resolution_parity: assert the training and serving caps agree.
         page_numbers: the true page numbers of these images. Defaults to
-            ``1..n``. A routed request passes the real numbers so the markers
+            ``1..n``. A window passes the real numbers so the markers
             say ``<page 9 of 20>`` rather than mislabelling page 9 as page 2.
         total_pages: pages in the whole document. Defaults to the number given,
             which is correct only when the whole document is being sent.
@@ -280,7 +280,7 @@ def build_messages(
         if ocr_pages is None:
             # image_only keeps the marker. It is document metadata, not OCR —
             # the mode's guarantee is "no OCR text", not "no text at all" — and
-            # without it a routed image_only request cannot tell the model it is
+            # without it an image_only window cannot tell the model it is
             # holding pages 9 and 14 of 20 rather than a two-page document.
             user_content.append({"type": "text", "text": marker})
         else:
@@ -374,8 +374,8 @@ def page_images_for(
 ) -> list[str]:
     """Resolve ordered page-image paths from a document's ``ocr_meta.json``.
 
-    ``pages`` selects a subset — the page-routing path for long documents
-    (arch §7). The returned list is always sorted by page number, because
+    ``pages`` selects a subset — one window of a long document (arch §7b);
+    every page is read, window by window. The returned list is always sorted by page number, because
     handing the model pages out of order changes what it sees.
     """
     page_count = int(ocr_meta.get("page_count", 0))

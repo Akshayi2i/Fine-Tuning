@@ -191,7 +191,7 @@ def test_the_shared_budgets_are_not_the_v1_single_cap():
 
 def test_policy_extraction_gets_a_larger_budget_than_acord():
     """Extraction is ONE task — the model is conditioned on doc_type through the
-    prompt, not routed elsewhere. What differs is the budget: a routed policy
+    prompt, not routed elsewhere. What differs is the budget: a policy window
     sends up to 6 pages against a larger schema. Modelled as an override so
     `extract` stays one task in the corpus, the prompt and the metrics."""
     acord = config.seq_cap_for_task("extract", "acord")

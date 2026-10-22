@@ -7,7 +7,7 @@ had.
 
 v2.1 decomposes the work instead, and **trains one adapter on all of it**. The
 task is declared in the prompt, so the model is never guessing which output shape
-is wanted, and a routed request stays a subsequence of the full-document shape.
+is wanted, and a window stays a subsequence of the full-document shape.
 
     ACORD      classify -> extract (all pages, one call)
     Policy     classify -> section-group windows over every page (policy_windows)
@@ -47,11 +47,7 @@ WINDOW_BANDS: tuple[tuple[int, int, int], ...] = (
 )
 DENSE_WINDOW = (1, 0)   # > 25 rows/page -> single page, no overlap
 
-#: Pages always added to a policy's routed set — the declarations area carries
-#: the policy-level fields whatever the page selector says (§7b).
-DECLARATIONS_PAGES = 3
-
-#: OCR markdown charged per routed page when sizing a window. Deliberately thin:
+#: OCR markdown charged per page when sizing a window. Deliberately thin:
 #: this decides how many pages a call is given, and over-estimating the text
 #: leaves capacity unused while under-estimating is caught by ``cap_check``,
 #: which rejects the row rather than truncating it.
@@ -265,7 +261,7 @@ def _apportion(claims: list[Any], windows: list[list[int]], index: int) -> list[
 def plan_policy_windows(
     pages: list[int], *, pages_per_window: int, leading: Sequence[int] = (), overlap: int = 0,
 ) -> list[list[int]]:
-    """Split a routed page set into calls, dropping nothing.
+    """Split a document's pages into calls, dropping nothing.
 
     ``pages_per_window`` is how many pages one extraction call can carry, which
     :func:`pages_per_extraction_call` derives from the line's own budget — a
@@ -277,7 +273,7 @@ def plan_policy_windows(
     * **The declarations lead — where the group reads them.** ``leading`` pages
       (the declarations group's: its leading pages, ``declarations_leading``,
       plus the page the declarations were found on) open the windows, together. Every group used to set pages 1-3
-      apart, so a routed group spent a call on them alone even when they held
+      apart, so another group spent a call on them alone even when they held
       none of its tables, and a declarations page found on page 5 was read in a
       window apart from the leading pages it continues.
     * **Runs stay whole where they fit.** A vehicle schedule printed across
@@ -303,9 +299,8 @@ def plan_policy_windows(
     if lead:
         windows.extend(_split_evenly(lead, pages_per_window))
 
-    # Whole runs are packed together while they fit, so scattered single pages —
-    # the usual output of keyword routing — share a call rather than each paying
-    # the whole system prompt for one page. A run is never split to fill space
+    # Whole runs are packed together while they fit, so short runs share a call
+    # rather than each paying the whole system prompt for a page or two. A run is never split to fill space
     # and never mixed into another window once it has to be split: a run longer
     # than one window gets windows of its own.
     open_window: list[int] = []

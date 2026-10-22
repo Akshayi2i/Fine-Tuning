@@ -12,8 +12,8 @@ training row whose shape cannot be reproduced is a row that teaches a shape the
 model will never be asked for again.
 
 The group a section belongs to is declared. The *pages* a group reads are
-computed — from the routed set and, for the declarations group, from where the
-declarations were actually found.
+computed — every page of the document and, for the declarations group's first
+window, where the declarations were actually found.
 """
 
 from __future__ import annotations

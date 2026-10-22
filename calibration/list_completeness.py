@@ -221,9 +221,8 @@ def check_document(
     Args:
         ocr_meta: the document's ``ocr_meta.json``, whose ``table_row_counts``
             supply the structure-derived count.
-        pages_used: pages that actually fed this extraction, so a page-routed
-            long document is compared against the pages it read rather than the
-            whole file.
+        pages_used: pages that actually fed this extraction, so a document is
+            compared against the pages it read rather than the whole file.
     """
     detected_total = None
     if ocr_meta and (row_counts := ocr_meta.get("table_row_counts")):

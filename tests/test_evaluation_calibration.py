@@ -585,8 +585,8 @@ def test_a_complete_list_is_not_flagged():
 
 
 def test_document_check_uses_ocr_row_counts_for_the_pages_read():
-    """A page-routed long document is compared against the pages it actually
-    read, not the whole file."""
+    """A document is compared against the pages it actually read, not the
+    whole file."""
     extraction = {"claims": [{"claim_number": f"C{i}"} for i in range(6)],
                   "total_claims_reported": 8}
     signals = check_document(

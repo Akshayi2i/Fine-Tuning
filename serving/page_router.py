@@ -126,9 +126,9 @@ def merge_page_extractions(
 ) -> MergeResult:
     """Combine per-page extractions into one document.
 
-    **No longer on the serving path.** A routed request now sends its selected
-    pages interleaved in a single call, so the model returns one document-level
-    object and there is nothing to merge. The declarations-precedence rule this
+    **Not on the serving path.** Every page is read in section windows that
+    ``serving.policy_merge`` joins, so the model never returns per-page objects
+    for this to merge. The declarations-precedence rule this
     function implements is stated to the model directly instead (see
     ``prompts/doc_types/policy.jinja``), which keeps it in one place rather than
     two that can disagree.

@@ -366,8 +366,8 @@ def test_a_routed_subset_keeps_its_true_page_numbers():
 def test_a_routed_request_is_a_subsequence_of_the_full_document():
     """The shape long policies are served in must be the shape they trained on —
     fewer pairs, not a different structure. Nothing in the suite compared user
-    turns before, which is why the previous one-call-per-page routing went
-    unnoticed."""
+    turns before, which is why the old one-call-per-page reading went
+    unnoticed. A window is that shape with fewer pairs."""
     pages = [f"page_{i}.png" for i in range(1, 5)]
     texts = [f"t{i}" for i in range(1, 5)]
 
@@ -404,7 +404,7 @@ def test_a_table_crossing_a_page_boundary_is_not_joined():
 
 def test_image_only_sends_markers_but_never_ocr():
     """image_only removes the OCR body, not page identity. Without the marker a
-    routed image_only request could not tell the model it is holding pages 9 and
+    an image_only window could not tell the model it is holding pages 9 and
     14 of 20 rather than a two-page document."""
     content = build_messages("policy", ["p9.png", "p14.png"], None, "image_only",
                              page_numbers=[9, 14], total_pages=20).messages[1]["content"]

@@ -142,12 +142,12 @@ def pages_to_read(
 
 def plan_windows(
     lob: str | list[str] | None,
-    routed: Sequence[int],
+    every_page: Sequence[int],
     declarations_page: int | None = None,
 ) -> list[PolicyWindowPlan]:
     """Every window a policy is read with, in group order then page order.
 
-    ``routed`` is the pages to read - every page (:func:`pages_to_read`).
+    ``every_page`` is the pages to read - every page (:func:`pages_to_read`).
     """
     from common.schema_sections import groups_for, leading_pages, pages_for, run_overlap
     from data_pipeline.dataset_builder.expand_tasks import (
@@ -157,7 +157,7 @@ def plan_windows(
 
     plans: list[PolicyWindowPlan] = []
     for group in groups_for(lob):
-        pages = pages_for(group, list(routed))
+        pages = pages_for(group, list(every_page))
         capacity = pages_per_extraction_call("policy", None, lob, group)
         # A declarations group's first window is its leading pages and the page
         # the declarations were found on, read together; every other page

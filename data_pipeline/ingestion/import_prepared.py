@@ -282,8 +282,8 @@ def import_document(
 
     if not doc.metadata.get("field_provenance"):
         log.warning(
-            "%s has no field_provenance, so page selection has no label for it and policy "
-            "schedule rows are apportioned across windows rather than placed on their page.",
+            "%s has no field_provenance, so per-alias evaluation cannot score it until alias "
+            "derivation backfills its surface labels.",
             source_id,
         )
     log.info("imported %s as %s (%d pages)", doc.directory.name, source_id, doc.page_count)

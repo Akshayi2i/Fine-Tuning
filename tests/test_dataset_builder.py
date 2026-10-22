@@ -982,7 +982,7 @@ def test_every_acord_form_in_the_corpus_is_pinned_not_just_form_25():
 
 
 def test_a_routed_group_does_not_set_the_first_pages_apart():
-    """Only the declarations group leads with pages 1-3. A routed group packing
+    """Only the declarations group leads with its first pages. Another group packing
     them apart spent a whole call on pages that may hold none of its tables."""
     from data_pipeline.dataset_builder.expand_tasks import plan_policy_windows
 

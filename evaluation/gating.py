@@ -244,7 +244,7 @@ class MetricVerdict:
     delta: float = DEFAULT_DELTA
 
     #: Nothing in this run could have produced this metric — no Loss Run in the
-    #: scope, no page-selection task. Distinct from `unmeasured`, which means
+    #: scope, no scan in the eval set. Distinct from `unmeasured`, which means
     #: something could have produced it and did not: that blocks, this does not.
     applicable: bool = True
 

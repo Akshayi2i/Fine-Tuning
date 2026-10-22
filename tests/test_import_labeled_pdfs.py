@@ -157,8 +157,8 @@ def test_validate_only_writes_nothing(tmp_path, client, raw_client):
 
 
 def test_a_missing_provenance_warns_without_blocking(tmp_path):
-    """It costs something real — page selection has no label for this document —
-    but it does not make the label wrong."""
+    """It costs something real — per-alias evaluation cannot score this
+    document — but it does not make the label wrong."""
     check = check_bundle(read_bundle(bundle(tmp_path)), "policy")
 
     assert check.ok, "a missing provenance map does not make the label wrong"

@@ -174,8 +174,8 @@ def check_bundle(bundle: LabeledPdf, doc_type: str) -> DocumentCheck:
 
     if not bundle.metadata.get("field_provenance"):
         check.warnings.append(
-            "no field_provenance: page selection has no label for this document, and policy "
-            "schedule rows will be apportioned across windows rather than placed on their page"
+            "no field_provenance: per-alias evaluation cannot score this document until "
+            "alias derivation backfills its surface labels"
         )
     # No policy_number warning: the schema REQUIRES it, so a label that reaches
     # here already carries one. A check that cannot fire reads as a guarantee
