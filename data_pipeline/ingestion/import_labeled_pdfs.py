@@ -186,37 +186,22 @@ def check_bundle(bundle: LabeledPdf, doc_type: str) -> DocumentCheck:
     if split is not None and str(split).lower() not in ("train", "val", "test"):
         check.errors.append(f"metadata split {split!r} is not train, val or test")
 
-    # One convention for form editions: an edition left inside a form number
-    # the label rules would have moved means the bundle was never prepared.
-    from data_pipeline.ingestion.label_rules import edition_rows, may_hold_edition, split_form_edition
+    # One convention for form editions, on the lines the label rules hold for
+    # (label_rules_apply): an edition left inside a form number the rules would
+    # have moved means the bundle was never prepared. A self-contained line's
+    # golds never go through them, so nothing is asked of those.
+    from data_pipeline.ingestion.label_rules import edition_problems
 
-    unmoved, unsure = [], []
-    for index, row in edition_rows(bundle.golden):
-        raw = row["form_number"].get("raw")
-        if split_form_edition(raw):
-            unmoved.append(f"forms_and_endorsements[{index}] {raw!r}")
-        elif may_hold_edition(raw):
-            unsure.append(f"forms_and_endorsements[{index}] {raw!r}")
-    if unmoved:
-        check.errors.append(
-            f"{len(unmoved)} form number(s) still carry their edition with edition_date empty "
-            f"({', '.join(unmoved[:3])}): re-run prepare_bundles, whose label rules move it")
-    if unsure:
-        check.warnings.append(
-            f"{len(unsure)} form number(s) may end in their edition, edition_date empty "
-            f"({', '.join(unsure[:3])}): check them by hand")
+    errors, warnings = edition_problems(bundle.golden, doc_type, bundle.lob)
+    check.errors.extend(errors)
+    check.warnings.extend(warnings)
 
-    # A model-drafted gold trains only once a person reviewed it (decision
-    # 2026-10-19); one with no record either way is named, not blocked.
-    from data_pipeline.labeling.export_golden_labels import has_review_record, review_problem
+    # Every gold needs a review record to train or score (decision 2026-10-22):
+    # one without, or a twin whose seed nobody reviewed, is blocked.
+    from data_pipeline.labeling.export_golden_labels import review_problem
 
-    problem = review_problem(bundle.golden, bundle.metadata)
-    if problem:
+    if problem := review_problem(bundle.golden, bundle.metadata):
         check.errors.append(problem)
-    elif not has_review_record(bundle.metadata):
-        check.warnings.append(
-            "no review record (reviewer_id, review_date) in metadata.json: nothing says a person "
-            "checked this label")
     return check
 
 
@@ -244,6 +229,7 @@ def import_bundle(
     ingested any other way by the time OCR sees it.
     """
     from data_pipeline.ingestion.pull_raw_pdfs import ingest_pdf
+    from data_pipeline.labeling.export_golden_labels import review_record
 
     source_id, status = ingest_pdf(
         bundle.pdf, doc_type, raw_client,
@@ -286,11 +272,10 @@ def import_bundle(
         # The delivery's own split (train/val/test), when it was split upstream:
         # the corpus build then uses it as given (split_groups.assign_delivered_splits).
         "split": str(bundle.metadata["split"]).lower() if bundle.metadata.get("split") else None,
-        # Who reviewed the label and what drafted it: a model-drafted gold
-        # without a reviewer is refused before training (review_problem).
-        "reviewer_id": bundle.metadata.get("reviewer_id"),
-        "review_date": bundle.metadata.get("review_date"),
-        "draft_backend": bundle.metadata.get("draft_backend"),
+        # Who reviewed the label and when, what drafted it, and for a twin the
+        # seed whose record it inherited: every reader asks review_problem of
+        # these before the gold trains, is frozen or scores.
+        **review_record(bundle.metadata),
         "labeled_at": datetime.now(UTC).isoformat(),
         "imported_from": bundle.directory.name,
         # OCR has NOT run: MinerU runs on the GPU pod as stage 2. Recorded so a

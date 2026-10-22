@@ -39,6 +39,9 @@ GOLDEN = json.loads(
 #: common model 1.1.0, and GOLDEN is not that shape.
 LINE = "property"
 
+#: A review record: every gold needs one to import (decision 2026-10-22).
+REVIEWED = {"reviewer_id": "a.reviewer", "review_date": "2026-10-20"}
+
 
 @pytest.fixture
 def client() -> BlobClient:
@@ -56,7 +59,7 @@ def prepared(tmp_path, name="policy_batch_001", *, pages=2, golden=None, metadat
     (directory / "golden.json").write_text(
         json.dumps(golden if golden is not None else GOLDEN), encoding="utf-8"
     )
-    metadata = {"lob": [LINE]} if metadata is None else metadata
+    metadata = {"lob": [LINE], **REVIEWED} if metadata is None else metadata
     (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     return directory
 
@@ -135,7 +138,8 @@ def test_a_schema_invalid_golden_never_reaches_the_label_store(tmp_path, client)
 def test_an_imported_document_lands_where_the_pipeline_already_reads(tmp_path, client):
     """A second layout would mean a second set of readers, and one of them would
     eventually be missed."""
-    doc = read_prepared(prepared(tmp_path, metadata={"field_provenance": {"named_insured.primary_name": 1}, "lob": ["workers_comp"]}))
+    doc = read_prepared(prepared(tmp_path, metadata={"field_provenance": {"named_insured.primary_name": 1},
+                                                     "lob": ["workers_comp"], **REVIEWED}))
     source_id = import_document(doc, "policy", client, mineru_version="2.0.0")
 
     assert source_id == "policy_0001"
@@ -221,7 +225,7 @@ def test_pages_are_stored_as_png_whatever_arrives(tmp_path, client):
         Image.new("RGB", (8, 8), (page * 10, 0, 0)).save(directory / f"page_{page}.jpg")
         (directory / f"page_{page}.md").write_text(f"# page {page}", encoding="utf-8")
     (directory / "golden.json").write_text(json.dumps(GOLDEN), encoding="utf-8")
-    (directory / "metadata.json").write_text(json.dumps({"lob": [LINE]}), encoding="utf-8")
+    (directory / "metadata.json").write_text(json.dumps({"lob": [LINE], **REVIEWED}), encoding="utf-8")
 
     source_id = import_document(
         read_prepared(directory), "policy", client, mineru_version="2.0.0"
@@ -253,3 +257,40 @@ def test_a_mixed_extension_bundle_keeps_its_page_order(tmp_path, client):
 
     assert [p.stem for p in doc.images] == [f"page_{i}" for i in range(1, 11)]
     assert [p.stem for p in doc.markdown] == [f"page_{i}" for i in range(1, 11)]
+
+
+# --------------------------------------------------------------------------
+# Every gold needs a review record; the edition rule where the label rules hold
+# --------------------------------------------------------------------------
+
+
+def test_a_prepared_gold_with_no_review_record_is_refused_and_nothing_written(tmp_path, client):
+    doc = read_prepared(prepared(tmp_path, metadata={"lob": [LINE], "reviewer_id": " ", "review_date": "2026-10-20"}))
+    with pytest.raises(ImportError_, match="names nobody"):
+        import_document(doc, "policy", client, mineru_version="2.0.0")
+    assert not client.list("golden-labels/") and not client.list("processed/")
+
+
+def test_the_review_record_and_a_twins_seed_reach_the_label_metadata(tmp_path, client):
+    twin = {"lob": [LINE], "synthetic": True, **REVIEWED, "draft_backend": "fideon_synth",
+            "review_inherited_from": "property/seed_1"}
+    source_id = import_document(read_prepared(prepared(tmp_path, metadata=twin)), "policy", client,
+                                mineru_version="2.0.0")
+    stored = client.read_json(paths.label_metadata("policy", source_id))
+    assert {k: stored[k] for k in twin if k != "lob"} == {k: v for k, v in twin.items() if k != "lob"}
+
+
+def test_an_edition_inside_a_form_number_is_refused_only_where_the_label_rules_hold(tmp_path, client):
+    """As the labelled-PDF import checks it: on a common-model line a gold whose
+    number still carries the edition would train one convention while the gate
+    scores the other; a self-contained line keeps its numbers as printed."""
+    form = {"form_number": {"raw": "CG 00 01 04 13", "parsed": "CG 00 01 04 13", "page_ref": [1],
+                            "confidence": {"score": 1.0, "source": "vlm"}, "flagged": False}}
+    common = json.loads((Path(__file__).resolve().parent.parent / "configs/canonical schema/common schema/"
+                         "examples/homeowners_minimal.json").read_text(encoding="utf-8"))
+    doc = read_prepared(prepared(tmp_path, "common", golden={**common, "forms_and_endorsements": [form]},
+                                 metadata={"lob": ["homeowners"], **REVIEWED}))
+    with pytest.raises(ImportError_, match="still carry their edition"):
+        import_document(doc, "policy", client, mineru_version="2.0.0")
+    own = read_prepared(prepared(tmp_path, "own", golden={**GOLDEN, "forms_and_endorsements": [form]}))
+    assert import_document(own, "policy", client, mineru_version="2.0.0")

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from data_pipeline.dataset_builder.split_groups import (
     MAX_TWINS_PER_SEED,
     GroupRecord,
@@ -15,9 +17,11 @@ from data_pipeline.dataset_builder.split_groups import (
 )
 
 
-def _record(group, carrier, line="homeowners", size=11):
-    return GroupRecord(group_id=group, doc_type="policy", source_ids=[f"{group}-{i}" for i in range(size)],
-                       carrier=carrier, line=line, synthetic=True)
+def _record(group, carrier, line="homeowners", size=11, synthetic=False, doc_type="policy"):
+    # Real families unless a test says otherwise: on a policy, carriers are
+    # counted and chosen from real families only (decision 2026-10-22).
+    return GroupRecord(group_id=group, doc_type=doc_type, source_ids=[f"{group}-{i}" for i in range(size)],
+                       carrier=carrier, line=line, synthetic=synthetic)
 
 
 # --------------------------------------------------------------------------
@@ -108,6 +112,97 @@ def test_a_delivered_split_is_kept_as_delivered_unless_the_hold_out_is_asked_for
     result = assign_delivered_splits({"policy": groups["policy"][:2]}, frozen, with_test=False,
                                      hold_out_carriers=True)
     assert result.assignment == frozen and not result.held_out_carriers_by_line
+
+
+# --------------------------------------------------------------------------
+# The hold-out leaks no seen carrier (decision 2026-10-22, policies only)
+# --------------------------------------------------------------------------
+
+
+def _ten_carriers(line="homeowners"):
+    """Ten real carriers of one line, each with a train, a val and a test family."""
+    records, splits = [], {}
+    for index in range(10):
+        for split in ("train", "val", "test"):
+            group = f"c{index}-{split}"
+            records.append(_record(group, f"carrier {index}", line=line, size=1 + index))
+            splits[group] = split
+    return records, splits
+
+
+def test_a_carrier_with_a_synthetic_family_is_never_held_out():
+    """Twins train wherever they sit, so their carrier is one the model has seen.
+    carrier 0 is the cheapest to hold out; with a twin family it is not chosen."""
+    records, splits = _ten_carriers()
+    assert held_out_carrier_per_line(records, seed=42, split_of=splits).held == {"homeowners": "carrier 0"}
+    twins = records + [_record("c0-twins", "carrier 0", size=40, synthetic=True)]
+    choice = held_out_carrier_per_line(twins, seed=42, split_of={**splits, "c0-twins": "train"})
+    assert choice.held == {"homeowners": "carrier 1"}
+
+
+def test_a_drawn_split_never_trains_the_held_out_carriers_real_document():
+    """A family holding a real seed and its twins is synthetic and trains before
+    the hold-out is looked at; were its carrier held out, that carrier's real
+    document would train while its others were scored as unseen."""
+    from data_pipeline.dataset_builder.split_groups import assign_group_splits
+
+    records = [_record(f"c{i}-{n}", f"carrier {i}", size=5) for i in range(1, 12) for n in range(4)]
+    records += [_record("c0-real", "carrier 0", size=1), _record("c0-real2", "carrier 0", size=1)]
+    # Chosen from the real families alone, carrier 0 - the cheapest - is held out.
+    assert assign_group_splits({"policy": records}, seed=42).held_out_carriers_by_line == {
+        "policy": {"homeowners": "carrier 0"}}
+    records.append(_record("seed-and-twins", "carrier 0", size=1, synthetic=True))
+    result = assign_group_splits({"policy": records}, seed=42)
+    held = result.held_out_carriers_by_line["policy"]["homeowners"]
+    assert held != "carrier 0" and result.assignment["seed-and-twins"] == "train"
+    trained = {r.carrier for r in records if result.assignment[r.group_id] == "train"}
+    assert held not in trained
+
+
+def test_a_synthetic_only_carrier_neither_counts_nor_is_held_out_on_a_delivered_split():
+    records, splits = _ten_carriers()
+    nine = [r for r in records if not r.group_id.startswith("c9-")]
+    nine_splits = {g: s for g, s in splits.items() if not g.startswith("c9-")}
+    twins = [_record(f"t-{split}", "twin carrier", size=1, synthetic=True) for split in ("train", "val", "test")]
+    groups = {"policy": nine + twins}
+    twin_splits = {**nine_splits, **{f"t-{s}": s for s in ("train", "val", "test")}}
+    result = assign_delivered_splits(groups, twin_splits, hold_out_carriers=True)
+    assert result.lines_below_carrier_minimum == {"policy": {"homeowners": 9}}     # the twins' carrier: no count
+    assert result.assignment == twin_splits                                      # and nothing moved
+    # With a tenth real carrier the line holds one out - never the twins' carrier.
+    groups = {"policy": records + twins}
+    result = assign_delivered_splits(groups, {**splits, **twin_splits}, hold_out_carriers=True)
+    assert result.held_out_carriers_by_line["policy"]["homeowners"] not in ("twin carrier",)
+    assert all(result.assignment[f"t-{s}"] == s for s in ("train", "val", "test"))
+
+
+@pytest.mark.parametrize("placeholder", ["N/A", "n a", "Unknown", "none", "TBD", "various", "", "  "])
+def test_a_placeholder_carrier_neither_counts_nor_is_held_out(placeholder):
+    records, splits = _ten_carriers()
+    nine = [r for r in records if not r.group_id.startswith("c9-")]
+    stand_in = [_record(f"p-{split}", placeholder, size=1) for split in ("train", "val", "test")]
+    stand_in_splits = {f"p-{s}": s for s in ("train", "val", "test")}
+    nine_splits = {g: s for g, s in splits.items() if not g.startswith("c9-")}
+    choice = held_out_carrier_per_line(nine + stand_in, seed=42, split_of={**nine_splits, **stand_in_splits})
+    assert choice.below_minimum == {"homeowners": 9} and not choice.held
+    cheapest = [_record(f"p-{split}", placeholder, size=0) for split in ("train", "val", "test")]
+    choice = held_out_carrier_per_line(records + cheapest, seed=42, split_of={**splits, **stand_in_splits})
+    assert choice.held == {"homeowners": "carrier 0"}                         # never the stand-in
+
+
+def test_a_doc_type_with_no_line_holds_out_as_before():
+    """ACORD and Loss Runs are left as they were: no line, no hold-out, and their
+    placeholder carriers and synthetic families read as given."""
+    records = [_record(f"a{i}", "N/A" if i == 0 else f"insurer {i}", line=None, doc_type="acord")
+               for i in range(12)]
+    assert held_out_carrier_per_line(records, seed=42).held == {}
+    # Ten carriers only counting the stand-in and the synthetic one, the
+    # stand-in the cheapest: an ACORD line holds it out, as it always did.
+    lined = [_record(f"l{i}-{s}", "N/A" if i == 0 else f"insurer {i}", line="commercial_auto",
+                     size=0 if i == 0 else 1, doc_type="acord", synthetic=(i == 1))
+             for i in range(10) for s in ("train", "val", "test")]
+    splits = {r.group_id: r.group_id.rsplit("-", 1)[1] for r in lined}
+    assert held_out_carrier_per_line(lined, seed=42, split_of=splits).held == {"commercial_auto": "N/A"}
 
 
 # --------------------------------------------------------------------------

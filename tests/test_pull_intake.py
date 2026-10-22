@@ -34,7 +34,9 @@ def _stage(backend, batch="personal-v1", docs=("doc-a", "doc-b")):
         base = f"intake/{batch}/{name}"
         backend.write("raw", f"{base}/policy.pdf", f"%PDF-1.7 {name}".encode())
         backend.write("raw", f"{base}/golden.json", json.dumps(GOLDEN).encode())
-        backend.write("raw", f"{base}/metadata.json", json.dumps({"lob": LINE}).encode())
+        # With a review record: every gold needs one to import (decision 2026-10-22).
+        backend.write("raw", f"{base}/metadata.json", json.dumps(
+            {"lob": LINE, "reviewer_id": "a.reviewer", "review_date": "2026-10-20"}).encode())
 
 
 # --------------------------------------------------------------------------

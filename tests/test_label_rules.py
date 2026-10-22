@@ -523,3 +523,71 @@ def test_a_frozen_gold_is_scored_under_the_edition_rule_without_being_rewritten(
     read = verified_label(gold, ["page text"])
     assert read["forms_and_endorsements"][0]["edition_date"]["parsed"] == "04/13"
     assert gold == before
+
+
+# --------------------------------------------------------------------------
+# Where the edition rule holds: one predicate, read alike by the corpus and the gate
+# --------------------------------------------------------------------------
+
+
+import pytest  # noqa: E402 - the parametrised tests below
+
+
+@pytest.mark.parametrize(("doc_type", "lob", "applies"), [
+    ("policy", "homeowners", True), ("policy", ["personal_auto"], True), ("policy", "classic_auto", True),
+    ("policy", "gl", True), ("policy", None, True),                       # no line: the fallback, common model
+    ("policy", "auto", False), ("policy", "wc", False), ("policy", "umbrella", False),
+    ("policy", "property", False),
+    ("policy", "pet_insurance", True),                    # no schema of its own: the fallback, as serving reads it
+    ("acord", None, False), ("lossrun", None, False),
+])
+def test_the_label_rules_hold_on_common_model_policy_lines_only(doc_type, lob, applies):
+    """The lines prepare_bundles corrects and serving conforms an answer on."""
+    from data_pipeline.ingestion.label_rules import label_rules_apply
+
+    assert label_rules_apply(doc_type, lob) is applies
+
+
+def _stored_gold(client, source_id, lob, number="CG 00 01 04 13"):
+    """A gold stored before the edition rule, OCR'd, as the corpus build loads it."""
+    from artifact_registry import paths
+
+    client.write_json(paths.golden_label("policy", source_id), _forms(number))
+    client.write_json(paths.label_metadata("policy", source_id),
+                      {"lob": lob, "reviewer_id": "a.reviewer", "review_date": "2026-10-20"})
+    client.write_json(paths.ocr_meta("policy", source_id), {"page_count": 1, "mineru_version": "3.4.5"})
+    client.write_text(paths.processed_page("policy", source_id, 1, "md"), f"Forms {number}")
+    client.write_bytes(paths.processed_page("policy", source_id, 1, "png"), b"\x89PNG")
+
+
+@pytest.mark.parametrize(("lob", "moved"), [("homeowners", True), ("auto", False), ("wc", False)])
+def test_the_corpus_build_reads_a_stored_gold_exactly_as_the_gate_scores_it(lob, moved):
+    """Before, the corpus build trained a stored gold's edition inside its form
+    number while the gate scored it split - and the gate split every line's."""
+    from artifact_registry import paths
+    from artifact_registry.blob_client import BlobClient, InMemoryBackend
+    from evaluation.golden_eval import verified_label
+    from orchestration.pipeline_dag import load_labeled_documents
+
+    client = BlobClient(backend=InMemoryBackend(), container="main")
+    _stored_gold(client, "policy_0001", lob)
+    ctx = SimpleNamespace(client=client, doc_types=["policy"], tenant_id=None)
+    [document] = load_labeled_documents(ctx)
+    stored = client.read_json(paths.golden_label("policy", "policy_0001"))
+    gate = verified_label(stored, ["Forms CG 00 01 04 13"], doc_type="policy", lob=lob)
+    assert document.golden_label == gate
+    row = document.golden_label["forms_and_endorsements"][0]
+    assert ("edition_date" in row) is moved
+    assert row["form_number"]["raw"] == ("CG 00 01" if moved else "CG 00 01 04 13")
+    assert stored == _forms("CG 00 01 04 13")                              # never rewritten in Blob
+
+
+def test_the_corpus_builds_verification_applies_the_rule_when_told_the_line():
+    from data_pipeline.dataset_builder.label_verification import verified_label
+
+    gold = _forms("CG 00 01 04 13")
+    assert verified_label(gold, ["text"]) is gold                         # as build_jsonl calls it today
+    moved = verified_label(gold, ["text"], doc_type="policy", lob="homeowners")
+    assert moved["forms_and_endorsements"][0]["edition_date"]["parsed"] == "04/13"
+    assert verified_label(gold, ["text"], doc_type="policy", lob="auto") is gold
+    assert gold == _forms("CG 00 01 04 13")

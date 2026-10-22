@@ -5,10 +5,13 @@ label is what the generator could read and place, about 29% of the fields the
 reviewed gold of that source holds. The model reads an omitted field as "not on
 the page", so trained on those labels it learns to skip most of a policy.
 
-"Reviewed" is what the source gold must be, not something this checks: a twin
-filled from a seed nobody reviewed (its ``seed_review`` says so) is still
-refused at import until a reviewer is recorded
-(``export_golden_labels.review_problem``, decision 2026-10-19).
+"Reviewed" is what the source gold must be, and this checks it: a twin is
+filled only from a seed whose own manifest row (``kind`` not synthetic) records
+a real review - ``reviewer_id`` and ``review_date``, as
+``export_golden_labels.review_problem`` reads them (decision 2026-10-22).
+Any other twin is refused and counted. A completed twin's ``fideon:filled``
+names the seed, its review and the seed's own notes, which the merged label
+does not otherwise carry.
 
 This adds the missing fields. It never changes a field the synthetic label
 already has - those are the generator's values, which match the synthetic PDF.
@@ -410,10 +413,14 @@ class DeliveryReport:
 def fill_delivery(delivery: Path, reviewed: Path, *, lines: frozenset[str] | None = None,
                   apply: bool = False) -> DeliveryReport:
     from common.schemas import is_common_model, iter_validation_errors
+    from data_pipeline.ingestion.prepare_bundles import seed_review_records, template_of
+    from data_pipeline.labeling.export_golden_labels import review_problem
 
     report = DeliveryReport()
     with (delivery / "manifest.csv").open(encoding="utf-8", newline="") as fh:
         rows = list(csv.DictReader(fh))
+    # Each seed's review record, from its own row: the record its twins inherit.
+    reviews = seed_review_records(rows)
     for row in rows:
         if row.get("kind") != "synthetic" or (lines is not None and row["lob"] not in lines):
             continue
@@ -431,10 +438,25 @@ def fill_delivery(delivery: Path, reviewed: Path, *, lines: frozenset[str] | Non
         if not source_gold.is_file():
             report.refused["no reviewed gold for the source"] += 1
             continue
+        seed = template_of(row)
+        record = reviews.get(seed) or {}
+        if review_problem(None, record):
+            # Filled from a seed nobody is recorded as reviewing, the twin would
+            # carry the seed's unchecked values as if they were reviewed.
+            report.refused["the seed has no review record (reviewer_id, review_date on its own row)"] += 1
+            continue
         twin = json.loads(gold_path.read_text(encoding="utf-8"))
         source = json.loads(source_gold.read_text(encoding="utf-8"))
         pages = int(row["pages"]) if str(row.get("pages", "")).isdigit() else None
         merged, stats = fill(source, twin, pages=pages)
+        if isinstance(merged.get("fideon:filled"), dict):
+            # Where the added values came from: the merged label keeps only the
+            # twin's own notes, so the seed's would otherwise be lost.
+            merged["fideon:filled"].update({
+                "source": seed,
+                "source_review": {"reviewer_id": record["reviewer_id"], "review_date": record["review_date"]},
+                "source_notes": copy.deepcopy(source.get("fideon:provenance")),
+            })
         errors = list(iter_validation_errors(merged, "policy", None, row["lob"]))
         before, after = sum(1 for _ in _flat(twin)), sum(1 for _ in _flat(merged))
         if errors:

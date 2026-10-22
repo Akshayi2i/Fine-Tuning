@@ -16,13 +16,17 @@ Three checks run before anything is written:
 
 The **day-zero rule** (arch §4c) also lives here rather than in its own module:
 it is a counter and a threshold, and it belongs beside the thing it gates.
+
+So does the **review rule** (decision 2026-10-22, :func:`review_problem`): a
+gold trains, is frozen into the eval set or is scored only when its metadata
+records who reviewed it and when. Every reader of golds asks that one function.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 from artifact_registry import paths
@@ -163,55 +167,101 @@ def validate_golden_label(
         )
 
 
-#: A gold's own notes (``fideon:provenance``) naming a model as its drafter.
-_MODEL_DRAFTED = re.compile(
-    r"\b(?:drafted|generated|written|labell?ed|annotated|pre-annotated|extracted)\b[^.;|]{0,40}?"
-    r"\bby\s+(?:an?\s+)?(?:claude|gpt|chatgpt|openai|anthropic|gemini|llama|mistral|copilot|qwen"
-    r"|(?:ai|llm|language model)\b)",
-    re.IGNORECASE,
-)
-#: ... or saying, in so many words, that nobody reviewed it.
-_NOT_REVIEWED = re.compile(r"\bnot\s+reviewed\b|\bunreviewed\b", re.IGNORECASE)
-#: ``draft_backend`` values that name no model: a person wrote the label.
-_NO_MODEL = frozenset({"", "unknown", "human", "manual", "none"})
+#: The metadata keys of a review record, and the one naming the seed a
+#: synthetic twin inherited its record from. Every importer and the freeze
+#: carry all of them, so the record reaches every reader the rule holds at.
+REVIEW_KEYS = ("reviewer_id", "review_date", "draft_backend", "review_inherited_from")
+
+#: ``reviewer_id`` values that name nobody - a field filled in before anyone
+#: reviewed the label. Compared with case, spaces and punctuation aside, so
+#: "N/A" is "na" and "-" is "".
+_NOBODY = frozenset({
+    "", "pending", "none", "na", "nil", "null", "tbd", "tba", "todo", "unknown", "unassigned",
+    "unreviewed", "notreviewed", "nobody", "noone",
+})
+
+#: A date with no time zone is the reviewer's own: it is in the future only
+#: once it is still ahead in the earliest time zone, UTC+14.
+_EARLIEST_ZONE = timedelta(hours=14)
 
 
-def review_problem(label: Any, metadata: dict[str, Any]) -> str | None:
-    """Why a gold may not train or score yet; ``None`` when it may.
+def review_problem(label: Any, metadata: dict[str, Any] | None) -> str | None:
+    """Why a gold may not train, be frozen into the eval set or score; ``None`` when it may.
 
-    A gold a model drafted counts only once a person has reviewed it: its
-    metadata records ``reviewer_id`` and ``review_date`` (decision 2026-10-19 -
-    frontier models are never used for gold, synthetic or training data, and a
-    draft is never trusted as-is). Model-drafted is read from the metadata's
-    ``draft_backend`` and from the gold's own notes: one naming a model as the
-    drafter, or saying it was not reviewed (a synthetic twin's ``seed_review``).
+    Every gold needs a review record (decision 2026-10-22): its metadata names
+    the person who reviewed it (``reviewer_id``, not blank and not a placeholder
+    such as "pending") and when (``review_date``, an ISO date or date-time, not
+    in the future). Nothing else stands in for one - not the gold's own notes,
+    which can be read either way, and not what drafted it (``draft_backend`` is
+    recorded as information): only a person's name says a person checked it.
+
+    A synthetic twin is reviewed only when its seed was. Its record is the
+    seed's, inherited when the bundle was prepared, and ``review_inherited_from``
+    names that seed (prepare_bundles); a twin naming no seed is not reviewed,
+    whatever record it holds of its own.
+
+    The one check every reader makes: import, the corpus build, the freeze, the
+    gate's golden eval, the harness, the preflight and the audit. ``label`` is
+    not read; it is taken so every caller passes the pair it holds.
     """
-    if metadata.get("reviewer_id") and metadata.get("review_date"):
+    metadata = metadata if isinstance(metadata, dict) else {}
+    missing = [problem for problem in (_reviewer_problem(metadata.get("reviewer_id")),
+                                       _review_date_problem(metadata.get("review_date"))) if problem]
+    seed = metadata.get("review_inherited_from")
+    if metadata.get("synthetic") and not (isinstance(seed, str) and seed.strip()):
+        missing.append("it is a synthetic twin and names no reviewed seed it inherits its record from "
+                       "(review_inherited_from): a twin is reviewed only when its seed was")
+    if not missing:
         return None
-    evidence = _model_drafted(label, metadata)
-    if evidence is None:
-        return None
-    return (f"{evidence}, and no reviewer is recorded: a person must review it and record "
-            "reviewer_id and review_date in its metadata before it trains or scores")
+    return ("no review record: " + "; ".join(missing) + ". A person must review it and record "
+            "reviewer_id and review_date in its metadata before it trains, is frozen or scores")
 
 
-def has_review_record(metadata: dict[str, Any]) -> bool:
-    return bool(metadata.get("reviewer_id") and metadata.get("review_date"))
+def has_review_record(metadata: dict[str, Any] | None) -> bool:
+    """Whether ``metadata`` holds a real review record (:func:`review_problem`)."""
+    return review_problem(None, metadata) is None
 
 
-def _model_drafted(label: Any, metadata: dict[str, Any]) -> str | None:
-    backend = str(metadata.get("draft_backend") or "").strip()
-    if backend.lower() not in _NO_MODEL:
-        return f"drafted by {backend}"
-    notes = label.get("fideon:provenance") if isinstance(label, dict) else None
-    values = notes.values() if isinstance(notes, dict) else [notes]
-    texts = [value for value in values if isinstance(value, str)]
-    if any(_NOT_REVIEWED.search(text) for text in texts):
-        return "its notes say it was not reviewed"
-    for text in texts:
-        if match := _MODEL_DRAFTED.search(text):
-            return f"its notes say it was {' '.join(match.group(0).split())}"
+def review_record(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """The review keys of ``metadata`` (:data:`REVIEW_KEYS`), as a reader copies them on."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return {key: metadata.get(key) for key in REVIEW_KEYS}
+
+
+def _reviewer_problem(value: Any) -> str | None:
+    if value is None:
+        return "reviewer_id is missing"
+    if not isinstance(value, str):
+        return f"reviewer_id {value!r} is not a person's name or id"
+    if "".join(re.findall(r"[a-z0-9]+", value.casefold())) in _NOBODY:
+        return f"reviewer_id {value!r} names nobody"
     return None
+
+
+def _review_date_problem(value: Any) -> str | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "review_date is missing"
+    when = _iso_moment(value)
+    if when is None:
+        return f"review_date {value!r} is not an ISO date (YYYY-MM-DD) or date-time"
+    now = datetime.now(UTC)
+    ahead = when > (now + _EARLIEST_ZONE).replace(tzinfo=None) if when.tzinfo is None else when > now
+    return f"review_date {value!r} is in the future" if ahead else None
+
+
+def _iso_moment(value: Any) -> datetime | None:
+    """An ISO date (as its midnight, with no zone) or date-time; ``None`` if it is neither."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    try:
+        return datetime.combine(date.fromisoformat(text), datetime.min.time())
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def export_golden_label(
@@ -233,8 +283,11 @@ def export_golden_label(
     """Validate and write a golden label plus its provenance metadata.
 
     Args:
-        accepted_without_review: the draft was taken as-is. Refused while the
-            day-zero requirement is ``"full"``.
+        reviewer_id: the person who reviewed the label; the review is dated now.
+        accepted_without_review: the draft was taken as-is. Always refused: a
+            draft nobody reviewed has no review record, so it could never
+            train, be frozen or score (decision 2026-10-22). Written, it would
+            sit in ``golden-labels/`` and stop the next corpus build.
 
     Returns:
         The blob key of the written label.
@@ -247,10 +300,19 @@ def export_golden_label(
             "correction (arch §4c). Drafts at this stage come from the untuned base model; "
             "trusting one would put its errors into the training target."
         )
+    if accepted_without_review:
+        raise LabelValidationError(
+            "a draft was accepted without review, so it has no review record - and every gold needs "
+            "one to train, be frozen into the eval set or score (decision 2026-10-22). Have a person "
+            "review it and export it under their reviewer_id."
+        )
 
     validate_golden_label(
         label, doc_type, acord_form=acord_form, field_provenance=field_provenance, lob=lob
     )
+    review = {"reviewer_id": reviewer_id, "review_date": datetime.now(UTC).isoformat()}
+    if problem := review_problem(label, review):
+        raise LabelValidationError(f"golden label for {source_id} rejected: {problem}")
 
     label_key = paths.golden_label(doc_type, source_id, tenant_id)
     client.write_json(label_key, label)
@@ -262,8 +324,9 @@ def export_golden_label(
         # Where the dataset build reads a policy's line from, to select the
         # canonical schema its prompt and training target use.
         "lob": lob,
-        "reviewer_id": reviewer_id,
-        "review_date": datetime.now(UTC).isoformat(),
+        **review,
+        # What drafted the label, kept as information: the review record above
+        # is what lets it train (review_problem).
         "draft_backend": draft_backend,
         "double_annotated": double_annotated,
         "agreement_score": agreement_score,
@@ -284,11 +347,19 @@ def export_golden_label(
 def load_golden_label(
     source_id: str, doc_type: str, client: BlobClient, tenant_id: str | None = None
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Load a label and its metadata together — they are only meaningful as a pair."""
-    return (
-        client.read_json(paths.golden_label(doc_type, source_id, tenant_id)),
-        client.read_json(paths.label_metadata(doc_type, source_id, tenant_id)),
-    )
+    """Load a label and its metadata together — they are only meaningful as a pair.
+
+    The label is read under the form-edition rule where it holds
+    (``label_rules.under_edition_rule``). A gold stored before the rule is not
+    rewritten in Blob; read as stored, the corpus build - which loads its golds
+    here - would train an edition inside a form number that the gate scores in
+    ``edition_date``.
+    """
+    from data_pipeline.ingestion.label_rules import under_edition_rule
+
+    label = client.read_json(paths.golden_label(doc_type, source_id, tenant_id))
+    metadata = client.read_json(paths.label_metadata(doc_type, source_id, tenant_id))
+    return under_edition_rule(label, doc_type, metadata.get("lob")), metadata
 
 
 def list_labeled_source_ids(

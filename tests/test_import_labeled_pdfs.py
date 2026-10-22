@@ -39,6 +39,9 @@ GOLDEN = json.loads(
 #: common model 1.1.0, and GOLDEN is not that shape.
 LINE = "property"
 
+#: A review record: every gold needs one to import (decision 2026-10-22).
+REVIEWED = {"reviewer_id": "a.reviewer", "review_date": "2026-10-20"}
+
 
 @pytest.fixture
 def client() -> BlobClient:
@@ -76,7 +79,7 @@ def bundle(tmp_path, name="acme-wc-2026", *, golden=None, metadata=None, pdf=b"%
     (directory / "golden.json").write_text(
         json.dumps(golden if golden is not None else GOLDEN), encoding="utf-8"
     )
-    metadata = {"lob": [LINE]} if metadata is None else metadata
+    metadata = {"lob": [LINE], **REVIEWED} if metadata is None else metadata
     (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     return directory
 
@@ -177,17 +180,29 @@ def test_a_complete_bundle_reports_nothing(tmp_path):
     assert check.ok and not check.warnings
 
 
-def test_a_model_drafted_gold_with_no_reviewer_is_refused(tmp_path):
-    """Frontier models are never used for gold, and no draft is trusted as-is
-    (decision 2026-10-19): a gold whose notes say a model drafted it imports
-    only once a reviewer is recorded."""
-    drafted = {**GOLDEN, "fideon:provenance": {"provenance": "Seed gold drafted by Claude Code"}}
-    check = check_bundle(read_bundle(bundle(tmp_path, golden=drafted)), "policy")
-    assert not check.ok and any("no reviewer is recorded" in e for e in check.errors)
+@pytest.mark.parametrize("note", [None, "Seed gold drafted by Claude Code", "not drafted by AI"])
+def test_a_gold_with_no_review_record_is_refused_whatever_its_notes_say(tmp_path, note):
+    """Every gold needs a review record to train or score (decision 2026-10-22):
+    its notes are no evidence either way."""
+    gold = {**GOLDEN, "fideon:provenance": {"provenance": note}} if note else GOLDEN
+    check = check_bundle(read_bundle(bundle(tmp_path, golden=gold, metadata={"lob": [LINE]})), "policy")
+    assert not check.ok and any("no review record" in e for e in check.errors)
 
-    reviewed = bundle(tmp_path, "reviewed", golden=drafted, metadata={
-        "lob": [LINE], "reviewer_id": "a.reviewer", "review_date": "2026-10-20"})
+    pending = bundle(tmp_path, "pending", golden=gold,
+                     metadata={"lob": [LINE], "reviewer_id": "pending", "review_date": "TBD"})
+    errors = check_bundle(read_bundle(pending), "policy").errors
+    assert any("'pending' names nobody" in e and "'TBD' is not an ISO date" in e for e in errors)
+
+    reviewed = bundle(tmp_path, "reviewed", golden=gold, metadata={"lob": [LINE], **REVIEWED})
     assert check_bundle(read_bundle(reviewed), "policy").ok
+
+
+def test_a_twin_imports_only_with_its_seeds_review(tmp_path):
+    twin = {"lob": [LINE], "synthetic": True, "sample": 1, **REVIEWED}
+    check = check_bundle(read_bundle(bundle(tmp_path, "own", metadata=twin)), "policy")
+    assert any("a twin is reviewed only when its seed was" in e for e in check.errors)
+    inherited = bundle(tmp_path, "inherited", metadata={**twin, "review_inherited_from": "property/seed_1"})
+    assert check_bundle(read_bundle(inherited), "policy").ok
 
 
 def test_the_review_record_reaches_the_label_metadata(tmp_path, client, raw_client):
@@ -195,11 +210,16 @@ def test_the_review_record_reaches_the_label_metadata(tmp_path, client, raw_clie
     root.mkdir()
     bundle(root, "doc", metadata={"lob": [LINE], "reviewer_id": "a.reviewer",
                                   "review_date": "2026-10-20", "draft_backend": "base_qwen3vl"})
+    bundle(root, "twin", pdf=b"%PDF-1.7 twin", metadata={
+        "lob": [LINE], "synthetic": True, **REVIEWED, "review_inherited_from": "property/seed_1"})
     report = import_batch(root, "policy", client, raw_client)
     assert report.ok, report.describe()
     stored = client.read_json(paths.label_metadata("policy", report.imported["doc"]))
     assert (stored["reviewer_id"], stored["review_date"], stored["draft_backend"]) == (
         "a.reviewer", "2026-10-20", "base_qwen3vl")
+    # A twin keeps the seed it inherited its record from: every later reader checks it.
+    twin = client.read_json(paths.label_metadata("policy", report.imported["twin"]))
+    assert twin["review_inherited_from"] == "property/seed_1"
 
 
 # --------------------------------------------------------------------------
@@ -273,8 +293,8 @@ def test_the_deliverys_unseen_carrier_mark_reaches_the_label_metadata(tmp_path, 
     gate could not report the unseen ones apart."""
     root = tmp_path / "batch"
     root.mkdir()
-    bundle(root, "unseen", pdf=b"%PDF-1.7 u", metadata={"lob": [LINE], "held_out_carrier": True})
-    bundle(root, "seen", pdf=b"%PDF-1.7 s", metadata={"lob": [LINE]})
+    bundle(root, "unseen", pdf=b"%PDF-1.7 u", metadata={"lob": [LINE], "held_out_carrier": True, **REVIEWED})
+    bundle(root, "seen", pdf=b"%PDF-1.7 s", metadata={"lob": [LINE], **REVIEWED})
     report = import_batch(root, "policy", client, raw_client)
     assert report.ok, report.describe()
 
@@ -285,19 +305,38 @@ def test_the_deliverys_unseen_carrier_mark_reaches_the_label_metadata(tmp_path, 
     assert label_metadata("seen")["held_out_carrier"] is False
 
 
+#: A common-model line's gold: the label rules - the form-edition rule among
+#: them - hold on these lines only (label_rules.label_rules_apply).
+COMMON_GOLD = json.loads((Path(__file__).resolve().parent.parent / "configs/canonical schema/common schema/"
+                          "examples/homeowners_minimal.json").read_text(encoding="utf-8"))
+
+
+def _with_form(gold, number):
+    return {**gold, "forms_and_endorsements": [
+        {"form_number": {"raw": number, "parsed": number, "page_ref": [1],
+                         "confidence": {"score": 1.0, "source": "vlm"}, "flagged": False}}]}
+
+
 def test_an_edition_left_inside_a_form_number_blocks_and_a_doubtful_one_warns(tmp_path):
     """The label rules move it at preparation; one still there means the bundle
     was never prepared, and the model would learn two conventions."""
-    unmoved = {**GOLDEN, "forms_and_endorsements": [
-        {"form_number": {"raw": "CG 00 01 04 13", "parsed": "CG 00 01 04 13", "page_ref": [1],
-                         "confidence": {"score": 1.0, "source": "vlm"}, "flagged": False}}]}
-    check = check_bundle(read_bundle(bundle(tmp_path, golden=unmoved)), "policy")
+    common = {"lob": ["homeowners"], **REVIEWED}
+    check = check_bundle(read_bundle(bundle(tmp_path, golden=_with_form(COMMON_GOLD, "CG 00 01 04 13"),
+                                            metadata=common)), "policy")
     assert any("still carry their edition" in e for e in check.errors)
 
-    doubtful = {**GOLDEN, "forms_and_endorsements": [
-        {"form_number": {"raw": "CG 20 10 04", "parsed": "CG 20 10 04", "page_ref": [1],
-                         "confidence": {"score": 1.0, "source": "vlm"}, "flagged": False}}]}
-    check = check_bundle(read_bundle(bundle(tmp_path, "doubtful", golden=doubtful)), "policy")
+    check = check_bundle(read_bundle(bundle(tmp_path, "doubtful", golden=_with_form(COMMON_GOLD, "CG 20 10 04"),
+                                            metadata=common)), "policy")
     assert not any("edition" in e for e in check.errors)
     assert any("may end in their edition" in w for w in check.warnings)
 
+
+@pytest.mark.parametrize("line", ["property", "auto", "wc", "umbrella"])
+def test_a_self_contained_line_keeps_its_editions_in_the_form_number(tmp_path, line):
+    """Nothing applies the label rules on a self-contained line - not
+    prepare_bundles, not serving - so "re-run prepare_bundles" could never fix
+    it: the edition is not asked of it."""
+    gold = _with_form(GOLDEN, "CG 00 01 04 13")
+    check = check_bundle(read_bundle(bundle(tmp_path, golden=gold, metadata={"lob": [line], **REVIEWED})),
+                         "policy")
+    assert not any("edition" in text for text in check.errors + check.warnings)

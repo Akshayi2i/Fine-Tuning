@@ -118,7 +118,8 @@ def test_the_golden_eval_scores_only_the_scopes_lines(client, monkeypatch):
 
     for source_id, lob in (("h1", "homeowners"), ("g1", "gl"), ("n1", None)):
         base = f"{paths.golden_eval_set_dir()}/{source_id}"
-        client.write_json(f"{base}/metadata.json", {"doc_type": "policy", "lob": lob})
+        client.write_json(f"{base}/metadata.json", {"doc_type": "policy", "lob": lob, "reviewer_id": "a.reviewer",
+                                                    "review_date": "2026-10-20"})
         client.write_bytes(f"{base}/page_1.png", b"png")
         client.write_json(f"{base}/golden.json", {})
     client.write_json(f"{paths.golden_eval_set_dir()}/manifest.json", {"source_ids": ["h1", "g1", "n1"]})

@@ -14,7 +14,9 @@ pymupdf = pytest.importorskip("pymupdf")
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "golden"
 GOLDEN = json.loads((FIXTURES / "policy_0001.golden.json").read_text(encoding="utf-8"))
-META = {"lob": "workers_comp", "field_provenance": {"policy.policy_number": "Policy No."}}
+META = {"lob": "workers_comp", "field_provenance": {"policy.policy_number": "Policy No."},
+        # Every gold needs a review record to import (decision 2026-10-22).
+        "reviewer_id": "a.reviewer", "review_date": "2026-10-20"}
 
 #: What page 1 of the fixture policy prints.
 PAGE_1 = [
@@ -121,6 +123,14 @@ def test_a_missing_or_unknown_line_is_a_blocker(tmp_path, meta, message):
     _document(tmp_path, "doc", meta=meta or {"field_provenance": {}})
     report = audit_folder(tmp_path, scope=None)
     assert any(message in f.detail for f in report.blockers)
+
+
+def test_a_gold_with_no_review_record_is_a_blocker_as_at_import(tmp_path):
+    unreviewed = {k: v for k, v in META.items() if k not in ("reviewer_id", "review_date")}
+    _document(tmp_path, "doc", meta={**unreviewed, "reviewer_id": "pending"})
+    report = audit_folder(tmp_path, scope=None)
+    assert any("no review record" in f.detail and "'pending' names nobody" in f.detail for f in report.blockers)
+    assert summary(report)["importable"] == 0
 
 
 def test_a_line_outside_the_scope_is_a_blocker(tmp_path):

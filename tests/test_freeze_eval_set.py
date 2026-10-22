@@ -147,7 +147,11 @@ def test_a_pilot_sized_set_is_not_frozen_by_accident(client, controller):
 # --------------------------------------------------------------------------
 
 
-def _seed_test_split(client, tenant, corpus, labels):
+#: A review record: a gold is frozen and scored only with one (decision 2026-10-22).
+REVIEWED = {"reviewer_id": "a.reviewer", "review_date": "2026-10-20", "draft_backend": "label_studio"}
+
+
+def _seed_test_split(client, tenant, corpus, labels, metadata=None):
     """A tenant's corpus test split, and what a freeze copies for each document."""
     import json
 
@@ -155,9 +159,56 @@ def _seed_test_split(client, tenant, corpus, labels):
     client.write_text(paths.corpus_eval_split(corpus, "test", tenant), rows)
     for source_id, label in labels.items():
         client.write_json(paths.golden_label("policy", source_id, tenant), label)
-        client.write_json(paths.label_metadata("policy", source_id, tenant), {"lob": "homeowners"})
+        client.write_json(paths.label_metadata("policy", source_id, tenant),
+                          {"lob": "homeowners", **REVIEWED, **(metadata or {}).get(source_id, {})})
         client.write_json(paths.ocr_meta("policy", source_id, tenant), {"page_count": 1})
         client.write_bytes(paths.processed_page("policy", source_id, 1, "png", tenant), b"png")
+
+
+def test_an_unreviewed_gold_is_never_frozen_and_nothing_is_copied(client):
+    _seed_test_split(client, "t", "v1", {"policy_0001": {}, "policy_0002": {}},
+                     metadata={"policy_0002": {"reviewer_id": "", "review_date": None}})
+    with pytest.raises(FreezeError, match="1 of the 2 test document.*policy_0002: no review record"):
+        freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)
+    assert not client.list(paths.golden_eval_set_dir("t"))
+
+
+def test_the_frozen_metadata_carries_the_review_record_the_gate_checks(client):
+    twin = {"synthetic": True, "review_inherited_from": "homeowners/seed_1"}
+    _seed_test_split(client, "t", "v1", {"policy_0001": {}, "policy_0002": {}}, metadata={"policy_0002": twin})
+    freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)
+    root = paths.golden_eval_set_dir("t")
+    real, frozen_twin = (client.read_json(f"{root}/{sid}/metadata.json") for sid in ("policy_0001", "policy_0002"))
+    assert {k: real[k] for k in REVIEWED} == REVIEWED and real["review_inherited_from"] is None
+    assert frozen_twin["review_inherited_from"] == "homeowners/seed_1" and frozen_twin["synthetic"] is True
+    assert [d.source_id for d in load_golden_set(client, tenant_id="t")] == ["policy_0001", "policy_0002"]
+
+
+def test_a_set_frozen_before_the_rule_is_refused_until_its_records_are_copied_in(client):
+    """The gate refuses, never narrows: skipping a frozen gold would score a
+    smaller yardstick than earlier versions were scored on."""
+    from evaluation.freeze_eval_set import mark_reviewed
+    from evaluation.golden_eval import GoldenEvalError
+
+    _seed_test_split(client, "t", "v1", {"policy_0001": {}, "policy_0002": {}})
+    freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)
+    root = paths.golden_eval_set_dir("t")
+    for sid in ("policy_0001", "policy_0002"):                         # as an older freeze wrote it
+        frozen = client.read_json(f"{root}/{sid}/metadata.json")
+        client.write_json(f"{root}/{sid}/metadata.json", {k: v for k, v in frozen.items() if k not in REVIEWED})
+    with pytest.raises(GoldenEvalError, match="2 frozen document.*no review record"):
+        load_golden_set(client, tenant_id="t")
+
+    # One label still has no record of its own: the copy leaves it listed.
+    client.write_json(paths.label_metadata("policy", "policy_0002", "t"), {"lob": "homeowners"})
+    assert list(mark_reviewed(client, tenant_id="t")) == ["policy_0002"]
+    with pytest.raises(GoldenEvalError, match="1 frozen document.*policy_0002"):
+        load_golden_set(client, tenant_id="t")
+    client.write_json(paths.label_metadata("policy", "policy_0002", "t"), {"lob": "homeowners", **REVIEWED})
+    golden_before = client.read_json(f"{root}/policy_0002/golden.json")
+    assert mark_reviewed(client, tenant_id="t") == {}
+    assert len(load_golden_set(client, tenant_id="t")) == 2
+    assert client.read_json(f"{root}/policy_0002/golden.json") == golden_before   # only the record changed
 
 
 def test_two_tenants_freeze_independently_and_each_reads_only_its_own(client):

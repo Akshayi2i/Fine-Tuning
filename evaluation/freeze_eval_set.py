@@ -143,9 +143,15 @@ def freeze_eval_set(
     :data:`MIN_FROZEN_DOCS_PER_TYPE` documents, unless ``allow_small``: the frozen
     set is the size of the build it came from, permanently, so freezing a pilot
     build fixes a pilot-sized yardstick for every later version.
+
+    Refused, before anything is copied, when any gold has no review record
+    (``export_golden_labels.review_problem``, decision 2026-10-22): a gold
+    nobody reviewed never scores, and a set holding one would be refused by the
+    gate. The record is carried into each frozen document's metadata, where the
+    gate checks it.
     """
     from data_pipeline.dataset_builder.split_groups import line_of
-    from data_pipeline.labeling.export_golden_labels import load_golden_label
+    from data_pipeline.labeling.export_golden_labels import load_golden_label, review_problem, review_record
 
     root = paths.golden_eval_set_dir(tenant_id)
     partial = partial_freeze(client, tenant_id=tenant_id)
@@ -199,6 +205,19 @@ def freeze_eval_set(
             "smaller set anyway (a pilot), pass --allow-small."
         )
 
+    loaded = {source_id: load_golden_label(source_id, doc_type, client, tenant_id)
+              for source_id, doc_type in sorted(documents.items())}
+    unreviewed = [(source_id, problem) for source_id, (label, metadata) in loaded.items()
+                  if (problem := review_problem(label, metadata))]
+    if unreviewed:
+        raise FreezeError(
+            f"{len(unreviewed)} of the {len(documents)} test document(s) of corpus {corpus_version} have "
+            f"no review record, and a gold nobody reviewed is never frozen or scored (decision "
+            f"2026-10-22): {unreviewed[0][0]}: {unreviewed[0][1]}. Others: "
+            f"{[s for s, _ in unreviewed[1:6]]}. Nothing was frozen. Freeze from a corpus built from "
+            "reviewed golds only."
+        )
+
     split = corpus_manifest.get("split_assignment") or {}
     held_out_ids = set(split.get("held_out_source_ids") or [])
     frozen_held_out: list[str] = []
@@ -206,7 +225,7 @@ def freeze_eval_set(
     by_type: dict[str, int] = {}
     by_line: dict[str, int] = {}
     for source_id, doc_type in sorted(documents.items()):
-        label, metadata = load_golden_label(source_id, doc_type, client, tenant_id)
+        label, metadata = loaded[source_id]
         ocr_meta = client.read_json(paths.ocr_meta(doc_type, source_id, tenant_id))
         page_count = int(ocr_meta.get("page_count") or 0)
         if page_count < 1:
@@ -236,6 +255,9 @@ def freeze_eval_set(
             # delivery. Evaluation reports these apart.
             "carrier": metadata.get("carrier"),
             "held_out_carrier": held_out_carrier(source_id, metadata, held_out_ids),
+            # Who reviewed the gold and when, what drafted it, and a twin's seed:
+            # the gate scores a frozen gold only with a review record here.
+            **review_record(metadata),
         })
         if held_out_carrier(source_id, metadata, held_out_ids):
             frozen_held_out.append(source_id)
@@ -309,3 +331,35 @@ def mark_held_out(client: BlobClient, *, tenant_id: str | None = None) -> list[s
     client.write_json(manifest_key(tenant_id=tenant_id), {**manifest, "held_out_source_ids": sorted(marked)})
     log.info("marked %d frozen document(s) in %s as unseen carriers': %s", len(marked), root, marked)
     return marked
+
+
+def mark_reviewed(client: BlobClient, *, tenant_id: str | None = None) -> dict[str, str]:
+    """Copy each frozen document's review record from its label metadata into the
+    frozen set. Returns ``{source_id: problem}`` for those still without one.
+
+    For a set frozen before the freeze carried the record: the gate refuses a
+    frozen gold with none (golden_eval.load_golden_set). Only the review keys
+    change, and only to a real record - never the documents, labels or pages -
+    so the yardstick stays the one every version was scored on. A document
+    still listed has no record in its label metadata either: review it and
+    import it again, or delete the set and freeze again.
+    """
+    from data_pipeline.labeling.export_golden_labels import load_golden_label, review_problem, review_record
+
+    root = paths.golden_eval_set_dir(tenant_id)
+    manifest = frozen_manifest(client, tenant_id=tenant_id)
+    if not manifest:
+        raise FreezeError(f"no frozen eval set at {root}/ to mark")
+    missing: dict[str, str] = {}
+    for source_id in manifest.get("source_ids") or []:
+        key = f"{root}/{source_id}/metadata.json"
+        frozen = client.read_json(key)
+        if review_problem(None, frozen) is None:
+            continue
+        _label, metadata = load_golden_label(source_id, frozen["doc_type"], client, tenant_id)
+        if problem := review_problem(None, metadata):
+            missing[source_id] = problem
+            continue
+        client.write_json(key, {**frozen, **review_record(metadata)})
+    log.info("review records in %s: %d frozen document(s) still have none", root, len(missing))
+    return missing

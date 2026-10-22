@@ -277,6 +277,78 @@ def split_form_editions(gold: dict[str, Any]) -> list[tuple[str, str]]:
     return notes
 
 
+def label_rules_apply(doc_type: str | None, lob: Any) -> bool:
+    """Whether the label rules - the form-edition rule among them - hold for a
+    gold of ``doc_type`` on line ``lob``: a policy on a common-model line (no
+    line is the fallback, which is one).
+
+    The one test of where the rules hold. They are the lines prepare_bundles
+    corrects a gold on (``prepare_bundles.corrected_gold``) and serving holds an
+    answer to them on (``serving.conventions.conform``); the importers' check,
+    the corpus build, the gate and the harness read a gold under them there and
+    nowhere else. A self-contained line (auto, wc, umbrella) keeps an edition
+    in its form number - nothing ever moved it, in its golds or in its answers -
+    so asking it of that line's golds asked what no step on the line produces.
+    """
+    if doc_type != "policy":
+        return False
+    from common.lob import merge_line
+    from common.schemas import SchemaError, is_canonical, is_common_model
+
+    line = merge_line(lob) or None
+    try:
+        return is_canonical("policy", None, line) and is_common_model("policy", None, line)
+    except SchemaError:
+        return False
+
+
+def under_edition_rule(gold: dict[str, Any], doc_type: str | None, lob: Any) -> dict[str, Any]:
+    """``gold`` read under the form-edition rule where it holds (:func:`label_rules_apply`):
+    a copy with each edition moved out of its form number, or ``gold`` itself when
+    the rule does not hold there or moves nothing.
+
+    For golds stored before the rule: they are not rewritten in Blob, they are
+    read under it - by the corpus build as by the gate, so a model is never
+    trained on one convention and scored on the other.
+    """
+    if not isinstance(gold, dict) or not label_rules_apply(doc_type, lob):
+        return gold
+    if not any(split_form_edition(row["form_number"].get("raw")) for _, row in edition_rows(gold)):
+        return gold
+    moved = copy.deepcopy(gold)
+    split_form_editions(moved)
+    return moved
+
+
+def edition_problems(gold: dict[str, Any], doc_type: str | None, lob: Any) -> tuple[list[str], list[str]]:
+    """``(errors, warnings)`` for the form editions a gold to import still holds
+    in its form numbers, where the rule holds (:func:`label_rules_apply`).
+
+    An edition the rule moves, left in its number with ``edition_date`` empty,
+    means the gold never went through the label rules: an error. A number that
+    may end in its edition, in a shape a number takes too, is named for a person
+    to check. On any other line nothing is asked of the gold.
+    """
+    if not label_rules_apply(doc_type, lob):
+        return [], []
+    unmoved, unsure = [], []
+    for index, row in edition_rows(gold):
+        raw = row["form_number"].get("raw")
+        if split_form_edition(raw):
+            unmoved.append(f"forms_and_endorsements[{index}] {raw!r}")
+        elif may_hold_edition(raw):
+            unsure.append(f"forms_and_endorsements[{index}] {raw!r}")
+    errors = [
+        f"{len(unmoved)} form number(s) still carry their edition with edition_date empty "
+        f"({', '.join(unmoved[:3])}): re-run prepare_bundles, whose label rules move it"
+    ] if unmoved else []
+    warnings = [
+        f"{len(unsure)} form number(s) may end in their edition, edition_date empty "
+        f"({', '.join(unsure[:3])}): check them by hand"
+    ] if unsure else []
+    return errors, warnings
+
+
 # --------------------------------------------------------------------------
 # Values and where they are printed
 # --------------------------------------------------------------------------

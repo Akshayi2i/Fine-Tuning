@@ -73,7 +73,11 @@ def test_each_twin_becomes_a_digital_and_a_scanned_document_reading_one_gold(tmp
     # text misses most of what its label cites settles nothing, so none is listed.
     assert meta.pop("unprinted_values") == []
     assert meta == {"lob": "homeowners", "synthetic": True, "template_id": "homeowners/seed_a", "split": "train",
-                    "carrier": "all_state", "source_system": "fideon_synth", "sample": 2, "render_mode": "scanned"}
+                    "carrier": "all_state", "source_system": "fideon_synth", "sample": 2, "render_mode": "scanned",
+                    # The manifest records no review of the seed, so its twins have none.
+                    "reviewer_id": None, "review_date": None, "draft_backend": None,
+                    "review_inherited_from": None}
+    assert report.unreviewed == 4 and "no review record: 4 document(s)" in report.describe()
     digital = json.loads((out / "homeowners__all_state__seed_a__twin_002" / "metadata.json").read_text("utf-8"))
     assert digital["render_mode"] == "digital" and digital["template_id"] == meta["template_id"]
 
@@ -184,6 +188,45 @@ def test_each_seed_is_a_real_document_in_its_twins_family_and_split(tmp_path):
     assert meta["synthetic"] is False and meta["split"] == "train" and meta["template_id"] == twin["template_id"]
     gold = json.loads((folder / "golden.json").read_text(encoding="utf-8"))
     assert gold["carrier"]["name"]["raw"] == "Allstate"                   # the same corrections as its twins
+
+
+def _with_review(root: Path, *records: dict) -> None:
+    """Give the SPEC_21 manifest's rows (in order) review columns: the SEED's review."""
+    path = root / "split_manifest.csv"
+    rows = list(csv.DictReader(path.open(encoding="utf-8", newline="")))
+    for row, record in zip(rows, records, strict=True):
+        row.update(record)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=[*rows[0]])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_a_spec21_seed_and_its_twins_carry_the_seeds_review_record(tmp_path):
+    from data_pipeline.labeling.export_golden_labels import has_review_record
+
+    root = _delivery(tmp_path, {1: _gold(), 2: _gold()})
+    record = {"reviewer_id": "a.reviewer", "review_date": "2026-10-20", "draft_backend": "label_studio"}
+    _with_review(root, record, record)
+    out = tmp_path / "bundles"
+    report = prepare_twin_bundles(root, out, originals=_originals(tmp_path, _gold()))
+    assert report.unreviewed == 0
+    seed = json.loads((out / ORIGINAL / "metadata.json").read_text(encoding="utf-8"))
+    assert {k: seed[k] for k in record} == record and has_review_record(seed)
+    for name in ("homeowners__all_state__seed_a__twin_001", "homeowners__all_state__seed_a__twin_002__scan"):
+        twin = json.loads((out / name / "metadata.json").read_text(encoding="utf-8"))
+        assert {k: twin[k] for k in record} == record and twin["review_inherited_from"] == "homeowners/seed_a"
+        assert has_review_record(twin)
+
+
+def test_a_seeds_twins_stating_two_review_records_are_refused(tmp_path):
+    from data_pipeline.ingestion.prepare_bundles import BundleError
+
+    root = _delivery(tmp_path, {1: _gold(), 2: _gold()})
+    _with_review(root, {"reviewer_id": "a.reviewer", "review_date": "2026-10-20"},
+                 {"reviewer_id": "b.reviewer", "review_date": "2026-10-20"})
+    with pytest.raises(BundleError, match="two review records"):
+        prepare_twin_bundles(root, tmp_path / "bundles")
 
 
 def test_a_seed_without_its_document_is_counted_not_guessed(tmp_path):

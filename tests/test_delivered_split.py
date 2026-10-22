@@ -224,9 +224,49 @@ def test_prepare_bundles_writes_one_folder_per_document(tmp_path):
     meta = json.loads((folder / "metadata.json").read_text("utf-8"))
     assert meta == {"lob": "homeowners", "synthetic": True, "template_id": "Acme/homeowners/ho_1",
                     "split": "train", "carrier": "Acme", "source_system": "fideon_synth", "sample": 1,
-                    "render_mode": None}
+                    "render_mode": None,
+                    # Its seed's own row records no review, so the twin has none.
+                    "reviewer_id": None, "review_date": None, "draft_backend": None,
+                    "review_inherited_from": None}
     original = json.loads((out / "homeowners__ho_1__original/metadata.json").read_text("utf-8"))
     assert original["synthetic"] is False and original["template_id"] == meta["template_id"]
+
+
+def test_a_twin_inherits_its_seeds_review_record_and_never_its_own(tmp_path):
+    """Decision 2026-10-22: a twin counts as reviewed only when its seed was."""
+    import csv as _csv
+
+    from data_pipeline.ingestion.prepare_bundles import prepare_bundles
+    from data_pipeline.labeling.export_golden_labels import has_review_record
+
+    delivery = _delivery(tmp_path)
+    with (delivery / "manifest.csv").open(encoding="utf-8", newline="") as fh:
+        rows = list(_csv.DictReader(fh))
+    for row in rows:
+        if row["kind"] == "original":            # ho_1's seed: reviewed
+            row.update(reviewer_id="a.reviewer", review_date="2026-10-20", draft_backend="label_studio")
+        elif "ho_2" in row["source"]:           # ho_2's twin names a reviewer, its seed none
+            row.update(reviewer_id="someone", review_date="2026-10-20", draft_backend="")
+    with (delivery / "manifest.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = _csv.DictWriter(fh, fieldnames=[*rows[0], "reviewer_id", "review_date", "draft_backend"])
+        writer.writeheader()
+        writer.writerows({"reviewer_id": "", "review_date": "", "draft_backend": "", **row} for row in rows)
+
+    out = tmp_path / "bundles"
+    report = prepare_bundles(delivery, out, lines=frozenset({"homeowners"}))
+
+    def meta(name):
+        return json.loads((out / name / "metadata.json").read_text("utf-8"))
+
+    seed, twin, orphan = (meta(n) for n in ("homeowners__ho_1__original", "homeowners__ho_1__synth_001",
+                                            "homeowners__ho_2__synth_001"))
+    assert (seed["reviewer_id"], seed["review_date"], seed["draft_backend"]) == (
+        "a.reviewer", "2026-10-20", "label_studio")
+    assert {k: twin[k] for k in ("reviewer_id", "review_date", "review_inherited_from")} == {
+        "reviewer_id": "a.reviewer", "review_date": "2026-10-20", "review_inherited_from": "Acme/homeowners/ho_1"}
+    assert has_review_record(seed) and has_review_record(twin)
+    assert orphan["reviewer_id"] is None and orphan["review_inherited_from"] is None
+    assert not has_review_record(orphan) and report.unreviewed == 1
 
 
 def test_prepare_bundles_is_safe_to_rerun_and_copies_when_asked(tmp_path):

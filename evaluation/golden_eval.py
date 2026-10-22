@@ -73,7 +73,14 @@ class GoldenDocument:
 def load_golden_set(
     client: BlobClient, doc_types: Sequence[str] | None = None, *, tenant_id: str | None = None
 ) -> list[GoldenDocument]:
-    """Every document in this tenant's frozen set, optionally narrowed to ``doc_types``."""
+    """Every document in this tenant's frozen set, optionally narrowed to ``doc_types``.
+
+    Refused, never narrowed, while any of them has no review record in its
+    frozen metadata (``export_golden_labels.review_problem``, decision
+    2026-10-22): a gold nobody reviewed does not score, and skipping it would
+    quietly score a smaller yardstick than every earlier version was scored on.
+    """
+    from data_pipeline.labeling.export_golden_labels import review_problem
     from evaluation.run_eval import eval_set_keys
 
     prefix = paths.golden_eval_set_dir(tenant_id)
@@ -84,6 +91,7 @@ def load_golden_set(
             by_source.setdefault(rest.split("/", 1)[0], []).append(key)
 
     documents = []
+    unreviewed: list[tuple[str, str]] = []
     for source_id, keys in sorted(by_source.items()):
         base = f"{prefix}/{source_id}"
         if f"{base}/golden.json" not in keys:
@@ -97,6 +105,9 @@ def load_golden_set(
                 f"{source_id} has no doc_type in metadata.json, so no schema can be selected"
             )
         if doc_types and doc_type not in doc_types:
+            continue
+        if problem := review_problem(None, metadata):
+            unreviewed.append((source_id, problem))
             continue
         images: dict[int, str] = {}
         texts: dict[int, str] = {}
@@ -119,7 +130,8 @@ def load_golden_set(
             # A rule-added value the page does not print is not expected of
             # the model either (label_verification), as in its training targets.
             golden=verified_label(
-                client.read_json(f"{base}/golden.json"), [texts.get(p, "") for p in sorted(images)]
+                client.read_json(f"{base}/golden.json"), [texts.get(p, "") for p in sorted(images)],
+                doc_type=doc_type, lob=metadata.get("lob"),
             ),
             image_keys=[images[p] for p in sorted(images)],
             page_texts={p: texts.get(p, "") for p in sorted(images)},
@@ -129,20 +141,29 @@ def load_golden_set(
             synthetic=bool(metadata.get("synthetic", False)),
             held_out_carrier=bool(metadata.get("held_out_carrier", False)),
         ))
+    if unreviewed:
+        raise GoldenEvalError(
+            f"{len(unreviewed)} frozen document(s) have no review record, so they cannot score "
+            f"(decision 2026-10-22): {unreviewed[0][0]}: {unreviewed[0][1]}. Others: "
+            f"{[s for s, _ in unreviewed[1:6]]}. Record each one's review in its label metadata and "
+            "copy it into the frozen set (evaluation.freeze_eval_set.mark_reviewed), or delete the "
+            "set and freeze again from a corpus of reviewed golds."
+        )
     return documents
 
 
-def verified_label(label: dict[str, Any], page_texts: list[str]) -> dict[str, Any]:
-    """The frozen gold as training would teach it: rule-added values the page
-    does not print left out (label_verification), and a form's edition moved out
-    of its number, as the label rules now do. A set frozen before that rule is
-    not rewritten in Blob; it is read under it."""
+def verified_label(
+    label: dict[str, Any], page_texts: list[str], *, doc_type: str = "policy", lob: Any = None,
+) -> dict[str, Any]:
+    """The frozen gold as training would teach it, through the function the
+    corpus build reads its golds with (label_verification): a form's edition
+    moved out of its number where the label rules hold for ``doc_type`` and
+    ``lob`` (label_rules.label_rules_apply), then rule-added values the page does
+    not print left out. A set frozen before the edition rule is not rewritten in
+    Blob; it is read under it."""
     from data_pipeline.dataset_builder.label_verification import verified_label as verify
-    from data_pipeline.ingestion.label_rules import split_form_editions
 
-    verified = copy.deepcopy(verify(label, page_texts))
-    split_form_editions(verified)
-    return verified
+    return copy.deepcopy(verify(label, page_texts, doc_type=doc_type, lob=lob))
 
 
 def merge_line(lob: Any) -> Any:

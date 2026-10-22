@@ -271,6 +271,36 @@ def test_a_test_document_of_a_carrier_training_never_sees_is_marked_held_out(tmp
             name: meta["held_out_carrier"] for name, meta in metas.items()}
 
 
+def test_a_placeholder_carrier_is_never_an_unseen_one(tmp_path):
+    """"N/A" names no carrier, so no carrier the model never saw (decision 2026-10-22)."""
+    docs = {(f"Carrier {n % 10}", f"policy_{n:02d}"): _gl_gold(f"INSURED {n}", carrier=f"Carrier {n % 10}")
+            for n in range(40)}
+    docs[("Broker", "unknown_0")] = _gl_gold("OTHER 0", carrier="N/A")       # drawn into test
+    out = tmp_path / "bundles"
+    prepare_original_bundles(_source(tmp_path, docs), out, lob="gl")
+    meta = json.loads((out / "gl__broker__unknown_0" / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["split"] == "test" and meta["held_out_carrier"] is False
+
+
+def test_real_documents_carry_the_review_record_their_reviews_file_gives(tmp_path):
+    from data_pipeline.labeling.export_golden_labels import has_review_record
+
+    root = _source(tmp_path, {("Utica First", "dec_01"): _gl_gold("A"), ("Utica First", "dec_02"): _gl_gold("B"),
+                              ("Utica First", "dec_03"): _gl_gold("C")})
+    (root / "reviews.csv").write_text(
+        "document,reviewer_id,review_date,draft_backend\n"
+        "Utica First/dec_01,a.reviewer,2026-10-20,label_studio\n"          # by the gold's path
+        "gl__utica_first__dec_02,b.reviewer,2026-10-21,\n",                # or by the folder name
+        encoding="utf-8")
+    out = tmp_path / "bundles"
+    report = prepare_original_bundles(root, out, lob="gl")
+    metas = {n: json.loads((out / f"gl__utica_first__{n}" / "metadata.json").read_text(encoding="utf-8"))
+             for n in ("dec_01", "dec_02", "dec_03")}
+    assert (metas["dec_01"]["reviewer_id"], metas["dec_01"]["draft_backend"]) == ("a.reviewer", "label_studio")
+    assert metas["dec_02"]["review_date"] == "2026-10-21" and has_review_record(metas["dec_02"])
+    assert metas["dec_03"]["reviewer_id"] is None and report.unreviewed == 1
+
+
 def test_the_corpus_build_records_the_delivered_held_out_documents():
     """So the frozen set marks them and the gate reports them apart."""
     from types import SimpleNamespace

@@ -253,36 +253,25 @@ def check_label_agreement(ctx, results: list[Check], labels=None) -> None:
         results.append(Check("label agreement", "PASS", detail))
 
 
-def check_reviewed_labels(ctx, results: list[Check], labels=None, read_label=None) -> None:
-    """Every model-drafted label has a reviewer recorded (decision 2026-10-19).
+def check_reviewed_labels(ctx, results: list[Check], labels=None) -> None:
+    """Every label has a review record (decision 2026-10-22).
 
     The corpus build refuses the run on the first one it meets; this names all
-    of them before anything is built.
+    of them before anything is built. The metadata alone decides it
+    (``export_golden_labels.review_problem``): a gold's notes are never read as
+    evidence either way.
     """
-    from artifact_registry import paths
-    from data_pipeline.labeling.export_golden_labels import has_review_record, review_problem
+    from data_pipeline.labeling.export_golden_labels import review_problem
 
     labels = _label_metadata(ctx) if labels is None else labels
-    if read_label is None:
-        def read_label(doc_type, source_id):
-            return ctx.client.read_json(paths.golden_label(doc_type, source_id, ctx.tenant_id))
-    blocked, unrecorded = [], 0
-    for doc_type, source_id, metadata in labels:
-        if has_review_record(metadata):
-            continue
-        if review_problem(read_label(doc_type, source_id), metadata):
-            blocked.append(source_id)
-        else:
-            unrecorded += 1
+    blocked = [(source_id, problem) for _doc_type, source_id, metadata in labels
+               if (problem := review_problem(None, metadata))]
     if blocked:
         results.append(Check(
             "reviewed labels", "FAIL",
-            f"{len(blocked)} of {len(labels)} labels were drafted by a model with no reviewer "
-            f"recorded: {blocked[:5]}",
+            f"{len(blocked)} of {len(labels)} labels have no review record ({blocked[0][1]}): "
+            f"{[s for s, _ in blocked[:5]]}",
             "have a person review them, record reviewer_id and review_date, and re-import"))
-    elif unrecorded:
-        results.append(Check("reviewed labels", "WARN",
-                             f"{unrecorded} of {len(labels)} labels record no reviewer"))
     else:
         results.append(Check("reviewed labels", "PASS", f"{len(labels)} labels, all reviewed"))
 

@@ -55,6 +55,8 @@ class RunSummary:
     by_mode: dict[str, int] = field(default_factory=dict)
     needing_review: int = 0
     failed: list[tuple[str, str]] = field(default_factory=list)
+    #: Extracted but not scored, and why: a gold with no review record.
+    not_scored: list[tuple[str, str]] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -72,6 +74,7 @@ class RunSummary:
             "by_doc_type": self.by_doc_type,
             "by_mode": self.by_mode,
             "failed": self.failed,
+            "not_scored": self.not_scored,
             **self.metrics,
         }
 
@@ -334,6 +337,7 @@ PAGE_CACHE = TESTING_ROOT / "ocr_cache"
 def document_request(
     client: Any, source_id: str, *, doc_type: str = "policy", tenant_id: str | None = None,
     mode: str = "ocr_plus_image", images_root: Path = PAGE_CACHE,
+    unscored: dict[str, str] | None = None,
 ) -> tuple[ExtractionRequest, dict[str, Any] | None]:
     """One imported, OCR'd document as an extraction request, and its gold label.
 
@@ -342,14 +346,21 @@ def document_request(
     read exactly as serving reads one. The gold label is ``None`` when the
     document has none: the extraction still runs, and is not scored.
 
-    A form's edition left inside its number moves to ``edition_date``, as the
-    label rules and the gate's golden eval read it: a gold imported before that
-    rule is not rewritten in Blob, and scored as stored it would count the
-    model's ``edition_date`` wrong for following the convention.
+    A form's edition left inside its number moves to ``edition_date`` where the
+    label rules hold (``label_rules.label_rules_apply``), as the gate's golden
+    eval reads it: a gold imported before that rule is not rewritten in Blob,
+    and scored as stored it would count the model's ``edition_date`` wrong for
+    following the convention.
+
+    A gold with no review record (``export_golden_labels.review_problem``,
+    decision 2026-10-22) is not scored: the extraction still runs, and the gold
+    comes back ``None`` with a warning saying why - recorded in ``unscored``
+    (source id -> why) when the caller passes one.
     """
     from artifact_registry import paths
     from common.lob import merge_line
-    from data_pipeline.ingestion.label_rules import split_form_editions
+    from data_pipeline.ingestion.label_rules import under_edition_rule
+    from data_pipeline.labeling.export_golden_labels import review_problem
     from training.stage_data import localize_keys
 
     meta_key = paths.ocr_meta(doc_type, source_id, tenant_id)
@@ -373,8 +384,13 @@ def document_request(
         metadata = client.read_json(label_meta_key)
     golden_key = paths.golden_label(doc_type, source_id, tenant_id)
     golden = client.read_json(golden_key) if client.exists(golden_key) else None
+    if golden is not None and (problem := review_problem(golden, metadata)):
+        log.warning("%s is extracted but NOT scored - its gold has %s", source_id, problem)
+        if unscored is not None:
+            unscored[source_id] = f"its gold has {problem}"
+        golden = None
     if golden is not None:
-        split_form_editions(golden)
+        golden = under_edition_rule(golden, doc_type, metadata.get("lob"))
 
     request = ExtractionRequest(
         source_id=source_id,
@@ -411,10 +427,12 @@ def run_batch(
 
     results: list[tuple[ExtractionResult, dict[str, Any]]] = []
     failed: list[tuple[str, str]] = []
+    # Documents whose gold has no review record: extracted, never scored.
+    unscored: dict[str, str] = {}
     for index, source_id in enumerate(source_ids, start=1):
         try:
             request, golden = document_request(client, source_id, doc_type=doc_type, tenant_id=tenant_id,
-                                               mode=mode, images_root=images_root)
+                                               mode=mode, images_root=images_root, unscored=unscored)
             calibration = CalibrationParams(method="temperature", doc_type=doc_type,
                                             model_version=model.tag, temperature=1.0)
             result, metrics = run_document(
@@ -425,6 +443,8 @@ def run_batch(
             log.error("%s failed: %s: %s", source_id, type(exc).__name__, exc)
             failed.append((source_id, f"{type(exc).__name__}: {exc}"[:300]))
             continue
+        if source_id in unscored:
+            metrics["ground_truth"] = f"not scored: {unscored[source_id]}"
         results_path, metrics_path = write_outputs(result, metrics, root=root)
         # Each output traced to the model, format and mode that wrote it.
         append_registry(result, results_path, metrics_path, root=root, quant_format=quant_format)
@@ -435,6 +455,7 @@ def run_batch(
 
     summary = summarise(results, model.tag)
     summary.failed = failed
+    summary.not_scored = sorted(unscored.items())
     summary.documents = len(results) + len(failed)
     target = metrics_dir(model.tag, root) / "summary.json"
     target.parent.mkdir(parents=True, exist_ok=True)

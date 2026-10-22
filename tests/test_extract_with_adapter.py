@@ -104,12 +104,17 @@ def test_an_adapter_named_by_a_blob_prefix_is_copied_down(client, tmp_path, monk
 ANSWER = '{"policy": {"policy_number": {"raw": "HO-1", "parsed": "HO-1", "page_ref": [1]}}}'
 
 
-def _imported_document(client, source_id="policy_0001", tenant="t1"):
+#: A review record: a gold is scored only with one (decision 2026-10-22).
+REVIEWED = {"reviewer_id": "a.reviewer", "review_date": "2026-10-20"}
+
+
+def _imported_document(client, source_id="policy_0001", tenant="t1", metadata=None):
     client.write_json(paths.ocr_meta("policy", source_id, tenant), {"page_count": 2})
     for page in (1, 2):
         client.write_bytes(paths.processed_page("policy", source_id, page, "png", tenant), b"\x89PNG fake")
         client.write_text(paths.processed_page("policy", source_id, page, "md", tenant), f"page {page} HO-1")
-    client.write_json(paths.label_metadata("policy", source_id, tenant), {"lob": "homeowners"})
+    client.write_json(paths.label_metadata("policy", source_id, tenant),
+                      {"lob": "homeowners", **REVIEWED} if metadata is None else metadata)
     client.write_json(paths.golden_label("policy", source_id, tenant),
                       {"policy": {"policy_number": {"raw": "HO-1", "parsed": "HO-1", "page_ref": [1]}}})
 
@@ -129,6 +134,40 @@ def test_a_gold_scored_by_the_harness_keeps_one_form_edition_convention(client, 
     row = golden["forms_and_endorsements"][0]
     assert row["form_number"]["raw"] == "CG 00 01"
     assert row["edition_date"]["parsed"] == "04/13" and row["edition_date"]["page_ref"] == [2]
+    # Not rewritten in the store: read under the rule.
+    stored = client.read_json(paths.golden_label("policy", "policy_0001", "t1"))
+    assert stored["forms_and_endorsements"][0]["form_number"]["raw"] == "CG 00 01 04 13"
+
+
+def test_a_self_contained_lines_gold_keeps_its_edition_in_the_form_number(client, tmp_path):
+    """Nothing on a self-contained line moves an edition - not its golds, not
+    serving's answer - so the harness scores the number as stored."""
+    from testing.run_extraction import document_request
+
+    _imported_document(client, metadata={"lob": "auto", **REVIEWED})
+    envelope = {"raw": "CA 00 01 03 10", "parsed": "CA 00 01 03 10", "page_ref": [2]}
+    client.write_json(paths.golden_label("policy", "policy_0001", "t1"),
+                      {"forms_and_endorsements": [{"form_number": envelope}]})
+    _, golden = document_request(client, "policy_0001", doc_type="policy", tenant_id="t1",
+                                 images_root=tmp_path / "pages")
+    assert golden["forms_and_endorsements"][0] == {"form_number": envelope}
+
+
+def test_a_gold_with_no_review_record_is_extracted_but_not_scored(client, tmp_path, caplog):
+    from testing.run_extraction import run_batch
+
+    _imported_document(client, metadata={"lob": "homeowners", "reviewer_id": "pending"})
+    model = load_model("base", client, backend_impl=EchoBackend(ANSWER), adapter=str(_adapter(tmp_path)))
+    summary = run_batch(model, client, ["policy_0001"], tenant_id="t1",
+                        images_root=tmp_path / "pages", root=tmp_path / "out")
+    assert summary.documents == 1 and not summary.failed
+    assert (tmp_path / "out" / "results" / model.tag / "policy_0001.json").is_file()   # still extracted
+    metrics = json.loads((tmp_path / "out" / "metrics" / model.tag / "policy_0001.metrics.json")
+                         .read_text(encoding="utf-8"))
+    assert "field_normalized_match_rate" not in metrics
+    assert metrics["ground_truth"].startswith("not scored: its gold has no review record")
+    assert summary.as_dict()["not_scored"][0][0] == "policy_0001"
+    assert "NOT scored" in caplog.text and "'pending' names nobody" in caplog.text
 
 
 def test_the_extraction_command_runs_each_document_through_serving_with_the_adapter(client, tmp_path):

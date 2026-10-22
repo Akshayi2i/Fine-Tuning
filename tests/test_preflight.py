@@ -142,18 +142,22 @@ def test_agreement_below_a_set_minimum_fails(monkeypatch):
     assert results[0].status == "PASS"
 
 
-def test_every_model_drafted_label_needs_a_reviewer_before_training():
+def test_every_label_needs_a_review_record_before_training():
+    """Decision 2026-10-22: no record, no training - whatever drafted the label."""
     from orchestration import preflight
 
+    reviewed = {"reviewer_id": "a", "review_date": "2026-10-20"}
     labels = [("policy", "policy_0001", {}),
-              ("policy", "policy_0002", {"reviewer_id": "a", "review_date": "2026-10-20"}),
-              ("policy", "policy_0003", {})]
-    golds = {"policy_0001": {"fideon:provenance": {"provenance": "drafted by Claude Code"}},
-             "policy_0003": {}}
+              ("policy", "policy_0002", reviewed),
+              ("policy", "policy_0003", {"reviewer_id": "pending", "review_date": "TBD"}),
+              ("policy", "policy_0004", {**reviewed, "synthetic": True}),
+              ("policy", "policy_0005", {**reviewed, "synthetic": True, "review_inherited_from": "ho/seed"})]
     results = []
-    preflight.check_reviewed_labels(None, results, labels, read_label=lambda _t, s: golds[s])
-    assert results[0].status == "FAIL" and results[0].detail.endswith("['policy_0001']")
+    preflight.check_reviewed_labels(None, results, labels)
+    assert results[0].status == "FAIL"
+    assert results[0].detail.endswith("['policy_0001', 'policy_0003', 'policy_0004']")
+    assert "reviewer_id is missing" in results[0].detail
 
     results = []
-    preflight.check_reviewed_labels(None, results, labels[1:], read_label=lambda _t, s: golds[s])
-    assert results[0].status == "WARN"
+    preflight.check_reviewed_labels(None, results, [labels[1], labels[4]])
+    assert results[0].status == "PASS"

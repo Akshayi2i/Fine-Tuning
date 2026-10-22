@@ -21,6 +21,12 @@ Values a person or the generator placed (not under ``fideon:filled``) are never
 touched: a value the OCR missed may still be on the image, and that is the
 model's to read. With no OCR text at all - or none on a page the value cites -
 nothing can be verified: the value is kept and counted as unverifiable.
+
+Given the gold's ``doc_type`` and line, the gold is first read under the
+form-edition rule where it holds (``label_rules.under_edition_rule``): the gate
+reads its frozen golds through this function, and the corpus build loads its
+golds under the same rule (``export_golden_labels.load_golden_label``), so a
+model is taught and scored on one convention.
 """
 
 from __future__ import annotations
@@ -53,14 +59,21 @@ def verified_label(
     label: dict[str, Any],
     page_texts: Sequence[str] | None,
     report: VerificationReport | None = None,
+    *,
+    doc_type: str | None = None,
+    lob: Any = None,
 ) -> dict[str, Any]:
-    """``label`` with each rule-added value kept only where the page prints it.
+    """``label`` with each rule-added value kept only where the page prints it,
+    read first under the form-edition rule when ``doc_type`` is given and the
+    rule holds for it and ``lob`` (``label_rules.label_rules_apply``).
 
     A copy when anything changes; ``label`` itself otherwise.
     """
     from common.canonical import is_field_value
     from data_pipeline.audit import MIN_CHECKABLE_CHARS, _appears, _Page, normalise
+    from data_pipeline.ingestion.label_rules import under_edition_rule
 
+    label = under_edition_rule(label, doc_type, lob)
     report = report if report is not None else VerificationReport()
     added = ((label.get("fideon:filled") or {}).get("paths")) or []
     if not added:

@@ -85,6 +85,26 @@ MIN_GROUPS_TO_REPAIR = 3
 #: of the line's layouts to give up.
 MIN_CARRIERS_PER_LINE_FOR_HELD_OUT = 10
 
+#: What a label or a delivery writes for a carrier it does not know, as words
+#: (case and punctuation aside: "N/A" is "n a"). Not a carrier: on a policy it
+#: never counts toward the minimum and is never the one held out.
+PLACEHOLDER_CARRIERS = frozenset({
+    "n a", "na", "none", "null", "nil", "unknown", "unknown carrier", "tbd", "tba", "pending",
+    "various", "various carriers", "various insurers", "multiple", "multiple carriers", "other",
+    "not applicable", "not available", "not provided", "not known", "no carrier", "see schedule",
+})
+
+
+def is_placeholder_carrier(carrier: Any) -> bool:
+    """Whether ``carrier`` names no carrier: blank, or a placeholder
+    (:data:`PLACEHOLDER_CARRIERS`) however it is written or normalised."""
+    import re
+
+    from common.normalize import normalize_carrier
+
+    words = " ".join(re.findall(r"[a-z0-9]+", str(carrier or "").casefold()))
+    return not words or words in PLACEHOLDER_CARRIERS or (normalize_carrier(words) or "") in PLACEHOLDER_CARRIERS
+
 
 class SplitError(RuntimeError):
     """Raised when a split assignment would leak or is otherwise unusable."""
@@ -273,7 +293,9 @@ def assign_group_splits(
     every real family of it in that line goes to test (Fideon SPEC_09
     amendment item 4; decision 2026-10-19). The carrier is chosen by
     :func:`held_out_carrier_per_line` on the split the hash would draw, so the
-    line keeps a train and a validation family.
+    line keeps a train and a validation family. A policy carrier with any
+    synthetic family is never the one: that family trains whatever the split,
+    so the carrier is one the model has seen.
     """
     result = GroupSplitAssignment(seed=seed)
 
@@ -303,8 +325,12 @@ def assign_group_splits(
             provisional = {
                 r.group_id: _hash_split(r.group_id, seed, train_edge, val_edge) for r in real
             }
+            # A policy's synthetic families too: each trains below, before the
+            # hold-out is looked at, so its carrier must not be the one held out
+            # (held_out_carrier_per_line counts and chooses from real ones only).
             choice = held_out_carrier_per_line(
-                real, seed, provisional, min_carriers=MIN_CARRIERS_PER_LINE_FOR_HELD_OUT)
+                unique if doc_type == "policy" else real, seed, provisional,
+                min_carriers=MIN_CARRIERS_PER_LINE_FOR_HELD_OUT)
             held_by_line = choice.held
             _record_hold_out(result, doc_type, choice)
         buckets: dict[str, list[str]] = {"train": [], "val": [], "test": []}
@@ -452,15 +478,31 @@ def held_out_carrier_per_line(records: list[GroupRecord], seed: int,
     validation at all. Among those, the one with the fewest train and
     validation documents - what holding it out costs; its test documents cost
     nothing - with ties broken by a seeded hash so the choice is reproducible.
+
+    On a policy (decision 2026-10-22) carriers are counted and chosen from its
+    real families only, and a placeholder ("N/A", "Unknown", blank) is no
+    carrier (:func:`is_placeholder_carrier`). A carrier with a synthetic family
+    in the line is never chosen: twins train wherever they sit - a drawn split
+    keeps them in train, a family holding a seed and its twins with them - so
+    its layouts are seen in training. Other doc types are read as given.
     """
     families: dict[str, dict[str, list[GroupRecord]]] = defaultdict(lambda: defaultdict(list))
+    #: Per line, the policy carriers a synthetic family trains.
+    trained: dict[str, set[str]] = defaultdict(set)
     lines: set[str] = set()
     for record in records:
         if not record.line:
             continue
+        carrier = record.carrier
+        if record.doc_type == "policy":
+            carrier = None if is_placeholder_carrier(carrier) else carrier
+            if record.synthetic:
+                if carrier:
+                    trained[record.line].add(carrier)
+                continue
         lines.add(record.line)
-        if record.carrier:
-            families[record.line][record.carrier].append(record)
+        if carrier:
+            families[record.line][carrier].append(record)
     result = CarrierHoldOut(no_carrier=sorted(lines - set(families)))
     split_of = split_of or {}
 
@@ -474,11 +516,14 @@ def held_out_carrier_per_line(records: list[GroupRecord], seed: int,
         if len(carriers) < min_carriers:
             result.below_minimum[line] = len(carriers)
             continue
-        eligible = [c for c in carriers if {"train", "val"} <= splits_without(carriers, c)]
+        unseen = [c for c in carriers if c not in trained[line]]
+        eligible = [c for c in unseen if {"train", "val"} <= splits_without(carriers, c)]
         if not eligible:
             result.not_held_out[line] = (
-                "every carrier is the line's only train or only validation carrier; holding one out "
-                "would leave the line untrained or unvalidated")
+                "every carrier trains through a synthetic family, so none is unseen" if not unseen else
+                "every carrier is the line's only train or only validation carrier, or trains through a "
+                "synthetic family; holding one out would leave the line untrained or unvalidated, or "
+                "hold out a carrier the model has seen")
             continue
 
         cost = {

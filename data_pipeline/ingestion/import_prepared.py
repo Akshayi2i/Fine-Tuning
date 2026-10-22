@@ -212,7 +212,19 @@ def import_document(
             f"{hint or errors[0]}. A label that reaches golden-labels/ is a training target nobody "
             "checked, and the first symptom is a model that learned the wrong shape."
         )
-    from data_pipeline.labeling.export_golden_labels import review_problem
+    # The form-edition convention, where the label rules hold (label_rules_apply),
+    # as the labelled-PDF import checks it: a gold whose number still carries the
+    # edition would train one convention while the gate scores the other.
+    from data_pipeline.ingestion.label_rules import edition_problems
+
+    edition_errors, edition_warnings = edition_problems(doc.golden, doc_type, lob)
+    if edition_errors:
+        raise ImportError_(f"{doc.directory.name}: {edition_errors[0]}")
+    for warning in edition_warnings:
+        log.warning("%s: %s", doc.directory.name, warning)
+
+    # Every gold needs a review record to train or score (decision 2026-10-22).
+    from data_pipeline.labeling.export_golden_labels import review_problem, review_record
 
     problem = review_problem(doc.golden, doc.metadata)
     if problem:
@@ -273,9 +285,8 @@ def import_document(
         "twin_index": twin_index(doc.metadata),
         "render_mode": doc.metadata.get("render_mode"),
         "synthetic": bool(doc.metadata.get("synthetic", False)),
-        "reviewer_id": doc.metadata.get("reviewer_id"),
-        "review_date": doc.metadata.get("review_date"),
-        "draft_backend": doc.metadata.get("draft_backend"),
+        # The review record, and for a twin the seed it was inherited from.
+        **review_record(doc.metadata),
         "labeled_at": datetime.now(UTC).isoformat(),
         "imported_from": doc.directory.name,
     })

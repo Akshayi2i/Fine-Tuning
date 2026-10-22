@@ -105,7 +105,9 @@ def _imported(client, source_id="policy_0001", tenant="compare"):
     client.write_json(paths.ocr_meta("policy", source_id, tenant), {"page_count": 1})
     client.write_bytes(paths.processed_page("policy", source_id, 1, "png", tenant), b"\x89PNG fake")
     client.write_text(paths.processed_page("policy", source_id, 1, "md", tenant), "Policy PA-1")
-    client.write_json(paths.label_metadata("policy", source_id, tenant), {"lob": "personal_auto"})
+    # With a review record: a gold is scored only with one (decision 2026-10-22).
+    client.write_json(paths.label_metadata("policy", source_id, tenant),
+                      {"lob": "personal_auto", "reviewer_id": "a.reviewer", "review_date": "2026-10-20"})
     client.write_json(paths.golden_label("policy", source_id, tenant), {"policy": {"policy_number": _env("PA-1")}})
 
 

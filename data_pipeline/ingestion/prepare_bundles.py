@@ -18,6 +18,13 @@ and the importer and the audit read one folder per document:
                  was split by, so a source and its twins stay on one side
     split        the delivery's own train/val/test, which the corpus build then
                  uses as given (split_groups.assign_delivered_splits)
+    reviewer_id, review_date, draft_backend
+                 the review record: the row's own columns for a real document;
+                 for a twin, its seed's (a twin is reviewed only when its seed
+                 was), with ``review_inherited_from`` naming the seed. A seed with
+                 no record leaves its twins none: the importer refuses every gold
+                 without one (export_golden_labels.review_problem, decision
+                 2026-10-22). A twin's own review columns are never read.
 
 Rows outside the scope's lines (flood, for personal_lines), rows the generator
 flagged (``ok`` false) and rows whose files are missing are skipped and counted.
@@ -34,7 +41,10 @@ the fix living only in a folder someone deleted by hand.
 
 **A SPEC_21 delivery** (``split_manifest.csv``: split, lob, carrier, seed, twin,
 digital, scanned, gold) delivers each twin twice - a digital PDF and a scanned
-rendering of it - with one gold. Each render becomes a document of its own
+rendering of it - with one gold. A row's review columns (``reviewer_id``,
+``review_date``, ``draft_backend``) record its SEED's review, which the seed's
+document and every twin of it carry; every row of one seed must state the same
+record. Each render becomes a document of its own
 (``render_mode`` digital or scanned, ``sample`` the twin's number, the seed as
 the family), both reading one gold - one document when the two are the same
 file, as a scanned seed's twins are. The gold the bundles hold is corrected
@@ -63,7 +73,10 @@ its gold gets the same corrections.
     python -m data_pipeline.ingestion.prepare_bundles --input "data/CGL source data" --lob gl \\
         --scope casualty_fleet --out data/cgl_bundles
 
-Each pair becomes ``<line>__<carrier>__<name>``, its gold corrected as above. A
+Each pair becomes ``<line>__<carrier>__<name>``, its gold corrected as above. Its
+review record comes from ``<input>/reviews.csv`` (``document,reviewer_id,
+review_date,draft_backend``; ``document`` the gold's path under ``Gold JSON/``
+without ``.gold.json``, or the folder name): none there, none in the bundle. A
 family is one insured: a declarations page, the policy and its renewals stay on
 one side. The split is drawn as the corpus build draws one
 (:func:`~data_pipeline.dataset_builder.split_groups.assign_group_splits`) and
@@ -99,6 +112,11 @@ ORIGINAL_PDFS = "PDFs"
 ORIGINAL_GOLDS = "Gold JSON"
 TWIN_COLUMNS = ("split", "lob", "carrier", "seed", "twin", "digital", "scanned", "gold")
 
+#: A manifest's review columns: who reviewed a gold, when, and what drafted it.
+REVIEW_COLUMNS = ("reviewer_id", "review_date", "draft_backend")
+#: Real documents alone: their review records, beside PDFs/ and Gold JSON/.
+REVIEWS_FILE = "reviews.csv"
+
 #: Line names a delivery misspells, in its folders and its manifest's lob column.
 DELIVERY_SPELLINGS = {"motorcyle": "motorcycle"}
 
@@ -122,6 +140,8 @@ class PrepareReport:
     copied: int = 0
     #: Folders an earlier run made for documents this run leaves out.
     removed: int = 0
+    #: Documents bundled with no review record: the importer refuses them.
+    unreviewed: int = 0
     #: Gold corrections by kind, and one row per change: (document, kind, detail).
     corrections: Counter = field(default_factory=Counter)
     correction_rows: list = field(default_factory=list)
@@ -146,6 +166,9 @@ class PrepareReport:
         for kind, n in sorted(self.corrections.items()):
             lines.append(f"  gold corrected ({kind}): {n}")
         lines.append(f"  files linked {self.linked}, copied {self.copied}")
+        if self.unreviewed:
+            lines.append(f"  no review record: {self.unreviewed} document(s) - the importer refuses them "
+                         "until reviewer_id and review_date are recorded (a twin's: its seed's)")
         if self.removed:
             verb = "would remove" if self.dry_run else "removed"
             lines.append(f"  {verb} {self.removed} folder(s) an earlier run made for documents now left out")
@@ -219,6 +242,8 @@ def prepare_bundles(
 
     report = PrepareReport(out=out, dry_run=dry_run)
     seen: dict[str, str] = {}
+    # Each seed's review record, from its own row, for its twins to inherit.
+    reviews = seed_review_records(rows)
     for row in rows:
         lob = row["lob"].strip()
         for prefix, new_lob in lob_overrides or ():
@@ -255,11 +280,12 @@ def prepare_bundles(
         if split not in ("train", "val", "test"):
             raise BundleError(f"{name}: split {row['split']!r} is not Train, Val or Test")
         kind = row["kind"].strip().lower()
+        template_id = template_of(row)
 
         metadata = {
             "lob": lob,
             "synthetic": kind == "synthetic",
-            "template_id": str(PurePosixPath(row["source"].strip()).with_suffix("")),
+            "template_id": template_id,
             "split": split,
             "carrier": row.get("carrier") or None,
             "source_system": "fideon_synth",
@@ -267,8 +293,12 @@ def prepare_bundles(
             # The twin's render mode (SPEC_21 §7.8: native, scanned_from_digital,
             # ...): the per-seed twin cap counts each mode apart.
             "render_mode": render_mode(row, gold),
+            # A real document's review record is its own row's; a twin's, its seed's.
+            **(inherited_review(reviews.get(template_id), template_id) if kind == "synthetic"
+               else row_review(row)),
         }
         report.written[(split, "synthetic" if metadata["synthetic"] else "real")] += 1
+        report.unreviewed += _unreviewed(metadata)
         if dry_run:
             continue
         folder = out / name
@@ -317,6 +347,8 @@ def prepare_twin_bundles(
     recodes = read_recodes()
     report = PrepareReport(out=out, dry_run=dry_run)
     seen: dict[str, str] = {}
+    # Each seed's review record, from its twins' rows (twin_seed_reviews).
+    reviews = twin_seed_reviews(rows)
     for row in rows:
         lob = delivery_line(row["lob"])
         if lines is not None and lob not in lines:
@@ -370,8 +402,11 @@ def prepare_twin_bundles(
                 # Values (fields or extra fields) no page prints: the corpus build
                 # leaves out the windows holding them (label_rules.PRINTED_NOWHERE).
                 "unprinted_values": _unprinted(notes),
+                # The seed's review record: a twin is reviewed only when its seed was.
+                **inherited_review(reviews.get(row["seed"].strip()), f"{lob}/{row['seed'].strip()}"),
             }
             report.written[(split, "synthetic")] += 1
+            report.unreviewed += _unreviewed(metadata)
             if dry_run:
                 continue
             folder = out / name
@@ -389,7 +424,7 @@ def prepare_twin_bundles(
 
     if originals is not None:
         _bundle_originals(originals, rows, out, lines=lines, mode=mode, exclusions=exclusions,
-                          dry_run=dry_run, recodes=recodes, report=report, seen=seen)
+                          dry_run=dry_run, recodes=recodes, report=report, seen=seen, reviews=reviews)
 
     # What an earlier run bundled of this delivery and this one leaves out.
     for name in sorted(_delivery_names(rows) - set(seen)):
@@ -450,9 +485,10 @@ def _same_file(a: Path, b: Path) -> bool:
 def _bundle_originals(
     originals: Path, rows: list[dict[str, str]], out: Path, *, lines: frozenset[str] | None, mode: str,
     exclusions: dict[str, str] | None, dry_run: bool, recodes: dict[str, dict[str, str]],
-    report: PrepareReport, seen: dict[str, str],
+    report: PrepareReport, seen: dict[str, str], reviews: dict[str, dict[str, str | None]] | None = None,
 ) -> None:
-    """Each seed of the twins' manifest as a real document, in its twins' family and split."""
+    """Each seed of the twins' manifest as a real document, in its twins' family and split,
+    with the review record its twins' rows state (``reviews``, :func:`twin_seed_reviews`)."""
     pdfs = {p.stem: p for p in (originals / "pdfs").rglob("*.pdf")}
     golds = {p.name[: -len(".gold.json")]: p for p in (originals / "gold json").rglob("*.gold.json")}
     seeds: dict[str, dict[str, str]] = {}
@@ -497,8 +533,10 @@ def _bundle_originals(
             "sample": None,
             "render_mode": None,
             "unprinted_values": _unprinted(notes),
+            **((reviews or {}).get(seed) or row_review({})),
         }
         report.written[(split, "real")] += 1
+        report.unreviewed += _unreviewed(metadata)
         if dry_run:
             continue
         folder = out / name
@@ -600,6 +638,7 @@ def prepare_original_bundles(
 
     recodes = read_recodes()
     report = PrepareReport(out=out, dry_run=dry_run)
+    reviews = read_reviews(source / REVIEWS_FILE)
     names = {key: f"{line}__{_slug(str(key.parent))}__{_slug(key.name)}" for key in pdfs.keys() | golds.keys()}
     clashes = Counter(names.values())
     if duplicate := sorted(n for n, count in clashes.items() if count > 1):
@@ -639,10 +678,16 @@ def prepare_original_bundles(
                                      hold_out_carriers=not frozen).assignment
     # Carriers the model trains on; a test document of any other is its reading
     # of a carrier it never saw.
+    # A placeholder carrier ("N/A", "Unknown", none at all) is no carrier, so
+    # never an unseen one (split_groups.is_placeholder_carrier).
+    from data_pipeline.dataset_builder.split_groups import is_placeholder_carrier
+
     trained = {_printed_carrier_key(gold) for name, (_, gold, _, _) in kept.items()
                if assignment[family[name]] == "train"}
     unseen = {name for name, (_, gold, _, _) in kept.items()
-              if assignment[family[name]] == "test" and _printed_carrier_key(gold) not in trained}
+              if assignment[family[name]] == "test" and _printed_carrier_key(gold) not in trained
+              and not is_placeholder_carrier(_printed_carrier_key(gold))}
+    key_of = {name: key for key, name in names.items()}
 
     for name, (pdf, gold, notes, gold_path) in sorted(kept.items()):
         split = assignment[family[name]]
@@ -661,8 +706,11 @@ def prepare_original_bundles(
             "render_mode": None,
             "unprinted_values": _unprinted(notes),
             "held_out_carrier": name in unseen,
+            # From reviews.csv, by the gold's path under Gold JSON/ or the folder name.
+            **(reviews.get(key_of[name].as_posix()) or reviews.get(name) or row_review({})),
         }
         report.written[(split, "real")] += 1
+        report.unreviewed += _unreviewed(metadata)
         if dry_run:
             continue
         folder = out / name
@@ -693,6 +741,70 @@ def prepare_original_bundles(
             writer.writerows((name, family[name], assignment[family[name]], name in unseen)
                              for name in sorted(kept))
     return report
+
+
+def template_of(row: dict[str, str]) -> str:
+    """A manifest.csv row's family: the source document it was made from, without its suffix."""
+    return str(PurePosixPath(row["source"].strip()).with_suffix(""))
+
+
+def row_review(row: dict[str, str]) -> dict[str, str | None]:
+    """The review record a row states (:data:`REVIEW_COLUMNS`), a blank cell as none."""
+    return {key: (row.get(key) or "").strip() or None for key in REVIEW_COLUMNS}
+
+
+def inherited_review(seed_record: dict[str, str | None] | None, seed: str) -> dict[str, str | None]:
+    """A twin's review record: its seed's, naming the seed it came from
+    (``review_inherited_from``) - or none at all when the seed has no real one,
+    so the importer refuses the twin with its seed (decision 2026-10-22)."""
+    from data_pipeline.labeling.export_golden_labels import has_review_record
+
+    if seed_record and has_review_record(seed_record):
+        return {**seed_record, "review_inherited_from": seed}
+    return {**row_review({}), "draft_backend": (seed_record or {}).get("draft_backend"),
+            "review_inherited_from": None}
+
+
+def seed_review_records(rows: list[dict[str, str]]) -> dict[str, dict[str, str | None]]:
+    """``{family: review record}`` from a manifest.csv delivery: each seed's own
+    row (``kind`` not synthetic), the record its twins inherit."""
+    records: dict[str, dict[str, str | None]] = {}
+    for row in rows:
+        if (row.get("kind") or "").strip().lower() != "synthetic":
+            records.setdefault(template_of(row), row_review(row))
+    return records
+
+
+def twin_seed_reviews(rows: list[dict[str, str]]) -> dict[str, dict[str, str | None]]:
+    """``{seed: review record}`` from a SPEC_21 manifest. A row is a twin and
+    names its seed, and its review columns record the seed's review - a twin is
+    reviewed only through its seed - so every row of one seed states one record."""
+    records: dict[str, dict[str, str | None]] = {}
+    for row in rows:
+        seed, record = row["seed"].strip(), row_review(row)
+        known = records.setdefault(seed, record)
+        if known != record:
+            raise BundleError(f"seed {seed!r}: its twins' rows state two review records ({known} and {record})")
+    return records
+
+
+def read_reviews(path: Path) -> dict[str, dict[str, str | None]]:
+    """``{document: review record}`` from a ``document,reviewer_id,review_date,draft_backend``
+    CSV (real documents alone, :data:`REVIEWS_FILE`); empty when there is none."""
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    if rows and not {"document", "reviewer_id", "review_date"} <= set(rows[0]):
+        raise BundleError(f"{path} needs the columns document,reviewer_id,review_date[,draft_backend]")
+    return {r["document"].strip().replace("\\", "/"): row_review(r) for r in rows if (r["document"] or "").strip()}
+
+
+def _unreviewed(metadata: dict) -> int:
+    """1 when a bundle's metadata holds no real review record: the importer refuses it."""
+    from data_pipeline.labeling.export_golden_labels import has_review_record
+
+    return int(not has_review_record(metadata))
 
 
 def read_recodes(path: Path = RECODES) -> dict[str, dict[str, str]]:
@@ -760,9 +872,12 @@ def corrected_gold(
     import copy
 
     from common.schemas import is_common_model, iter_validation_errors, load_schema
+    from data_pipeline.ingestion.label_rules import label_rules_apply
 
     notes: list[tuple[str, str]] = []
-    if is_common_model("policy", None, lob):
+    # Where the label rules hold (label_rules_apply): the importers, the corpus
+    # build and the gate read a gold under them on exactly these lines.
+    if label_rules_apply("policy", lob):
         gold = copy.deepcopy(gold)
         listed = set(load_schema("policy", None, lob).get("fideon:coverage_codes") or [])
         table = recodes.get(lob, {})

@@ -256,6 +256,26 @@ def test_accepting_a_draft_unreviewed_is_refused_on_day_zero(client):
         )
 
 
+def test_a_draft_accepted_without_review_is_refused_after_day_zero_too(client, monkeypatch):
+    """No review record, so it could never train or score (decision 2026-10-22):
+    written, it would only stop the next corpus build."""
+    from data_pipeline.labeling import export_golden_labels as E
+
+    monkeypatch.setattr(E, "review_requirement", lambda *a, **k: "confidence_routed")
+    with pytest.raises(LabelValidationError, match="no review record"):
+        export_golden_label(_policy_label(), "policy_0001", "policy", client,
+                            reviewer_id="alice", accepted_without_review=True, lob="property")
+    assert not client.exists(paths.golden_label("policy", "policy_0001"))
+
+
+@pytest.mark.parametrize("reviewer", ["", " ", "pending", "N/A"])
+def test_an_export_naming_no_reviewer_writes_nothing(client, reviewer):
+    with pytest.raises(LabelValidationError, match="reviewer_id"):
+        export_golden_label(_policy_label(), "policy_0001", "policy", client, reviewer_id=reviewer,
+                            lob="property")
+    assert not client.exists(paths.golden_label("policy", "policy_0001"))
+
+
 def test_export_writes_label_and_provenance(client):
     export_golden_label(
         _policy_label(), "policy_0001", "policy", client,
