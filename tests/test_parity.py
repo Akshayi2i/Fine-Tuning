@@ -425,3 +425,81 @@ def test_the_parity_examples_are_built_from_the_shared_renderer(tmp_path):
     assert len(rows) == PARITY_EXAMPLE_COUNT
     for row in rows:
         assert row["images"] and row["messages"][-1]["role"] == "assistant"
+
+
+# --------------------------------------------------------------------------
+# The Phase 0 spike's token comparison, with stand-ins for ms-swift and the processor
+# --------------------------------------------------------------------------
+
+#: The prompt both sides tokenize to: two pages of two visual tokens (5), and
+#: the assistant header (7, 8) the prompt ends at.
+_PROMPT = [1, 5, 5, 2, 5, 5, 3, 7, 8]
+
+
+def _spike_with(monkeypatch, tmp_path, apply_chat_template):
+    """The spike's swift_row_format check, with ms-swift and the model's processor
+    replaced by stand-ins and ``apply_chat_template`` as the processor's."""
+    import sys
+    import tempfile
+    import types
+    from types import SimpleNamespace
+
+    from scripts import phase0_spike as spike
+
+    class Tokenizer:
+        def encode(self, text, add_special_tokens=False):
+            return [7, 8]
+
+        def convert_tokens_to_ids(self, token):
+            return 5
+
+        def decode(self, ids):
+            return " ".join(map(str, ids))
+
+    class Template:
+        def set_mode(self, mode):
+            self.mode = mode
+
+        def encode(self, inputs):
+            return {"input_ids": [*_PROMPT, 42, 43]}        # the prompt, then the answer
+
+    swift_processor = SimpleNamespace(model_meta=SimpleNamespace(template="qwen3_vl"), tokenizer=Tokenizer())
+    swift_llm = types.ModuleType("swift.llm")
+    swift_llm.get_model_tokenizer = lambda model_id, load_model=False: (None, swift_processor)
+    swift_llm.get_template = lambda name, processor: Template()
+    swift = types.ModuleType("swift")
+    swift.llm = swift_llm
+    transformers = types.ModuleType("transformers")
+    transformers.AutoProcessor = SimpleNamespace(
+        from_pretrained=lambda *a, **k: SimpleNamespace(apply_chat_template=apply_chat_template))
+    for name, module in (("swift", swift), ("swift.llm", swift_llm), ("transformers", transformers)):
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(tmp_path))
+    return spike.run("swift_row_format", "train/serve token parity", spike.check_swift_row_format)
+
+
+def test_the_spike_compares_tokens_on_the_pinned_processor(monkeypatch, tmp_path):
+    """transformers 4.57's processor reads each message's content as a list of
+    blocks when it tokenizes, and a plain-string system prompt raised TypeError
+    every time: the check came out undetermined and the bootstrap passed with
+    the comparison never run."""
+    def like_transformers_4_57(messages, **kwargs):
+        for message in messages:
+            [block for block in message["content"] if block["type"] in ("image", "video")]
+        return {"input_ids": [list(_PROMPT)]}
+
+    result = _spike_with(monkeypatch, tmp_path, like_transformers_4_57)
+    assert result.status == "PASS", result.detail
+    assert result.data["image_tokens_trained"] == result.data["image_tokens_served"] == [2, 2]
+
+
+def test_a_processor_failure_fails_the_spike_rather_than_leaving_it_undetermined(monkeypatch, tmp_path):
+    """Only `ok is False` fails the run, so an undetermined comparison let the
+    bootstrap exit 0 having measured nothing."""
+    def cannot_load_the_page(messages, **kwargs):
+        raise OSError("cannot identify image file 'page_1.png'")
+
+    result = _spike_with(monkeypatch, tmp_path, cannot_load_the_page)
+    assert result.ok is False and result.status == "FAIL"
+    assert "OSError: cannot identify image file" in result.detail
+    assert "token parity was not measured" in result.detail

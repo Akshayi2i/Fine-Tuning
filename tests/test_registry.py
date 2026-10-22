@@ -639,9 +639,11 @@ def test_listing_by_scope_reads_an_absent_scope_as_unified(client):
 
 
 class _RecordingBackend:
-    def __init__(self, connection_string=None, *, account_url=None, credential=None):
+    def __init__(self, connection_string=None, *, account_url=None, credential=None,
+                 raw_container=None, raw_credential=None):
         self.connection_string, self.account_url, self.credential = (
             connection_string, account_url, credential)
+        self.raw_container, self.raw_credential = raw_container, raw_credential
 
 
 @pytest.fixture
@@ -649,7 +651,8 @@ def azure_env(monkeypatch):
     from artifact_registry import blob_client
 
     for name in ("AZURE_STORAGE_ACCOUNT_URL", "AZURE_STORAGE_SAS_TOKEN",
-                 "AZURE_STORAGE_CONNECTION_STRING"):
+                 "AZURE_STORAGE_CONNECTION_STRING", "AZURE_RAW_SAS_TOKEN",
+                 "AZURE_BLOB_CONTAINER", "AZURE_RAW_CONTAINER"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(blob_client, "AzureBackend", _RecordingBackend)
     return monkeypatch
@@ -691,3 +694,77 @@ def test_no_storage_login_at_all_is_refused(azure_env):
 
     with pytest.raises(BlobError, match="no storage login"):
         azure_from_environment()
+
+
+def _sas_login(env):
+    env.setenv("AZURE_STORAGE_ACCOUNT_URL", "https://acct.blob.core.windows.net")
+    env.setenv("AZURE_STORAGE_SAS_TOKEN", "sv=2024&sig=main-fake")
+
+
+def test_the_raw_container_can_have_its_own_token(azure_env):
+    """A container SAS reaches one container. With one token for both, the
+    main container's token got 403 on the raw one, and the only token that
+    worked was an account SAS that gave every pod the raw PDFs."""
+    _sas_login(azure_env)
+    azure_env.setenv("AZURE_BLOB_CONTAINER", "main-c")
+    azure_env.setenv("AZURE_RAW_CONTAINER", "raw-c")
+    azure_env.setenv("AZURE_RAW_SAS_TOKEN", "?sv=2024&sig=raw-fake")
+    backend = BlobClient()._backend
+    assert backend.credential == "sv=2024&sig=main-fake"
+    assert (backend.raw_container, backend.raw_credential) == ("raw-c", "sv=2024&sig=raw-fake")
+
+
+def test_without_a_raw_token_one_token_serves_both_containers(azure_env):
+    _sas_login(azure_env)
+    azure_env.setenv("AZURE_RAW_CONTAINER", "raw-c")
+    backend = BlobClient()._backend
+    assert backend.credential == "sv=2024&sig=main-fake"
+    assert backend.raw_credential is None and backend.raw_container is None
+
+
+def test_half_a_raw_login_is_refused_without_naming_a_token(azure_env):
+    """The raw token joins a SAS login: beside a connection string alone it is
+    half of one, and with no separate raw container it has nothing to log in to."""
+    azure_env.setenv("AZURE_RAW_SAS_TOKEN", "sv=2024&sig=raw-secret")
+    azure_env.setenv("AZURE_STORAGE_CONNECTION_STRING", "AccountName=acct;AccountKey=k")
+    with pytest.raises(BlobError, match="AZURE_STORAGE_ACCOUNT_URL and AZURE_STORAGE_SAS_TOKEN are "
+                                        "not set") as caught:
+        BlobClient(raw_container="raw-c")
+    assert "raw-secret" not in str(caught.value)
+
+    _sas_login(azure_env)
+    with pytest.raises(BlobError, match="no separate raw container") as caught:
+        BlobClient()                      # AZURE_RAW_CONTAINER unset: raw is the main container
+    assert "raw-secret" not in str(caught.value) and "main-fake" not in str(caught.value)
+
+
+def test_raw_container_calls_use_the_raw_token(monkeypatch):
+    """The backend picks the login per call, by the container the client routed to."""
+    from artifact_registry.blob_client import AzureBackend
+
+    sdk = pytest.importorskip("azure.storage.blob")
+    made = []
+
+    class FakeServiceClient:
+        """Stands in for the SDK's client: says which token each call would carry."""
+
+        def __init__(self, account_url, credential):
+            made.append(credential)
+            self.credential = credential
+
+        def get_blob_client(self, container, blob):
+            return (self.credential, container, blob)
+
+        def get_container_client(self, container):
+            return (self.credential, container)
+
+    monkeypatch.setattr(sdk, "BlobServiceClient", FakeServiceClient)
+    backend = AzureBackend(account_url="https://acct.blob.core.windows.net", credential="main-fake",
+                           raw_container="raw-c", raw_credential="raw-fake")
+    assert made == ["main-fake", "raw-fake"]
+    assert backend._client("raw-c", "intake/b/d/x.pdf")[0] == "raw-fake"
+    assert backend._client("main-c", "corpus/t/v1/manifest.json")[0] == "main-fake"
+    assert backend._service_for("raw-c").get_container_client("raw-c")[0] == "raw-fake"
+
+    single = AzureBackend(account_url="https://acct.blob.core.windows.net", credential="main-fake")
+    assert single._client("raw-c", "raw-documents/t/policy/p/original.pdf")[0] == "main-fake"

@@ -311,21 +311,30 @@ def check_swift_row_format(r: Result) -> None:
     pad = tokenizer.convert_tokens_to_ids(IMAGE_PAD)
     trained = prompt_ids(encoded["input_ids"], header)
     # The same messages as serving sends them: the pages at their local paths,
-    # no answer, and the generation header the model answers after.
+    # no answer, and the generation header the model answers after. A plain
+    # string (the system prompt) goes in as one text block: the pinned
+    # transformers (4.57) processor reads every message's content as a list of
+    # blocks when it tokenizes, and a string raises TypeError ("string indices
+    # must be integers") - every time, so the comparison could not run at all.
+    # Qwen3-VL's chat template renders a string and one text block alike.
     serving_messages = [
         {**m, "content": [
             {**b, "image": str(tmp / b["image"])} if b.get("type") == "image" else b
             for b in m["content"]
-        ]} if isinstance(m["content"], list) else m
+        ]} if isinstance(m["content"], list) else {**m, "content": [{"type": "text", "text": m["content"]}]}
         for m in original["messages"] if m["role"] != "assistant"
     ]
+    # Anything raised here - a template error, a page that does not load - is a
+    # FAIL: undetermined would let the bootstrap pass with parity never measured.
     try:
         served = flat_ids(processor.apply_chat_template(
             serving_messages, tokenize=True, add_generation_prompt=True, return_dict=True,
         )["input_ids"])
-    except Exception as exc:  # noqa: BLE001 - this transformers cannot tokenize pages in a template
-        r.ok = None
-        r.detail = f"the processor could not tokenize the pages in the chat template: {exc}"
+    except Exception as exc:  # noqa: BLE001 - reported as a failure, never swallowed
+        r.ok = False
+        r.detail = (f"the processor could not tokenize the serving prompt, so token parity was not "
+                    f"measured: {type(exc).__name__}: {exc}")
+        r.data["traceback"] = traceback.format_exc(limit=4)
         return
 
     r.data["images"] = len(row["images"])

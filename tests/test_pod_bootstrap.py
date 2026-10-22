@@ -139,8 +139,90 @@ def test_an_unquoted_connection_string_is_refused():
 
 def test_an_unquoted_sas_token_is_refused_and_either_login_will_do():
     """Sourced by bash, an unquoted token's '&' sends the rest to the background."""
-    assert "AZURE_STORAGE_SAS_TOKEN in .env contains '&' but is not quoted" in SCRIPT
+    assert "contains '&' but is not quoted" in SCRIPT
+    assert "for sas_key in AZURE_STORAGE_SAS_TOKEN AZURE_RAW_SAS_TOKEN; do" in SCRIPT
     assert "AZURE_STORAGE_ACCOUNT_URL + AZURE_STORAGE_SAS_TOKEN, or AZURE_STORAGE_CONNECTION_STRING" in SCRIPT
+
+
+def _login_check(tmp_path: Path, env_text: str) -> subprocess.CompletedProcess:
+    """Run the script's .env checks, from its quoting checks to its login check,
+    against ``env_text`` as the pod's .env."""
+    start = SCRIPT.index("env_value() {")
+    end = SCRIPT.index("\n# --- 3 and 4.", start)
+    (tmp_path / ".env").write_text(env_text, encoding="utf-8", newline="\n")
+    check = (
+        "set -euo pipefail\n"
+        'die() { echo "pod_bootstrap: $*" >&2; exit 1; }\n'
+        'PENDING=(); REPO="$(pwd)"\n'
+        + SCRIPT[start:end] + "\n"
+        '[ ${#PENDING[@]} -eq 0 ] || printf "PENDING %s\\n" "${PENDING[@]}"\n'
+        'printf "TOKEN=%s\\n" "${AZURE_STORAGE_SAS_TOKEN:-}"\n'
+    )
+    # Only PATH: a login in the test runner's own environment must not leak in.
+    return subprocess.run([BASH, "-c", check], cwd=tmp_path, capture_output=True, text=True,
+                          env={"PATH": "/usr/bin:/bin"})
+
+
+_URL = "AZURE_STORAGE_ACCOUNT_URL=https://acct.blob.core.windows.net\n"
+_CONN = 'AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=fake"\n'
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+@pytest.mark.parametrize("line, key", [
+    ("export AZURE_STORAGE_SAS_TOKEN=sv=1&sig=fake\n", "AZURE_STORAGE_SAS_TOKEN"),
+    ("   AZURE_STORAGE_SAS_TOKEN=sv=1&sig=fake\n", "AZURE_STORAGE_SAS_TOKEN"),
+    ("AZURE_RAW_SAS_TOKEN=sv=1&sig=fake\n", "AZURE_RAW_SAS_TOKEN"),
+    ("  export AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=a;AccountKey=fake\n",
+     "AZURE_STORAGE_CONNECTION_STRING"),
+])
+def test_an_unquoted_login_is_refused_however_the_line_is_written(tmp_path, line, key):
+    """bash sources `export KEY=...` and an indented line as readily as a bare
+    one. Matched only from the first column, those slipped past the check and
+    the token was cut at its '&' - unset after sourcing."""
+    done = _login_check(tmp_path, _URL + line)
+    assert done.returncode == 1, done.stdout
+    assert f"{key} in .env contains" in done.stderr and "but is not quoted" in done.stderr
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+def test_a_quoted_exported_token_is_read_whole(tmp_path):
+    done = _login_check(tmp_path, _URL + 'export AZURE_STORAGE_SAS_TOKEN="sv=1&sig=fake"\n')
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == ["TOKEN=sv=1&sig=fake"]
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+@pytest.mark.parametrize("env_text", [
+    _URL + "AZURE_STORAGE_SAS_TOKEN=\n" + _CONN,
+    'AZURE_STORAGE_SAS_TOKEN="sv=1&sig=fake"\n' + _CONN,
+    'AZURE_RAW_SAS_TOKEN="sv=1&sig=fake"\n' + _CONN,
+])
+def test_half_a_sas_login_is_reported_even_beside_a_connection_string(tmp_path, env_text):
+    """Python refuses half a SAS login on every Blob call rather than falling
+    back to the connection string, so the bootstrap must not call it done."""
+    done = _login_check(tmp_path, env_text)
+    assert done.returncode == 0, done.stderr
+    assert any(line.startswith("PENDING ") and "half a SAS login" in line
+               for line in done.stdout.splitlines()), done.stdout
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+def test_a_raw_token_needs_a_separate_raw_container(tmp_path):
+    login = _URL + 'AZURE_STORAGE_SAS_TOKEN="sv=1&sig=fake"\nAZURE_RAW_SAS_TOKEN="sv=1&sig=raw-fake"\n'
+    done = _login_check(tmp_path, login)
+    assert "AZURE_RAW_SAS_TOKEN is set" in done.stdout and "no separate raw container" in done.stdout
+
+    done = _login_check(tmp_path, login + "AZURE_RAW_CONTAINER=insurance-extraction-raw\n")
+    assert done.returncode == 0, done.stderr
+    assert "PENDING" not in done.stdout
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+def test_one_whole_login_is_enough_and_none_is_reported(tmp_path):
+    assert "PENDING" not in _login_check(tmp_path, _CONN).stdout
+    assert "PENDING" not in _login_check(tmp_path, _URL + 'AZURE_STORAGE_SAS_TOKEN="sv=1&sig=fake"\n').stdout
+    missing = _login_check(tmp_path, "AZURE_STORAGE_ACCOUNT_URL=\n").stdout
+    assert "PENDING set AZURE_STORAGE_ACCOUNT_URL + AZURE_STORAGE_SAS_TOKEN, or" in missing
 
 
 # --------------------------------------------------------------------------

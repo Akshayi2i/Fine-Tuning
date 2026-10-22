@@ -256,8 +256,8 @@ def test_purge_plan_reports_the_full_cascade_without_deleting():
     assert "rebuild" in plan["corpus_action"][0]
     assert "policy_0001" in plan["corpus_action"][0]
     # The frozen eval set is a copy of the document; a purge must reach it.
-    assert plan["golden_eval_set"] == ["golden-eval-set/broker_a/policy_0001"]
-    assert plan["exports"] == ["exports/broker_a"]
+    assert plan["golden_eval_set"] == ["golden-eval-set/broker_a/policy_0001/"]
+    assert plan["exports"] == ["exports/broker_a/"]
 
 
 def _trained_run(client, run_id, tenant, corpus):
@@ -301,8 +301,163 @@ def test_a_tenant_purge_reaches_every_tenant_scoped_prefix_and_its_runs():
     _trained_run(client, "extractor-v9", "broker_b", "v1")
 
     plan = ingest.tenant_purge_plan("broker_a", client)
-    assert plan["prefixes"] == sorted(f"{p}/broker_a" for p in paths.TENANT_SCOPED)
+    assert plan["prefixes"] == sorted(f"{p}/broker_a/" for p in paths.TENANT_SCOPED)
     assert [r["run_id"] for r in plan["trained_weights"]] == ["extractor-v1"]
+
+
+def _keys_under(prefixes, keys):
+    return {key for key in keys for prefix in prefixes if key.startswith(prefix)}
+
+
+def test_every_purge_prefix_stops_at_a_folder_boundary():
+    """Without the trailing '/', policy_1's eval-set prefix also matched
+    policy_10's documents, and tenant acme's corpus prefix matched acme_west's:
+    a purge run from the plan deleted someone else's data."""
+    plan = ingest.purge_plan("policy_1", "policy", "acme")
+    prefixes = [p for k in ("raw", "processed", "golden_labels", "golden_eval_set", "exports")
+                for p in plan[k]]
+    assert prefixes and all(p.endswith("/") for p in prefixes)
+    neighbours = ["golden-eval-set/acme/policy_10/metadata.json",
+                  "processed/acme/policy/policy_10/page_1.png",
+                  "exports/acme_west/compare/x/report.json"]
+    assert _keys_under(prefixes, neighbours) == set()
+    assert _keys_under(prefixes, ["golden-eval-set/acme/policy_1/golden.json"])
+
+    tenant = ingest.tenant_purge_plan("acme")
+    assert all(p.endswith("/") for p in tenant["prefixes"])
+    assert _keys_under(tenant["prefixes"], ["corpus/acme_west/v1/manifest.json",
+                                            "releases/acme-2/release_index.json"]) == set()
+
+
+def _labeled_import(client, folder, source_id="policy_0001", tenant="broker_a"):
+    client.write_json(paths.label_metadata("policy", source_id, tenant),
+                      {"source_id": source_id, "imported_from": folder})
+
+
+def test_the_purge_plan_finds_the_delivered_folder_in_intake():
+    """intake/{batch}/{document}/ holds the PDF and golden.json as delivered, and
+    nothing deletes it. The import records the folder, not the batch."""
+    backend = InMemoryBackend()
+    client = BlobClient(backend=backend, container="main", raw_container="raw", context="ingestion")
+    _labeled_import(client, "HO_1")
+    for key in ("intake/personal-v1/HO_1/HO_1.pdf", "intake/personal-v1/HO_1/golden.json",
+                "intake/personal-v2/HO_1/HO_1.pdf", "intake/personal-v1/HO_10/HO_10.pdf",
+                "intake/personal-v1/AU_3/AU_3.pdf"):
+        client.write_bytes(key, b"x")
+
+    plan = ingest.purge_plan("policy_0001", "policy", "broker_a", client=client)
+    assert plan["intake"] == ["intake/personal-v1/HO_1/", "intake/personal-v2/HO_1/"]
+    assert "confirm each is this document" in plan["intake_action"][0]
+    # The pod's pulled copies, in every batch: the folder name is known.
+    assert plan["pod_volume"][0].endswith("/*/HO_1/")
+
+
+def test_without_raw_access_the_intake_check_is_left_to_the_operator():
+    """A general client may not list the raw container: the plan says so and
+    names the folder to look for, rather than reporting nothing to delete."""
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    _labeled_import(client, "HO_1")
+    plan = ingest.purge_plan("policy_0001", "policy", "broker_a", client=client)
+    assert plan["intake"] == []
+    assert "by hand" in plan["intake_action"][0] and "'HO_1'" in plan["intake_action"][0]
+
+    unrecorded = ingest.purge_plan("policy_0002", "policy", "broker_a", client=client)
+    assert "nothing records which batch" in unrecorded["intake_action"][0]
+    assert "check each batch by hand" in unrecorded["pod_volume_action"][0]
+
+
+def test_the_purge_plan_names_the_copies_on_the_pods_volume():
+    plan = ingest.purge_plan("policy_0001", "policy", "broker_a")
+    volume = plan["pod_volume"]
+    images = paths.staging_train_images_dir("*", "broker_a")
+    assert f"{images}/processed/broker_a/policy/policy_0001/" in volume
+    assert f"{paths.staging_train_data_dir('*', '*')}/" in volume
+    assert any(p.startswith("/workspace/ocr_check") for p in volume)
+    assert len(plan["pod_volume_action"]) >= len(volume)
+
+    tenant = ingest.tenant_purge_plan("broker_a")
+    assert f"{images}/" in tenant["pod_volume"]
+    assert "not filed by tenant" in tenant["intake_action"][0]
+
+
+def test_each_run_names_its_staged_weights_eval_report_and_calibrator():
+    """Eval reports and calibrators sit under shared prefixes, so no tenant
+    prefix reaches them: the report's error_records hold the expected values."""
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    from registry_utils.query_registry import get
+    from registry_utils.write_run_manifest import write_manifest
+
+    _trained_run(client, "extractor-v1", "broker_a", "v1")
+    manifest = get("extractor-v1", client)
+    manifest.artifacts.staging_path = "/workspace/staging/adapters/foundation/v1"
+    manifest.artifacts.eval_report = paths.eval_report("v1")
+    manifest.artifacts.calibration_params = paths.calibration_params("v1", "policy")
+    write_manifest(manifest, client)
+
+    [run] = ingest.tenant_purge_plan("broker_a", client)["trained_weights"]
+    assert run["staging_path"] == "/workspace/staging/adapters/foundation/v1"
+    assert run["eval_report"] == "eval-reports/v1/summary.json"
+    assert run["calibration_params"] == "calibration/v1/policy.json"
+
+
+def test_an_unreadable_manifest_is_listed_not_fatal():
+    """Manifests forbid unknown fields, the index can hold a row no path is
+    built from, and a blob can hold something that is not JSON. Each is that
+    run's problem: the plan lists it to check by hand and goes on."""
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    _trained_run(client, "extractor-v1", "broker_a", "v1")
+    _trained_run(client, "extractor-v2", "broker_a", "v1")
+    _trained_run(client, "extractor-v3", "broker_a", "v1")
+    key_v2 = paths.run_manifest("extractor-v2", "unified")
+    client.write_json(key_v2, {**client.read_json(key_v2), "field_from_a_newer_build": 1})
+    client.write_text(paths.run_manifest("extractor-v3", "unified"), "{not json")
+    index = client.read_json(paths.registry_index())
+    index["runs"].append({"run_id": "extractor-v4", "run_type": "no_such_type"})
+    client.write_json(paths.registry_index(), index)
+
+    runs = {r["run_id"]: r["action"] for r in ingest.tenant_purge_plan("broker_a", client)["trained_weights"]}
+    assert runs["extractor-v1"] == "needs retrain or delete"
+    assert runs["extractor-v2"] == "check by hand: the manifest cannot be read (ValidationError)"
+    assert runs["extractor-v3"] == "check by hand: the manifest cannot be read (JSONDecodeError)"
+    assert runs["extractor-v4"] == "check by hand: the manifest cannot be read (PathError)"
+
+
+def test_lineage_lists_continued_runs_and_adapters_on_a_listed_foundation():
+    """A run continued from a checkpoint carries what earlier corpora taught
+    it; a per-type adapter sits on its Foundation's weights. Neither shows the
+    document in its own corpus manifest."""
+    from registry_utils.models import RunManifest
+    from registry_utils.query_registry import get
+    from registry_utils.write_run_manifest import write_manifest
+    from tests.test_registry import _DS, _deps, _tc
+
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    client.write_json(paths.corpus_manifest("v1", "broker_a"),
+                      {"source_ids_by_split": {"train": ["policy_0001"]}})
+    client.write_json(paths.corpus_manifest("v2", "broker_a"),
+                      {"source_ids_by_split": {"train": ["policy_0003"]}})
+    _trained_run(client, "extractor-v1", "broker_a", "v1")
+    _trained_run(client, "extractor-v2", "broker_a", "v2")
+    _trained_run(client, "extractor-v3", "broker_a", "v2")
+    continued = get("extractor-v3", client)
+    continued.continued_from = "/workspace/staging/adapters/foundation/v1/checkpoint-280"
+    write_manifest(continued, client)
+    for run_id, foundation in (("policy-adapter-v1", "extractor-v1"), ("policy-adapter-v2", "extractor-v2")):
+        write_manifest(RunManifest(
+            run_id=run_id, run_type="per_type_adapter", doc_type="policy", tenant_id="broker_a",
+            dependencies=_deps(corpus_version="corpus/v2", foundation_version=foundation),
+            training_config=_tc(), data_stats=_DS,
+        ), client)
+
+    runs = {r["run_id"]: r["action"] for r in
+            ingest.purge_plan("policy_0001", "policy", "broker_a", client=client)["trained_weights"]}
+    assert runs["extractor-v1"] == "needs retrain or delete"
+    assert runs["extractor-v3"] == (
+        "check by hand: continued from /workspace/staging/adapters/foundation/v1/checkpoint-280, "
+        "which may carry earlier corpora")
+    assert runs["policy-adapter-v1"] == "built on extractor-v1, listed here: needs retrain or delete"
+    # Neither trained on the document nor built on a run that did.
+    assert "extractor-v2" not in runs and "policy-adapter-v2" not in runs
 
 
 def test_unknown_doc_type_is_refused(tmp_path, ingestion_client):

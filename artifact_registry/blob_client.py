@@ -133,10 +133,16 @@ class AzureBackend(BlobBackend):
     def __init__(
         self, connection_string: str | None = None, *,
         account_url: str | None = None, credential: str | None = None,
+        raw_container: str | None = None, raw_credential: str | None = None,
     ) -> None:
         """A connection string (it carries the account key), or an account URL
         with a SAS token as ``credential`` - short-lived and scoped by its
-        permissions, so a leaked pod ``.env`` exposes less."""
+        permissions, so a leaked pod ``.env`` exposes less.
+
+        ``raw_credential`` is a second SAS token, used for ``raw_container``
+        alone. The raw container has tighter permissions: a token issued for the
+        main container is refused there (403), and the only single token valid
+        for both is an account SAS, which hands the raw PDFs to every holder."""
         try:
             from azure.storage.blob import BlobServiceClient
         except ImportError as exc:  # pragma: no cover - depends on optional extra
@@ -150,9 +156,21 @@ class AzureBackend(BlobBackend):
             self._service = BlobServiceClient.from_connection_string(connection_string)
         else:
             raise BlobError("AzureBackend needs a connection string or an account URL")
+        self._raw_container = raw_container
+        self._raw_service = None
+        if raw_credential:
+            if not (account_url and raw_container):
+                raise BlobError("a raw-container SAS token needs the account URL and the raw container's name")
+            self._raw_service = BlobServiceClient(account_url=account_url, credential=raw_credential)
+
+    def _service_for(self, container: str):
+        """The raw container's own login when it has one; the main login otherwise."""
+        if self._raw_service is not None and container == self._raw_container:
+            return self._raw_service
+        return self._service
 
     def _client(self, container: str, key: str):
-        return self._service.get_blob_client(container=container, blob=key)
+        return self._service_for(container).get_blob_client(container=container, blob=key)
 
     def read(self, container: str, key: str) -> bytes:
         try:
@@ -193,7 +211,7 @@ class AzureBackend(BlobBackend):
 
     def list(self, container: str, prefix: str) -> Iterator[str]:
         try:
-            container_client = self._service.get_container_client(container)
+            container_client = self._service_for(container).get_container_client(container)
             for blob in container_client.list_blobs(name_starts_with=prefix.strip("/")):
                 yield blob.name
         except Exception as exc:
@@ -219,6 +237,8 @@ class BlobClient:
         raw_container: the separately-permissioned container for
             ``raw-documents/``. Defaults to ``container`` only when unset, which
             is a valid single-container deployment but loses the RBAC split.
+            Logged in to with ``AZURE_RAW_SAS_TOKEN`` when that is set
+            (:func:`azure_from_environment`).
         context: what is doing the reading — ``ingestion`` and ``ocr`` may reach
             ``raw-documents/``; everything else is refused.
         max_retries: transient-failure retries, with exponential backoff.
@@ -240,7 +260,11 @@ class BlobClient:
         if backend is not None:
             self._backend = backend
         else:
-            self._backend = azure_from_environment()
+            # The raw container named only when it is a separate one: its own
+            # token (AZURE_RAW_SAS_TOKEN) has nothing to apply to otherwise.
+            self._backend = azure_from_environment(
+                self.raw_container if self.raw_container != self.container else None
+            )
 
     # -- routing and guards -------------------------------------------------
 
@@ -386,24 +410,44 @@ class BlobClient:
         return count
 
 
-def azure_from_environment() -> AzureBackend:
+def azure_from_environment(raw_container: str | None = None) -> AzureBackend:
     """The Azure backend the environment logs in to.
 
     A SAS token (``AZURE_STORAGE_ACCOUNT_URL`` + ``AZURE_STORAGE_SAS_TOKEN``) when
     set - preferred, because the connection string carries the account key, which
-    reaches everything for ever - and the connection string otherwise. The token
-    is never logged or put in an error message.
+    reaches everything for ever - and the connection string otherwise.
+
+    ``raw_container`` is the separately-permissioned raw container, when it is a
+    separate one (``raw-documents/``, ``intake/`` and ``exports/`` live there).
+    ``AZURE_RAW_SAS_TOKEN``, when set, is the login for it alone, so the main
+    token can be a container SAS that cannot read raw PDFs. When it is not set,
+    the one token serves both containers and must be valid for both - which only
+    an account SAS is. Neither token is ever logged or put in an error message.
     """
     url = (os.environ.get("AZURE_STORAGE_ACCOUNT_URL") or "").strip()
     sas = (os.environ.get("AZURE_STORAGE_SAS_TOKEN") or "").strip().lstrip("?")
-    if url or sas:
+    raw_sas = (os.environ.get("AZURE_RAW_SAS_TOKEN") or "").strip().lstrip("?")
+    if url or sas or raw_sas:
         if not (url and sas):
-            missing = "AZURE_STORAGE_SAS_TOKEN" if url else "AZURE_STORAGE_ACCOUNT_URL"
-            raise BlobError(
-                f"{missing} is not set: a SAS login needs the account URL and the token both. "
-                "Half of one is refused rather than falling back to the connection string."
+            missing = " and ".join(
+                name for name, value in (("AZURE_STORAGE_ACCOUNT_URL", url), ("AZURE_STORAGE_SAS_TOKEN", sas))
+                if not value
             )
-        return AzureBackend(account_url=url, credential=sas)
+            raise BlobError(
+                f"{missing} {'are' if ' and ' in missing else 'is'} not set: a SAS login needs the "
+                "account URL and the token both (AZURE_RAW_SAS_TOKEN only adds the raw container's own "
+                "token to one). Half of one is refused rather than falling back to the connection string."
+            )
+        if raw_sas and not raw_container:
+            raise BlobError(
+                "AZURE_RAW_SAS_TOKEN is set but there is no separate raw container for it: "
+                "AZURE_RAW_CONTAINER is not set, or names the main container. Set it, or leave "
+                "AZURE_RAW_SAS_TOKEN empty."
+            )
+        return AzureBackend(
+            account_url=url, credential=sas,
+            raw_container=raw_container if raw_sas else None, raw_credential=raw_sas or None,
+        )
     conn = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
     if not conn:
         raise BlobError(

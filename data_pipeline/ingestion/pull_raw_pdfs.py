@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from artifact_registry import paths
-from artifact_registry.blob_client import BlobClient, ImmutableBlobError, for_ingestion
+from artifact_registry.blob_client import BlobClient, BlobError, ImmutableBlobError, for_ingestion
 from common.constants import ACTIVE_DOC_TYPES, UNCLASSIFIED
 from common.ids import build_source_id, is_valid_source_id, parse_source_id
 
@@ -267,6 +267,92 @@ def ingest_directory(
     return result
 
 
+def _prefix(path: str) -> str:
+    """A blob prefix that ends at a folder boundary.
+
+    The path helpers return keys with no trailing ``/``, and as a key prefix
+    ``golden-eval-set/acme/policy_1`` also matches ``policy_10/`` and
+    ``corpus/acme`` matches ``corpus/acme_west/``: a purge run from the plan
+    would delete another document's, or another tenant's, data.
+    """
+    return path.rstrip("/") + "/"
+
+
+def _pod_volume(tenant: str, doc_type: str | None = None, source_id: str | None = None,
+                folder: str | None = None) -> tuple[list[str], list[str]]:
+    """Where the pod's volume holds copies of the tenant's documents: ``(paths, actions)``.
+
+    The volume survives a pod stop, so a copy there outlives the purge of the
+    Blob layers it came from. The paths are globs (``*``): the copies are keyed
+    by batch, corpus version, scope and run, and every one of them counts.
+    """
+    from data_pipeline.ingestion.pull_intake import default_intake_dir
+    from data_pipeline.ocr_check import DEFAULT_OUT as OCR_CHECK_OUT
+
+    images = _prefix(paths.staging_train_images_dir("*", tenant))
+    intake = default_intake_dir().as_posix()
+    if source_id is not None and doc_type is not None:
+        # The image cache stores each page under its own blob key, so one
+        # document's pages are one folder in each corpus version's cache.
+        images = _prefix(f"{images}{paths.processed_dir(doc_type, source_id, tenant)}")
+        if folder:
+            intake = f"{intake}/*/{folder}"
+    found = [
+        _prefix(intake),
+        images,
+        _prefix(paths.staging_train_data_dir("*", "*")),
+        _prefix(f"{OCR_CHECK_OUT.as_posix()}*"),
+    ]
+    actions = [
+        f"{found[0]}: delivered bundles (the PDF and its golden.json) pulled by pull_intake, "
+        "and the smoke run's subsets copied from them - pull_intake never deletes a batch"
+        + ("" if folder or source_id is None else
+           "; the folder this document was imported from is not recorded, so check each batch by hand"),
+        f"{found[1]}: page images cached per corpus version for training and evaluation",
+        f"{found[2]}: each run's staged training rows (labels included), one folder per scope "
+        "and version - delete the folders of the runs under trained_weights",
+        f"{found[3]}: ocr_check reports, whose CSVs quote label values - delete them or run the "
+        "check again after the purge (and any --out folder it was given)",
+        "/workspace/logs/: diagnose_generation reports are named after the document they compare "
+        "and hold its values (a compare folder holds its PDF too) - check by hand",
+    ]
+    return found, actions
+
+
+def _intake_copies(client: BlobClient, folder: str) -> list[str] | None:
+    """``intake/{batch}/{folder}/`` for every delivered batch holding that folder.
+
+    ``None`` when this client cannot list ``intake/``: it is in the raw
+    container, which a client outside ingestion and OCR may not read
+    (AccessDeniedError) and a token without raw access cannot (a 403).
+    """
+    try:
+        keys = client.list(_prefix(paths.INTAKE_PREFIX))
+    except BlobError:  # AccessDeniedError is one
+        return None
+    found = set()
+    for key in keys:
+        parts = key.split("/")
+        if len(parts) >= 4 and parts[0] == paths.INTAKE_PREFIX and parts[2] == folder:
+            found.add(_prefix("/".join(parts[:3])))
+    return sorted(found)
+
+
+def _imported_from(client: BlobClient, doc_type: str, source_id: str, tenant: str) -> str | None:
+    """The delivered folder a labeled import read the document from, if recorded.
+
+    ``import_labeled_pdfs`` records the folder's name (``imported_from``) but
+    not the batch it was delivered in.
+    """
+    key = paths.label_metadata(doc_type, source_id, tenant)
+    try:
+        meta = client.read_json(key) if client.exists(key) else None
+    except (BlobError, ValueError):  # unreadable: the plan says check by hand
+        return None
+    folder = meta.get("imported_from") if isinstance(meta, dict) else None
+    return str(folder) if folder else None
+
+
 def purge_plan(
     source_id: str, doc_type: str, tenant_id: str | None = None, *,
     client: BlobClient | None = None,
@@ -280,34 +366,67 @@ def purge_plan(
     removing a row from one is a rebuild, not a delete. That is why this reports
     rather than acts.
 
+    The delivered copy in ``intake/`` (raw container) and the copies on the
+    pod's volume are named too: nothing deletes them once they are imported.
+
     A model trained on the document is the tenant's data too (arch §8b). With a
     ``client``, every run whose corpus listed the document is named, with its
     weights and the releases serving it: each needs a retrain or a delete. The
     weights' prefixes are not tenant-scoped yet, so the plan names them.
     """
+    tenant = paths._tenant(tenant_id)
+    folder = _imported_from(client, doc_type, source_id, tenant) if client is not None else None
+    on_volume, volume_actions = _pod_volume(tenant, doc_type, source_id, folder)
     plan: dict[str, list[Any]] = {
-        "raw": [paths.raw_document_dir(doc_type, source_id, tenant_id)],
-        "processed": [paths.processed_dir(doc_type, source_id, tenant_id)],
-        "golden_labels": [paths.golden_label_dir(doc_type, source_id, tenant_id)],
-        "golden_eval_set": [f"{paths.golden_eval_set_dir(tenant_id)}/{source_id}"],
+        "raw": [_prefix(paths.raw_document_dir(doc_type, source_id, tenant))],
+        "processed": [_prefix(paths.processed_dir(doc_type, source_id, tenant))],
+        "golden_labels": [_prefix(paths.golden_label_dir(doc_type, source_id, tenant))],
+        "golden_eval_set": [_prefix(f"{paths.golden_eval_set_dir(tenant)}/{source_id}")],
         # Result sets hold many documents' outputs; each one must be checked.
-        "exports": [f"{paths.EXPORTS_PREFIX}/{paths._tenant(tenant_id)}"],
+        "exports": [_prefix(f"{paths.EXPORTS_PREFIX}/{tenant}")],
+        "pod_volume": on_volume,
+        "pod_volume_action": volume_actions,
         "corpus_action": [
             f"rebuild any corpus version whose manifest lists source_id {source_id!r} — "
             "corpus files are shared, so the row cannot simply be deleted"
         ],
         "golden_eval_set_action": [
             "if the frozen eval set holds the document: remove it and update the set's "
-            "manifest - the yardstick changes, so later scores are not comparable with earlier ones"
+            "manifest - the yardstick changes, so later scores are not comparable with earlier ones. "
+            "Every run gated on the set holds the document's expected values in its eval report's "
+            "error_records (eval_report under trained_weights, and the tenant's other runs): "
+            "remove them there too"
         ],
     }
+    # intake/{batch}/{document}/: the PDF and golden.json exactly as delivered.
+    copies = _intake_copies(client, folder) if folder else None
+    if copies:
+        plan["intake"] = copies
+        plan["intake_action"] = [
+            f"the import records the folder the document came from ({folder!r}), not its batch: "
+            "these batches hold a folder of that name - confirm each is this document (its PDF's "
+            "checksum is checksum_sha256 in the raw metadata.json) before deleting it"
+        ]
+    elif copies is not None:
+        plan["intake"] = []
+        plan["intake_action"] = [f"no batch under intake/ holds a folder named {folder!r}"]
+    else:
+        plan["intake"] = []
+        plan["intake_action"] = [
+            f"check every batch under intake/ in the raw container by hand for a folder named {folder!r} "
+            "(the import records the folder, not the batch; this client cannot list intake/)"
+            if folder else
+            "check every batch under intake/ in the raw container by hand: nothing records which "
+            "batch delivered this document" + ("" if client is not None else
+                                                " (pass a client to look up the folder it was imported from)")
+        ]
     if client is None:
         plan["trained_weights"] = [
             "pass a client to list the runs trained on this document: each one's weights and "
             "releases need a retrain or a delete"
         ]
     else:
-        plan["trained_weights"] = runs_trained_on(client, tenant_id=tenant_id, source_id=source_id)
+        plan["trained_weights"] = runs_trained_on(client, tenant_id=tenant, source_id=source_id)
     return plan
 
 
@@ -319,8 +438,16 @@ def tenant_purge_plan(tenant_id: str, client: BlobClient | None = None) -> dict[
     corpora - whose weights live under prefixes that are not tenant-scoped yet.
     """
     tenant = paths._tenant(tenant_id)
+    on_volume, volume_actions = _pod_volume(tenant)
     plan: dict[str, list[Any]] = {
-        "prefixes": sorted(f"{prefix}/{tenant}" for prefix in paths.TENANT_SCOPED),
+        "prefixes": sorted(_prefix(f"{prefix}/{tenant}") for prefix in paths.TENANT_SCOPED),
+        # intake/{batch}/ carries no tenant segment, so no prefix above reaches it.
+        "intake_action": [
+            "check every batch under intake/ in the raw container by hand: delivered batches "
+            "are not filed by tenant, and nothing deletes one after import"
+        ],
+        "pod_volume": on_volume,
+        "pod_volume_action": volume_actions,
     }
     if client is None:
         plan["trained_weights"] = [
@@ -332,6 +459,47 @@ def tenant_purge_plan(tenant_id: str, client: BlobClient | None = None) -> dict[
     return plan
 
 
+def _corpus_lists(client: BlobClient, manifest: Any, tenant: str, source_id: str) -> bool | str:
+    """Whether the run's corpus manifest lists ``source_id`` in any split.
+
+    A string says why it cannot tell; the run is then listed to check by hand.
+    """
+    corpus = str(manifest.dependencies.corpus_version or "").removeprefix("corpus/")
+    try:
+        key = paths.corpus_manifest(corpus, tenant)
+    except paths.PathError:
+        return "the run's corpus manifest is missing"
+    if not client.exists(key):
+        return "the run's corpus manifest is missing"
+    try:
+        listed = client.read_json(key).get("source_ids_by_split")
+    except (BlobError, ValueError, AttributeError) as exc:
+        return f"the run's corpus manifest cannot be read ({type(exc).__name__})"
+    if not isinstance(listed, dict):
+        return "the run's corpus manifest is missing"
+    return any(source_id in (ids or []) for ids in listed.values())
+
+
+def _run_entry(manifest: Any, releases: dict[str, list[str]], action: str) -> dict[str, Any]:
+    artifacts = manifest.artifacts
+    return {
+        "run_id": manifest.run_id,
+        "corpus_version": manifest.dependencies.corpus_version,
+        "adapter_weights": artifacts.adapter_weights,
+        "merged_model": artifacts.merged_model,
+        "quantized_model": artifacts.quantized_model,
+        # The weights on the pod's volume while they are staged.
+        "staging_path": artifacts.staging_path,
+        # Both under shared prefixes (eval-reports/, calibration/), so no tenant
+        # prefix reaches them: the report's error_records hold documents'
+        # expected values, and the calibrator was fitted on the tenant's fields.
+        "eval_report": artifacts.eval_report,
+        "calibration_params": artifacts.calibration_params,
+        "releases": sorted(releases.get(manifest.run_id, [])),
+        "action": action,
+    }
+
+
 def runs_trained_on(
     client: BlobClient, *, tenant_id: str | None = None, source_id: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -340,8 +508,13 @@ def runs_trained_on(
     Read from the run registry: a run of this tenant whose corpus manifest lists
     ``source_id`` in any split (any of the tenant's runs when ``source_id`` is
     None), with its weights and the tenant's releases built on it. A run that
-    records no tenant, or whose corpus manifest is gone, is listed to check by
-    hand rather than skipped: absent evidence is not a clean model.
+    records no tenant, or whose manifest or corpus manifest cannot be read, is
+    listed to check by hand rather than skipped: absent evidence is not a clean
+    model.
+
+    Lineage counts as well as the corpus. A run that continued from a checkpoint
+    carries what earlier corpora taught it though its own corpus may not list
+    the document, and a per-type adapter is built on its Foundation's weights.
     """
     from registry_utils.query_registry import RegistryQueryError, get, list_runs
 
@@ -353,39 +526,52 @@ def runs_trained_on(
             releases.setdefault(str(row.get("adapter")), []).append(str(row.get("release_id")))
 
     found: list[dict[str, Any]] = []
+    adapters: list[Any] = []
     for row in list_runs(client, include_sweeps=True):
         run_id = str(row.get("run_id"))
         try:
             manifest = get(run_id, client)
-        except (RegistryQueryError, KeyError, FileNotFoundError):
-            found.append({"run_id": run_id, "action": "check by hand: the manifest cannot be read"})
+        # ValueError covers a manifest that fails validation (pydantic's
+        # ValidationError: manifests forbid unknown fields), an index row that
+        # builds no path (paths.PathError) and a manifest that is not JSON. One
+        # bad manifest is that run's problem, not the whole plan's. The type is
+        # named, never the message: a storage error can quote a URL.
+        except (RegistryQueryError, BlobError, KeyError, FileNotFoundError, ValueError) as exc:
+            found.append({"run_id": run_id,
+                          "action": f"check by hand: the manifest cannot be read ({type(exc).__name__})"})
             continue
         if manifest.tenant_id is None:
             found.append({"run_id": run_id, "action": "check by hand: the run records no tenant"})
             continue
         if paths._tenant(manifest.tenant_id) != tenant:
             continue
-        corpus = str(manifest.dependencies.corpus_version or "").removeprefix("corpus/")
         action = "needs retrain or delete"
         if source_id is not None:
-            try:
-                key = paths.corpus_manifest(corpus, tenant)
-            except paths.PathError:
-                key = None
-            listed = client.read_json(key).get("source_ids_by_split") if key and client.exists(key) else None
-            if listed is None:
-                action = "check by hand: the run's corpus manifest is missing"
-            elif not any(source_id in ids for ids in listed.values()):
-                continue
-        found.append({
-            "run_id": run_id,
-            "corpus_version": manifest.dependencies.corpus_version,
-            "adapter_weights": manifest.artifacts.adapter_weights,
-            "merged_model": manifest.artifacts.merged_model,
-            "quantized_model": manifest.artifacts.quantized_model,
-            "releases": sorted(releases.get(run_id, [])),
-            "action": action,
-        })
+            listed = _corpus_lists(client, manifest, tenant, source_id)
+            if isinstance(listed, str):
+                action = f"check by hand: {listed}"
+            elif not listed:
+                if manifest.continued_from:
+                    # A checkpoint PATH (training.train --continue-from), not a
+                    # run id, so the corpora behind it cannot be read from here.
+                    action = (f"check by hand: continued from {manifest.continued_from}, "
+                              "which may carry earlier corpora")
+                elif manifest.run_type == "per_type_adapter":
+                    adapters.append(manifest)
+                    continue
+                else:
+                    continue
+        found.append(_run_entry(manifest, releases, action))
+
+    # A per-type adapter trained on a listed Foundation sits on weights that
+    # learned the document, whatever its own corpus lists.
+    listed_runs = {entry["run_id"]: entry["action"] for entry in found}
+    for manifest in adapters:
+        foundation = manifest.dependencies.foundation_version
+        if foundation in listed_runs:
+            verdict = ("needs retrain or delete" if listed_runs[foundation] == "needs retrain or delete"
+                       else "check by hand with it")
+            found.append(_run_entry(manifest, releases, f"built on {foundation}, listed here: {verdict}"))
     return found
 
 
@@ -419,8 +605,10 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
         print(json.dumps(tenant_purge_plan(args.tenant, BlobClient()), indent=2))
         return 0
     if args.purge_plan:
+        # An ingestion client, so the plan can look for the document's delivered
+        # folder in intake/, in the raw container. It still only reads.
         print(json.dumps(
-            purge_plan(args.purge_plan, args.doc_type, args.tenant, client=BlobClient()), indent=2))
+            purge_plan(args.purge_plan, args.doc_type, args.tenant, client=for_ingestion()), indent=2))
         return 0
 
     result = ingest_directory(

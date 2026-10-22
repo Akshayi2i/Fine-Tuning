@@ -141,30 +141,48 @@ ensure_env MINERU_TOOLS_CONFIG_JSON "$MINERU_CONFIG" "$WORKSPACE/magic-pdf.json"
 ensure_env MINERU_DEVICE_MODE cuda
 ensure_env MINERU_MODEL_SOURCE local
 ensure_env HF_HUB_ENABLE_HF_TRANSFER 0 1
+# The value .env gives KEY, read as bash reads the line when sourcing it: blanks
+# before the name and an `export ` are allowed there, so they are here too. Matched
+# only from the first column, `export AZURE_STORAGE_SAS_TOKEN=sv=1&sig=X` passed
+# the quoting check below and was then cut at its '&' when sourced.
+env_value() {
+  grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" .env | tail -n1 \
+    | sed -E "s/^[[:space:]]*(export[[:space:]]+)?$1=//" || true
+}
 # .env is sourced by bash (here and by pod_run.sh): an unquoted connection string
 # is cut at its first ';' and every Blob call would fail with a confusing error.
-azure_line="$(grep -E '^AZURE_STORAGE_CONNECTION_STRING=' .env | tail -n1 || true)"
-azure_value="${azure_line#AZURE_STORAGE_CONNECTION_STRING=}"
-case "$azure_value" in
+case "$(env_value AZURE_STORAGE_CONNECTION_STRING)" in
   \"*|\'*) ;;
   *\;*) die "AZURE_STORAGE_CONNECTION_STRING in .env contains ';' but is not quoted. Wrap the \
 value in double quotes: bash would otherwise cut it at the first ';'." ;;
 esac
 # A SAS token is cut the same way at each '&', and the rest run in the background.
-sas_line="$(grep -E '^AZURE_STORAGE_SAS_TOKEN=' .env | tail -n1 || true)"
-sas_value="${sas_line#AZURE_STORAGE_SAS_TOKEN=}"
-case "$sas_value" in
-  \"*|\'*) ;;
-  *\&*) die "AZURE_STORAGE_SAS_TOKEN in .env contains '&' but is not quoted. Wrap the value \
-in double quotes: bash would otherwise run each part after an '&' in the background." ;;
-esac
+for sas_key in AZURE_STORAGE_SAS_TOKEN AZURE_RAW_SAS_TOKEN; do
+  case "$(env_value "$sas_key")" in
+    \"*|\'*) ;;
+    *\&*) die "$sas_key in .env contains '&' but is not quoted. Wrap the value in double \
+quotes: bash would otherwise run each part after an '&' in the background." ;;
+  esac
+done
 set -a; . ./.env; set +a
 export HF_HOME MINERU_TOOLS_CONFIG_JSON MINERU_DEVICE_MODE MINERU_MODEL_SOURCE RUNPOD_VOLUME_MOUNT
 # RunPod images turn on the hf_transfer downloader for every process; it is not
 # installed in our environments, and Hugging Face then refuses to download.
 export HF_HUB_ENABLE_HF_TRANSFER=0
 # A SAS login (account URL + token) or the connection string; either one will do.
-if [ -z "${AZURE_STORAGE_ACCOUNT_URL:-}" ] || [ -z "${AZURE_STORAGE_SAS_TOKEN:-}" ]; then
+# The same rule as Python's (artifact_registry.blob_client.azure_from_environment):
+# any part of a SAS login set means a SAS login, and half of one is refused there
+# rather than falling back to the connection string - so it is not done here either.
+sas_url="${AZURE_STORAGE_ACCOUNT_URL:-}" sas_main="${AZURE_STORAGE_SAS_TOKEN:-}" sas_raw="${AZURE_RAW_SAS_TOKEN:-}"
+if [ -n "$sas_url$sas_main$sas_raw" ]; then
+  if [ -z "$sas_url" ] || [ -z "$sas_main" ]; then
+    PENDING+=("set both AZURE_STORAGE_ACCOUNT_URL and AZURE_STORAGE_SAS_TOKEN in $REPO/.env, or empty every SAS setting to use the connection string: half a SAS login is refused on every Blob call, not backed by the connection string")
+  fi
+  main_container="${AZURE_BLOB_CONTAINER:-insurance-extraction}"
+  if [ -n "$sas_raw" ] && [ "${AZURE_RAW_CONTAINER:-$main_container}" = "$main_container" ]; then
+    PENDING+=("AZURE_RAW_SAS_TOKEN is set in $REPO/.env but AZURE_RAW_CONTAINER names no separate raw container: set it, or empty the token (every Blob call is refused until then)")
+  fi
+else
   case "${AZURE_STORAGE_CONNECTION_STRING:-}" in
     ""|*AccountName=...*)
       PENDING+=("set AZURE_STORAGE_ACCOUNT_URL + AZURE_STORAGE_SAS_TOKEN, or AZURE_STORAGE_CONNECTION_STRING, in $REPO/.env (every stage reads and writes Blob)") ;;
