@@ -1,10 +1,10 @@
 # SPEC 01 — Project Scaffold, Configs, Schemas, Prompts
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: none. This spec creates the repo skeleton and all static configuration that later modules read.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §0a (schema contract), §0b (LoB), §6 (modality instructions), §7 (dataset format, schema registry, prompt template), §9/§9a (LoRA targets), §11 (full hyperparameter spec), §11a (sweeps), §13a/§13b (quantization), §19 (repo structure).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0a (schema contract), §0b (LoB), §6 (modality instructions), §7 (dataset format, schema registry, prompt template), §9/§9a (LoRA targets), §11 (full hyperparameter spec), §11a (sweeps), §13a/§13b (quantization), §19 (repo structure).
 
 ## Goal
 
@@ -16,7 +16,7 @@ Scaffold the `insurance-extraction-finetuning` repo and create every config file
 - `README.md` — project overview, setup steps, how to run each pipeline stage (stub with section headings + the module map from master §5). State prominently that this repo implements the **L3 VLM layer** of the Fideon pipeline and that its output schema is owned by **Fideon SPEC_00** (master §1.1).
 - `pyproject.toml` — Python 3.11+. **The only place versions are declared**, in dependency groups: `[data]`, `[ocr]` (MinerU 3.4, pipeline backend), `[train]`, `[serve]`, `[quantize]`, `[eval]`, `[track]`, `[dev]`. See *Current implementation* below for the pinned versions and why each group is separate.
 - `requirements.txt` and `requirements-{ocr,train,serve,quantize}.txt` — one per machine, each only `-e .[groups]`: they choose groups, never versions. Installed on a pod by `scripts/setup_pod.sh <role>`, constrained by `requirements-{ocr,train,serve,quantize}.lock`.
-- `.env.example` — every required env var with placeholder: `AZURE_STORAGE_CONNECTION_STRING`, `AZURE_BLOB_CONTAINER`, `AZURE_RAW_CONTAINER` (separately-permissioned raw container: raw documents, intake batches, exports — master §4, §8), `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, `RUNPOD_VOLUME_ID`, `RUNPOD_VOLUME_MOUNT` (default `/runpod-volume`, the staging volume — master §12a), `HF_TOKEN`, `HF_MODEL_REVISION`, `HF_HOME`, `HF_HUB_ENABLE_HF_TRANSFER`, `MLFLOW_TRACKING_URI` / `WANDB_API_KEY` (optional), `DEFAULT_TENANT_ID` (the default tenant), `ALLOW_EXTERNAL_PREANNOTATION` (default `false`) and `EXTERNAL_PREANNOTATION_ENDPOINT`, `FIDEON_BASE_MODEL_DIR` (overrides the local base-model directory), `FIDEON_ALLOW_OFF_POD` (train on a non-RunPod GPU host), `FIDEON_NO_DETACH` (run one command in the foreground on the pod), `FIDEON_INTAKE_DIR`, `FIDEON_WORKSPACE`, and MinerU's `MINERU_TOOLS_CONFIG_JSON` (its `mineru.json`), `MINERU_DEVICE_MODE` (cuda) and `MINERU_MODEL_SOURCE` (local: the pinned weights). Comment each. `tests/test_repo_contracts.py` fails when the code reads a variable the template does not list, or the template lists one nothing reads (library-owned and runtime-set names excepted).
+- `.env.example` — every required env var with placeholder: a Blob login — `AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN` (preferred), or `AZURE_STORAGE_CONNECTION_STRING` — then `AZURE_BLOB_CONTAINER`, `AZURE_RAW_CONTAINER` (separately-permissioned raw container: raw documents, intake batches, exports — master §4, §8), `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, `RUNPOD_VOLUME_ID`, `RUNPOD_VOLUME_MOUNT` (default `/runpod-volume`, the staging volume — master §12a), `HF_TOKEN`, `HF_MODEL_REVISION`, `HF_HOME`, `HF_HUB_ENABLE_HF_TRANSFER`, `MLFLOW_TRACKING_URI` / `WANDB_API_KEY` (optional), `DEFAULT_TENANT_ID` (the default tenant), `FIDEON_BASE_MODEL_DIR` (overrides the local base-model directory), `FIDEON_ALLOW_OFF_POD` (train on a non-RunPod GPU host), `FIDEON_NO_DETACH` (run one command in the foreground on the pod), `FIDEON_INTAKE_DIR`, `FIDEON_WORKSPACE`, and MinerU's `MINERU_TOOLS_CONFIG_JSON` (its `mineru.json`), `MINERU_DEVICE_MODE` (cuda) and `MINERU_MODEL_SOURCE` (local: the pinned weights). Comment each. `tests/test_repo_contracts.py` fails when the code reads a variable the template does not list, or the template lists one nothing reads (library-owned and runtime-set names excepted).
 - `.gitignore` — Python caches, `.env`, model weights (`*.safetensors`, `*.gguf`, `*.bin`, `*.ckpt`), `*.pdf` (except under `tests/fixtures/`), `testing/{results,metrics,ocr_cache,test_data}/`, `calibration/calibration_store/`, `pilot/reports/`, the client data folders under `data/` (deliveries, bundles, CGL source data, audit reports, exclusion and override CSVs), `configs/field_types.proposed.yaml`, and `Documentation/`.
 
 ### 2. `configs/`
@@ -32,9 +32,9 @@ Scaffold the `insurance-extraction-finetuning` repo and create every config file
   - Distributed: `deepspeed_config: null`, `sequence_parallel_size: 1`, `gpus: auto` (data-parallel on every GPU the pod has).
   - Top comment: "hyperparameters are sweep starting points (arch §11/§11a) — tune on the validation set, not fixed truth."
 - **`configs/training/personal_lines.yaml`** — `extends: unified` (merged over it by `common.config.training_config`) and adds the `personal_lines` scope's `data_mix`: scope-level and per-line `synthetic_fraction` and `scanned_share`, all `null` (unsteered) until set; a scope may also set its own `modality_mix`. `casualty_fleet` uses `unified` as is.
-- **`configs/scopes.yaml`** — what one training run covers: `unified`, `policy`, `lossrun`, `personal_lines` (seven personal lines; not flood) and `casualty_fleet` (`lines: [gl]`, the CGL documents). Each declares `lineage`, `doc_types`, `lines`, `tasks`, `training_config`, `long_doc_types` and `not_applicable_metrics` (checked against what the scope's shape implies, `common.scopes`).
+- **`configs/scopes.yaml`** — what one training run covers: `unified`, `policy`, `lossrun`, `personal_lines` (seven personal lines; not flood) and `casualty_fleet` (`lines: [gl]`, the CGL documents). Each declares `lineage`, `doc_types`, `lines`, `tasks`, `training_config` and `not_applicable_metrics` (checked against what the scope's shape implies, `common.scopes`). No task list holds `page_select` and no scope declares `long_doc_types`: every page is read (decision 2026-10-19).
 - **`configs/layout_families.yaml`** — the one LOB → layout-family table (`personal_lines`, `casualty_fleet`, `property_pkg`, `exec_specialty`, `benefits_misc`, `no_family`), every canonical line in exactly one family; read by training and serving, and checked against the delivered `lob_schema_map.yaml`.
-- **`configs/schema_sections.yaml`** — the policy section groups, page rules and identifying keys the window planner reads in training and serving; a default map (decl, arrays, lineblk, dtd) for self-contained lines and a `common_model` profile (decl, arrays, lineblk; each table's id field and prefix, reference fields, `array_keys`, unit keys, `run_overlap_pages: 1`); `pages.declarations_leading: 5` for every line.
+- **`configs/schema_sections.yaml`** — the policy section groups, page rules and identifying keys the window planner reads in training and serving; a default map (decl, arrays, lineblk, dtd) for self-contained lines and a `common_model` profile (decl, arrays, lineblk; each table's id field and prefix, reference fields, `array_keys`, unit keys, `run_overlap_pages: 1`); `pages.declarations_leading: 5` for every line. Every group reads every page; the page rule says only how its first window is formed: `every` (arrays, lineblk — pages packed into windows by runs) or `declarations` (decl, dtd — pages 1–5 and the detected declarations page read together first, the rest as for `every`).
 - **`configs/model_view.yaml`** — repo-owned replacements for common-model descriptions written for schema authors, and how coverage codes are offered (`oneof` or `enum`); part of the prompt.
 - **`configs/lob_meanings.yaml`** — one role-based sentence per registered line, for the line classifier (no carrier wording).
 - **`configs/label_mappings.yaml`** — labels written for one line's schema used under another's (applied when targets are built and labels scored, never to stored labels).
@@ -48,7 +48,7 @@ Scaffold the `insurance-extraction-finetuning` repo and create every config file
   - `phase3_rank.yaml` — Foundation rank `{32, 64, 128}`; **secondary, not run by default** — only if F1 plateaus.
   - Comment the total budget: **~9–12 training runs before the first production run**, and that **every sweep run writes a full run manifest** (IMPL-02) so sweeps are first-class registry entries, not untracked side experiments.
 - **`configs/deepspeed/zero2.json`** and **`zero3.json`** — ZeRO-2 default, ZeRO-3 for VRAM-constrained multi-GPU.
-- **`configs/inference/vllm_serving.yaml`** — resolution cap (**must match `base_model.yaml`**, `common.config.assert_resolution_parity`), `max_seq_len: 32768` (at least the largest per-task cap); `generation`: greedy (`temperature: 0.0`), `max_new_tokens: 12288` (every task's full reservation), `logprobs: true` with `logprobs_mode: raw_logprobs`, `structured_outputs: true`, `repeatable: false`, and `validation_batch_rows: 96` (rows per vLLM call when a whole split is generated, longest expected answer first); `serving`: backend, served model tag (resolved from the registry), `enable_lora`, `max_loras`, `max_lora_rank`; `routing`: `classifier_confidence_threshold: 0.70`, `detect_lob: false` with `lob_confidence_threshold: 0.90` and `lob_family_threshold: 0.60`, `release_pins: {}`; **review confidence threshold (`confidence.review_threshold`, default 0.7, arch §5)**. Adapter paths are **not** listed here — they are resolved through the registry and the promoted releases. The long-document page threshold is **not** set here either: it is `common.constants.DEFAULT_LONG_DOC_PAGE_THRESHOLD` (5), the value the corpus build planned its training windows with, so serving cannot drift from training.
+- **`configs/inference/vllm_serving.yaml`** — resolution cap (**must match `base_model.yaml`**, `common.config.assert_resolution_parity`), `max_seq_len: 32768` (at least the largest per-task cap); `generation`: greedy (`temperature: 0.0`), `max_new_tokens: 12288` (every task's full reservation), `logprobs: true` with `logprobs_mode: raw_logprobs`, `structured_outputs: true`, `repeatable: false`, and `validation_batch_rows: 96` (rows per vLLM call when a whole split is generated, longest expected answer first); `serving`: backend, served model tag (resolved from the registry), `enable_lora`, `max_loras`, `max_lora_rank`; `routing`: `classifier_confidence_threshold: 0.70`, `detect_lob: false` with `lob_confidence_threshold: 0.90` and `lob_family_threshold: 0.60`, `release_pins: {}`; **review confidence threshold (`confidence.review_threshold`, default 0.7, arch §5)**. Adapter paths are **not** listed here — they are resolved through the registry and the promoted releases. There is no page threshold anywhere: every page is read, in windows planned by the function the corpus build uses (`policy_windows.plan_windows`), and `long_documents` holds only `conflict_resolution: declarations_page_wins`.
 
 ### 3. `schemas/` — JSON Schemas (Draft 2020-12)
 
@@ -160,14 +160,14 @@ Every policy is extracted into the client's canonical JSON for its line. These f
 - `common/model_view.py` — a common-model line's schema as the model sees it (§3b), with `configs/model_view.yaml`.
 - `common/structural_ids.py` — structural ids on a common-model document: unit keys, references resolved to them, renumbering in printed order, and `comparable_view` (what scoring compares instead of ids).
 - `common/grounding.py` — whether a value is printed, and on which pages: one matcher for the label rules, the audit, the OCR-agreement feature and the hallucination metric.
-- `common/schema_sections.py` — which canonical sections one extraction call asks for (`configs/schema_sections.yaml`), and `run_overlap` (pages two windows of a split run share).
-- `common/scopes.py` — training scopes (`load_scopes`, `structural_not_applicable`, `assert_one_output_shape`); `common/tasks.py` — the `Task` enum and `CORPUS_TASKS` (the tasks the corpus builds rows for: `extract` and the three policy window tasks).
+- `common/schema_sections.py` — which canonical sections one extraction call asks for (`configs/schema_sections.yaml`), `pages_for(group, pages)` (every page, for every group), `leading_pages(group, pages, declarations_page=)` (the pages a declarations group reads together in its first window; empty for the others), and `run_overlap` (pages two windows of a split run share).
+- `common/scopes.py` — training scopes (`load_scopes`, `structural_not_applicable`, `assert_one_output_shape`); `common/tasks.py` — the `Task` enum (no `PAGE_SELECT`) and `CORPUS_TASKS` (the tasks the corpus builds rows for: `extract` and the three policy window tasks).
 - `common/label_mapping.py` — `configs/label_mappings.yaml` applied when targets are built and labels scored.
 - `common/gpu.py` — model compute never falls back to the CPU; `common/run_ids.py` — the one run-id shape.
 - `common/logging_setup.py` — the run's logging: `setup()` installs a `ConsoleHandler` (a `StreamHandler` subclass that ms-swift's and modelscope's logger setup leave alone), and `reassert()` restores our levels, handlers and loggers before every stage.
 - `common/normalize.py` *(moved here from IMPL-08)* — per-field-type normalizers so comparison reflects correctness rather than formatting: dates (`01/01/2026` == `2026-01-01`), currency (`$1,200.00` == `1200.0`), entity names (`Acme Mfg LLC` ≈ `ACME MANUFACTURING LLC`), policy/claim number separators. **Built here rather than in IMPL-08 because three specs need it and the earliest is IMPL-04**: alias derivation (IMPL-04), the promotion gate (IMPL-08), and the testing routine (IMPL-12). Pure and dependency-free. One definition of "matches" shared by all three — divergence silently changes what "correct" means between them.
 - `common/aliases.py` *(new)* — loads `schemas/aliases/{doc_type}.aliases.json`; `aliases_for(doc_type, field)`, `confusables_for(doc_type, field)`, `canonical_for(doc_type, surface_label)` (reverse lookup, **for labeling and eval only**), `is_confusable(doc_type, field, label)`. Mirrors the `common/lob.py` pattern. Its module docstring must state that no serving or inference path may import it.
-- `common/constants.py` — `ACTIVE_DOC_TYPES = ["acord", "policy", "lossrun"]`, **`UNCLASSIFIED = "unclassified"`** (the holding bucket for documents whose type is not yet known — it lives here, not in `data_pipeline`, because `common/ids.py` and `artifact_registry/paths.py` both have to honour it and both sit below `data_pipeline`), the **`doc_type` → Fideon SPEC_00 canonical model mapping table (master §1.2)** (`DOC_TYPE_TO_CANONICAL`), ACORD form list, modality modes + mix ratios (`MODALITY_MIX`, `PROMPT_MODE_ALIASES`), resolution cap default, split-ratio table by volume (`SPLIT_RATIOS_BY_VOLUME`), `DEFAULT_LONG_DOC_PAGE_THRESHOLD = 5`, confidence review threshold.
+- `common/constants.py` — `ACTIVE_DOC_TYPES = ["acord", "policy", "lossrun"]`, **`UNCLASSIFIED = "unclassified"`** (the holding bucket for documents whose type is not yet known — it lives here, not in `data_pipeline`, because `common/ids.py` and `artifact_registry/paths.py` both have to honour it and both sit below `data_pipeline`), the **`doc_type` → Fideon SPEC_00 canonical model mapping table (master §1.2)** (`DOC_TYPE_TO_CANONICAL`), ACORD form list, modality modes + mix ratios (`MODALITY_MIX`, `PROMPT_MODE_ALIASES`), resolution cap default, split-ratio table by volume (`SPLIT_RATIOS_BY_VOLUME`), confidence review threshold, and `MIN_INTER_ANNOTATOR_AGREEMENT` (`None`: no spec states a minimum, so the preflight warns on agreement and blocks only once it is set).
 
 ## Constraints
 - No business logic yet — scaffold + static assets + tiny shared helpers.
@@ -197,7 +197,7 @@ Every policy is extracted into the client's canonical JSON for its line. These f
 
 ---
 
-## Current implementation (commit f5668a4, 2026-10-13)
+## Current implementation (2026-10-21)
 
 **Dependencies** (`pyproject.toml`; resolved for Linux with `uv` — the resolver found three failures that
 would have broken the pods, fixed below):
@@ -244,7 +244,11 @@ keeps `six` in the OCR lock. Locked today: ms-swift 3.12.6, transformers 4.57.6,
 safetensors shards, 17.5 GB); the bootstrap downloads exactly that into `local_dir`.
 
 **`.env.example`**: the Azure connection string is quoted — the file is sourced by bash on the pod, which
-would cut an unquoted value at its first `;`. `HF_HOME` is documented (on the pod,
+would cut an unquoted value at its first `;`. A SAS login (`AZURE_STORAGE_ACCOUNT_URL` +
+`AZURE_STORAGE_SAS_TOKEN`) is preferred and, when both are set, used instead: the connection string carries the
+account key, which reaches everything and never expires. The token is quoted too (bash reads each `&` as "run in
+the background"). There is no external pre-annotation setting: frontier models are never used for gold,
+synthetic or training data (decision 2026-10-19). `HF_HOME` is documented (on the pod,
 `/workspace/.cache/huggingface`); `MINERU_TOOLS_CONFIG_JSON` names MinerU 3.x's `mineru.json` and may be an
 absolute path (the bootstrap sets `/workspace/mineru.json`, replacing a MinerU 1.x `magic-pdf.json`);
 `MINERU_DEVICE_MODE=cuda` and `MINERU_MODEL_SOURCE=local` are set by the bootstrap and applied before MinerU
@@ -260,8 +264,10 @@ their page rules and identifying keys, read by the window planner in training an
 read the `common_model` profile instead (decl: the policy-level objects, `lob_parts`, premium, billing; arrays:
 every unit table and everything that refers to a unit, plus `additional_fields`; lineblk: the remainder, today
 the forms list), with each table's id field and prefix, the reference fields, identifying keys, unit keys and
-`run_overlap_pages: 1`. `pages.declarations_leading: 5` makes the declarations group read the first five
-pages (plus a declarations page found later).
+`run_overlap_pages: 1`. Every group reads every page (decision 2026-10-19). The page rules are `every`
+(arrays, lineblk) and `declarations` (decl, dtd): `pages.declarations_leading: 5` makes the declarations
+group's first window the first five pages plus a declarations page found later, read together, and every page
+after them follows in windows.
 
 **Schema 2 configs** (all prompt or target inputs, never the client's files): `configs/model_view.yaml`
 (description replacements; a test fails once the client's own text matches an entry),
@@ -279,3 +285,11 @@ not yet read by the model view).
 - §4: the template's real switches (`canonical`, `common_model`), common-model rules, evidence blocks as rendered, `PROMPT_TEMPLATE_VERSION` 7.2.0, classifier `lob` output, renderer names, prompt hash inputs, reference snapshots and frozen fingerprints.
 - §5: `common/` described as built (config loaders, registry functions, `canonical`, `model_view`, `structural_ids`, `grounding`, `schema_sections`, `scopes`/`tasks`, `label_mapping`, `gpu`, `run_ids`, `logging_setup`).
 - Current implementation: MinerU 3.4.5 dependencies, pinned weights and config refusals, locked versions, the `common_model` section profile and the Schema 2 config files.
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; architecture reference `finetuning-architecture-v2.4.docx`.
+- §1 `.env.example`: the SAS login (`AZURE_STORAGE_ACCOUNT_URL`, `AZURE_STORAGE_SAS_TOKEN`) beside the connection string; `ALLOW_EXTERNAL_PREANNOTATION` and `EXTERNAL_PREANNOTATION_ENDPOINT` are gone (no frontier model, decision 2026-10-19).
+- §2: scopes declare no `long_doc_types` and no `page_select` task; the section map's page rules are `every` and `declarations`; no page threshold in `vllm_serving.yaml` or anywhere else (every page is read).
+- §5: `schema_sections.pages_for` / `leading_pages`; no `Task.PAGE_SELECT`; `DEFAULT_LONG_DOC_PAGE_THRESHOLD` removed from `common.constants`, `MIN_INTER_ANNOTATOR_AGREEMENT` added.
+- Current implementation: the SAS token in `.env.example`; the section map's every-page rule.

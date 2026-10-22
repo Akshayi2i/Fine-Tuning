@@ -1,10 +1,10 @@
 # SPEC 03 — Ingestion + MinerU OCR (GPU, with Version + Device Pinning)
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §7 (page images, multi-page), §8a (**MinerU version pinning**), §11 (resolution cap), §13 steps 1–2, §18a (raw-document storage, dedup, retention, access pattern).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0e (decisions of 2026-10-19: GPU only, reviewed golds), §7 (page images, multi-page), §7c (delivered golds), §8a (**MinerU version pinning**), §11 (resolution cap), §13 steps 1–2, §18a (raw-document storage, dedup, retention, access pattern), §18.2–18.3 (storage tiers, purge cascade).
 
 ## Goal
 
@@ -20,8 +20,12 @@ For each PDF from a local folder or source location:
 - Compute a **SHA-256 checksum** and **dedup** (arch §18a): if the checksum was already ingested, skip and log. Insurance documents — Loss Runs and renewal policies especially — are frequently re-submitted with only minor changes; de-duping prevents redundant labeling effort and corpus bloat.
 - Write `raw-documents/{tenant_id}/{doc_type}/{source_id}/original.pdf` — **immutable, exactly as received, never overwritten**. A corrected version of a document is ingested as a **new `source_id`**, so historical training runs remain reproducible against the exact bytes they trained on.
 - Write `metadata.json`: ingestion timestamp, `tenant_id`, source system, original filename, checksum, size, page count, a first **digital-vs-scanned flag**, PII flags placeholder (`not_assessed`), retention class. The ingest flag (`inspect_pdf`) reads the extractable text of up to three pages with pypdf — PyMuPDF when pypdf cannot read the file, so only a PDF neither library opens is refused — and calls a document scanned below 50 characters per page. It counts any extractable text, a searchable scan's invisible OCR layer included, so it is a first look only: the flag the scanned eval subset (IMPL-08) and the ViT gate (IMPL-06) read is the OCR stage's `ocr_meta.is_scanned` (§3), which counts visible text only.
-- Idempotent and re-runnable. CLI: `--input`, `--doc-type` (an active type or `unclassified`), `--tenant` (optional, defaults from env), `--source-system`, `--purge-plan SOURCE_ID` (prints the downstream cascade a purge must reach, deletes nothing). There is no container flag: the raw container is `AZURE_RAW_CONTAINER`, reached through `for_ingestion()`.
-- Uses the tighter-RBAC container for `raw-documents/` (master §8). **This is the only pipeline component that writes this layer** (the labeled-PDF importer stores its PDFs through `ingest_pdf`).
+- Idempotent and re-runnable. CLI: `--input` (required to ingest), `--doc-type` (an active type or `unclassified`; required to ingest and for `--purge-plan`), `--tenant` (optional, defaults from env), `--source-system`, `--purge-plan SOURCE_ID` and `--tenant-purge-plan` (below; both print a plan and delete nothing). There is no container flag: the raw container is `AZURE_RAW_CONTAINER`, reached through `for_ingestion()`.
+- **Purge plans** (arch §18.3) report what a purge must reach and never delete:
+  - `purge_plan(source_id, doc_type, tenant_id, client=)` (`--purge-plan SOURCE_ID`): the document's `raw`, `processed` and `golden_labels` prefixes, `golden-eval-set/{tenant}/{source_id}` (with the action: remove it from the frozen set and update its manifest — later scores are then not comparable with earlier ones), `exports/{tenant}` (result sets hold many documents' outputs, so each is checked), the corpus versions to rebuild (corpus files are shared, so a row cannot simply be deleted), and `trained_weights`.
+  - `tenant_purge_plan(tenant_id, client)` (`--tenant-purge-plan`, needs `--tenant`): every prefix in `paths.TENANT_SCOPED` for the tenant, built from that set so a prefix added there cannot be missed, plus `trained_weights`.
+  - `trained_weights` comes from `runs_trained_on(client, tenant_id=, source_id=)`, which reads the run registry: each run of the tenant (for a document, each whose corpus manifest lists it in any split) with its corpus version, adapter, merged and quantized weights and the tenant's releases built on it, marked **"needs retrain or delete"**. A run whose manifest cannot be read, that records no tenant, or (for a document) whose corpus manifest is missing is listed "check by hand", never skipped. Trained weights are not tenant-prefixed yet (`paths.SHARED`), so a deletion cannot reach them by prefix and the plans name them instead. Without a client the plan says to pass one.
+- Uses the tighter-RBAC container for `raw-documents/` (master §8). **This is the only pipeline component that writes this layer** (the labeled-PDF importer stores its PDFs through `ingest_pdf`). `raw-documents/` is kept in the **Cool tier once processed, never Archive** (arch §18.2): a corpus rebuild after an OCR pin change needs the PDFs readable without hours of rehydration. The tier is a storage-account setting; no code here sets it.
 
 
 ### 2. `data_pipeline/ocr/mineru_version.py` *(new — arch §8a)*
@@ -83,6 +87,10 @@ Consequences, all enforced in code:
   without mixing two markdown formats in one training set.
 - CI simulates a GPU pod to exercise these paths, because they now refuse to run
   without one.
+- **Fideon SPEC_05's CPU OCR is not followed.** SPEC_05 reads native PDFs on
+  the CPU and makes the GPU optional for scans; this project runs OCR on the GPU
+  only (decision 2026-10-19, arch §0e, §8a). SPEC_05's drawn-figure rule (§4.1)
+  and its timeouts are followed.
 
 ## Acceptance checklist
 - [ ] Ingesting the same PDF twice results in one stored copy (dedup by checksum).
@@ -107,10 +115,13 @@ Consequences, all enforced in code:
 - [ ] `find_unprocessed` applies the same render-only test `process_document` does. Counting a render-only `ocr_meta.json` as done filtered the document out of `--all-unprocessed`, so it was never OCR'd and the CLI reported nothing to do.
 - [ ] The `_reprocessed` marker is added to the **returned** metadata only, never written to Blob — persisting it made the skip path read it straight back, so `process_batch` reported every skipped document as processed.
 - [ ] The serving-side `run_mineru` raises `MinerUError` on a timeout, any engine failure, or fewer than 10 characters read.
+- [ ] `--purge-plan SOURCE_ID` lists the document's raw, processed, label and frozen-eval-set prefixes, the tenant's exports, the corpus versions to rebuild and every run trained on it (with weights and releases, "needs retrain or delete"); `--tenant-purge-plan` lists every prefix in `paths.TENANT_SCOPED` and every run of the tenant. Neither deletes anything, and a run that cannot be checked is listed "check by hand".
+- [ ] `check_bundle` blocks a bundle whose form number still carries its edition with `edition_date` empty, and warns on a number that may end in one; the audit reports the same.
+- [ ] `check_bundle` and `import_prepared` refuse a model-drafted gold (`draft_backend`, or `fideon:provenance` notes) without `reviewer_id` and `review_date`; both importers copy `reviewer_id`, `review_date` and `draft_backend` into `label_metadata.json`.
 
 ---
 
-## Current implementation (2026-10-13)
+## Current implementation (2026-10-21)
 
 - **MinerU 3.4.5, pipeline backend**: the `ocr` dependency group installs `mineru[pipeline]>=3.4.5,<3.5`
   (plus `six`, which its OCR text system imports, and the training stack's torch 2.8), locked in
@@ -157,11 +168,22 @@ Consequences, all enforced in code:
   any file failed to download). Both run detached on the pod.
 - **The import** (`import_labeled_pdfs`): every bundle is checked first (`check_bundle`: one PDF and a
   `golden.json` per folder, the label against its line's schema, a valid split; a missing line or
-  `field_provenance` only warns),
-  then each PDF goes through `ingest_pdf` — a re-import of a corrected batch refreshes the label of a document
+  `field_provenance` only warns). Two more checks block a bundle:
+  - **a form's edition left in its form number** with the form's `edition_date` empty, in a shape the label
+    rules move (`label_rules.split_form_edition`, IMPL-04): the bundle was never prepared, so re-run
+    `prepare_bundles`. A number that only *may* end in its edition (`may_hold_edition`, "CG 20 10 04") is a
+    warning, to check by hand;
+  - **a gold a model drafted with no reviewer recorded** (`export_golden_labels.review_problem`, decision
+    2026-10-19, IMPL-04): drafted is read from the metadata's `draft_backend` or the gold's own
+    `fideon:provenance` notes; `reviewer_id` and `review_date` in `metadata.json` satisfy it. A bundle with no
+    review record and no drafting note is warned about, not blocked.
+
+  Then each PDF goes through `ingest_pdf` — a re-import of a corrected batch refreshes the label of a document
   already stored and keeps its PDF — and its label and `label_metadata.json` are written with
-  `awaiting_ocr: true` (IMPL-04 lists the metadata). A PDF that cannot be read fails its own document; the
-  rest of the batch goes on.
+  `awaiting_ocr: true`, carrying `reviewer_id`, `review_date` and `draft_backend` from the bundle's metadata
+  (IMPL-04 lists the metadata). A PDF that cannot be read fails its own document; the rest of the batch goes
+  on. The prepared importer (`import_prepared`) refuses a model-drafted gold without a reviewer the same way
+  and copies the same three keys.
 - **GPU only**, with no CPU option (see the GPU section above and `common/gpu.py` for the same rule on every
   other model step).
 - **Render-only documents** (`ocr_meta.render_only: true`, rendered for labeling without OCR) and documents
@@ -223,7 +245,8 @@ check cannot run, is kept as it is.
 `modality` and `force_ocr` are trusted as given (a page without a text layer read in text mode is logged and
 flagged), offline they are detected. `data_pipeline/ocr/mineru_runner.py::run_mineru(pdf_bytes, modality,
 force_ocr=False)` is the async entry point for a caller that has a PDF rather than page texts: 30 s budget on
-the native path, 90 s on the scanned or forced one; a timeout, any engine failure, an unknown modality or fewer
+the native path, 90 s on the scanned or forced one (Fideon SPEC_05's timeouts, ceilings rather than a latency
+budget: no latency SLA is agreed); a timeout, any engine failure, an unknown modality or fewer
 than 10 characters read raises `MinerUError` (the document goes to review). The call runs in a worker thread,
 so a timeout stops the wait, not MinerU. This repository's own serving endpoint runs no OCR: its requests carry
 page texts.
@@ -261,13 +284,17 @@ import bundles — `<out>/<document>/{document.pdf, golden.json, metadata.json}`
    family is one insured (`named_insured.primary_name` without case, punctuation or legal-form words, hashed),
    so a declarations page, the policy and its renewals stay on one side. The split is drawn as the corpus build
    draws one (`split_groups.assign_group_splits`, seed 42) and delivered in each document's metadata, the same
-   on every re-run; `--frozen` (the tenant's eval set is frozen) draws train and val only. A test document whose
+   on every re-run; `--frozen` (the tenant's eval set is frozen) draws train and val only. The draw holds one
+   carrier out of train and val only when the line names at least 10 carriers
+   (`split_groups.MIN_CARRIERS_PER_LINE_FOR_HELD_OUT`, decision 2026-10-19; IMPL-05). A test document whose
    carrier no train document has is marked `held_out_carrier: true`. `<out>/split.csv` lists document, family,
    split and `held_out_carrier`. Never `move`: a re-run removes the folder of a document left out, which would be
    the only copy of a moved PDF.
 
-For shapes 2 and 3 every gold goes through `corrected_gold` (coverage-code recodes, a premium written twice,
-a missing carrier, then the label rules — IMPL-04); a gold still outside its line's schema, or a package
+For shapes 2 and 3 every gold goes through `corrected_gold` (on common-model lines: coverage-code recodes, a
+premium written twice, a missing carrier, then the label rules — IMPL-04 — which also move a form's edition
+printed inside its form number to the form's empty `edition_date`, so the targets change and the bundles are
+prepared again); a gold still outside its line's schema, or a package
 policy filed under one common-model line, is left out with the reason, and every change is listed in
 `<out>/corrections.csv`. Bundle metadata carries `unprinted_values` (values no page prints). A corrected gold
 and every `metadata.json` are written as new files, never through a hard link to the delivery or to a batch
@@ -282,8 +309,9 @@ after a re-import with `freeze-eval-set --tenant T --mark-held-out` (IMPL-08, IM
 
 The audit (`data_pipeline/audit.py`, default input `data/bundles`, `--scope personal_lines` by default,
 `--scope casualty_fleet` for the CGL bundles) blocks a source document found in two splits and a delivery where
-only some documents carry a split, and reports the delivered Train/Val/Test counts (real and synthetic) with
-the test count checked against the freeze minimum.
+only some documents carry a split, and runs the importer's own `check_bundle`, so a form's edition left in its
+number and a model-drafted gold with no reviewer are blockers before upload as well as at import. It reports
+the delivered Train/Val/Test counts (real and synthetic) with the test count checked against the freeze minimum.
 
 ### Completing synthetic labels (first delivery)
 
@@ -297,7 +325,9 @@ edition dates, the carrier's own name and address), **shifted** by the recorded 
 known from a field both labels share, and **left out** otherwise; amounts are added only when every amount the two
 labels share is equal (89% of shared amounts are; some templates change them). Table rows are matched on unchanged
 values, and no row is added while the twin has rows that did not match, so none is listed twice. A merged label
-that fails the schema is not written. Result on the first delivery: 90,050 → 295,082 fields; 30,268 deliberately
+that fails the schema is not written. Filling does not make a twin reviewed: a twin filled from a seed nobody
+reviewed (its `seed_review` note says so) is still refused at import until a reviewer is recorded
+(`review_problem`, IMPL-04). Result on the first delivery: 90,050 → 295,082 fields; 30,268 deliberately
 left out. The originals take their reviewed gold through fideon_synth's `use_reviewed_gold.py`. The audit accepts
 the reviewed gold's conventions: month/year edition dates in any layout (`05 11`, `0699`, `(06/99)`) and split
 limits (several amounts in one field). A SPEC_21 delivery needs none of this: its golds arrive complete and are
@@ -314,3 +344,11 @@ corrected at bundling instead.
 - Bundles: "Synthetic deliveries" became "Deliveries into bundles" covering the SPEC_21 delivery (two renders per twin, one corrected gold, seeds via `--originals`) and the originals mode (`--lob gl`, insured families, split delivered in metadata, `held_out_carrier`, `split.csv`, `corrections.csv`); noted that the importer does not yet carry `held_out_carrier` into label metadata.
 - Added the post-OCR check (`ocr_check`), the importer's behaviour, the `cgl-v1` batch, and `prepare_bundles` / `pull_intake` running detached.
 - The importer now copies `held_out_carrier` into `label_metadata.json` (commit f5668a4); `freeze-eval-set --mark-held-out` marks a set frozen before that.
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; the architecture reference is `finetuning-architecture-v2.4.docx` (adds §0e, §7c, §18.2–18.3).
+- §1 Ingestion: the CLI flags as the parser has them (`--input` only to ingest, `--doc-type` for ingest and `--purge-plan`); purge plans reach the frozen eval set, the tenant's exports and every run trained on the data (`purge_plan`, `tenant_purge_plan`, `runs_trained_on`, `--tenant-purge-plan`), report only; `raw-documents/` is Cool tier once processed, never Archive.
+- GPU only: Fideon SPEC_05's CPU OCR is not followed (decision 2026-10-19).
+- Acceptance checklist: purge plans, the form-edition blocker, the reviewed-gold rule.
+- Current implementation: `check_bundle` blocks an edition left in a form number and an unreviewed model-drafted gold; both importers copy `reviewer_id`, `review_date`, `draft_backend`; the audit runs the same checks; the SPEC_05 timeouts are ceilings, not a latency budget; the originals draw holds a carrier out only in a line naming 10 or more; the label rules move form editions, which changes targets; a filled twin from an unreviewed seed is still refused.

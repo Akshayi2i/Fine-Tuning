@@ -1,14 +1,14 @@
 # SPEC 04 — Labeling, Golden JSON, and the Day-Zero Bootstrap
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01 (schemas, alias registry, `common.normalize`, `common.aliases`), IMPL-02, IMPL-03 (MinerU output — `derive_aliases` reads it).
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §0a (schema contract), §0b (LoB in every label), §4c (**day-zero bootstrap**), §7 "Golden JSON Generation Mechanism", §13 step 11 (feedback loop).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0a (schema contract), §0b (LoB in every label), §0e (decisions of 2026-10-19: **no frontier model**, reviewed golds only), §4c (**day-zero bootstrap**), §7c "Golden Label Generation", §13 step 11 (feedback loop).
 
 ## Goal
 
-Turn OCR'd documents into human-verified **golden JSON** labels via a bootstrap pre-annotation + human-review workflow, with provenance tracking — and enforce the day-zero rule that no machine draft is accepted without correction until the corpus reaches a defined size.
+Turn OCR'd documents into human-verified **golden JSON** labels via a bootstrap pre-annotation + human-review workflow, with provenance tracking — and enforce the day-zero rule that no machine draft is accepted without correction until the corpus reaches a defined size. Drafts come from the self-hosted Qwen3-VL only, and a gold a model drafted trains or scores only once a person has reviewed it (decision 2026-10-19).
 
 ## Deliverables
 
@@ -19,9 +19,10 @@ Generates a first-pass ("silver") JSON draft for a document using a configurable
 |---|---|---|
 | `base_qwen3vl` (**default**) | Day zero, before any fine-tuned Foundation exists | none — self-hosted |
 | `own_finetuned` | Once v1 is promoted; drafts improve every cycle, so labeling cost falls instead of staying flat | resolves the promoted version via IMPL-02 |
-| `external_frontier` | One-time bootstrap only, if base Qwen3-VL zero-shot is too rough to be a useful starting point | **disabled by default** — requires both `--allow-external` AND the `ALLOW_EXTERNAL_PREANNOTATION` env flag, plus a configured zero-retention/enterprise endpoint |
 
-**PII caveat (arch §7, master §8):** insurance documents contain names, TINs/SSNs, addresses, and financials. Sending them to a third-party API may violate the compliance posture or data-processing agreements. The external backend must **refuse to run** rather than warn, unless both permissions are present. If external pre-annotation isn't permissible, use the self-hosted base model and accept rougher first-pass drafts.
+These are the only two backends (`pre_annotate.BACKENDS`), both self-hosted.
+
+**No frontier model, ever (decision 2026-10-19, arch §0e, §7c):** frontier models are never used for gold, synthetic or training data. There is no external backend: `check_backend` refuses any backend outside `BACKENDS`, and one asked for by name (`external_frontier`, or any name containing `frontier` or `external`) is refused with the decision in the message — it is not a missing permission a flag could grant. `--allow-external`, `ALLOW_EXTERNAL_PREANNOTATION` and `EXTERNAL_PREANNOTATION_ENDPOINT` are removed; `.env.example` says there is nothing to configure. `pre_annotate_batch` checks the backend before the first document, so a refused backend stops the whole batch, while one unreadable document does not. Insurance documents carry names, TINs/SSNs, addresses and financials, so no document leaves the tenancy boundary for drafting either (master §8).
 
 The draft is **never trusted as-is** — it is only a starting point for review.
 
@@ -30,7 +31,7 @@ The day-zero path exists because on day zero **no fine-tuned Foundation adapter 
 
 1. Use the **base** `Qwen3-VL-8B-Instruct` with the zero-shot classification prompt (IMPL-01) to identify document type **and ACORD form number**.
 2. Run extraction with the **base** model using the schema-injected prompts from IMPL-01.
-3. **All pre-annotation output from the base model receives 100% human review** — no draft is accepted without correction until at least **25 labeled examples per document type** exist.
+3. **All pre-annotation output from the base model receives 100% human review** — no draft is accepted without correction until at least **25 labeled examples per document type** exist. Past day zero a draft is still never a gold until a person has reviewed it (§5, *Reviewed golds only*).
 
 Implement this as an enforced rule, not a guideline — it is a counter and a threshold, so it lives in `export_golden_labels.py` rather than a dedicated module:
 - `review_requirement(doc_type)` → `"full"` while `count(golden labels for doc_type) < 25`, otherwise `"confidence_routed"` (§5 active learning below).
@@ -103,12 +104,13 @@ Integration config for an external labeling tool (Label Studio or Argilla) OR a 
 - **Surfaces each field's semantic gloss** (the schema `description`, IMPL-01) next to the field being reviewed, and the alias registry behind it. This is the labeling rulebook: without it, three reviewers will disagree about whether a document's *Applicant* is `insured_name`, and that inconsistency trains directly into the model as noise.
 - **Records the observed surface label** for each canonical field it fills — see `field_provenance` below. This is one extra click per field and it is what makes per-alias diagnosis possible later.
 - **`line_of_business` is a mandatory review field on every document type** (arch §0b) — the reviewer must set it to a valid LOB enum value or explicitly to `null`. It cannot be left unset.
-- Support **double-annotation** on a configurable sample (default 10–20%): a second reviewer labels independently, disagreements are adjudicated, and an **inter-annotator agreement** score is produced. This measures how much noise/ambiguity exists in the labeling process itself — useful context when eval scores plateau below 100%, since some of that ceiling is human disagreement, not model error.
+- Support **double-annotation** on a configurable sample (default 10–20%): a second reviewer labels independently, disagreements are adjudicated, and an **inter-annotator agreement** score is produced (`export_golden_labels.inter_annotator_agreement`, field level). This measures how much noise/ambiguity exists in the labeling process itself — useful context when eval scores plateau below 100%, since some of that ceiling is human disagreement, not model error.
+- **The preflight reports agreement before training** (`orchestration.preflight.check_label_agreement`): how many labels are double-annotated (`double_annotated`, `agreement_score` in `label_metadata.json`), with their mean and lowest agreement. It is a **warning only**: no spec states a minimum, so `common.constants.MIN_INTER_ANNOTATOR_AGREEMENT` is `None`; with none double-labelled it warns that label noise is unmeasured. Setting the constant turns a document below it into a FAIL.
 - Provide a task-export/import adapter so labels round-trip cleanly.
 
 ### 5. `data_pipeline/labeling/export_golden_labels.py`
 - Writes verified labels to `golden-labels/{tenant_id}/{doc_type}/{source_id}/golden.json` and `label_metadata.json`.
-- **`label_metadata.json` records provenance, not just the label** (arch §7 step 5): reviewer id, review date, which annotator backend produced the draft, base-model-vs-finetuned draft source, double-annotated flag, agreement score, review requirement in force at time of labeling. This matters later for debugging — if a document type's accuracy regresses, you want to check whether the *labels* for that batch were lower quality rather than only suspecting the model.
+- **`label_metadata.json` records provenance, not just the label** (arch §7 step 5): `reviewer_id` (required by `export_golden_label`), `review_date` (the time of export), `draft_backend` (which backend produced the draft — base model or fine-tuned; `unknown` when not given), `double_annotated`, `agreement_score`, `review_requirement` in force at time of labeling, `accepted_without_review`, `field_provenance`. This matters later for debugging — if a document type's accuracy regresses, you want to check whether the *labels* for that batch were lower quality rather than only suspecting the model.
 - **`field_provenance` — the observed surface label per canonical field** (master §1.4). Golden JSON keys are always canonical; this records what the document actually said:
 
   ```json
@@ -132,6 +134,15 @@ Integration config for an external labeling tool (Label Studio or Argilla) OR a 
 **New surface forms.** When a reviewer meets a phrasing not in the registry, they append it to `schemas/aliases/{doc_type}.aliases.json`. That is a **registry edit, not a schema edit** — it triggers no corpus rebuild (master §7). Only editing a field's `description` does.
 - Idempotent; re-export overwrites only with a new `label_metadata` version.
 
+**Reviewed golds only (decision 2026-10-19, arch §0e, §7c).** A gold a model drafted counts only once a person has reviewed it. `export_golden_labels.review_problem(label, metadata)` returns why a gold may not train or score yet, or `None`:
+- **reviewed** — `reviewer_id` and `review_date` both in its metadata (`has_review_record`): always accepted;
+- **model-drafted** (`_model_drafted`) — the metadata's `draft_backend` names a model (anything but empty, `unknown`, `human`, `manual`, `none`), or the gold's own `fideon:provenance` notes say it was not reviewed ("not reviewed", "unreviewed" — a synthetic twin's `seed_review` can) or name a model as its drafter ("drafted by …", "generated by …" followed by a model family's name, "AI", "LLM" or "language model"): refused with the evidence and what to record;
+- **neither** — no review record and no drafting note: accepted; the import and the preflight warn that nothing says a person checked it.
+
+It is enforced at every door: `import_labeled_pdfs.check_bundle` makes it an error (so both the import and the pre-upload audit block it; IMPL-03), `import_prepared` refuses it, the preflight names every such label (`check_reviewed_labels`: FAIL on any, WARN on labels with no review record), and the corpus build refuses the run on one already in Blob (`pipeline_dag.load_labeled_documents`). Both importers copy `reviewer_id`, `review_date` and `draft_backend` from the bundle's metadata into `label_metadata.json`. A label written through `export_golden_label` records `reviewer_id` (a required argument) and `review_date`.
+
+This **overrides Fideon SPEC_21's model-drafted seed golds** (SPEC_21 P2, §5.3, where a frontier model drafts each seed gold, schema and variation map for a reviewer to sign off): no gold here is drafted by a frontier model, and a delivered gold that says a model drafted it trains only with a reviewer recorded.
+
 ### 6. `data_pipeline/labeling/active_learning.py`
 Once a model version exists (arch §7 step 6, §13 step 11):
 - Run the promoted model over new unlabeled docs, and use the **calibrated confidence** (IMPL-09) to route: high-confidence extractions get a light spot-check, low-confidence fields get full manual review.
@@ -141,7 +152,8 @@ Once a model version exists (arch §7 step 6, §13 step 11):
 - **Disabled while `review_requirement` is `"full"`** — confidence routing is meaningless before there are 25 labels/type.
 
 ## Constraints
-- External pre-annotation OFF unless explicitly permitted by flag **and** env.
+- No frontier or external pre-annotation, ever: only the self-hosted `base_qwen3vl` and `own_finetuned` backends exist.
+- A model-drafted gold trains or scores only once `reviewer_id` and `review_date` are recorded.
 - Golden labels must be schema-valid and must carry `line_of_business` (for a canonical policy label, whose schema has no such key, the line is `lob` in its label metadata).
 - Day-zero: 100% human review until ≥25 labeled examples per doc type.
 - Store provenance for every label.
@@ -149,7 +161,8 @@ Once a model version exists (arch §7 step 6, §13 step 11):
 - No PII in logs.
 
 ## Acceptance checklist
-- [ ] `pre_annotate` produces a draft with the self-hosted backend; the external backend **refuses** without both the flag and the env permission.
+- [ ] `pre_annotate` produces a draft with the self-hosted backend; `BACKENDS` is exactly `base_qwen3vl`, `own_finetuned`; `external_frontier` asked for by name is **refused** with the decision in the message, and stops a whole batch; no external pre-annotation setting remains in the code or `.env.example`.
+- [ ] `review_problem` refuses a gold whose `draft_backend` names a model, or whose `fideon:provenance` notes say it was not reviewed or name a model as its drafter, unless `reviewer_id` and `review_date` are recorded; `check_bundle`, `import_prepared`, the preflight and the corpus build all refuse it; a gold with no record either way only warns.
 - [ ] `review_requirement` returns `"full"` below 25 labels/type and `"confidence_routed"` at/above it.
 - [ ] `export_golden_labels` rejects a label missing `line_of_business`, one with an out-of-enum LoB value, and one failing schema validation.
 - [ ] An ACORD label without `acord_form` is rejected.
@@ -164,17 +177,18 @@ Once a model version exists (arch §7 step 6, §13 step 11):
 - [ ] `--propose` writes `*.aliases.proposed.json` and never overwrites the live registry.
 - [ ] Running it over already-labeled documents backfills `field_provenance` without re-annotation.
 - [ ] Review workflow exports a corrected golden JSON that passes schema validation.
-- [ ] Double-annotation path produces an agreement score on the sampled subset.
+- [ ] Double-annotation path produces an agreement score on the sampled subset; the preflight reports the count, mean and lowest agreement and warns (no minimum is set).
 - [ ] `label_metadata.json` captures full provenance including draft backend and the review requirement in force.
 - [ ] `active_learning` orders a queue by ascending confidence, surfaces row-completeness flags, and refuses to run while `review_requirement` is `"full"`.
 - [ ] At bundling, a document-level value lists every page that prints it, a table value keeps to the pages it cites, and a form number cites every page whose header or footer prints it.
 - [ ] An extra field repeating a field folds into it; wording and drafting notes filed as extra fields are dropped while captions stay; an extra field naming an empty field moves into it, and stays when the field is filled or two entries name it.
 - [ ] A value with figures no page prints is listed in `unprinted_values`, never changed, and the corpus build leaves out the windows holding it; the OCR text over a scanned page never settles that a value is missing.
 - [ ] A coverage code in no list of its line is re-coded (code file's `replaces_codes`, then the repository's table, which wins); a package policy filed under one common-model line is left out with the reason.
+- [ ] `split_form_edition` moves "CG 00 01 04 13" to number `CG 00 01` and `edition_date` `04/13`, and a bracketed edition after a form code likewise; a filled `edition_date` is never overwritten; "HO 04 35" and "CG 20 10 04" are left alone, the second warned on at import; a bundle still carrying a movable edition is refused at import and audit.
 
 ---
 
-## Current implementation (2026-10-13)
+## Current implementation (2026-10-21)
 
 - **Policy labels are the client's canonical JSON** (`configs/canonical schema/LOB Schema/`, 34 `.json`
   files: 31 lines are registered, plus `_fallback`; `_common` is merged by the client's own registry and
@@ -200,8 +214,9 @@ Once a model version exists (arch §7 step 6, §13 step 11):
   name. On a self-contained line a field is a date when a whole word of its name is `date`, `dates`, `dated`
   or `dob` (so `date_of_birth`, `date_licensed`, `report_due_dates` are; `candidate`, `update_reason` are not);
   `tests/test_serving_parity.py` checks every date field in all LOB schemas.
-- **`page_ref` matters now**: long policies are trained and served as page windows, and a value is taught
-  only in the window that holds its page. The agreed convention (applied at bundling, below) is that a value
+- **`page_ref` matters now**: policies are trained and served as page windows over **every page**, chunk by
+  chunk, never selected pages (decision 2026-10-19), and a value is taught only in the window that holds its
+  page. The agreed convention (applied at bundling, below) is that a value
   appears **once**, in its proper field, citing **every page that prints it** — and a form number cites every
   page whose header or footer prints it, so a window over a form's fourth page is taught the form it shows. A
   value with no `page_ref` in a multi-window group is reported as *unplaced* and a value on pages no window
@@ -219,9 +234,10 @@ Once a model version exists (arch §7 step 6, §13 step 11):
 - **What the importer records** (`import_labeled_pdfs.import_bundle` → `label_metadata.json`): `source_id`,
   `doc_type`, `acord_form`, `lob` (merged), `field_provenance`, `document_kind`, `policy_number`,
   `template_id` (the family), `carrier`, `twin_index` (a synthetic twin's number, from `sample`),
-  `render_mode`, `unprinted_values`, `synthetic`, `split` (the delivery's, when it has one), `labeled_at`,
+  `render_mode`, `unprinted_values`, `synthetic`, `split` (the delivery's, when it has one), `reviewer_id`,
+  `review_date` and `draft_backend` (from the bundle's metadata; what `review_problem` reads), `labeled_at`,
   `imported_from`, `awaiting_ocr: true` and `held_out_carrier` (the bundler's unseen-carrier mark, which the
-  corpus build and the freeze read; IMPL-03).
+  corpus build and the freeze read; IMPL-03). `import_prepared` records the same three review keys.
 
 **Labels corrected at bundling** (`data_pipeline/ingestion/prepare_bundles.py::corrected_gold`, for SPEC_21
 twins and seeds and for real documents alone). On a common-model line, in this order, each change listed in
@@ -237,6 +253,18 @@ the bundles' `corrections.csv` and the delivery itself never changed:
   pages;
 - the **label rules** (`data_pipeline/ingestion/label_rules.py::apply_label_rules`), on the digital render's
   text layer:
+  - *form edition moved* (first, and needing no text) — a form number that carries its edition in a shape no
+    form number takes, with the form's `edition_date` empty, gives the edition to `edition_date` and keeps the
+    number (`split_form_editions`, row by row through `split_form_edition`). Two shapes only: ISO's
+    `AA 99 99 MM YY` ("CG 00 01 04 13" → `CG 00 01`, edition `04 13`) and a month and year in brackets after a
+    form code ("IL0017(11-98)"). The edition is parsed `MM/YY` (the schema's code) and takes the number's
+    `page_ref`, confidence and flag. A filled `edition_date` is never overwritten; a number that only *may*
+    end in its edition ("CG 20 10 04", `may_hold_edition`) is left alone, and the import warns on it. The
+    labels did both, and the model learned both — so this **changes training targets**: the bundles are prepared again and the adapters
+    retrained. The import and the audit refuse a bundle that still carries such an edition (`check_bundle`,
+    IMPL-03); serving's `conventions.conform` applies the same rule to an answer and carries the number's span
+    to the moved edition (IMPL-11); a frozen eval set's golds are read under it without being rewritten
+    (`golden_eval.verified_label`, IMPL-08);
   - *page list* — a value's pages become the pages that print it; a document-level value printed as itself
     (a policy number in every header) lists them all; a table row's value keeps to the pages it cites; a name
     or phrase keeps every page it cites (it may be only in a logo) and gains a page only where it heads a line;
@@ -276,8 +304,9 @@ LOB enum, which rejected `flood`, `cyber`, `professional_eo`, `gl`, `wc` and fai
 input `data/bundles`, the `prepare_bundles` output; `--scope casualty_fleet` for the CGL bundles): read-only, on
 the laptop, before anything is uploaded. Five layers — structure
 (one PDF + `golden.json` + `metadata.json` per folder, PDF opens, no duplicate PDFs), label shape (the
-importer's own `check_bundle`, `lob` has a schema and is in scope, `page_ref` inside the PDF, a delivered split
-that keeps each source in one split), values against
+importer's own `check_bundle` (so a form's edition left in its number and a model-drafted gold with no
+reviewer block here too), `lob` has a schema and is in scope, `page_ref` inside the PDF, a delivered
+split that keeps each source in one split), values against
 the PDF (each `raw` found on the page its `page_ref` names, with the `common.grounding` matcher the label rules
 and the evaluation also use; wrong page / not found / needs OCR for scans),
 formats (readable dates — the build rewrites them MM/DD/YYYY — amounts agreeing with `raw`, period order) and
@@ -300,3 +329,13 @@ row per value. Page text is normalised once per page.
 - Added what the importer writes to `label_metadata.json` (`carrier`, `twin_index`, `render_mode`, `unprinted_values`, `split`, `awaiting_ocr` …), and `held_out_carrier`, which the importer carries since commit f5668a4.
 - New section on labels corrected at bundling: `corrected_gold` (recodes incl. `replaces_codes`, premium written twice, carrier missing) and `label_rules` (page lists, folded extra fields, wording dropped, extra field moved into its empty field, building links, unprinted numbers, printed nowhere).
 - Audit: default input is `data/bundles` (not `data/training data`), split check, shared `common.grounding` matcher; new acceptance items for the label rules.
+
+## Changes since 2026-10-13
+
+- Header and goal: aligned with the code of 2026-10-21; the architecture reference is `finetuning-architecture-v2.4.docx` (§0e decisions, §7c golden label generation); drafts come from the self-hosted model only.
+- §1 `pre_annotate`: no frontier model, ever — `external_frontier`, `--allow-external`, `ALLOW_EXTERNAL_PREANNOTATION` and `EXTERNAL_PREANNOTATION_ENDPOINT` removed; `check_backend` refuses a frontier backend by name.
+- §2 Day zero: a draft is never a gold until reviewed, past day zero too.
+- §4 Review tool: the preflight reports annotation agreement, warning only (`MIN_INTER_ANNOTATOR_AGREEMENT = None`).
+- §5 Export: the metadata keys as written; new *Reviewed golds only* (`review_problem`, `has_review_record`, `_model_drafted`; enforced at import, audit, preflight and corpus build), overriding Fideon SPEC_21's model-drafted seed golds.
+- Constraints and acceptance checklist: the frontier ban, the reviewed-gold rule, agreement in the preflight, the form-edition rule.
+- Current implementation: windows over every page; the importer records `reviewer_id`, `review_date`, `draft_backend`; the *form edition moved* label rule (`split_form_edition`, `split_form_editions`), which changes training targets; the audit's label check includes both new blockers.

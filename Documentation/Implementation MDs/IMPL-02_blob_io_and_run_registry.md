@@ -1,10 +1,10 @@
 # SPEC 02 — Azure Blob I/O + Training Run Registry
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01. This is the ONLY module that talks to the Azure SDK directly. Everything else goes through it.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §8b (tenant isolation per Fideon SPEC_12), §12 (versioning + training run registry), §13b (quantization thresholds recorded), §15 (metrics recorded), §18/§18a (Blob layout, raw-document access control).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §8b (tenant isolation per Fideon SPEC_12), §12 (versioning + training run registry), §13b (quantization thresholds recorded), §15 (metrics recorded), §18/§18a (Blob layout, raw-document access control).
 
 ## Goal
 
@@ -14,12 +14,12 @@ Provide a clean, typed interface for all Azure Blob reads/writes, and implement 
 
 ### 1. `artifact_registry/paths.py` (build this first)
 - The **single place** the Blob layout (master §4) is expressed. Every other function builds paths through it.
-- **Reserves the tenant prefix** (arch §8b): `TENANT_SCOPED` — `raw-documents/`, `processed/`, `golden-labels/`, `corpus/`, `releases/`, `exports/` and `golden-eval-set/` — are `{tenant_id}`-prefixed; `SHARED` — `base-models/`, `adapters/`, `merged-models/`, `quantized-models/`, `registry/`, `eval-reports/`, `calibration/` — are never prefixed (the module records that trained weights are tenant data under v2.1 and that moving `adapters/`, `merged-models/` and `quantized-models/` under the tenant is still a pending migration). `tenant_id` **defaults from `DEFAULT_TENANT_ID`** (else `default`) and is validated by `paths._tenant` (lowercase alphanumeric, `-`/`_`, at most 63 characters: it becomes a path segment). Every ingestion, OCR, import and pipeline CLI takes `--tenant`, and separate tenants are in real use: the CGL documents train under a tenant of their own, smoke runs under `smoke` / `smoke-cgl`. Each tenant has its own documents, labels, corpus versions, frozen eval set (`golden-eval-set/{tenant}/`) and releases.
+- **Reserves the tenant prefix** (arch §8b): `TENANT_SCOPED` — `raw-documents/`, `processed/`, `golden-labels/`, `corpus/`, `releases/`, `exports/` and `golden-eval-set/` — are `{tenant_id}`-prefixed; `SHARED` — `base-models/`, `adapters/`, `merged-models/`, `quantized-models/`, `registry/`, `eval-reports/`, `calibration/` — are never prefixed (the module records that trained weights are tenant data under v2.1 and that moving `adapters/`, `merged-models/` and `quantized-models/` under the tenant is still a pending migration; until then a tenant deletion cannot remove trained weights by prefix, so the purge plans name each run trained on the tenant's corpora, its weights and its releases — IMPL-03 §1). `tenant_id` **defaults from `DEFAULT_TENANT_ID`** (else `default`) and is validated by `paths._tenant` (lowercase alphanumeric, `-`/`_`, at most 63 characters: it becomes a path segment). Every ingestion, OCR, import and pipeline CLI takes `--tenant`, and separate tenants are in real use: the CGL documents train under a tenant of their own, smoke runs under `smoke` / `smoke-cgl`. Each tenant has its own documents, labels, corpus versions, frozen eval set (`golden-eval-set/{tenant}/`) and releases.
 - Distinguishes the adapter lineages: `adapters/foundation/v{n}/` (unified), `adapters/scope/{scope}/v{n}/` (a scoped run) and `adapters/{doc_type}/v{n}/` (a §4.2 graduated per-type adapter). A per-tenant lineage is **not built** until a broker requires one.
 - **Also expresses the RunPod staging paths** (master §12a) — `/runpod-volume/staging/{adapters,merged-models,eval-reports,run_manifests}/` — deliberately mirroring the Blob layout so `package` (IMPL-13 command 2) copies rather than translates. Staging paths and Blob paths are built by separate functions that must never be interchanged: one is working storage, the other is the artifact of record.
 
 ### 2. `artifact_registry/blob_client.py`
-- Thin wrapper around `azure-storage-blob`, initialized from env (`AZURE_STORAGE_CONNECTION_STRING`, `AZURE_BLOB_CONTAINER`, `AZURE_RAW_CONTAINER`). Two backends behind `BlobBackend`: `AzureBackend` (SDK imported lazily) and `InMemoryBackend` (tests; same write-once and container rules). The Azure SDK's own logger is held at WARNING.
+- Thin wrapper around `azure-storage-blob`, initialized from env (`AZURE_BLOB_CONTAINER`, `AZURE_RAW_CONTAINER`, and a login). `azure_from_environment` prefers a **SAS token** — `AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`, short-lived and limited to the permissions it was issued with — when both are set, and falls back to `AZURE_STORAGE_CONNECTION_STRING`, which carries the account key; half a SAS login (one of the two) is refused, and the token never appears in an error. Two backends behind `BlobBackend`: `AzureBackend` (SDK imported lazily) and `InMemoryBackend` (tests; same write-once and container rules). The Azure SDK's own logger is held at WARNING.
 - Methods: `read_bytes` / `write_bytes`, `read_text` / `write_text`, `read_json` / `write_json`, `exists`, `list(prefix)`, `delete`, `upload_file`, `download_file`, `upload_dir`, `download_dir`, `holds`.
   - `upload_dir(local_dir, prefix, *, names=None, skip_identical=False)` returns the files written. `names` uploads only those paths relative to the folder (a missing one raises `BlobError`); `skip_identical` leaves any blob that already holds the file's bytes.
   - `holds(local, key)` compares the MD5 recorded with the blob (`BlobBackend.md5`) with the local file's (`file_md5`, read in 8 MB chunks). A blob that records no MD5 does not count, so it is sent again. The properties call is retried like any read.
@@ -59,7 +59,7 @@ Pydantic model `RunManifest` capturing the arch §12 manifest **plus the v1 addi
   - **`mineru_version`** and `ocr_device` (arch §8a) — read from the corpus manifest the run trains on (`training/train.py`), so the run records the MinerU that read its documents (the corpus build refuses documents read by more than one version, IMPL-03)
   - **`schema_version`** and **`prompt_template_version`** (arch §7)
 - `training_config`: **`technique` (`LoRA` | `QLoRA`) and `base_quantization` (`bf16_frozen_base`, or `<quant_type>_<double|single>_quant_<dtype>_compute` under 4-bit) — both REQUIRED, never defaulted**. They previously carried QLoRA/NF4 defaults on the model, so a bf16 run that did not pass them recorded a technique it never used; base precision is exactly the kind of change that causes a regression, and the manifest is what makes one attributable. Then lora_rank/alpha/dropout, bias, lr, lr_scheduler, warmup_ratio, epochs, **optimizer (`adamw_torch`, also required)**, betas, eps, weight_decay, max_grad_norm, per_device_batch, grad_accum, effective_batch_size, gradient_checkpointing, mixed_precision, target_modules, **`vit_trainable`** with `vit_method` (`frozen` | `lora`; when trainable it must be **LoRA-on-ViT, never full fine-tune** — arch §3), resolution_cap_px, `pixel_budget` (the image resize budget the trainer was actually given), max_seq_len, **`seed`**.
-- `data_stats`: train/val/test counts, `modality_mix` and `modality_mix_target`, **`lob_coverage`** (per-LoB-value share, arch §0b), `alias_coverage`, `confusable_example_count`, `tenant_ids` contributing, `split_policy` (carriers held out per line, single-carrier lines, families moved into test, twins dropped by the per-seed cap), `data_mix` (the scope's configured `synthetic_fraction` / `scanned_share` and what each line's train documents came to), `examples_by_line` (split → line → documents, real, synthetic, rows; scoped runs), `deidentified: true|false` and `image_redaction` (recorded; the enforcement rule is **suspended while de-identification is blocked** — see IMPL-00 §8 and IMPL-05).
+- `data_stats`: train/val/test counts, `modality_mix` and `modality_mix_target`, **`lob_coverage`** (per-LoB-value share, arch §0b), `alias_coverage`, `confusable_example_count`, `tenant_ids` contributing, `split_policy` (carriers held out per line, single-carrier lines, lines naming fewer than the 10 carriers a hold-out needs (`lines_below_carrier_minimum`), families moved into test, twins dropped by the per-seed cap), `data_mix` (the scope's configured `synthetic_fraction` / `scanned_share` and what each line's train documents came to), `examples_by_line` (split → line → documents, real, synthetic, rows; scoped runs), `deidentified: true|false` and `image_redaction` (recorded; `false` and `unresolved` under Option A, no de-identification, which the architecture records as the current state — IMPL-00 §8, IMPL-05 §1).
 - `eval_metrics` (all against the frozen golden eval set, arch §15):
   `field_exact_match`, `field_normalized_match`, `field_f1_list_fields`, `list_field_recall`, `schema_validity_rate`, `ece_confidence`, `ocr_arbitration_accuracy`, `image_only_accuracy`, `scanned_accuracy`, `doc_type_classifier_accuracy`, **`lob_detection_accuracy`** (overall, and `lob_accuracy_by_value`), `alias_accuracy` (reported), **`confusable_misattribution_rate`** (gating), `table_f1` and `lossrun_totals_reconciliation_rate` (Loss Runs), `held_out_carrier_match` (reported, not gated), `latency_ms_per_doc`.
 - `artifacts`: **`status`** (`staged` | `published`), **`staging_path`** (set while `staged`), `adapter_weights`, `merged_model`, `quantized_model`, `quantized_formats[]`, `eval_report`, `calibration_params`.
@@ -69,7 +69,7 @@ Pydantic model `RunManifest` capturing the arch §12 manifest **plus the v1 addi
 ### 5. `registry_utils/write_run_manifest.py`
 - `write_manifest(manifest: RunManifest)` → writes `registry/foundation/{run_id}/run_manifest.json` (unified and foundation runs share the slot), `registry/adapters/{doc_type}/{run_id}/…` or `registry/scope/{scope}/{run_id}/…` (`paths.run_manifest`) to Blob, rewrites the run's **model card** beside it (`model_card.md`, `registry_utils/model_card.py`, rendered from the manifest alone; a card that fails to write is logged, never fails the run), and updates `registry/registry_index.json` (a flat table: run_id, run_type, doc_type, scope, doc_types, status, artifact_status, corpus/foundation version, commit, created_at, is_sweep_run, key metrics).
 - `capture_git_commit()` to fill `code_git_commit`, `is_dirty_worktree()` so callers can warn; `mineru_version` comes from the corpus manifest the training stage reads (IMPL-05), not from a capture here. `mark_promoted` and `mark_published` (below and IMPL-13).
-- `data_stats.deidentified` is **recorded but not enforced** while de-identification is blocked (IMPL-00 §8). Reinstate the refusal here — it is the right enforcement point — once the image-redaction question is resolved.
+- `data_stats.deidentified` is **recorded, not enforced**: under Option A (no de-identification, IMPL-00 §8) every run records `false`. Should a de-identification option (B or C) be chosen later, the refusal belongs here — it is the right enforcement point.
 - `log_to_tracker` mirrors params and numeric metrics to MLflow when `MLFLOW_TRACKING_URI` is set (no-op otherwise; W&B is not wired) — the tracker gives the queryable UI, the Blob manifest is the durable record that travels with the artifacts (arch §12).
 
 ### 6. `registry_utils/query_registry.py`
@@ -125,10 +125,11 @@ CLI + functions:
 - [ ] A published scoped adapter holds `adapter_config.json` and `adapter_model.safetensors` only; a folder missing either is refused.
 - [ ] A re-push of the same adapter or merged model writes nothing; a blob that records no MD5 is sent again; `upload_dir(names=...)` refuses a named file that is not there.
 - [ ] Each tenant pushes and pulls only its own golden eval set (`golden-eval-set/{tenant}/`).
+- [ ] With `AZURE_STORAGE_ACCOUNT_URL` and `AZURE_STORAGE_SAS_TOKEN` both set the client logs in with the SAS token; with one of them alone it refuses, naming the missing one; with neither it uses `AZURE_STORAGE_CONNECTION_STRING`.
 
 ---
 
-## Current implementation (2026-10-13)
+## Current implementation (2026-10-21)
 
 **Paths beyond the original layout** (all in `artifact_registry/paths.py`):
 
@@ -164,8 +165,9 @@ an empty prefix that would read as a published model.
 format — bf16 is the merged model, never an export.
 
 **Release bundle** (`registry_utils/models.py::ReleaseBundle`) also records `tier` (`production` at field
-match ≥ 0.92, `interim` when it passed every floor below that; `evaluation.gating.release_tier`), and —
-recorded, not gated — `latency_p95_ms_by_adapter`, `peak_gpu_memory_mb`, `measured_with`, and `routing` (where
+match ≥ 0.92, `interim` when it passed every floor below that, or when its eval set was frozen with
+`--allow-small`; `evaluation.gating.release_tier`), and — recorded, not gated, since no latency SLA is agreed
+(decision 2026-10-19) — `latency_p95_ms_by_adapter`, `peak_gpu_memory_mb`, `measured_with`, and `routing` (where
 every line of business routes once the release is promoted), plus `scope`, `doc_types` and `lines` (empty
 means every type / every line).
 
@@ -180,3 +182,11 @@ into the per-corpus cache atomically (unique `.part` names, renamed into place).
 - `RunManifest`: added `unified`/`scoped` run types, `scope`, `doc_types`, `ocr_device`, `vit_method`, `pixel_budget`, the new `data_stats` fields (`split_policy`, `data_mix`, `modality_mix_target`, `examples_by_line`), new metrics (`table_f1`, `lossrun_totals_reconciliation_rate`, `held_out_carrier_match`) and `promotion.tier`.
 - `write_manifest`: scope manifest path, model card written beside every manifest; removed the non-existent `capture_mineru_version()` (the MinerU pin comes from the corpus manifest); tracker is MLflow only.
 - Current implementation: paths table gained model cards, per-tenant eval set, `intake/`, `exports/`; release bundle tier, latency, GPU memory and routing fields.
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; architecture reference `finetuning-architecture-v2.4.docx`.
+- §1: until trained weights are tenant-prefixed, the purge plans name the runs trained on a tenant's documents (IMPL-03).
+- §2: the SAS login (`AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`) is preferred over the connection string; half a SAS login is refused. New acceptance item.
+- §4/§5: de-identification is Option A (none), recorded, not "blocked"; `split_policy` records `lines_below_carrier_minimum`.
+- Current implementation: the tier is also `interim` for a release gated on a set frozen with `--allow-small`; latency is recorded, not gated (no SLA).

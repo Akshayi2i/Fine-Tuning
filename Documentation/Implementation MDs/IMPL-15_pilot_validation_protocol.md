@@ -1,18 +1,18 @@
 # SPEC 15 — Pilot Validation Protocol (De-Risking Before Full Annotation)
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01–IMPL-14 built.
 >
 > **This spec is executed, not imported.** It is an operational runbook, not a library — nothing else in the repo depends on it. It exists because architecture v1 added §16, which has no home in the module specs.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §16 (**pilot validation protocol**), §16a/§16b/§16c, §8 (pilot split ratios), §4c (day-zero bootstrap), §15 (metrics).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §16 (**pilot validation protocol**: 16.1 zero-shot baseline, 16.2 smoke test, 16.3 pilot run, 16.4 exit decision), §0d (the floors the pilot targets come from), §0e (decisions of 2026-10-19), §8 (pilot split ratios), §8b (de-identification), §4c (day-zero bootstrap), §15 (metrics).
 
 ## Goal
 
 Before committing to full corpus annotation, run three sequential experiments that de-risk the architecture in order of increasing investment. Each answers a different question, and each is cheap relative to the one after it.
 
-**Run these in order. Do not skip to 16c.**
+**Run these in order. Do not skip to Experiment C.**
 
 ## Deliverables
 
@@ -41,6 +41,8 @@ This tells you how much the base model extracts for free and — more usefully �
 | **0.40 – 0.70** | Fine-tuning will materially improve; specific failure modes identified | Proceed, **with targeted corpus coverage for the weak areas** |
 | **< 0.40** | Base model likely insufficient as framed | **Review prompt design, schema complexity, and document difficulty *before* committing annotation investment** |
 
+The "field F1" this table reads is `BaselineReport.field_f1`: each document's field normalized match (`score_fields(...).normalized_match`), averaged per type and weighted over every document presented, so a document the pipeline refused counts as zero. The report also records it as `field_normalized_match`, the metric the pilot and the gate use.
+
 - Output: `pilot/reports/zero_shot_baseline.json` — per-doc-type F1, per-metric breakdown (schema validity, list recall, LoB accuracy, OCR arbitration), and the failure-mode distribution.
 - Uses IMPL-07 inference core and IMPL-08 metrics — the same code the production gate uses, so the numbers are comparable later.
 
@@ -62,22 +64,24 @@ Confirm all of:
 
 ### 3. Experiment C — Pilot Training Run (Weeks 2–6, 25–30 documents per type)
 
-Annotate 25–30 documents per document type per IMPL-04, using the **pilot split ratios (~70/18/12)** from IMPL-05 (or the split a delivery arrives with — master §10). Train ONE adapter for the pilot's scope with the §11.1 pilot hyperparameters (`configs/training/unified.yaml`). Evaluate on the pilot test split, in every modality regime.
+Annotate 25–30 documents per document type per IMPL-04 — **reviewed golds only**: no frontier model drafts a gold, and a gold a model drafted trains only once `reviewer_id` and `review_date` are recorded (decision 2026-10-19; the preflight and the corpus build refuse the run otherwise). Use the **pilot split ratios (~70/18/12)** from IMPL-05 (or the split a delivery arrives with — master §10). Train ONE adapter for the pilot's scope with the §11.1 pilot hyperparameters (`configs/training/unified.yaml`). Evaluate on the pilot test split, in every modality regime, with **every page of every document read**, chunk by chunk, never selected pages (decision 2026-10-19).
 
 This is the **minimum experiment that tests the architecture's generalisation claim**: whether one adapter captures cross-type behaviour without the types interfering, whether modality-dropout arbitration functions, whether totals reconciliation catches a missed row on unseen documents, and whether the per-field-type calibrators have enough data to be enforced at all — at pilot volume several field types will not clear the 300-instance floor and will route everything to review, which is the system working rather than failing.
 
-**Pilot success criteria — directional targets, not production thresholds:**
+**Pilot success criteria — directional targets, not production thresholds** (`pilot.pilot_run.PILOT_CRITERIA`):
 
-| Metric | Pilot threshold |
-|---|---|
-| Field F1 (non-list fields) | > 0.80 |
-| List-field recall | > 0.75 |
-| JSON schema validity | 100% |
-| Image-only field F1 | Within 15% of OCR-plus-image F1 |
-| Row-completeness detection accuracy | > 80% of documents with missing rows flagged |
-| LoB detection accuracy | > 0.85 (flat document types; see below for policies) |
-| **Alias generalization** | Field accuracy on a **held-out surface label** within 15% of accuracy on that field's dominant label |
-| **Confusable misattribution rate** | < 5% |
+| Metric | Pilot threshold | Source |
+|---|---|---|
+| Field normalized match (`field_normalized_match`) | ≥ 0.85 | gate floor |
+| List-field recall (`list_field_recall`) | ≥ 0.75 | gate floor |
+| JSON schema validity (`schema_validity_rate`) | ≥ 0.98 | gate floor |
+| Image-only field F1 (`image_only_gap`) | Within 15% of OCR-plus-image F1 (gap < 0.15) | pilot's own |
+| Row-completeness detection accuracy | > 80% of documents with missing rows flagged | pilot's own |
+| LoB detection accuracy (`lob_detection_accuracy`) | ≥ 0.85 (ACORD and Loss Run documents; see below for policies) | gate floor |
+| **Alias generalization** (`alias_generalization_gap`) | Field accuracy on a **held-out surface label** within 15% of accuracy on that field's dominant label (gap < 0.15) | pilot's own |
+| **Confusable misattribution rate** | ≤ 5% | gate floor |
+
+**The five gate-floor targets are the gate's own** (arch §0d): `_from_floor` builds each from `evaluation.gating.PILOT_FLOORS` (the threshold) and `GATING_METRICS` (the direction), and compares inclusively (≥ / ≤), as the gate does — so a model exactly at a floor passes both the gate and the pilot. A second copy of the thresholds in the pilot had drifted (field F1 0.80, schema validity 0.9999); there is now one table. The three relative criteria have no gate floor and keep strict comparisons.
 
 **LoB detection on a policy-only pilot.** A canonical policy label carries no `line_of_business` — the line comes with the request — so `lob_detection_accuracy` is structurally not applicable to policy-only scopes (`personal_lines`, `casualty_fleet`, `policy`) and the gate does not ask for it. `pilot/pilot_run.py` records it as not applicable when the pilot holds no ACORD or Loss Run documents (`Criterion.applies_to`; listed under `not_applicable` in the report), so it neither passes nor fails; for such a pilot, read it from `scripts/measure_lob_detection.py --corpus vN [--tenant T]` (the base model reading the line of each policy in the tenant's frozen eval set zero-shot, its line withheld, at serving's thresholds, against the 0.85 floor), and record that it stands in. Line detection stays off in serving until that measurement passes (master §1.3).
 
@@ -85,14 +89,14 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 
 | Failed criterion | First place to look |
 |---|---|
-| Field F1 low | Prompt/schema design; corpus coverage for that doc type; LR/epochs on the unified run (a targeted retrain, not the deferred sweep) |
+| Field match low | Prompt/schema design; corpus coverage for that doc type; LR/epochs on the unified run (a targeted retrain, not the deferred sweep) |
 | List-field recall low | Loss Run corpus row-length variety; row-completeness signal (IMPL-09); consider list-specific prompt rules |
-| Schema validity < 100% | Prompt rules (no fences, null-handling); JSON structural discipline in the Foundation corpus |
+| Schema validity < 0.98 | Prompt rules (no fences, null-handling); JSON structural discipline in the training corpus |
 | Image-only F1 gap > 15% | **The ViT escalation gate (IMPL-06 `vit_gate`)** — but only if errors are perception-type, not schema/reasoning |
 | Row-completeness misses | Cross-check sources in IMPL-09: is MinerU's table row count reaching the signal? |
 | LoB accuracy low | **LoB corpus coverage (IMPL-05 `corpus_manifest`)** — check the ≥20%-per-value target before blaming the model. For a policy's line (the zero-shot measurement): the line meanings in `configs/lob_meanings.yaml`, and the per-line floor in the measurement's report |
 | Alias generalization gap > 15% | **`alias_coverage` in the corpus manifest** — the held-out label is probably under-represented. Also check the field's semantic gloss: a vague `description` gives the model nothing to generalise from |
-| Confusable misattribution ≥ 5% | **`confusable_example_count`** — near zero means the corpus taught the mapping but never the boundary. Also check the gloss carries an explicit exclusion clause (IMPL-01) |
+| Confusable misattribution > 5% | **`confusable_example_count`** — near zero means the corpus taught the mapping but never the boundary. Also check the gloss carries an explicit exclusion clause (IMPL-01) |
 
 **Alias generalization is measured by deliberate hold-out.** Pick one surface label per confusable-prone field (say, *Applicant* for `insured_name`), keep every document using it out of `train`, and place them in the pilot test split. If the model scores well on them it has learned the semantic mapping rather than memorising label strings — which is the whole claim of the canonical-field design (master §1.4) and the one thing no plumbing test can prove.
 
@@ -106,10 +110,11 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 
 ## Constraints
 - Run the experiments **in order**; each gates the next.
-- The pilot is not an exemption from the PII rules — but de-identification is currently **blocked** (IMPL-05 §1), so pilot data is protected by tenancy and access control only, and that must be acknowledged before real documents are used.
+- The pilot is not an exemption from the PII rules. De-identification is **Option A — none**, the state the architecture records for every tenant's build (arch §8b, IMPL-05 §1): pilot data is protected by tenancy, access control and encryption, the corpus manifest records `deidentified: false` and `image_redaction: "unresolved"`, and that is acknowledged to the compliance owner before real documents are used.
 - Pilot eval numbers are **directional**. At 3–4 test documents per type, no single metric is trustworthy on its own; the batch's real job is proving the pipeline works end to end before scaling annotation to 1000+/type.
 - Re-baseline properly once at real scale — do not carry pilot thresholds forward as production gates.
-- Pilot documents inherit the **unresolved de-identification question** (IMPL-05 §1). Until it is resolved, pilot corpora are built without de-identification and that limitation is stated, not assumed away.
+- Choosing between the de-identification options (A / B / C) stays a compliance open item, to be closed before the first production release (arch §8b). Until another option is chosen, pilot corpora are built under Option A and that limitation is stated, not assumed away.
+- Golds are reviewed golds: no frontier model is used for gold, synthetic or training data, and a model-drafted gold needs a recorded reviewer (IMPL-04).
 
 ## Acceptance checklist
 - [ ] `zero_shot_baseline` runs the base model over 10 docs/type and emits per-type F1 plus a failure-mode distribution.
@@ -117,12 +122,13 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 - [ ] `smoke_test` trains to overfit on 5 docs/type and reports loss < 0.05 by epoch 2 and train F1 > 0.95.
 - [ ] The smoke test exercises and reports pass/fail for every listed pipeline component, including Blob push and vLLM hot-swap.
 - [ ] Pilot run evaluates against all eight pilot criteria (`pilot.pilot_run.PILOT_CRITERIA`) and names any that fail, or were not measured, with its diagnosis path.
+- [ ] The five criteria with a gate floor take threshold and direction from `PILOT_FLOORS` / `GATING_METRICS` and are met at exactly the floor (`field_normalized_match` 0.85, `schema_validity_rate` 0.98 pass).
 - [ ] Every pilot training run produces a `RunManifest`.
 - [ ] `pilot_report` renders the three experiments as one go/no-go summary.
 
 ---
 
-## Current implementation (commit f5668a4, 2026-10-13)
+## Current implementation (2026-10-21)
 
 - **Pilot split**: under 200 documents per type the band is 70/18/12, applied **per line of business**; a
   line with fewer than 5 documents trains whole and is not measured (listed in the manifest's
@@ -131,18 +137,22 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 - **A delivered split is used as given** (`split_groups.assign_delivered_splits`): the SPEC_21 delivery puts
   each seed and its twins in one split, so test layouts are ones the model never trained on, and the gate
   report adds a `real_only` section (the same metrics over the real documents alone). The per-line carrier
-  hold-out is off for a delivered split; the CGL bundler marks a test document of a carrier no training
-  document has as `held_out_carrier`, and evaluation reports such documents apart (`held_out_carrier_match`,
-  not gated).
+  hold-out (decision 2026-10-19) applies to a drawn split: a line whose real documents name **10 or more
+  carriers** holds **one** carrier out of train and validation; a line with fewer holds none out
+  (`split_groups.MIN_CARRIERS_PER_LINE_FOR_HELD_OUT`; recorded as `lines_below_carrier_minimum` in the split and
+  the run manifest). The hold-out is off for a delivered split. The CGL bundler marks a test document of a
+  carrier no training document has as `held_out_carrier`, and evaluation reports such documents apart
+  (`held_out_carrier_match`, not gated).
 - **Alias hold-out** (above) is still done by choosing documents deliberately; it is not automatic — the
   hash split does not know which surface label to hold out. For common-model lines,
   `scripts/check_alias_coverage.py` lists the recorded labels no training document prints, and evaluation
   splits field accuracy into labels training showed and labels it never did (`unseen_labels`, reported).
 - **Freezing a pilot eval set** is per tenant: `freeze-eval-set --corpus vN [--tenant T]` writes
   `golden-eval-set/{tenant}/`, and needs `--allow-small` under 150 test documents per type: the set is then
-  directional, and once frozen it is the yardstick for every later version of that tenant. Prefer to freeze
-  from the first build at real scale; if a pilot set is frozen, replacing it later is a deliberate
-  delete-and-refreeze after which older scores are not comparable.
+  directional (its manifest records `small_set_accepted`, and a release that passes the gate on it is capped
+  at the `interim` tier, with a warning), and once frozen it is the yardstick for every later version of that
+  tenant. Prefer to freeze from the first build at real scale; if a pilot set is frozen, replacing it later is
+  a deliberate delete-and-refreeze after which older scores are not comparable.
 - **A pilot whose eval set holds no scans** (the CGL originals are all digital) is not blocked on
   `scanned_accuracy`: it is a conditional gate metric, required only when the eval set holds scanned documents
   — and required whenever the frozen baseline measured it, since its absence then means something broke.
@@ -151,12 +161,19 @@ This is the **minimum experiment that tests the architecture's generalisation cl
   bundled with `python -m data_pipeline.ingestion.prepare_bundles --input <PDFs/ + Gold JSON/> --lob gl --out <dir>`
   (`cgl` reads as `gl`; one family per insured; split drawn once and delivered in the metadata). Each tenant has its
   own corpus, frozen set and releases.
+- **Every page is read** (decision 2026-10-19): each window group reads every page of a policy, chunk by
+  chunk, and the declarations group's first window is pages 1–5 plus the detected declarations page. That is
+  more windows per policy, so a longer training run; a corpus built before the change must be rebuilt and the
+  adapter retrained, and pilot or gate numbers from before it are not comparable with new ones.
 - **Before the pilot's `finetune`**: `python -m data_pipeline.ocr_check` (labelled values against the OCR
-  text), `python -m orchestration.preflight --scope <scope>` (add `--skip-corpus` when `finetune` follows in the
+  text), `python -m orchestration.preflight --scope <scope>` (it also fails on a model-drafted label with no
+  reviewer and reports annotation agreement, warning only; add `--skip-corpus` when `finetune` follows in the
   same chain: the build then runs once, and refuses a >25% set-aside itself), and
   `python -m orchestration.smoke_run --scope <scope>` (tenant `smoke`, version `v0`, 4 train / 1 val / 1 test
   sources with their twins; never freezes or packages). The smoke run proves the plumbing; it is not
-  Experiment B.
+  Experiment B. Train/serve token parity is measured on the pod with
+  `pytest tests/test_parity.py::test_template_token_parity` (GPU-marked; it skips without a GPU, the base
+  weights, ms-swift and vLLM), so run it in the training environment there.
 - **Reading the results**: `extract` writes per-document JSON (with `all_fields`: every schema field, its value
   and its result against gold) and metrics; `python -m testing.compare_models` runs the same documents through
   the base model and base + adapter and writes both, with a workbook per document. Every stage of a run records
@@ -176,3 +193,13 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 - Acceptance: eight criteria, not six.
 - Current implementation: delivered split and held-out carriers, alias coverage for common-model lines, per-tenant freeze, conditional `scanned_accuracy`, the `personal_lines` and `casualty_fleet` pilots, the pre-`finetune` checks (OCR check, preflight `--skip-corpus`, smoke run), result tools (`all_fields`, `compare_models`, run report), and MinerU 3.4.5 on the pod.
 - `pilot_run` records a criterion the pilot's document types cannot measure as not applicable, and the zero-shot baseline prints the current commands (commit f5668a4).
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; the architecture reference is `finetuning-architecture-v2.4.docx` (§16.1–16.4, §0d, §0e, §8b); "do not skip to Experiment C".
+- Experiment A: what the baseline's "field F1" is (mean field normalized match over every document presented).
+- Experiment C: reviewed golds only; every page read.
+- Pilot criteria: field match is `field_normalized_match` ≥ 0.85 (was field F1 > 0.80), schema validity ≥ 0.98 (was 100%), list recall ≥ 0.75, LoB detection ≥ 0.85 and confusable rate ≤ 5%, all taken from `PILOT_FLOORS` / `GATING_METRICS` with the gate's inclusive comparison; the diagnosis table follows.
+- Constraints: de-identification is Option A (none) as the architecture records, not "blocked"; the option choice stays a compliance open item; reviewed golds.
+- Acceptance checklist: the gate-floor criteria are met at exactly the floor.
+- Current implementation: one carrier held out per line, only in a line naming 10 or more carriers; a set frozen with `--allow-small` caps the release at interim; every page read (longer run, rebuild and retrain, earlier numbers not comparable); the preflight's label checks; token parity on the pod.

@@ -1,10 +1,10 @@
 # SPEC 09 — Confidence Calibration
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-07, IMPL-08. Uses the inference core (IMPL-07) for logprobs/spans and the evaluation normalizer (IMPL-08) for the correctness signal. No forward dependency on serving/testing.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §5 (**confidence flow, calibration, list-field second signal**), §0b (LoB carries confidence too), §15 (ECE as a gating metric).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §5 (**confidence flow, calibration, list-field second signal**), §0b (LoB carries confidence too), §15 (ECE as a gating metric).
 
 ## Goal
 
@@ -96,7 +96,7 @@ This matters most for **Loss Runs**, where a missed claim row is both easy to ma
 
 ---
 
-## Current implementation (2026-10-13)
+## Current implementation (2026-10-21)
 
 This spec's §1–§3 describe v1's single-number calibration. What runs now (arch v2.1 §5):
 
@@ -163,7 +163,9 @@ no entry. A resumed `package` finds the calibrators in Blob.
 stamped on each row (a row without one is left out, with a warning):
 - a policy read in windows is fitted **as it is served**: its windows and their spans merged
   (`merged_windows`, the serving merge), held to the label conventions (`serving.conventions.conform`), then
-  featured against each page's text and scored against the merged window targets — not one window at a time;
+  featured against each page's text and scored against the merged window targets — not one window at a time.
+  The windows cover every page of the document (decision 2026-10-19; IMPL-05), as serving reads it, so the
+  calibrators are fitted on whole policies merged as served, never on a selection of pages;
 - every other row is fitted as generated; a row that failed to generate has no features;
 - correctness is `values_agree` (IMPL-08's typed comparison), with the label's rows **paired by identity** to
   the answer's (`aligned_for_scoring` on a common-model line, `rows_aligned_to` otherwise), so one omitted or
@@ -190,3 +192,8 @@ back to the default target.
 - Calibrators and thresholds: added `MIN_INSTANCES` 300 and the single-outcome rule, the threshold grid, binomial upper bound, `MIN_ACCEPTED_SAMPLE` 30 and the per-type targets; the calibrators file name.
 - Samples: described `collect_calibration_samples` (every val row per format, merged model, engine released between formats, rows/seconds/calls logged) and `calibration_samples` (windowed policies merged and conformed as served, rows paired by identity, typed correctness, common-model fields as serving calibrates them).
 - Calibrate stage: reports ECE per field type and overall on the threshold half.
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; architecture reference is `finetuning-architecture-v2.4.docx`.
+- Current implementation, *How a sample is labelled*: a windowed policy's windows cover every page (decision 2026-10-19), so calibrators are fitted on whole policies merged as served.

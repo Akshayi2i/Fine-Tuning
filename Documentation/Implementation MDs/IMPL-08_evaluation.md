@@ -1,10 +1,10 @@
 # SPEC 08 — Evaluation (Metrics + Promotion Gating)
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-06, IMPL-07. Uses the shared inference core (IMPL-07) for all model runs — no forward dependency on serving or testing.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §15 (**metric definitions + LoB metric**), §0b (LoB gating), §3 (ViT gate inputs), §5 (list-field recall), §13 step 6 (the gate is a hard stop), §12 (gate result recorded in the manifest).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §15 (**metric definitions + LoB metric**), §0b (LoB gating), §3 (ViT gate inputs), §5 (list-field recall), §13 step 6 (the gate is a hard stop), §12 (gate result recorded in the manifest).
 
 ## Goal
 
@@ -39,7 +39,7 @@ One definition of "matches", applied **consistently in the promotion gate, check
 | `metrics/field_accuracy.score_fields` | Exact + normalized match, per-field and aggregate, by the schema's declared type (`values_agree`) | Core extraction accuracy |
 | `metrics/field_accuracy.score_list_field` | Precision/recall/F1 for list fields (claims, schedule rows) | Precision/recall on repeating structures |
 | `metrics/field_accuracy.score_list_field` (recall) | **Row completeness** — extracted row count vs ground truth; missed-row rate | Whole rows silently missed — a dropped Loss Run claim is invisible to per-value confidence (arch §5) |
-| `metrics/coverage_metrics.score_schema_validity` | Parse + validate against the doc_type schema | Structural reliability; mirrors the Fideon SPEC_07 Stage 3 audit gate |
+| `metrics/coverage_metrics.score_schema_validity` | Parse + validate against the doc_type schema; a whole common-model document is judged as serving returns it (`serving.pipeline.served_schema_verdict`) | Structural reliability; mirrors the Fideon SPEC_07 Stage 3 audit gate |
 | `metrics/coverage_metrics.expected_calibration_error` | Expected Calibration Error on confidence vs correctness | Whether the confidence numbers are trustworthy, not just the extractions |
 | `run_eval` — the `noisy_ocr` subset | Scored on the **deliberately-noisy-OCR subset** | Did the model correctly override bad OCR using the image? |
 | `run_eval` — `image_only` / `scanned` subsets; `training/vit_gate.classify_error` on every error record | Separate accuracy for the `image_only` and `scanned` subsets | Confirms the second production pathway works; **feeds the ViT escalation gate** (IMPL-06) |
@@ -47,8 +47,8 @@ One definition of "matches", applied **consistently in the promotion gate, check
 | `metrics/coverage_metrics.score_lob` | **`line_of_business` detection accuracy, overall and per LoB value** | The VLM is the fallback LoB detector when L1/L2 miss (arch §0b) |
 | `metrics/confusable.score_alias_accuracy` (not yet called by `score_subset`); `metrics/unseen_labels.label_split` | Field accuracy **sliced by the observed surface label**; on common-model lines, `seen_label_field_match` / `unseen_label_field_match` (labels training showed vs never showed) | Whether the canonical mapping generalises across phrasings, or only works on the dominant one (master §1.4) |
 | `metrics/confusable.score_misattribution` | Rate at which a **confusable entity's value is returned as the canonical field** | The failure that produces confident, well-formed, wrong extractions — a certificate holder returned as `insured_name` |
-| `release_measurements` (golden eval) | P95 latency per adapter of each generation round, peak GPU memory | Production feasibility, not just accuracy — recorded in the eval report and the release bundle, not gated |
-| `metrics/extraction_faults` — `score_false_nulls`, `score_hallucinations`, `score_page_refs`, `score_page_selection` | False-null rate, hallucination rate (schema fields; `additional_fields` apart), page_ref exact rate / precision / recall, page-selection recall | A value on the page emitted as null; a value printed on no page sent (looked for on the pages it cites); a right value citing the wrong pages; pages with fields that routing dropped |
+| `release_measurements` (golden eval) | P95 latency per adapter of each generation round, peak GPU memory | Production feasibility, not just accuracy — recorded in the eval report and the release bundle, not gated (there is no latency SLA; decision 2026-10-19) |
+| `metrics/extraction_faults` — `score_false_nulls`, `score_hallucinations`, `score_page_refs` | False-null rate, hallucination rate (schema fields; `additional_fields` apart), page_ref exact rate / precision / recall | A value on the page emitted as null; a value printed on no page sent (looked for on the pages it cites); a right value citing the wrong pages |
 | `metrics/common_model.CommonModelTally` | `reference_accuracy` (links), `coverage_code_accuracy`, `coverage_code_recall`, `additional_fields_recall` / `_precision` | Common-model lines: which unit a coverage applies to, whether it got the right code, the overflow scored apart from the core fields |
 | `metrics/lossrun_table.table_f1` | Claims matched by claim number (or, unnumbered, by loss date) with total incurred within a cent, micro-averaged | Loss Run table reading as a whole |
 | `metrics/auto_accept.score_auto_accept` | `auto_accept_error_rate`: of the values delivered without a review flag, the share that were wrong | What the release's review thresholds promise, measured on documents they never saw |
@@ -63,9 +63,10 @@ One definition of "matches", applied **consistently in the promotion gate, check
 **Mode accuracy specifics:** must also classify errors as **perception** (misread characters, missed checkboxes) vs **schema/reasoning** (right value, wrong field), because IMPL-06's `vit_gate` needs that distinction, not just the accuracy number. `classify_error` also names **omission** (nothing produced) and **invented** (a value where the label has none and no other field holds it); invented errors are counted in the report's error totals and left out of the ViT error mix.
 
 ### 3. `evaluation/run_eval.py`
-- Given `--model vN` (resolved via IMPL-02) + the frozen golden eval set, run inference **through the serving pipeline** (`golden_eval.evaluate_version` → `serving.pipeline.extract`, built on the IMPL-07 inference core — so windows, merge, date formatting and calibrated confidence are what is measured) across all eval docs and all three modes, compute every metric, and write the report where the gate reads it (`paths.eval_report(version, scope=...)` — `eval-reports/{version}/summary.json`, or `…/scope/{name}/summary.json` for a scoped run). Broken down **per doc_type and per subset** inside it (`by_doc_type`).
+- Given `--model vN` (resolved via IMPL-02) + the frozen golden eval set, run inference **through the serving pipeline** (`golden_eval.evaluate_version` → `serving.pipeline.extract`, built on the IMPL-07 inference core — so windows, merge, date formatting and calibrated confidence are what is measured; serving reads every page of a document, window by window, never a selection of pages) across all eval docs and all three modes, compute every metric, and write the report where the gate reads it (`paths.eval_report(version, scope=...)` — `eval-reports/{version}/summary.json`, or `…/scope/{name}/summary.json` for a scoped run). Broken down **per doc_type and per subset** inside it (`by_doc_type`).
 - Runs the eval subsets explicitly: `image_only`, `scanned`, `noisy_ocr`, `long_policy`, plus the full set — and `held_out_carrier` when the set holds documents of a carrier held out of train and val (reported as `held_out_carrier_match`, never gated).
 - Records per-document error records (field, expected, got, error class, mode, scanned, line) so `vit_gate` and failure-mode analysis have real material rather than aggregates, and totals them per subset (`error_summary`: by class, by line, the 15 fields that fail most).
+- **Keeps each document's own score** for the gate's paired bootstrap (`SubsetReport.per_document`, gathered by `EvalReport.per_document_scores()` and written as the report's `per_document`, `{metric: {source_id: score}}`): `field_normalized_match`, `field_exact_match`, `list_field_recall` and `schema_validity_rate`, plus the `image_only`, `scanned` and `noisy_ocr` subsets' field match as `image_only_accuracy`, `scanned_accuracy` and `ocr_arbitration_accuracy`. A document's score is the mean of its readings (one per mode). Other gating metrics carry no per-document scores.
 - **The golden eval set is frozen and versioned separately, one per tenant, human-double-verified, and held constant across corpus versions** so model versions compare apples-to-apples over time (arch §8). Never train on it — assert no eval `source_id` appears in the tenant's corpus train or val split (`assert_eval_set_disjoint`).
 - **Every gating metric must be emitted by `score_subset`.** `gating.GATING_METRICS` is checked with `require_all_measured=True`, so a metric the scorer never computes blocks *every* candidate, permanently, and the gate has no override by design. This is not hypothetical: `ece_confidence` and `confusable_misattribution_rate` were both gating metrics that `run_eval` never produced — `score_misattribution` had zero production callers and ECE had none at all — which made the gate unpassable under any input. The names must match exactly too: `list_field_recall` and `lob_detection_accuracy` are the gate's spellings, and emitting `list_recall` or `lob_accuracy` instead means the metric silently never arrives. **A test asserts the two sets agree** (`tests/test_module_seams.py`), because a hand-written metrics dict in a unit test proves nothing about what the scorer emits.
 - ECE needs per-field confidences: `score_subset` reads them from each document's `metadata["field_confidence"]` and skips fields that carry none, rather than assuming a value. An unmeasured field is not evidence in either direction.
@@ -73,26 +74,30 @@ One definition of "matches", applied **consistently in the promotion gate, check
 - Note: classifier accuracy uses the classifier from IMPL-11 once it exists; until then `run_eval` scores extraction with the true doc_type supplied, and classifier metrics fill in on a later pass. This keeps eval runnable before serving is built.
 
 ### 4. `evaluation/gating.py`
-- `promotion_gate(candidate_metrics, current_metrics, *, per_document=None, floors=None, continued_from=None, cross_type_evidence=None, require_all_measured=True, fixes_defect=None, override=None, scope=None)` → `GateResult` (per-metric verdicts, failed gates, blocking reasons, tier). Three conditions, all of which must hold (arch v2.1 §15.5):
-  1. **Absolute floors** (`PILOT_FLOORS`, with the scope's own overrides via `floors_for(scope)`) — applied to the first release too: `field_exact_match` / `field_normalized_match` 0.85, `list_field_recall` 0.75, `schema_validity_rate` 0.98, `doc_type_classifier_accuracy` 0.95, `lob_detection_accuracy` 0.85, `confusable_misattribution_rate` ≤ 0.05, `lossrun_totals_reconciliation_rate` 0.80, `table_f1` 0.88, `auto_accept_error_rate` ≤ 0.02, `worst_line_field_match` 0.85.
-  2. **Non-inferiority** against the current release: the 95% CI lower bound of (candidate − current) from a paired bootstrap over documents (`per_document`) above −δ, with a per-metric δ (`NON_INFERIORITY_DELTA`, default 0.015); a point comparison against δ, recorded as weaker evidence, when no per-document scores are supplied.
-  3. **Improvement**: at least one primary metric (`field_normalized_match`, `list_field_recall`) improves with its CI lower bound above zero, or the release names the defect it fixes (`fixes_defect`). The first release is exempt; without per-document scores the rule cannot be evaluated and is not enforced.
-- A passing release is tiered by `release_tier`: **production** when `field_normalized_match` ≥ `PRODUCTION_FIELD_MATCH` (0.92), **interim** below that; a blocked release has no tier.
+- `promotion_gate(candidate_metrics, current_metrics, *, per_document=None, floors=None, continued_from=None, cross_type_evidence=None, require_all_measured=True, fixes_defect=None, override=None, scope=None, small_eval_set=False)` → `GateResult` (per-metric verdicts, failed gates, blocking reasons, tier, warnings). Three conditions, all of which must hold (arch v2.1 §15.5):
+  1. **Absolute floors** (`PILOT_FLOORS`, with the scope's own overrides via `floors_for(scope)`) — applied to the first release too: `field_exact_match` / `field_normalized_match` 0.85, `list_field_recall` 0.75, `schema_validity_rate` 0.98, `doc_type_classifier_accuracy` 0.95, `lob_detection_accuracy` 0.85, `confusable_misattribution_rate` ≤ 0.05, `lossrun_totals_reconciliation_rate` 0.80, `table_f1` 0.88, `auto_accept_error_rate` ≤ 0.02, `worst_line_field_match` 0.85. `PILOT_FLOORS` is also the one source of the pilot's thresholds: `pilot.pilot_run` builds its field match, list recall, schema validity, LoB detection and confusable-rate criteria from it and `GATING_METRICS`, with the same inclusive comparison (IMPL-15).
+  2. **Non-inferiority** against the current release: the 95% CI lower bound of (candidate − current) from a paired bootstrap over documents above −δ, with a per-metric δ (`NON_INFERIORITY_DELTA`, default 0.015). The gate stage supplies `per_document`: `orchestration.pipeline_dag.paired_document_scores` reads the promoted release's eval report and the candidate's, and pairs each metric's per-document scores on the documents both scored (a mismatch is logged; the frozen set should not change). A metric with no per-document scores gets a point comparison against δ, recorded as `basis: point_estimate` and weaker evidence; so does every metric when either report was written before per-document scores were kept, with a logged warning to re-score it.
+  3. **Improvement**, enforced: at least one primary metric (`field_normalized_match`, `list_field_recall`) improves with its CI lower bound above zero, or the release is blocked on `improvement`. Naming the defect the release fixes (`--fixes-defect "<ticket>"` on `package` or `all`, `StageContext.fixes_defect`, recorded in the decision) stands in for the improvement and nothing else: floors and non-inferiority still apply. The first release is exempt; when neither primary metric has per-document scores (a report written before they were kept) the rule cannot be evaluated and is not enforced, with a logged warning.
+- A passing release is tiered by `release_tier`: **production** when `field_normalized_match` ≥ `PRODUCTION_FIELD_MATCH` (0.92, kept by the decision of 2026-10-19), **interim** below that; a blocked release has no tier. **A small eval set caps the tier**: the gate stage reads the frozen set's manifest, and a set accepted below its minimum size (`freeze-eval-set --allow-small`, manifest `small_set_accepted`) is passed as `promotion_gate(small_eval_set=True)`, which tiers a passing release `interim` whatever its score and adds a warning (`GateResult.warnings`, also in the decision).
 
 **Gating metric set** (`GATING_METRICS`): field exact/normalized match, list-field F1 (`field_f1_list_fields`), **list-field recall**, schema validity rate, ECE, OCR-arbitration accuracy, image-only accuracy, scanned accuracy, doc-type classifier accuracy, **LoB detection accuracy**, **confusable misattribution rate**, false-null rate, Loss Run totals reconciliation rate, `table_f1`, `auto_accept_error_rate`, `worst_line_field_match`.
 
-- **Not applicable vs not measured.** `not_applicable_for(scope)` excuses what the scope's shape cannot produce (`common.scopes.structural_not_applicable`: no Loss Runs → no reconciliation or `table_f1`; no classify task → no classifier metric; policy-only → no LoB metric; no list fields → no list metrics) plus `CONDITIONAL_METRICS` (`lossrun_totals_reconciliation_rate`, `table_f1`, `page_selection_recall`, `auto_accept_error_rate`, `worst_line_field_match`, `scanned_accuracy`), which only exist when the eval set holds the relevant documents. A conditional metric the baseline measured is required. Anything else unmeasured blocks.
-- `PENDING_GATING_METRICS` — `list_field_precision`, `page_selection_recall`, `hallucination_rate` — are reported, and not enforced until their producers are complete. A metric moves into `GATING_METRICS` in the same commit as the code that computes it.
+- **Not applicable vs not measured.** `not_applicable_for(scope)` excuses what the scope's shape cannot produce (`common.scopes.structural_not_applicable`: no Loss Runs → no reconciliation or `table_f1`; no classify task → no classifier metric; policy-only → no LoB metric; no list fields → no list metrics) plus `CONDITIONAL_METRICS` (`lossrun_totals_reconciliation_rate`, `table_f1`, `auto_accept_error_rate`, `worst_line_field_match`, `scanned_accuracy`), which only exist when the eval set holds the relevant documents. A conditional metric the baseline measured is required. Anything else unmeasured blocks.
+- `PENDING_GATING_METRICS` — `list_field_precision`, `hallucination_rate` — are reported, and not enforced until their producers are complete. A metric moves into `GATING_METRICS` in the same commit as the code that computes it. (`page_selection_recall` is gone: every page is read, so there is no selection to measure.)
+- **No ceiling on invented values is gated** — an open item. `hallucination_rate` is reported where rows carry their OCR text, no spec states a ceiling, and the golden eval does not carry the pages' text in its metadata, so on the gate path it is not measured.
 
 `alias_accuracy` and `held_out_carrier_match` are **reported alongside but not gated** — see the note above.
 
 A frozen document is an unseen carrier's when the split held its carrier out or the delivery marked it
 (`label_metadata.json` `held_out_carrier`; `evaluation.freeze_eval_set.held_out_carrier`); the manifest lists
 them as `held_out_source_ids`. `mark_held_out` (`freeze-eval-set --mark-held-out`) marks a set frozen before the
-importer carried the flag, changing only that flag.
+importer carried the flag, changing only that flag. Which carriers a drawn split holds out is IMPL-05's rule: one
+per line of business, only in a line whose real documents name 10 or more carriers
+(`split_groups.MIN_CARRIERS_PER_LINE_FOR_HELD_OUT`). A set already frozen keeps the carriers its split held out:
+a frozen set draws no new test documents, and splits made after freezing hold no carrier out.
 
 - **Additional gate for `--continue-from` Foundation runs (arch §12):** a minor incremental patch that continued from the previous Foundation checkpoint must additionally show **no regression on the *other* document types**, not just the type it was patching. The gate reads the manifest flag IMPL-06 sets and demands that cross-type evidence before passing; an empty entry for a type blocks.
-- Writes the decision, tier, per-metric verdicts, metrics gated and `gated_against` into the candidate's `RunManifest` (IMPL-02, `apply_to_manifest`); a run recorded as failed is not marked evaluated.
+- Writes the decision, tier, per-metric verdicts, metrics gated and `gated_against` into the candidate's `RunManifest` (IMPL-02, `apply_to_manifest`); a run recorded as failed is not marked evaluated. The gate decision the stage writes (`paths.gate_decision`, and under the release) also records `paired_documents` (how many documents each metric's bootstrap paired; empty for a point comparison), `fixes_defect`, `eval_set` (`small_set_accepted`, documents per type, the corpus it was frozen from) and `warnings`.
 - **No override flag.** A failed gate is a failed gate unless a written, attributed override is recorded with it (`GateOverrideRecord`: a named person, not a system identity; a reason of at least 20 characters; the gates it waives). It lifts only the named gates that actually failed, and they are recorded as waived, never as passed.
 
 ## Constraints
@@ -114,13 +119,17 @@ importer carried the flag, changing only that flag.
 - [ ] `run_eval` produces a per-doc-type report with mode breakdowns (`image_only`, `scanned`, `noisy_ocr`, `long_policy`), using IMPL-07.
 - [ ] An eval `source_id` appearing in a corpus train or val split causes a loud failure.
 - [ ] `gating` blocks a candidate that fails **any single** gate metric's floor or non-inferiority test — including LoB accuracy alone.
+- [ ] The eval report keeps each document's score (`per_document`), and with per-document scores in both reports the gate judges non-inferiority by a paired bootstrap (`basis: paired_bootstrap`) and records `paired_documents`; a report without them gets a point comparison with a warning.
+- [ ] A release whose primary metrics did not improve is blocked on `improvement`, unless `--fixes-defect` names the defect it fixes, which is recorded in the decision.
+- [ ] A frozen set accepted with `--allow-small` caps a passing release at `interim`, with a warning in `GateResult.warnings` and the decision.
+- [ ] A merged common-model answer's schema validity is judged as serving returns it (`served_schema_verdict`), not failed for the system fields the pipeline adds.
 - [ ] A `--continue-from` candidate without cross-type regression evidence is blocked.
 - [ ] No code path waives a failed gate except a validated, attributed `GateOverrideRecord`, recorded as a waiver.
 - [ ] Promotion decision + per-metric verdicts written to the RunManifest.
 
 ---
 
-## Current implementation (2026-10-13)
+## Current implementation (2026-10-21)
 
 **The frozen golden eval set** (`evaluation/freeze_eval_set.py`,
 `python -m orchestration.run freeze-eval-set --corpus vN [--allow-small]`):
@@ -135,22 +144,29 @@ importer carried the flag, changing only that flag.
 - **refused a second time** (the set is the yardstick every version is compared on), and **refused when
   any type would freeze fewer than 150 documents** (`MIN_FROZEN_DOCS_PER_TYPE`, arch §15.4) unless
   `--allow-small`: the set cannot grow once frozen, and at 150 documents a rate near 80% is known to about ±3
-  points;
+  points. A set accepted small records `small_set_accepted` in its manifest, and the gate caps a release scored
+  on it at `interim` (§4);
 - after freezing, every corpus build excludes the frozen documents and their families and splits new
   documents into train/val only (IMPL-05).
 
 **The golden eval** (`evaluation/golden_eval.py::evaluate_version`): refuses a partial set and asserts the set
 is disjoint from the corpus; loads the tenant's frozen documents in the scope's doc types and lines
 (`scope.covers_lob`), each label passed through label verification (a rule-added value no page prints is not
-expected of the model, as in its training targets) and classic auto read as personal auto; runs every document
+expected of the model, as in its training targets) and the form-edition label rule (`verified_label` →
+`label_rules.split_form_editions`: an edition printed inside a form number moves to the form's empty
+`edition_date`, as training labels and serving's `conform` have it; the frozen gold in Blob is read under the rule,
+not rewritten), and classic auto read as personal auto; runs every document
 in **all three modes** (`GOLDEN_MODES`; `noisy_ocr_image` with the corpus build's own seeded corruption)
 through `serving.pipeline.extract` with the release's bf16 calibrators; scores failures as `{}` with the error
 recorded; and writes the report where the gate reads it. A common-model policy carries serving's own schema
-verdict (`schema_valid`), which `schema_validity_rate` reads. The report adds `documents_failed`, `calibrated`
+verdict (`schema_valid`, from `serving.pipeline.schema_verdict`), which `schema_validity_rate` reads. The report adds `documents_failed`, `calibrated`
 (a report made without calibrators is not reused once the release has them — `pipeline_dag.eval_report_metrics`),
 `release_measurements` (P95 latency per adapter, peak GPU memory sampled through the eval; recorded, not gated)
-and `windowing_ceiling` (what the oracle merge of the gold loses before any model runs; reported, never gated).
-The gate stage produces the report when none exists.
+and `windowing_ceiling` (what the oracle merge of the gold loses before any model runs, over the same windows on
+every page — `policy_windows.pages_to_read`; reported, never gated), and `per_document` (§3). The gate stage
+produces the report when none exists. Since every page is read (decision 2026-10-19), a policy is read in more
+windows than before: the corpus must be rebuilt and the adapters retrained, and gate numbers from before the
+change are not comparable with new ones.
 
 **Validation-based scoring** (checkpoint selection, calibration): `evaluation/validation_generation.py`.
 - `generate_validation(rows, model, *, adapter, constrain, batch_rows, stats)` generates every row once with the
@@ -171,7 +187,10 @@ The gate stage produces the report when none exists.
 - `score_generations` is the gate's `build_report` over the rows, window by window, plus the same metrics over
   **whole documents** (`document_*`): each policy's windows merged per reading mode by the serving merge
   (`merged_windows` → `serving.policy_merge.merge_policy_windows`), its window targets into the gold and its
-  generations into the answer, so windowing loss is out of both and the score reads the model alone.
+  generations into the answer, so windowing loss is out of both and the score reads the model alone. A whole
+  common-model document's schema validity is judged as serving would return it
+  (`serving.pipeline.served_schema_verdict`: enveloped, system fields and every key filled, then the client's
+  schema), so `document_schema_validity_rate` no longer reads a false 0% for what the pipeline adds.
 - Images are localised to the pod cache first (vLLM opens paths, the rows hold Blob keys).
 
 **Checkpoint selection** (`evaluation/checkpoint_eval.py`, run by `orchestration.pipeline_dag.stage_checkpoint_eval`;
@@ -219,8 +238,9 @@ settings in the training config's `evaluation` block):
   code — then shared values), so one omitted or reordered row does not make every later row wrong;
 - **common-model lines** (`metrics/common_model.py`): both sides go through `comparable_view`, so structural ids
   are never scored and links are compared by what they name; values inside rows count; links, codes and
-  `additional_fields` are scored apart; schema validity is asked of the answer as it was produced (or serving's
-  verdict), not of the scored copy;
+  `additional_fields` are scored apart; schema validity is asked of the answer as it was produced, never of the
+  scored copy: one window against its slice's model view, a whole document as serving returns it (serving's own
+  verdict on the gate path, `served_schema_verdict` where no verdict exists);
 - **hallucination** looks for the value as printed (`raw`) on the pages it cites (`common.grounding`); printed
   only on another page is a wrong page, not an invention; a value too short to look for is left out; a right
   value is never a hallucination; only rows that were sent text count;
@@ -277,3 +297,12 @@ extra.
 - §4: replaced the stale "match or beat on every metric" gate with floors + paired-bootstrap non-inferiority + improvement, release tiers (0.92), the current gating/conditional/pending metric sets and the attributed override; checklist items corrected to match.
 - Current implementation: frozen set is per tenant with carrier fields; golden eval details (label verification, served schema verdict, `calibrated`, release measurements, windowing ceiling); validation generation (96 rows per call, longest first, halves retry, stats, page bounds, answer caps, two failure rates, document metrics); new checkpoint-selection section (candidates, 400-row stratified sample, two finalists on whole documents with guards, `selection_document_modes`, `.full`, `document_choice`, `break_tie`, `ParallelScorer`, `generation_cost`); scoring corrections for typed comparison, identity pairing, common-model scoring, page-aware hallucinations, false nulls; line-detection measurement.
 - Frozen held-out documents: the delivery's mark, `held_out_source_ids`, `mark_held_out` (commit f5668a4).
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; architecture reference is `finetuning-architecture-v2.4.docx`.
+- §2 table: schema validity judges a whole common-model document as serving returns it (`served_schema_verdict`); latency is recorded, not gated (no SLA); `score_page_selection` and page-selection recall removed.
+- §3: serving reads every page; the eval report keeps per-document scores (`per_document`, `EvalReport.per_document_scores()`).
+- §4: non-inferiority is a paired bootstrap on per-document scores the gate stage pairs (`paired_document_scores`), with a point comparison and warning for a report written before they were kept; the improvement rule is enforced, `--fixes-defect` stands in for it; a set accepted small caps a release at `interim` with a warning; production tier stays 0.92; `PILOT_FLOORS` is the pilot's one source; `page_selection_recall` gone from the conditional and pending sets; no invented-value ceiling (open item); the per-line carrier rule and the frozen set's held-out carriers; what the gate decision records.
+- Acceptance checklist: per-document scores and the paired bootstrap, the enforced improvement rule and `--fixes-defect`, the small-set cap, the served schema verdict.
+- Current implementation: `small_set_accepted`; frozen golds read under the form-edition rule (`split_form_editions`); serving's verdict from `schema_verdict`; the windowing ceiling over every page and old gate numbers not comparable; checkpoint selection's whole-document schema validity as served.

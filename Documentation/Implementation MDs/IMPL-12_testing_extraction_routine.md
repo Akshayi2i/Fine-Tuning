@@ -1,12 +1,12 @@
 # SPEC 12 — Testing / Extraction Routine (CLI Harness)
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-03 (OCR), IMPL-07 (inference core), IMPL-08 (metrics), IMPL-09 (calibration), IMPL-11 (serving pipeline).
 >
 > **Naming hazard (master §0.1):** the architecture's "**Fideon SPEC_12**" is the external multi-tenant deployment spec. This file is our testing harness. Different documents.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §17 (**extraction/testing routine**), §19 (folder placement), §13a (quantized-format validation consumer), §5 (confidence without ground truth).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §17 (**extraction/testing routine**), §19 (folder placement), §13a (quantized-format validation consumer), §5 (confidence without ground truth).
 
 ## Goal
 
@@ -93,11 +93,13 @@ For each source_id:
   3. Prompt select    → rendered by common.prompts for that type, form, line and window group
   4. Assemble input   → system = prompt (schema + instructions)
                         user   = [page image + page marker (+ OCR markdown, unless image_only)] per page
-  5. Model inference  → the selected model generates JSON + token logprobs (policies: in windows, merged)
+  5. Model inference  → the selected model generates JSON + token logprobs (policies: in windows over
+                        every page, merged)
   6. Confidence       → per-field confidence from logprobs; no release calibrators are loaded, so the
                         identity transform applies and every field is flagged for review
-  7. Validate         → JSON parses + conforms to that selection's schema (strict_schema=False:
-                        an invalid answer is kept and flagged schema:invalid)
+  7. Validate         → serving's audit verdict (serving.pipeline.schema_verdict): JSON parses +
+                        conforms to that selection's schema (strict_schema=False: an invalid
+                        answer is kept and flagged schema:invalid)
   8. Write result     → results/{version}/{source_id}.json, with all_fields
   9. Metrics          → scored against the gold label → metrics/{version}/{source_id}.metrics.json
  10. Summarise        → metrics/{version}/summary.json; a failed document is listed, the batch carries on
@@ -118,7 +120,7 @@ For each source_id:
   "mode": "ocr_plus_image",
   "schema_valid": true,
   "overall_confidence": 0.88,
-  "pages_used": [1, 2, 3, 4, 5, 9],
+  "pages_used": [1, 2, 3, 4, 5, 6, 7, 8, 9],
   "review_flags": ["coverages[3].limit:merge_conflict", "window_failed:arrays:p9"],
   "fields": {
     "policy.policy_number":   {"value": "...", "confidence": 0.94, "correct": true},
@@ -142,7 +144,7 @@ All correctness uses IMPL-08 metrics — `score_fields`, `score_all_list_fields`
 **On the confidence-without-ground-truth case (arch §17):** even with no golden JSON — a brand-new unknown document — the routine still emits `overall_confidence` and per-field confidence. That is the whole payoff of the calibration work: confidence is available at inference time on documents you have never labeled, which is exactly what routes low-confidence extractions to human review in production. (The harness loads no release calibrators, so its numbers are the identity transform of the raw signal, and every field is flagged; a release's calibrated confidence is measured by the golden eval, IMPL-08.)
 
 ### 5. `testing/extraction_registry.json`
-One entry per extraction, so an output JSON is never ambiguous about its origin — written by `append_registry`, which `run_batch` does not call today; until it does, provenance is the `results/{version}/` path and the `model_version` inside each result:
+One entry per extraction, so an output JSON is never ambiguous about its origin — written by `append_registry`, which `run_batch` calls after each document's results and metrics are written (§1):
 ```json
 {
   "extractions": [
@@ -199,12 +201,16 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 
 ---
 
-## Current implementation (2026-10-13)
+## Current implementation (2026-10-21)
 
 - Both entries run the extraction: `python -m testing.run_extraction …` and
   `python -m orchestration.run extract …`, which passes the same arguments to `run_extraction.main`. Extraction
   goes through `serving.pipeline.extract` — windows and the window merge for policies, the serving guards,
   every-key output, dates in `MM/DD/YYYY` — so test output is production output.
+- **Every page is read** (decision 2026-10-19, IMPL-11 §4): a policy of any length is read in windows over
+  all its pages, never on selected pages, so `pages_used` lists every page and a long policy takes more
+  windows than it did. Results written before 2026-10-21 read a policy longer than five pages on its selected
+  pages only. Nothing in the harness selects pages: there is no page threshold and no `long_doc_types`.
 - Documents are read from Blob as the pipeline wrote them (`document_request`): `processed/` page images and
   MinerU markdown, `golden-labels/` gold and metadata. A document not yet OCR'd is refused with what to run;
   one failing document is recorded in `summary.json` and the batch carries on (exit 1 only when every document
@@ -213,6 +219,12 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
   model) is used. No serving plan is passed, so nothing is refused for its line.
 - No calibrators are loaded: confidence is the identity transform and every field is flagged for review. This
   run measures extraction, not a release's review thresholds.
+- `schema_valid` and the `schema:invalid` flag are serving's own verdict (`serving.pipeline.schema_verdict`, IMPL-11
+  §5): on a common-model line the served answer, every key filled, is what is judged.
+- The gold is read from `golden-labels/` under the form-edition rule (`document_request` applies
+  `label_rules.split_form_editions`), as the gate's golden eval reads the frozen set (IMPL-08): the served answer
+  has a form's edition moved out of its number into `edition_date` (IMPL-11), and a gold imported before that
+  rule is not rewritten in Blob, so scored as stored it would count the convention wrong.
 - On the pod `run_extraction` and `compare_models` run detached in tmux like every long job; they survive a
   closed laptop.
 - The gate's numbers do not come from this harness: they come from the frozen golden eval set
@@ -229,3 +241,11 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 - §6 (new): `compare_models` — inputs, compare tenant, outputs (`base/adapter.json`, `*.all_fields.json`, `comparison.xlsx`, `summary.xlsx`), upload to `exports/{tenant}/comparisons/{run}/` and the azcopy download.
 - Constraints and acceptance checklist updated to match.
 - `run_batch` now writes `extraction_registry.json` (commit f5668a4).
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; architecture reference `finetuning-architecture-v2.4.docx`.
+- §3: a policy is read in windows over every page; validation is serving's audit verdict (`schema_verdict`).
+- §4: the `pages_used` example lists every page.
+- §5: `run_batch` writes the registry (the stale "does not call today" removed).
+- *Current implementation*: every page read, no page selection, results before 2026-10-21 read selected pages; `schema_valid` is serving's verdict; golds read under the form-edition rule, as the golden eval reads them.

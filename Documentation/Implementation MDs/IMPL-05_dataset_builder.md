@@ -1,10 +1,10 @@
 # SPEC 05 — Dataset Builder (JSONL, Modality, Split)
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-04.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §6 (modality dropout), §7 (dataset format, schema registry, prompt template versioning, long documents), §8 (corpus versioning, split strategy), §8a (MinerU pin in the manifest), §8b (tenant isolation per Fideon SPEC_12; **de-identification per Fideon SPEC_11 — BLOCKED, see §1**), §0b (LoB coverage).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §0e (decisions of 2026-10-19), §6 (modality dropout), §7 (dataset format, schema registry, prompt template versioning, long documents), §8 (corpus versioning, split strategy), §8a (MinerU pin in the manifest), §8b (tenant isolation per Fideon SPEC_12; **de-identification per Fideon SPEC_11 — Option A, none, see §1**), §0b (LoB coverage).
 
 ## Goal
 
@@ -12,23 +12,24 @@ Compile processed docs + golden labels into versioned, chat-format JSONL trainin
 
 ## Deliverables
 
-### 1. De-identification — **BLOCKED. Do not implement.**
+### 1. De-identification — **Option A (none); no `data_pipeline/deidentify/` module**
 
-Arch §8b requires the unified extractor LoRA to train only on Presidio de-identified data (Fideon SPEC_11). **Do not build `data_pipeline/deidentify/` until the question below is answered**, because implementing it as specified would make the fine-tuned model measurably worse.
+Arch §8b rejects text-only Presidio de-identification (Fideon SPEC_11) and records **Option A — no de-identification** as the current state for every tenant's build. No de-identification module is built.
 
-**Why this is a training bug, not a compliance gap.** Arch §8b specifies de-identification of **text**. It says nothing about the **page images** the vision encoder reads. If the text is de-identified and the image is not:
+**Why not text-only: it is a training bug, not only a compliance gap.** Text-only de-identification changes the **text**, not the **page images** the vision encoder reads. If the text is de-identified and the image is not:
 
 | Regime | Share of Foundation corpus | What the model is taught |
 |---|---|---|
 | `image_only` | **30%** | Image shows "John Smith"; target says `PERSON_1`. **The target is not derivable from the input.** These are unlearnable examples — 30% of the corpus becomes pure hallucination pressure. |
-| `ocr_plus_image` | **50%** | OCR says `PERSON_1`, image says "John Smith", target says `PERSON_1` → teaches **trust-OCR-over-image**, the exact inverse of what the projector LoRA and the 20% `noisy_ocr_image` regime exist to teach (arch §3, §6). |
+| `ocr_plus_image` | **50%** | OCR says `PERSON_1`, image says "John Smith", target says `PERSON_1` → teaches **trust-OCR-over-image**, the exact inverse of what the decoder LoRA and the 20% `noisy_ocr_image` regime exist to teach (arch §3, §6). |
 
-**Half-de-identifying is worse than either extreme.** Two coherent resolutions, both acceptable, to be chosen by the compliance owner:
+**Half-de-identifying is worse than either extreme.** The architecture lists three options; choosing between them is the compliance owner's open item before the first production release (arch §8b):
 
-1. **Redact page images consistently with the text** — input and target then agree, and the arbitration signal survives. Costs an image-redaction pipeline (bounding-box detection + overlay) that the architecture does not currently specify.
-2. **De-identify nothing; rely on tenancy plus access control** — training data keeps real values and the input/target contract stays coherent. Requires explicit sign-off that PII in `corpus/` carries the same posture as `raw-documents/`.
+- **A — no de-identification (the current state).** Real values, protected by tenancy, RBAC and encryption; the input/target contract stays coherent, and PII in `corpus/` carries the same posture as `raw-documents/`.
+- **B — consistent replacement.** Presidio entity spans plus OCR bounding boxes: the value replaced with realistic fake text in the image, the OCR text and the target. Needs an image-redaction pipeline.
+- **C — a PII-free synthetic layer** (arch §4d) for any shared model; real data only in tenant-scoped models.
 
-Until resolved: the corpus manifest records `deidentified: false` and `image_redaction: "unresolved"`, the registry-side enforcement in IMPL-02 stays suspended, and **the limitation is stated to the compliance owner rather than left implicit**. If resolution 1 is chosen this section becomes the Presidio + image-redaction module; if resolution 2, it is deleted.
+Under Option A the corpus manifest records `deidentified: false` and `image_redaction: "unresolved"`, every row carries `deidentified: false`, the run registry records it without enforcing it (IMPL-02), and **the limitation is stated to the compliance owner rather than left implicit**. If option B is chosen this section becomes the Presidio + image-redaction module.
 
 **Whichever is chosen, one rule holds:** de-identification must be **consistent across the OCR text, the page image, and the target JSON**. Any inconsistency between input and target teaches the model to hallucinate.
 
@@ -76,7 +77,7 @@ Orchestrates: for each tenant, split, and doc_type, assemble chat-format rows us
 - Handwritten annotations on otherwise digital forms
 - Fields legitimately absent — must produce `null`, not a hallucination
 - Repeating table rows of variable length (Loss Run claims, ACORD schedule lines)
-- **Long multi-page policies**, so the page-selection strategy (IMPL-11 `page_router`) is tested rather than assumed
+- **Long multi-page policies**, so the window planner over every page (`policy_windows.plan_windows`, shared with serving, IMPL-11) is tested rather than assumed
 - **Confusable co-occurrence** *(master §1.4)* — documents where a canonical field and at least one of its registered confusables both appear on the page (a named insured **and** a certificate holder; an insurer **and** a producer), with the golden JSON resolving them to different canonical keys. Without these the model learns the mapping but never the **boundary**, and will happily return the certificate holder as `insured_name` with high confidence. Track the count in the manifest and treat a zero count as a corpus defect, not an acceptable state.
 
 ### 6. `data_pipeline/corpus_manifest.py`
@@ -86,7 +87,7 @@ Writes `manifest.json` per corpus version — this is what training and eval rea
 - `modality_mix` over train rows and `modality_mix_target`, the mix the modes were drawn against.
 - **`mineru_version`**, **`ocr_device`**, and per-document `preprocessing_date` (arch §8a). Device is pinned alongside version because the model learns MinerU's output conventions, and GPU and CPU MinerU may not produce identical markdown.
 - **`schema_version`** and **`prompt_template_version`** (arch §7) — a change to either forces a corpus rebuild and a new training cycle.
-- `tenant_ids` contributing; `deidentified: false` and `image_redaction: "unresolved"` while §1 is blocked.
+- `tenant_ids` contributing; `deidentified: false` and `image_redaction: "unresolved"` under Option A (§1).
 - **`lob_coverage`** (arch §0b) — computed here, not as a separate module: counts `line_of_business` per doc_type and split, compares against the **≥20%-per-value target**, and writes the actual distribution. Under-coverage emits a **loud warning naming the under-represented values**; it does not block the build, because the remedy is targeted document collection, not a build-time fix.
 - **`alias_coverage`** (master §1.4) — same pattern, same module: counts examples per canonical field × observed surface label, read from each label's `field_provenance` (IMPL-04). **Alias coverage matters more than document count** — 95 documents saying *Named Insured* and 5 saying *Applicant* produce a model that is shaky on *Applicant* no matter how large the corpus is. Warn loudly naming variants below a configurable floor (default: fewer than 3 source documents). Non-blocking, for the same reason as LoB.
 - **`confusable_example_count`** — how many source documents satisfy the confusable co-occurrence edge case, per canonical field. **Zero is a corpus defect** and warns accordingly.
@@ -103,8 +104,8 @@ Writes `manifest.json` per corpus version — this is what training and eval rea
 
 ## Page pairing and the noise budget
 
-- `SourceDocument.ocr_pages` holds **one markdown string per page**, never a joined blob. The corpus row's user turn is interleaved per page (master §9), so a training row and a serving request — including a page-routed one — have the same structure.
-- `noisy_ocr_image` corruption is budgeted **per document, not per page** (`corrupt_ocr_pages`) — and for a windowed policy, **per window**: each window row gets the budget over its own pages, seeded by window, after routing (otherwise one budget over a 200-page policy left almost every noisy window byte-identical to its clean twin). Calling the single-page corrupter once per page multiplies the noise by the page count: a 20-page policy would take up to 40 corruptions instead of 2, and the "nothing changed" fallback would fire on every page. That is not a louder version of the same signal — a corpus where every page is garbage teaches the model to ignore OCR entirely, degrading the 50% `ocr_plus_image` regime that never sees noise.
+- `SourceDocument.ocr_pages` holds **one markdown string per page**, never a joined blob. The corpus row's user turn is interleaved per page (master §9), so a training row and a serving request — including one window of a long policy — have the same structure.
+- `noisy_ocr_image` corruption is budgeted **per document, not per page** (`corrupt_ocr_pages`) — and for a windowed policy, **per window**: each window row gets the budget over its own pages, seeded by window, after the windows are planned on the clean text (otherwise one budget over a 200-page policy left almost every noisy window byte-identical to its clean twin). Calling the single-page corrupter once per page multiplies the noise by the page count: a 20-page policy would take up to 40 corruptions instead of 2, and the "nothing changed" fallback would fire on every page. That is not a louder version of the same signal — a corpus where every page is garbage teaches the model to ignore OCR entirely, degrading the 50% `ocr_plus_image` regime that never sees noise.
 - Corruption details record **which page** the noise landed on, so IMPL-08's `ocr_arbitration_accuracy` can match a corruption to the field it affected.
 
 ## Acceptance checklist
@@ -117,6 +118,10 @@ Writes `manifest.json` per corpus version — this is what training and eval rea
 - [ ] The noise budget is per document: a 20-page document takes no more corruptions than a 1-page one, and no noisy row is identical to its clean twin.
 - [ ] Every flat assistant JSON validates against its schema and contains `line_of_business`; every common-model window target validates against its slice of the model view.
 - [ ] A window target cites only the window's own pages; no window holding a value no page prints is built; no coverage row is taught on a multi-window window that shows none of its home pages.
+- [ ] Every page of a policy is in a window of every group planned for its line, whatever its length; the declarations group's (and `dtd`'s) first window is pages 1–5 plus the detected declarations page; the corpus holds no `page_select` rows.
+- [ ] A drawn split holds one carrier out of train and val per line only where the line's real documents name at least 10 carriers; a line with fewer holds none out and is recorded in `lines_below_carrier_minimum`. A delivered split stays as delivered.
+- [ ] A gold a model drafted (`draft_backend`, or its `fideon:provenance` notes) with no `reviewer_id` and `review_date` stops the corpus build.
+- [ ] No `lossrun_totals` example is built while the Loss Run schema declares no `totals`.
 - [ ] `corpus_manifest` warns loudly and names under-represented LoB values below the 20% target.
 - [ ] `corpus_manifest` reports `alias_coverage` per canonical field × surface label and warns on variants below the floor.
 - [ ] `confusable_example_count` is reported per canonical field, and a zero count warns.
@@ -125,18 +130,19 @@ Writes `manifest.json` per corpus version — this is what training and eval rea
 
 ---
 
-## Current implementation (2026-10-13)
+## Current implementation (2026-10-21)
 
 A document's `lob` is read through `common.lob.merge_line` (`SourceDocument.__post_init__`): classic auto is
 personal auto everywhere.
 
 **Policy windows.** A canonical policy is built as one row per *(section group × page window)* per reading
 mode, planned by `policy_windows.plan_windows` — the same function `serving.pipeline` uses, so every served
-window is a shape a training row had. The pages come from `policy_windows.routed_pages`, i.e.
-`serving.page_router.plan_pages` over the OCR text **that row carries** (clean, corrupted, or none:
-`image_only` reads every page); a document of at most `DEFAULT_LONG_DOC_PAGE_THRESHOLD` (5) pages is not
-routed, but its declarations page is still detected. The groups are `common.schema_sections.groups_for(lob)`
-over `configs/schema_sections.yaml`:
+window is a shape a training row had. **Every page is read, chunk by chunk, never selected pages** (decision
+2026-10-19): `policy_windows.pages_to_read` returns every page of the document, whatever its length, with the
+declarations page `serving.page_router.plan_pages` detects in the OCR text the row is planned on (the clean
+text for `ocr_plus_image` and `noisy_ocr_image` — a noisy window is corrupted after planning — and none for
+`image_only`, which has no text to search). There is no page threshold, no routed subset and no `page_select`
+row. The groups are `common.schema_sections.groups_for(lob)` over `configs/schema_sections.yaml`:
 
 - **self-contained lines:** `decl`, `arrays`, `lineblk` (every section no other group claims), and `dtd`
   where the line carries it;
@@ -149,8 +155,14 @@ over `configs/schema_sections.yaml`:
 
 A group with no sections on the line is not planned at all.
 
-`decl` (and `dtd`) read the first `pages.declarations_leading` = **5** pages plus the detected declarations
-page when it falls later, together in leading windows; `arrays` and `lineblk` read every routed page.
+Every group reads every page (`common.schema_sections.pages_for(group, pages)`); the page rule — `every`
+for `arrays` and `lineblk`, `declarations` for `decl` and `dtd` — says only how the first window is formed.
+For `decl` and `dtd`, `schema_sections.leading_pages(group, pages, declarations_page=)` gives the first
+`pages.declarations_leading` = **5** pages plus the detected declarations page when it falls later; they are
+read together in the group's first window (split evenly only if they exceed one window), and every page after
+them follows in windows as for the other groups. A long policy therefore has more windows, and the corpus more
+rows, than when pages were selected: a corpus built before this change must be rebuilt and the adapters
+retrained, and earlier gate numbers are not comparable with new ones (IMPL-06).
 `expand_tasks.plan_policy_windows` packs whole page runs while they fit and splits a longer run evenly; on a
 common-model line consecutive windows of a split run share `run_overlap_pages: 1` page
 (`common.schema_sections.run_overlap`, `_split_overlapping`), so a row printed across the boundary is whole in
@@ -171,7 +183,8 @@ one window. A window's capacity is `expand_tasks.pages_per_extraction_call(..., 
 - A value with no `page_ref` is taught as it is in a group read in one window (`plan.single`). In a group
   read over several windows (`multi_window_sections`) it is given a page by `with_inferred_pages` when the
   clean OCR prints it (at least 4 characters, on word boundaries) on exactly one page, and is otherwise
-  reported `unplaced`. Values printed only on pages no window of their group reads are reported `unread`.
+  reported `unplaced`. Values printed only on pages no window of their group reads are reported `unread`;
+  with every page read, that is now only a value citing a page the document does not have.
 
 On a **common-model** line, additionally:
 
@@ -199,6 +212,24 @@ On a **common-model** line, additionally:
   (`within_schema`), put in the grammar's key order, and validated against the window's slice of the model
   view (`_check_writable`): a target the decoder could not write raises `CanonicalLabelError`.
 
+**Golds the build reads.**
+
+- **Reviewed golds only** (decision 2026-10-19: frontier models are never used for gold, synthetic or training
+  data): `pipeline_dag.load_labeled_documents` passes each gold and its metadata to
+  `export_golden_labels.review_problem`. A gold a model drafted — metadata `draft_backend`, or its own
+  `fideon:provenance` notes naming a model as the drafter or saying it was not reviewed — with no
+  `reviewer_id` and `review_date` in its metadata stops the build (`PipelineError`, naming it and up to five
+  others). A gold with neither a review record nor a drafting note loads. The import, the pre-upload audit and
+  the preflight refuse the same golds (IMPL-04, IMPL-13).
+- **One form-edition convention**: the label rules `prepare_bundles` applies to a common-model gold
+  (`corrected_gold` → `label_rules.apply_label_rules`) move an edition printed inside a form number in a shape
+  no form number takes (ISO's `AA 99 99 MM YY`, or a month and year in brackets after the number) to the
+  form's empty `edition_date`, parsed `MM/YY`, with the number's pages and confidence
+  (`label_rules.split_form_edition`); a filled `edition_date` is never overwritten. The import and the
+  pre-upload audit refuse a bundle that still carries one (`check_bundle`) and warn on a number that only may
+  end in one. This changed training targets: bundles prepared before it are prepared again and the corpus
+  rebuilt.
+
 **Label checks before slicing** (`build_jsonl._policy_window_rows`, once per document, on the clean OCR text
 whatever the row's mode — the target is the same answer in every mode):
 
@@ -217,6 +248,11 @@ count, the verification counts — is kept per document on `BuildResult.window_n
 common-model line, where more than `max_expansion_failures` (default 0) such documents fail the build.
 `classify_rows` (the family adapter's line question) exists, but `build_corpus(with_classify_rows=True)` is
 refused until serving asks that question.
+
+**Loss Runs** train as one whole-document `extract` row. `expand_tasks.expand_lossrun` (header, row windows,
+totals; arch §7b) has no production caller yet, and its `lossrun_totals` example is built only when the Loss
+Run schema declares `totals` (`expand_tasks.lossrun_schema_has_totals`). It declares none today; without the
+check every such target was `{}`, which teaches the model to ignore printed totals.
 
 **Blank pages** get one placeholder text in training and serving (`input_builder.EMPTY_PAGE_TEXT`) instead
 of an empty block in training and a placeholder at serving.
@@ -240,9 +276,19 @@ tokenizer re-measures every staged row before launch (IMPL-06).
 - **carriers are compared normalised** (`common.normalize.normalize_carrier`: "The Travelers Indemnity
   Company" = "TRAVELERS"; a bundle's own `carrier` first, else the label's), so a held-out carrier is not
   still in train under another spelling;
-- **held-out carriers**: once a type has `MIN_CARRIERS_FOR_HELD_OUT` (6) carriers, 2 drawn by hash from the
-  smaller half go entirely to test (`held_out_carriers`, `held_out_source_ids`);
-- `counts_by_line` and `train_only_lines` are recorded in the manifest's `split_assignment`.
+- **held-out carrier, one per line** (Fideon SPEC_09 amendment item 4; decision 2026-10-19): a line whose real
+  documents name at least `MIN_CARRIERS_PER_LINE_FOR_HELD_OUT` (10) carriers holds one carrier out of train
+  and val — every real family of it in that line goes to test (`held_out_carriers_by_line`,
+  `held_out_source_ids`). It is chosen by `held_out_carrier_per_line(..., min_carriers=)` on the split the hash
+  would draw: of the carriers whose removal still leaves the line a train and a val family, the one with the
+  fewest train and val documents, ties broken by a seeded hash. A line naming fewer carriers holds none out
+  (`CarrierHoldOut.below_minimum`, recorded per doc type as `lines_below_carrier_minimum` with each line's
+  carrier count); so does a line with one carrier (`single_carrier_lines`), none named
+  (`lines_without_carrier`), or no carrier it can spare (`lines_not_held_out`). This replaces "2 carriers per
+  doc type once 6 exist" and takes effect when a corpus is next split (a frozen eval set draws no new test
+  documents);
+- `counts_by_line`, `train_only_lines` and the hold-out records are in the manifest's `split_assignment`; the
+  run manifest's `split_policy` carries `lines_below_carrier_minimum` too.
 
 **Twin cap** (`split_groups.cap_twins`, drawn and delivered splits alike): at most `MAX_TWINS_PER_SEED` (20)
 synthetic twins of one seed (family) per render mode train, chosen by a seeded hash, before modes are drawn;
@@ -298,7 +344,8 @@ still halved by group; a split with no val, or no test before the eval set is fr
 freezing, no document may be delivered as test). The per-line carrier hold-out
 (`held_out_carrier_per_line`: the cheapest carrier whose families can all go to test while the line keeps a
 train and a validation family) is **off** for a delivered split (`HOLD_OUT_CARRIER_PER_LINE = False`; pass
-`hold_out_carriers=True` to apply it): the delivery already keeps whole seeds out of training. Documents
+`hold_out_carriers=True` to apply it, with the same minimum: `min_carriers`, default
+`MIN_CARRIERS_PER_LINE_FOR_HELD_OUT`): the delivery already keeps whole seeds out of training. Documents
 delivered with `held_out_carrier` that sit in test are added to `held_out_source_ids`
 (`delivered_held_out_ids`), so evaluation reports them apart. Families this pipeline detects by text
 similarity that cross the delivered split — several source documents of one carrier share a printed form —
@@ -306,7 +353,7 @@ are reported with a count of val/test documents on a form seen in training, not 
 `assert_synthetic_is_train_only` applies to drawn splits only; under a delivered split the synthetic twins of
 held-out sources are evaluated, and the gate reports real documents apart (IMPL-08). The corpus manifest's
 split record carries `delivered: true`, and the run manifest a `split_policy` summary (held-out carriers,
-lines holding none out, frozen set, families moved to test, twin cap).
+lines holding none out, lines below the carrier minimum, frozen set, families moved to test, twin cap).
 
 ## Changes since 2026-10-05
 
@@ -332,3 +379,14 @@ lines holding none out, frozen set, families moved to test, twin cap).
 - Split: drawn-split held-out carriers, the twin cap, per-tenant frozen sets, the MinerU-version guard and
   the >25% set-aside refusal; delivered split extended to SPEC_21 twin bundles, seed documents, insured
   families for real-only deliveries, the per-line carrier hold-out (off by default) and `held_out_carrier`.
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; architecture reference `finetuning-architecture-v2.4.docx` (with §0e, the decisions of 2026-10-19).
+- §1: de-identification is Option A (none), as the architecture records, not "blocked"; options A/B/C listed; "projector LoRA" corrected to the decoder LoRA; the manifest's `deidentified: false` / `image_redaction: "unresolved"` explained under Option A. §6 says the same.
+- §5 edge cases and *Page pairing*: long policies test the every-page window planner, not page selection; noisy windows are corrupted after planning.
+- Acceptance checklist: every page in a window of every group, the declarations group's first window, no `page_select` rows; the one-carrier-per-line rule from 10 carriers; unreviewed model-drafted golds stop the build; no `lossrun_totals` example while the schema has no totals.
+- Current implementation, policy windows: every page read (`policy_windows.pages_to_read`, `schema_sections.pages_for` / `leading_pages`, page rules `every` / `declarations`); no page threshold, routed pages or `page_select`; more windows per policy, so a rebuild and retrain; `unread` now only means a page the document does not have.
+- Current implementation, golds: `load_labeled_documents` refuses an unreviewed model-drafted gold (`review_problem`); the form-edition label rule applied by `prepare_bundles` (`split_form_edition`).
+- Current implementation, Loss Runs: the `lossrun_totals` example only when the schema declares `totals`.
+- Split: one carrier per line, only in a line naming 10 or more carriers (`MIN_CARRIERS_PER_LINE_FOR_HELD_OUT`, `held_out_carrier_per_line`, `below_minimum`, `lines_below_carrier_minimum`), replacing 2 per doc type once 6 exist; the delivered split's opt-in hold-out takes the same minimum.

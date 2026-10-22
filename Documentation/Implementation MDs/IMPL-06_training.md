@@ -1,10 +1,10 @@
 # SPEC 06 — Training (ms-swift LoRA: ONE Unified Adapter)
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-05.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §3 (ViT escalation gate — **LoRA, never full FT**), §4.1 (**one unified adapter**), §4.2 (graduation gate for per-type adapters), §6.1 (per-epoch modality sampling), §8b (tenancy per Fideon SPEC_12; de-identification per Fideon SPEC_11 — blocked, see IMPL-05), **§9.2 (bf16 base vs 4-bit)**, §9.3 (memory settings), §9.4 / §9a (frozen ViT and mergers; LoRA targets), §10 (**locked three-layer trainer stack**), §11 (hyperparameters), §11.2 (checkpoint selection), §11a (**sweep methodology**), §12 (versioning + run registry).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §3 (ViT escalation gate — **LoRA, never full FT**), §4.1 (**one unified adapter**), §4.2 (graduation gate for per-type adapters), §6.1 (per-epoch modality sampling), §7b (policy windows over every page), §8b (tenancy per Fideon SPEC_12; de-identification per Fideon SPEC_11 — Option A, none, see IMPL-05 §1), **§9.2 (bf16 base vs 4-bit)**, §9.3 (memory settings), §9.4 / §9a (frozen ViT and mergers; LoRA targets), §10 (**locked three-layer trainer stack**; §10.1 fallback, §10.2 parity tests), §11 (hyperparameters), §11.2 (checkpoint selection), §11a (**sweep methodology**), §12 (versioning + run registry).
 
 ## Goal
 
@@ -29,7 +29,7 @@ Layer 1   PyTorch + Transformers + PEFT + Accelerate (bitsandbytes only under lo
 
 TRL's `SFTTrainer` is **not** in this stack: ms-swift builds its own `Seq2SeqTrainer` on the HF Trainer, and TRL is a dependency for its RLHF trainers only. `training/train.py` is a **thin wrapper that assembles the ms-swift config and launches it**, not a custom training loop.
 
-**Fallback clause:** migrating to TRL `SFTTrainer` is permitted **only** if ms-swift lacks a specific Qwen3-VL capability needed at implementation time. It is a framework migration, not a layer swap — the template, collator and masking must be re-implemented against the §10.2 parity tests. Document it if invoked.
+**Fallback clause (arch §10.1):** migrating to TRL `SFTTrainer` is permitted **only** if ms-swift lacks a specific Qwen3-VL capability needed at implementation time. It is a framework migration, not a layer swap — the template, collator and masking must be re-implemented against the §10.2 parity tests. Document it if invoked. (Dropping to ms-swift's own `Seq2SeqTrainer` is not the fallback: it is already Layer 2.)
 
 ## Deliverables
 
@@ -46,7 +46,7 @@ Replaces v1's `train_foundation.py` and `train_adapter.py`. One entrypoint. The 
 - **Datasets.** **Epochs are files, and ms-swift runs one pass over them** (§6.1). `dataset` is the first `num_train_epochs` (3) of the scope's epoch files — `corpus/{tenant}/v{n}/train/epoch_{1..4}.jsonl` for the unified scope, the view under `train/scope/{name}/` otherwise — and ms-swift is given **`num_train_epochs: 1`**. Each file already holds every train document once in that epoch's modality draw, so the concatenation *is* the N-epoch run; also telling ms-swift N looped the N files N times — nine passes for a "3 epoch" run. The manifest records the logical count. Fewer epoch files than epochs is refused. `val_dataset` is the scope's validation file (`corpus/{tenant}/v{n}/val/val.jsonl`, or `val/scope/{name}/val.jsonl`), staged as the fixed loss sample (see *Evaluation*) and passed separately (see below). The corpus is read for `--tenant`, never silently from the default tenant. (ms-swift shuffles across the concatenation, so epoch-2 rows can precede epoch-1 rows; each document is still seen exactly N times, each time in its drawn regime.)
 - **Evaluation during training** is validation **loss** on a fixed stratified sample of **`evaluation.loss_sample_rows` (160)** validation rows (`train.loss_sample_rows`, falling back to `validation_sample_rows`; chosen by `evaluation.validation_sample.validation_sample`, stratified by line × reading mode, by a stable hash). It only draws the progress curve: **no early stopping is passed to ms-swift** and **`load_best_model_at_end: false`**. The run is divided into **`evaluations_per_run` (10)** checks (`_eval_interval`: ⌈optimizer steps ÷ 10⌉; without the setting, the configured `eval_steps` shrunk so a run gets at least 5). `_checkpoint_cadence` then saves a resume point at least every **`checkpoint_every_steps` (70)** steps — multiplied by the GPU count, since n GPUs run n× the steps in the same hour — evaluates on every k-th save (`eval_steps` = `save_steps` × k), and sets `save_total_limit` to the configured 4 × k + 1, so the limit counts evaluation checkpoints and resume points never push a candidate out. `metric_for_best_model: eval_loss`, `greater_is_better: false` let the trainer record the best-loss checkpoint, one selection candidate. **Loss never selects what ships** — see §3 below.
 - **Staging:** the adapter and its `checkpoint-*` directories go to the RunPod staging volume under `staging/adapters/foundation/v{n}/` (unified; `staging/adapters/scope/{scope}/v{n}/` for a scoped run). Pushed to Blob by `package` (the checkpoint selection chose), or immediately with `finetune --push-adapters` (the best-loss checkpoint, else the last, before selection) — the adapter's weights and config only (`push_scoped_adapter`), never a checkpoint's resume state.
-- **Manifest:** a `RunManifest` (IMPL-02) is written at status **`training`** before launch; `launch_and_record` flips it to `trained` when ms-swift returns, or **`failed`** when it raises, so the registry never claims weights a crashed run never wrote. It records the full config, data stats, LoB coverage, seed, git commit, corpus version, MinerU version, schema/prompt template versions, and the de-identification flag (recorded, not asserted, while de-identification is blocked — IMPL-05 §1). A model card is written beside it (`registry_utils/model_card.py`).
+- **Manifest:** a `RunManifest` (IMPL-02) is written at status **`training`** before launch; `launch_and_record` flips it to `trained` when ms-swift returns, or **`failed`** when it raises, so the registry never claims weights a crashed run never wrote. It records the full config, data stats, LoB coverage, seed, git commit, corpus version, MinerU version, schema/prompt template versions, and the de-identification flag (recorded, not asserted: `false` under Option A, no de-identification — IMPL-05 §1). A model card is written beside it (`registry_utils/model_card.py`).
 - **The YAML's `evaluation:` block** is read in three places. `build_training_config` passes `eval_strategy`, `save_strategy`, `metric_for_best_model`, `greater_is_better` and `load_best_model_at_end` directly, and derives `eval_steps`, `save_steps` and `save_total_limit` from `evaluations_per_run`, `checkpoint_every_steps` and `save_total_limit`. Staging reads `loss_sample_rows`. Checkpoint selection reads `validation_sample_rows` and the `selection_*` keys (§3). `early_stopping_patience` is still in the YAML and passed nowhere: ms-swift 3 accepts none.
 
 Flags: `--corpus vN`, `--out-version vN`, `--tenant`, `--scope NAME` (defaults to unified), `--deepspeed zero2|zero3`, `--train-vit` (refused, see *Current implementation*), `--continue-from <checkpoint dir>`, `--dry-run`.
@@ -66,7 +66,7 @@ Runs as the `checkpoint_eval` stage, between training and merge.
 
 - **Candidates:** the last 3 checkpoints by step (`TRAILING_CANDIDATES`), plus the best-loss one. After a real run, `discover_checkpoints` reads them from ms-swift's versioned output directory (`…/v{n}/v0-<timestamp>/checkpoint-*`, the most recent run), keeping only checkpoints an evaluation fell on plus the last (resume points saved between evaluations are not candidates), and the best-loss checkpoint from `trainer_state.json`.
 - **Scoring:** each candidate is applied as a **decoder LoRA** on the bf16 base in vLLM and generates over a fixed stratified sample of **`validation_sample_rows` (400)** rows of the scope's validation view, in all three reading modes, through `evaluation/validation_generation.py` — the row's own prompt with the golden answer removed, constrained as serving is, `validation_batch_rows` (96) rows per vLLM call — and is scored by the gate's own `build_report`. The winner has the best `field_normalized_match`; ties go to the later step. A candidate whose scoring raises is skipped and recorded, never scored zero.
-- **Whole documents decide among the finalists** (`choose_on_documents`): the `selection_document_finalists` (2) best are scored on every validation row of `selection_document_modes` (`[ocr_plus_image]`; filtered by mode so every document stays whole) and judged on whole documents, windows merged as serving merges them. The best `document_field_normalized_match` wins among finalists whose `document_hallucination_rate` and `document_false_null_rate` are within `selection_guard_margin` (0.02) of the best finalist's. With fewer than 2 finalists configured, a near-tie under `selection_tie_break_margin` (0.015) is re-decided on the full split instead (`break_tie`). A mode filter matching no row is refused before the engine loads.
+- **Whole documents decide among the finalists** (`choose_on_documents`): the `selection_document_finalists` (2) best are scored on every validation row of `selection_document_modes` (`[ocr_plus_image]`; filtered by mode so every document stays whole) and judged on whole documents, windows merged as serving merges them. The best `document_field_normalized_match` wins among finalists whose `document_hallucination_rate` and `document_false_null_rate` are within `selection_guard_margin` (0.02) of the best finalist's. With fewer than 2 finalists configured, a near-tie under `selection_tie_break_margin` (0.015) is re-decided on the full split instead (`break_tie`). A mode filter matching no row is refused before the engine loads. A whole common-model document's schema validity is judged as serving would return it (`coverage_metrics.score_schema_validity` → `serving.pipeline.served_schema_verdict`: enveloped, system fields and every key filled, then checked), so a merged answer is not failed for what the pipeline supplies — which had made `document_schema_validity_rate` read a false 0%.
 - **On a multi-GPU pod** the candidates are scored at once, one worker and vLLM engine per GPU (`parallel_vllm_scorer`), up to the run's training GPU count.
 - **Why not loss:** averaged over every token, it is dominated by schema keys and JSON punctuation the model gets right in the first hundred steps. A checkpoint can improve on loss while getting worse at the values.
 
@@ -122,8 +122,8 @@ The protocol is implemented and tested against a stub trainer. What waits is *ru
 - **One adapter.** No code path trains a per-type adapter outside the §4.2 graduation gate, and none stacks two LoRAs.
 - **ViT and mergers frozen** unless `--train-vit` — and then LoRA-on-ViT, never full fine-tune. The mergers are never a LoRA target.
 - Every run writes a manifest — **no silent training, sweeps included**.
-- Runs record (not yet assert) de-identification status; every run asserts its corpus is single-tenant.
-- Vision budgets and sequence caps come from `configs/shared/` and must match data prep and serving (the §10.2 parity tests assert this).
+- Runs record (not assert) de-identification status — `false` under Option A (IMPL-05 §1); every run asserts its corpus is single-tenant.
+- Vision budgets and sequence caps come from `configs/shared/` and must match data prep and serving (the §10.2 parity tests assert this; token parity is measured on the pod, see *Current implementation*).
 - Seed is fixed, logged, and recorded in the manifest.
 
 ## Datasets, and the split that must stay split
@@ -148,6 +148,8 @@ The trainer receives **`--dataset` (the epoch files) and `--val_dataset` (val) a
 - [ ] The assistant span **includes** the end-of-turn token, so EOS is supervised.
 - [ ] **Label masking verified**: loss only on assistant tokens; a mutated masking implementation fails the test.
 - [ ] Every flag in the rendered command is one ms-swift 3's own parser accepts (Phase 0 spike `check_ms_swift` parses the exact command with `HfArgumentParser(TrainArguments)`).
+- [ ] On the pod, `tests/test_parity.py::test_template_token_parity` (`pytest -m gpu`) passes: ms-swift's encoder and a vLLM engine on the serving pixel budget give identical prompt token ids and identical per-image token counts, each equal to the resize rule, and the processor's pixels per visual token equal `cap_check.PIXELS_PER_VISUAL_TOKEN`. Off the pod it skips, naming what is missing.
+- [ ] No scope declares `page_select`: a task list naming it is refused at load as an unknown task.
 - [ ] `--continue-from` refuses a run-id and marks the manifest so the gate demands cross-type regression evidence.
 - [ ] Checkpoints are discovered from the versioned output directory after training, and selection scores them with the gate's metric, not loss.
 - [ ] Adapter lands on the staging volume; the RunManifest lands in **Blob** with `artifacts.status: "staged"`, LoB coverage, and seed recorded.
@@ -156,7 +158,7 @@ The trainer receives **`--dataset` (the epoch files) and `--val_dataset` (val) a
 
 ---
 
-## Current implementation (2026-10-13)
+## Current implementation (2026-10-21)
 
 **ms-swift 3 command** (`build_training_config`; `pyproject.toml` pins `ms-swift>=3.9,<4`): `model` (the
 local base directory — see below — else the Hub id, with `model_revision` only for a Hub id), `use_hf`,
@@ -222,6 +224,24 @@ one layout family on two output shapes (`common.scopes.assert_one_output_shape`,
 both `MAX_PIXELS`/`MIN_PIXELS` and `IMAGE_MAX_TOKEN_NUM`/`IMAGE_MIN_TOKEN_NUM` (whole 32×32 tokens), the
 same function the vLLM engine takes its budget from.
 
+**Train/serve token parity, measured on the pod** (arch §10.2): `tests/test_parity.py::test_template_token_parity`
+(marked `gpu`) encodes ten fixed rows — or the first rows of the staged epoch file `$FIDEON_PARITY_CORPUS`
+names — with the trainer's own ms-swift encoder (`_masking_encoder` over `build_training_config`) and with a
+vLLM engine built on the serving pixel budget (`pixel_budget()`), and asserts identical prompt token ids up to
+the assistant header and identical per-image visual-token counts, each equal to the resize rule the sequence
+caps use (`training.length_check.image_tokens`). It also measures pixels per visual token from the processor
+(patch × merge, squared) against `cap_check.PIXELS_PER_VISUAL_TOKEN` (1,024). Without a CUDA GPU, the pinned
+base weights, ms-swift or vLLM it skips, naming what is missing. What is compared lives in `training/parity.py`
+(`prompt_ids`, `image_pad_runs`, `from_swift_row`, `flat_ids`) and is tested without a GPU; the Phase 0 spike
+(`check_swift_row_format`) compares token ids the same way, not decoded text. Serving output parity
+(`test_serving_output_parity`) is still a placeholder that skips.
+
+**Every page is read** (decision 2026-10-19): a policy trains on its windows over every page (IMPL-05), so a
+long policy has more windows than when pages were selected and a run over the same documents is longer. A
+corpus built before this change must be rebuilt and both adapters retrained before the next gate; earlier gate
+numbers are not comparable with new ones. The corpus holds no `page_select` rows: the task, with its sequence
+and vision budgets, is gone (`Task.PAGE_SELECT` removed), so no scope declares it.
+
 **Base model**: loaded from `model.local_dir` in `configs/base_model.yaml` (default `/workspace/models`;
 the directory itself, a folder named after the model, or a Hugging Face cache snapshot), overridable with
 `FIDEON_BASE_MODEL_DIR`. The manifest still records `model_id@revision` as the identity.
@@ -261,7 +281,9 @@ for every epoch, in this order:
 Validation and test are never sampled, rotated or repeated. None of the three applies to the unified scope,
 which reads the corpus files as they are and warns when they are configured. **casualty_fleet** (`lines:
 [gl]`, `training_config: unified`) is the CGL adapter, trained in its own tenant on the CGL bundles
-(`--tenant`): one line, real documents only, so the three change nothing there. A scope without `lines`
+(`--tenant`): one line, real documents only, so the three change nothing there. The architecture records that
+its v1 adapter was trained and scored on golds a model drafted and nobody reviewed; such golds no longer
+reach a corpus (IMPL-05), so they are reviewed before it trains again. A scope without `lines`
 (`policy`, `lossrun`) filters by type alone.
 
 ## Changes since 2026-10-05
@@ -287,3 +309,12 @@ which reads the corpus files as they are and warns when they are configured. **c
   `assert_corpus_mix` and `assert_one_output_shape`, scoped manifest stats, and the scope view's data mix,
   render rotation and line balance; casualty_fleet added.
 - Checklist: scoped `max_length`, evaluation cadence and the loss/selection samples.
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; architecture reference `finetuning-architecture-v2.4.docx` (§7b, §10.1, §10.2 named); de-identification is Option A (none), not "blocked".
+- Locked stack: the fallback clause cites arch §10.1 — a migration to TRL `SFTTrainer` — and says ms-swift's `Seq2SeqTrainer` is Layer 2, not the fallback.
+- §1 manifest and Constraints: the de-identification flag is recorded as `false` under Option A; token parity is measured on the pod.
+- §3: checkpoint selection judges a whole common-model document's schema validity with `served_schema_verdict`.
+- Acceptance checklist: the GPU token-parity test; no scope declares `page_select`.
+- Current implementation: token parity on the pod (`training/parity.py`, `test_template_token_parity`, GPU-marked, the spike comparing token ids); every page read, so more windows per policy, a longer run, a corpus rebuild and retrain of both adapters, and no `page_select` rows; casualty_fleet v1's unreviewed golds.

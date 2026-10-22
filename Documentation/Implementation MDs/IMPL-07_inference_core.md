@@ -1,12 +1,12 @@
 # SPEC 07 — Inference Core (Shared Model-Runner Primitive)
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02. **This module exists to break the cycle between evaluation, calibration, serving, and testing** — they all need one shared way to run a model version over a document. Build it here, once; everything downstream imports it.
 >
 > **Naming hazard (master §0.1):** in this folder `IMPL-07` is the inference core. The architecture's "**Fideon SPEC_07 Stage 3**" is the external production **audit gate** — a different document. They are unrelated.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §5 (logprobs → field spans), §6 (modality modes), §7 (prompt template identity, multi-page inputs), §11 (resolution cap).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §5 (logprobs → field spans), §6 (modality modes), §7 (prompt template identity, multi-page inputs; §7b windows over every page), §11 (resolution cap).
 
 ## Why this module exists
 
@@ -36,7 +36,7 @@ A clean, low-level inference engine: given a resolved model version + a prepared
 - `build_messages(doc_type, image_paths, ocr_pages, modality_mode, *, acord_form=None, lob=None, sections=None, assistant_content=None, check_resolution_parity=True, page_numbers=None, total_pages=None)` → `BuiltMessages`: the exact chat-format `messages` (master §9), rendered through **`common.prompts`**. `lob` selects a policy's per-line schema, `sections` the slice of it one window asks for (`configs/schema_sections.yaml`), and `assistant_content` the golden JSON when `build_training_row` builds a corpus row. This is the single place prompt + image + OCR get assembled, so dataset build, evaluation, serving, and testing are guaranteed identical.
   - **`ocr_pages` is one markdown string per image, not one joined blob.** A mismatched length is refused: a short or long list shifts every page's text onto the wrong image, and every value after the shift is then attributed to the wrong page.
   - The user turn is **interleaved** — `[img_1][<page 1 of M> + md_1][img_2][<page 2 of M> + md_2]…` — so which text belongs to which image is positional rather than something the model infers. Joining destroyed that, and (because a blank line ends a Markdown table) split every table crossing a page boundary in two.
-  - `page_numbers` / `total_pages` let a routed request label pages truthfully (`<page 9 of 20>`). The gap in the numbering is what tells the model it holds a fragment, so fields living on unshown pages are absent rather than missing.
+  - `page_numbers` / `total_pages` let one window of a long document label its pages truthfully (`<page 9 of 20>`), in the document's own numbering. Every page of a document is read (decision 2026-10-19): a request is either the whole document or one window of it — a policy's section-group windows (`policy_windows.plan_windows`, the same planner the corpus build uses) or a long Loss Run's row windows — never a selected subset. A window's numbering (pages 6–12 of 40, or a declarations window of pages 1–5 plus page 9) is what tells the model it holds a fragment, so fields living on pages other windows read are absent rather than missing. `build_training_row` forwards both, so a corpus row of a window carries the same markers.
   - `image_only` carries the markers and no markdown. The guarantee is *no OCR text*, not *no text at all*.
 - Handles `image_only` (omit the OCR block, use the image-only prompt with its explicit "no OCR provided" declaration) vs `ocr_plus_image` (arch §6). `image_only` with OCR text, or another mode without it, is refused.
 - **Multi-page inputs:** accepts an ordered list of page images and emits them as ordered `image` blocks, each followed by its own page's text. **Page order is positionally meaningful** under Interleaved-MRoPE (arch §3) — ordering must be explicit and stable, never set-like.
@@ -69,7 +69,8 @@ A clean, low-level inference engine: given a resolved model version + a prepared
 - [ ] `load_model("v2")` resolves + loads a version's merged weights; `load_model("base", adapter=...)` serves base + a LoRA applied per request, not merged; base-only loading also works.
 - [ ] `build_messages(...)` yields **byte-identical** structure for eval, serving, and testing given the same inputs.
 - [ ] Each page image is immediately followed by that page's own text, and every text block carries its `<page N of M>` marker.
-- [ ] A **routed subset is a subsequence of the full document** — the same blocks, fewer pairs — so a long policy is served in the shape it trained on. Comparing only *system* prompts does not catch this; the user turn must be compared too.
+- [ ] A **window is a subsequence of the full document** — the same blocks, fewer pairs, the document's own page numbers — so a long policy is served in the shape it trained on. Comparing only *system* prompts does not catch this; the user turn must be compared too.
+- [ ] No request carries a selected subset of pages: every page of a document is in the one whole-document request or in a window (`policy_windows.plan_windows` serves the windows the corpus was built with).
 - [ ] A mismatch between the page-image count and the page-text count is refused.
 - [ ] Two pages' markdown is never concatenated, so a table crossing a page boundary is not split.
 - [ ] `build_messages(...)` rendering matches what IMPL-05 wrote into the corpus for the same doc_type + modality_mode (round-trip test against a corpus row).
@@ -81,8 +82,17 @@ A clean, low-level inference engine: given a resolved model version + a prepared
 
 ---
 
-## Current implementation (2026-10-13)
+## Current implementation (2026-10-21)
 
+- **Every page is read, never selected pages** (decision 2026-10-19). There is no page routing, page threshold
+  or `long_doc_types` any more: `serving.page_router.plan_pages` returns every page and only detects the
+  declarations page (`RoutingPlan` has no `routed`), and the routed single-call branch of serving is gone. A
+  request reaching `build_messages` is the whole document (ACORD, a Loss Run whose rows fit one answer, any
+  other type) or one window: a canonical policy's windows over every page, planned by `policy_windows.plan_windows` from
+  `pages_to_read` exactly as the corpus build plans them, the declarations group's first window being pages
+  1–5 plus the detected declarations page; or a long Loss Run's row windows, a shape no training row has yet
+  (Loss Runs train as whole documents, IMPL-05). Each window is built with its own `page_numbers` and the
+  document's `total_pages`.
 - **vLLM backend**: refuses to build an engine without CUDA (`common.gpu.require_cuda`); passes
   `mm_processor_kwargs={"min_pixels", "max_pixels"}` from `pixel_budget()`; `close()` releases the engine
   (tears down vLLM's parallel state, collects, empties the CUDA cache) and `release_model(model)` calls it.
@@ -114,3 +124,10 @@ A clean, low-level inference engine: given a resolved model version + a prepared
 - Span mapping: string spans exclude quotes; `collapse_spans` takes `raw`'s span.
 - `runner_config`: listed the real fields and current values (`max_new_tokens` 12,288, `max_seq_len` 32,768); added per-task answer caps (`answer_cap`, policy schedule 12,288) and decoding page bounds (`with_page_bounds`).
 - Current implementation: checkpoint selection's per-GPU engines, base + adapter callers, and the pin note updated.
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; architecture reference `finetuning-architecture-v2.4.docx` (§7b named).
+- §2 `build_messages`: `page_numbers` / `total_pages` label one window of a long document, not a routed request; every page is read, a request is the whole document or one window, and `build_training_row` forwards the same markers.
+- Acceptance checklist: "a routed subset" replaced by "a window is a subsequence of the full document"; new item: no request carries a selected subset of pages.
+- Current implementation: every page read — no page routing, page threshold, `long_doc_types` or `RoutingPlan.routed`; the shapes a request can take (whole document, a canonical policy's windows, a long Loss Run's windows).

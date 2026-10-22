@@ -1,10 +1,10 @@
 # SPEC 10 — Postprocessing (Merge + Serving-Format Quantization)
 
-> Aligned with the code at commit f5668a4 (2026-10-13).
+> Aligned with the code of 2026-10-21.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-02, IMPL-06.
 >
-> **Architecture refs:** `finetuning-architecture-v2.3.docx` §13 steps 7–8, §13a (**vLLM-native serving formats**), §13b (quantization quality thresholds, absolute percentage points), §18 (artifact paths).
+> **Architecture refs:** `finetuning-architecture-v2.4.docx` §13 steps 7–8, §13a (**vLLM-native serving formats**), §13b (quantization quality thresholds, absolute percentage points), §18 (artifact paths).
 
 ## Goal
 
@@ -15,6 +15,8 @@ Fold the trained adapter into the base model, and produce the quantized formats 
 v1 produced `fp16` + `q5_k_m` GGUF files every cycle. GGUF is **llama.cpp's** format and the endpoint runs **vLLM**, so the pipeline spent conversion and eval compute on an artifact nothing could deploy — and there was no small format the server *could* open, leaving bf16 or nothing.
 
 v1's own module docstring had the right of it: *"GGUF is the portable/edge path and vLLM on the merged model is the primary one."* It never followed through, and left `DEFAULT_FORMATS = ("fp16", "q5_k_m")` making a GGUF the per-cycle deliverable.
+
+**GPU only** (decision 2026-10-19). The merge, every quantized export and the vLLM engine that serves and scores them run on CUDA and refuse to start without it (`common/gpu.py` `require_cuda`); nothing falls back to the CPU. Every deployment target is a vLLM format on a GPU. GGUF stays an **optional edge export** (§2a), never a deployment target.
 
 ## 1. `training/merge.py`
 
@@ -30,7 +32,7 @@ v1's own module docstring had the right of it: *"GGUF is the portable/edge path 
 
 | Format | Tool | Hardware | Role |
 |---|---|---|---|
-| **bf16 merged** | PEFT merge | Any | Reference, and cycle 1's serving format |
+| **bf16 merged** | PEFT merge | Any CUDA GPU | Reference, and cycle 1's serving format |
 | **FP8 (W8A8)** | llm-compressor | Native FP8 on Ada/Hopper (L4, L40S, H100, H200); weight-only on A100 | Default serving format from cycle 2 |
 | **AWQ INT4 (W4A16)** | llm-compressor | Modern NVIDIA | VRAM-constrained serving only, if it meets threshold |
 
@@ -47,11 +49,11 @@ python -m orchestration.run package --version v2 --release-id release-2026.11.1 
 
 **The vision path is never quantized.** `NEVER_QUANTIZED = visual.*, mergers, aligners, lm_head`, passed to llm-compressor as its ignore list (arch §13a). Compressing it produces a model that loads cleanly and reads pages badly — very hard to notice, because it still emits well-formed JSON.
 
-**Every serving format gets its own calibrator fit and its own gate run.** Quantization degrades exactly what was fine-tuned in, so an FP8 release inherits nothing from bf16's result.
+**Every serving format gets its own calibrator fit and its own gate run.** Quantization degrades exactly what was fine-tuned in, so an FP8 release inherits nothing from bf16's result. Today the evaluation gate scores bf16 only (its decision is `release_gate_decision(release, "bf16", tenant)`); a quantized format with no gate decision of its own leaves the release bundle at status `gated`, never `promoted`.
 
 ## 2a. GGUF — the edge export, on request only
 
-`plan_gguf_export` / `export_gguf` produce a GGUF for an **offline or edge** deployment. Not per-cycle, not on the serving path, and **validated separately in llama.cpp** against the §13b AWQ INT4 column — the serving gate does not cover it, because the serving endpoint never loads one.
+`plan_gguf_export` / `export_gguf` produce a GGUF for an **offline or edge** deployment. Not per-cycle, not on the serving path, not a deployment target (the deployment is GPU only), and **validated separately in llama.cpp** against the §13b AWQ INT4 column — the serving gate does not cover it, because the serving endpoint never loads one. No command calls it, and past its guards `export_gguf` raises `NotImplementedError`: the llama.cpp conversion is not wired.
 
 The v1 mmproj guard is carried over **unchanged**: Qwen3-VL is multimodal, so a GGUF needs the quantized LLM **plus a separate `mmproj`** file for the vision encoder and projector. Exporting without a verified one produces a model that loads and cannot see, which fails silently on every image-only document.
 
@@ -88,6 +90,14 @@ A format exceeding **any** threshold is not served. Asking the serving gate abou
 - Also checks **row recall** and **confusable misattribution** on their own margins: a quantized model that keeps its field accuracy while dropping claim rows has lost exactly what a Loss Run is for, and an aggregate field score would not show it.
 - Writes `quant_threshold_results` into the quantize stage result (`ValidationReport.manifest_entry()`) and **refuses promotion of an over-threshold format** (`assert_servable`) — no override flag.
 
+## 5. Where the gates sit in `package`
+
+`package` runs stages 8–11 in order (`orchestration.pipeline_dag.STAGES`): **quantize** (the §4 threshold gate at its end, when per-format metrics are supplied) → **calibrate** (IMPL-09) → **evaluation_gate** → **package** (the push).
+
+- **The promotion gate** (IMPL-08) scores the merged bf16 model on the frozen golden eval set through serving, with the release's bf16 calibrators. It holds every floor; judges non-inferiority by a **paired bootstrap** over the per-document scores of the candidate's and the promoted release's eval reports (`paired_document_scores`; a point comparison, with a logged warning, against a report written before per-document scores were kept); and blocks a release that improves no primary metric unless `--fixes-defect "<ticket>"` names the defect it fixes (on `package` and `all`; recorded in the decision). A passing release is **production** at `field_normalized_match` ≥ 0.92 and **interim** below it — and **interim whatever its score** when the frozen set was accepted small (`small_set_accepted`), with a warning in the decision.
+- A blocked gate stops the release: the merged model stays on the staging volume, nothing is published, and the command exits non-zero with the per-metric verdicts. The push re-reads the recorded decision (`assert_gate_passed`) and refuses a version that did not pass, so a standalone `package` cannot publish it either. The release bundle carries the bf16 decision's tier.
+- **Latency is recorded, not gated** (no latency SLA; decision 2026-10-19): `record_release_measurements` copies P95 latency per adapter and peak GPU memory from the eval report's `release_measurements` onto the bundle, and a missing measurement is a warning, never a block.
+
 ## Constraints
 
 - Merged models never overwrite adapters (separate Blob paths).
@@ -113,10 +123,14 @@ A format exceeding **any** threshold is not served. Asking the serving gate abou
 - [ ] **`assert_servable` refuses a serving format that produced no verdict at all.** `validate_quant` only returns a result for formats it was given metrics for, so a format nobody scored appears in neither `servable_formats` nor `blocked_formats`. Checking `blocked_formats` alone let it sail through to push with zero measurements — the precise inverse of the rule this module exists to enforce.
 - [ ] The threshold gate sits inside `package`, between quantize and calibrate.
 - [ ] `package` publishes an adapter as its `adapter_config.json` and `adapter_model.safetensors` only, never a checkpoint's resume state.
+- [ ] The merge and every quantized export refuse to run without CUDA; nothing falls back to the CPU.
+- [ ] The promotion gate runs inside `package`, after calibrate and before the push; the push refuses a version whose recorded gate decision did not pass.
+- [ ] The release bundle's tier is the bf16 gate decision's: `interim` below 0.92, and `interim` whatever the score when the frozen set was accepted small.
+- [ ] P95 latency and peak GPU memory are recorded on the release bundle and never block a release.
 
 ---
 
-## Current implementation (2026-10-13)
+## Current implementation (2026-10-21)
 
 **Merge** (`training/merge.py`, run by `orchestration.pipeline_dag.stage_merge`), implemented:
 - refuses an adapter directory without `adapter_config.json` (a run's output root is not an adapter), and
@@ -159,3 +173,12 @@ manifest's `quantized_model` points at the first quantized format — never bf16
 - §4: `validate_quant` judges supplied metrics only; no CLI supplies them yet, so the stage warns.
 - *Current implementation*: the published adapter is `adapter_config.json` + `adapter_model.safetensors` only (also for `--push-adapters`); adapter and merged-model pushes skip identical files by MD5; the bundle and routing check come before any push; the llm-compressor export is not wired.
 - Acceptance checklist: added the bf16 no-op and the two-file adapter publish.
+
+## Changes since 2026-10-13
+
+- Header: aligned with the code of 2026-10-21; architecture reference is `finetuning-architecture-v2.4.docx`.
+- What changed from v1: GPU only (decision 2026-10-19); GGUF an optional edge export, never a deployment target.
+- §2: the bf16 reference runs on any CUDA GPU, not any hardware.
+- §2a: GGUF is not a deployment target; no command calls `export_gguf`, and the llama.cpp conversion is not wired.
+- §5 (new): the stage order in `package`; the promotion gate's paired bootstrap, `--fixes-defect` and the interim cap for a small eval set; the push re-checks the decision; the bundle's tier; latency recorded, not gated (no SLA).
+- Acceptance checklist: GPU only; the gate's place and the push's check; the bundle's tier and the small-set cap; latency never blocks.

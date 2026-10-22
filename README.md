@@ -14,7 +14,7 @@ in `schemas/` are those canonical models serialised to JSON Schema.
 
 | Where | What |
 |---|---|
-| `Documentation/finetuning-architecture-v2.3.docx` | The design and its rationale - the *why* (v2.3, with the implementation update of 2026-10-13). v2.1 and v1 are kept for history only |
+| `Documentation/finetuning-architecture-v2.4.docx` | The design and its rationale - the *why* (v2.4: the decisions of 2026-10-19 and the review fixes of 2026-10-21, §0e and Appendix A). v2.3, v2.1 and v1 are kept for history only |
 | `Documentation/Implementation MDs/IMPL-00` .. `IMPL-15` | Module specs and acceptance criteria - the *how*; IMPL-00 §13 indexes what the code does now |
 | `Documentation/Implementation MDs/IMPL_ALL_COMBINED.md` | All specs in one file |
 
@@ -37,6 +37,8 @@ python -m orchestration.run finetune --input ./intake --corpus-version v1 --out-
 
 # 2  quantize -> calibrate -> GATE -> push real weights + release bundle to Azure Blob
 python -m orchestration.run package --version v2 --release-id release-2026.11.1 --formats bf16
+#    a release that improves no primary metric needs --fixes-defect "<ticket>"; a gate on an eval set
+#    frozen with --allow-small is capped at interim
 
 # 3  extraction through the serving pipeline, on documents already imported and OCR'd
 python -m orchestration.run extract --model base|v1|v2 --tenant T --source-ids policy_0001 policy_0002
@@ -94,8 +96,7 @@ It checks the GPU, the `/workspace` mount and 150 GB free; fills `.env`
 overwriting a value you set; builds **two environments** on the volume; moves
 MinerU's config onto the volume and sets it to cuda; downloads the base model at
 the pinned revision into `/workspace/models`; and runs the Phase 0 spike. It ends
-with a list of anything still to do (the Azure connection string, MinerU's
-weights).
+with a list of anything still to do (the Blob login, MinerU's weights).
 
 | Environment | For | Why separate |
 |---|---|---|
@@ -103,8 +104,10 @@ weights).
 | `/workspace/venv-ocr` | OCR only (MinerU 3.4, pipeline backend) | MinerU's dependency set (its own transformers, onnxruntime, layout and OCR runtimes) is kept apart from the training stack |
 
 Everything is on `/workspace` because the container disk is wiped when the pod
-stops. Keep the Azure connection string in **double quotes** in `.env`: it is
-sourced by bash, which would otherwise cut it at the first `;`.
+stops. For Blob, prefer a SAS login (`AZURE_STORAGE_ACCOUNT_URL` +
+`AZURE_STORAGE_SAS_TOKEN`, used when both are set) over the connection string,
+which carries the account key. Keep either in **double quotes** in `.env`: it is
+sourced by bash, which would otherwise cut it at the first `;` or `&`.
 
 **OCR runs first, in its own environment**, then the pipeline:
 
@@ -245,14 +248,21 @@ as they are, full dates shifted by the recorded `date_shift_days`, a replaced id
 known (else left out), amounts only where the template kept them, table rows matched on unchanged values and never
 duplicated. Every merged label must pass the schema. After OCR, the audit checks every value against the page.
 
+**A gold a model drafted counts only once a person reviewed it.** Frontier models are never used for gold,
+synthetic or training data (decision 2026-10-19). A label whose metadata names a `draft_backend`, or whose
+`fideon:provenance` notes say a model drafted it, needs `reviewer_id` and `review_date` in its
+`metadata.json`; the audit, the import, the preflight and the corpus build refuse it otherwise.
+
 **The delivered split is used as given.** The generator put each source document and its ten synthetic twins
 in one of Train/Val/Test, so a test layout is one the model never trained on. The corpus build takes that
 split when every document carries one (`split_groups.assign_delivered_splits`): one family per source, a source
-in two splits refused, synthetic twins allowed in val and test only then. The gate report adds a
+in two splits refused, synthetic twins allowed in val and test only then. A split the build draws itself holds
+one carrier out of train and val per line of business, only in a line naming 10 or more carriers. The gate report adds a
 **`real_only`** section, the same metrics over the real documents alone, and the composition of the set.
 
 It reports blockers (one PDF + `golden.json` + `metadata.json` per folder, PDF readable, `lob` valid and in
-scope, `page_ref` inside the PDF), checks each labelled value against the text on its page, checks formats and
+scope, `page_ref` inside the PDF, a model-drafted gold reviewed, no form edition left inside a form number),
+checks each labelled value against the text on its page, checks formats and
 totals, and draws a 5% spot-check sample per line. Fix and re-run until it exits 0. The report and CSVs go to
 `data/audit_report/`, which is git-ignored: they quote label values.
 
@@ -373,6 +383,12 @@ test suite is not evidence about extraction quality.
   evaluation material. The model does the semantic mapping.
 - **The promotion gate has no override flag.** The one exception is a recorded
   written override (named approver, reason, waived gates), stored with the release.
+- **Every page is read, chunk by chunk, never selected pages** - in training and
+  in serving, by one window planner (decision 2026-10-19).
+- **No frontier model touches the data.** Drafts come from the self-hosted
+  Qwen3-VL only, and a drafted gold trains or scores only once reviewed.
+- **GPU only.** Every step that runs a model refuses to start without CUDA;
+  GGUF is an optional edge export, not a deployment target.
 
 ## What is deliberately not wired
 
@@ -387,7 +403,6 @@ the reason and what unblocks it. They are the whole of what Phase 0 gates.
 | `inference_core/model_runner.py` (vLLM and HF backends, written; merge in `training/merge.py`, written) | a GPU to run on - they refuse without CUDA |
 | `testing/run_extraction.py` (`extract`), `pilot/zero_shot_baseline.py` CLIs | a GPU with vLLM, as above; `extract` reads documents already imported and OCR'd |
 | `training/data_collator.py` custom hook | nothing - ms-swift collates and masks; the hook exists only for a genuine override |
-| `data_pipeline/labeling/pre_annotate.py` external backend | a compliance decision **and** a zero-retention endpoint; refuses without both |
 | `evaluation/golden_eval.py`, `data_pipeline/labeling/active_learning.py` inference loops | a live model backend on the GPU; the golden eval runs through the serving pipeline |
 
 `LocalBackend`, `EchoBackend` and `InMemoryBackend` are **real implementations**,
@@ -396,8 +411,17 @@ process, which is why CI covers this much without a pod.
 
 ## Open items
 
-- **Presidio de-identification is BLOCKED** (IMPL-05 section 1). Text-only
-  de-identification corrupts the training signal - resolve before production.
+- **No de-identification (Option A, arch §8b).** Text-only de-identification
+  corrupts the training signal, so none is done; PII is protected by tenancy,
+  access control and encryption, and that is stated to the compliance owner
+  (IMPL-05 section 1).
+- **No latency SLA is agreed.** Latency is recorded per release, not gated.
+- **No ceiling on invented values is gated.** No spec states one, and the gate
+  path does not measure it yet.
+- **The every-word `text_sections` tier is not built in this repo.** The model
+  never generates it; its owner is open.
+- **Token parity is measured on the pod only.** `tests/test_parity.py` needs a
+  GPU, the base weights, ms-swift and vLLM, and has not run there yet.
 - **Field glosses need SME review.** They are prompt text; changing one after the
   first corpus build forces a rebuild and retrain.
 - **The dependency spike has not run.** ms-swift with Qwen3-VL, flash-attn,
