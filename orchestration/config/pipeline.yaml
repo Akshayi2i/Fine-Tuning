@@ -20,7 +20,7 @@ gpu_class_by_stage:
   #
   # The deployment runs every GPU stage on ONE H200 SXM (141 GB) pod, in
   # process, inside tmux (orchestration/detach.py): OCR, training, checkpoint
-  # selection, merge, calibration and the gate share the card, and each vLLM
+  # selection, calibration and the gate share the card, and each vLLM
   # engine is released before the next stage loads one. These classes are what
   # the (not yet wired) RunPodBackend would request per stage; OCR alone could
   # run on a cheaper card, but moving a corpus between pods costs more than it saves.
@@ -28,15 +28,8 @@ gpu_class_by_stage:
   dataset_build: H200-SXM
   training: H200-SXM
   checkpoint_eval: H200-SXM
-  merge: H200-SXM
-  quantize: H200-SXM
   calibrate: H200-SXM
   evaluation_gate: H200-SXM
-
-# Per-scope overrides, applied over gpu_class_by_stage. A scope whose largest
-# task cap is 32k (policy extraction) may not fit a card that a 20480-cap scope
-# fits comfortably, and that is a property of the scope, not of the stage.
-gpu_class_by_scope: {}
 
 pod:
   # CUDA 12.8 / torch 2.8: the stack pyproject pins (vLLM 0.11.0 is built on
@@ -59,15 +52,9 @@ retry:
   retry_on_gate_block: false
 
 defaults:
-  # vLLM-native serving formats (arch v2.1 13a). bf16 alone until Phase 0 spike
-  # item 9 verifies a decoder-only FP8 export loads and runs in vLLM; the v1
-  # default produced GGUF files the serving endpoint could not load at all.
-  formats: [bf16]
-
-  # bf16, not fp16: the adapter trained in bf16 against a bf16 base, and FP8 is
-  # quantized from this merge. fp16 would insert a precision change between
-  # training and every serving format for no reason.
-  dtype: bf16
+  # The release is its adapter, served as a LoRA on the bf16 base: nothing is
+  # merged or quantized, so there is no format or merge dtype to choose
+  # (decision 2026-10-23).
   min_labels_per_type: 25
   keep_staging: false
   seed: 42
@@ -79,15 +66,13 @@ notifications:
   on_publish: []
 
 deferred:
-  # Both are BUILT. These flags control whether the pipeline runs them, which is
-  # a separate question from whether they exist.
+  # BUILT. This flag controls whether the pipeline runs it, which is a separate
+  # question from whether it exists.
   #
   # The sweep is never a pipeline stage: 9-12 training runs is an operator
   # decision taken after the pilot, not something a build starts on its own. It
   # also refuses at pilot volume, where it would measure the split rather than
   # the hyperparameter (arch §11a).
   sweep: false
-  # The quantization gate applies whenever per-format metrics are supplied to
-  # `package`. Scoring each GGUF needs the IMPL-12 routine on a GPU, so until
-  # then the stage warns rather than inventing numbers to judge (IMPL-10 §4).
-  quant_threshold_gate: false
+  # The quantization gate is gone with the quantize stage: nothing is quantized,
+  # the release is its adapter on the bf16 base (decision 2026-10-23).

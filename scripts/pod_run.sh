@@ -11,8 +11,8 @@
 #   bash scripts/pod_run.sh stop <name>       the ONLY way this script ends a run
 #
 # Example:
-#   bash scripts/pod_run.sh start finetune-v1 finetune --corpus-version v1 --out-version v1
-#   bash scripts/pod_run.sh start package-v1 package --version v1 --release-id release-2026.10.1
+#   bash scripts/pod_run.sh start finetune-v3 finetune --version v3 --corpus-version v1
+#   bash scripts/pod_run.sh start package-v3 package --version v3
 #   bash scripts/pod_run.sh start spike -- python scripts/phase0_spike.py
 #
 # You rarely need to call this yourself: on the pod, `python -m orchestration.run`,

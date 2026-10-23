@@ -93,7 +93,7 @@ def count_policy_lines(lobs: list[Any]) -> dict[str, int]:
     """
     from collections import Counter
 
-    from common.scopes import lob_lines
+    from common.lob import lob_lines
 
     counts: Counter[str] = Counter()
     for lob in lobs:
@@ -275,7 +275,7 @@ def build_manifest(
         },
         "modality_mix_basis": "train rows",
         # The mix the modes were drawn against: the global default or the
-        # building scope's own (training.data_mix.assert_corpus_mix reads it).
+        # training config's own (training.data_mix.assert_corpus_mix reads it).
         "modality_mix_target": dict(modality_mix_target or MODALITY_MIX),
         "source_ids_by_split": {
             split: sorted({row["source_id"] for row in rows})

@@ -133,13 +133,59 @@ def seed_corpus(client: BlobClient) -> list[str]:
     return seeded
 
 
+def seeded_policies(seeded: list[str]) -> list[str]:
+    """The seeded documents the policy adapter trains on. The fixtures also hold
+    an ACORD form and a Loss Run, which a policy cycle loads none of."""
+    return [source_id for source_id in seeded if source_id.startswith("policy_")]
+
+
+def seed_policy_copy(client: BlobClient, source_id: str, *, like: str = "policy_0001",
+                     own_family: bool = False) -> str:
+    """One more labelled policy, a copy of ``like`` under its own id and checksum.
+
+    A copy is a near-duplicate of the same account, so it groups into
+    ``like``'s family and moves with it between splits. ``own_family`` names
+    another insured (the declared account) and appends words no other copy
+    holds (below the near-duplicate threshold), so the copy is a family of its
+    own.
+    """
+    import random
+
+    raw = ingestion_client(client)
+    raw.write_bytes(paths.raw_pdf("policy", source_id), b"%PDF-1.7 fixture")
+    raw.write_json(paths.raw_metadata("policy", source_id), {
+        "source_id": source_id, "doc_type": "policy", "checksum_sha256": f"sha-{source_id}",
+    })
+    text = client.read_text(paths.processed_page("policy", like, 1, "md"))
+    golden = client.read_json(paths.golden_label("policy", like))
+    if own_family:
+        rng = random.Random(source_id)
+        insured = golden["named_insured"]["primary_name"]
+        name = f"{source_id.replace('_', ' ').title()} Holdings LLC"
+        text = text.replace(insured["raw"], name)
+        golden["named_insured"]["primary_name"] = {**insured, "raw": name, "parsed": name}
+        words = [f"{rng.choice('bcdfghklmnprstvz')}{rng.choice('aeiou')}{rng.randrange(10**6)}"
+                 for _ in range(150)]
+        text += "\n\n" + " ".join(words) + "\n"
+    client.write_text(paths.processed_page("policy", source_id, 1, "md"), text)
+    client.write_bytes(paths.processed_page("policy", source_id, 1, "png"),
+                       client.read_bytes(paths.processed_page("policy", like, 1, "png")))
+    client.write_json(paths.ocr_meta("policy", source_id), {
+        **client.read_json(paths.ocr_meta("policy", like)),
+        "source_id": source_id, "source_checksum": f"sha-{source_id}",
+    })
+    client.write_json(paths.golden_label("policy", source_id), golden)
+    client.write_json(paths.label_metadata("policy", source_id),
+                      {**client.read_json(paths.label_metadata("policy", like)), "source_id": source_id})
+    return source_id
+
+
 def make_context(client: BlobClient, controller: RunPodController, **over) -> StageContext:
     defaults = dict(
         client=client,
         raw_client=ingestion_client(client),
         controller=controller,
         out_version="v1",
-        release_id="release-2026.9.1",
         tenant_id=None,
         dry_run=True,
         skip_ingest=True,
@@ -149,6 +195,20 @@ def make_context(client: BlobClient, controller: RunPodController, **over) -> St
     )
     defaults.update(over)
     return StageContext(**defaults)  # type: ignore[arg-type]
+
+
+def promote_in_index(client: BlobClient, version: str, tenant_id: str | None = None,
+                     *, created_at: str = "2026-10-01T00:00:00+00:00") -> None:
+    """Make ``version`` the tenant's promoted release in its release index, as
+    ``package`` or ``promote`` leaves it: the row the gate's baseline is read
+    from (``pipeline_dag.promoted_version``). A dry run's bundle is gated (it
+    has no calibrator), so the row is written here rather than earned."""
+    key = paths.release_index(tenant_id)
+    rows = [r for r in (client.read_json(key) if client.exists(key) else [])
+            if r.get("release_id") != version]
+    rows.append({"release_id": version, "status": "promoted", "adapter": f"policy-{version}",
+                 "tenant_scope": paths._tenant(tenant_id), "created_at": created_at})
+    client.write_json(key, rows)
 
 
 # --------------------------------------------------------------------------
@@ -178,52 +238,64 @@ def test_every_stage_is_owned_by_exactly_one_command():
     finetune = {s.name for s in FINETUNE_STAGES}
     package = {s.name for s in PACKAGE_STAGES}
     assert not finetune & package
-    assert len(STAGES) == 13
+    assert len(STAGES) == 11
 
 
 def test_stage_numbers_match_the_architecture_order():
-    assert [s.number for s in STAGES] == list(range(1, 14))
+    assert [s.number for s in STAGES] == list(range(1, 12))
 
 
 def test_the_stage_order_matches_the_architecture():
-    """arch v2.1 §13. Two orderings carry real meaning:
+    """arch v2.1 §13, with nothing merged or quantized (decision 2026-10-23).
+    Two orderings carry real meaning:
 
-    Selection precedes merge, because the gate scores what ships and what ships
-    has to be chosen first (§11.2). And the gate follows merge, quantize AND
-    calibrate — under v1 it ran before merge, so it scored the bare adapter
-    rather than the merged model in each serving format, and it could not read
-    auto_accept_error_rate at all because no threshold had been chosen.
+    Selection precedes calibration and the gate, because the gate scores what
+    ships and what ships has to be chosen first (§11.2). And the gate follows
+    calibrate: it reads auto_accept_error_rate, which does not exist until a
+    threshold has been chosen.
     """
     order = [s.name for s in STAGES]
     assert order.index("training") < order.index("checkpoint_eval")
-    assert order.index("checkpoint_eval") < order.index("merge")
-    assert order.index("merge") < order.index("quantize")
-    assert order.index("quantize") < order.index("calibrate")
+    assert order.index("checkpoint_eval") < order.index("calibrate")
     assert order.index("calibrate") < order.index("evaluation_gate")
     assert order.index("evaluation_gate") < order.index("package")
 
 
-def test_finetune_ends_at_merge_and_package_owns_the_gate():
+def test_no_stage_merges_or_quantizes():
+    """The release is its adapter, served as a LoRA on the bf16 base: there is
+    no merge or quantize stage to run, resume at or skip (decision 2026-10-23)."""
+    from orchestration import pipeline_dag
+
+    assert not {"merge", "quantize"} & {s.name for s in STAGES}
+    for gone in ("stage_merge", "_is_merged", "stage_quantize", "_is_quantized"):
+        assert not hasattr(pipeline_dag, gone), gone
+    with pytest.raises(PipelineError, match="unknown stage 'merge'"):
+        stages_from("merge", "all")
+
+
+def test_finetune_ends_at_checkpoint_selection_and_package_owns_the_gate():
     """The command boundary moved with the gate (arch v2.1 §13c): `finetune`
-    produces artifacts, `package` judges and publishes them."""
+    produces the adapter and chooses its checkpoint, `package` judges and
+    publishes it."""
     finetune = [s.name for s in STAGES if s.command == "finetune"]
     package = [s.name for s in STAGES if s.command == "package"]
 
-    assert finetune[-1] == "merge"
-    assert package == ["quantize", "calibrate", "evaluation_gate", "package"]
+    assert finetune[-1] == "checkpoint_eval"
+    assert package == ["calibrate", "evaluation_gate", "package"]
 
 
 def test_from_stage_resumes_mid_pipeline():
-    resumed = [s.name for s in stages_from("merge", "finetune")]
-    assert resumed == ["merge"]
+    resumed = [s.name for s in stages_from("checkpoint_eval", "finetune")]
+    assert resumed == ["checkpoint_eval"]
     assert [s.name for s in stages_from("training", "finetune")][0] == "training"
 
 
 def test_from_stage_on_all_carries_through_into_package():
-    """Resuming at merge must still package afterwards — stopping at the end of
-    finetune would leave the artifacts staged and the operator none the wiser."""
-    resumed = [s.name for s in stages_from("merge", "all")]
-    assert resumed == ["merge", "quantize", "calibrate", "evaluation_gate", "package"]
+    """Resuming at checkpoint selection must still package afterwards — stopping
+    at the end of finetune would leave the adapter staged and the operator none
+    the wiser."""
+    resumed = [s.name for s in stages_from("checkpoint_eval", "all")]
+    assert resumed == ["checkpoint_eval", "calibrate", "evaluation_gate", "package"]
 
 
 def test_unknown_stage_names_the_valid_ones():
@@ -236,15 +308,14 @@ def test_unknown_stage_names_the_valid_ones():
 # --------------------------------------------------------------------------
 
 
-def test_finetune_runs_ingest_through_merge(client, controller):
+def test_finetune_runs_ingest_through_checkpoint_selection(client, controller):
     seed_corpus(client)
     ctx = make_context(client, controller)
     report = run_stages(ctx, stages_for("finetune"), command="finetune")
 
     assert report.ok, report.render()
     assert [r.name for r in report.results] == [s.name for s in FINETUNE_STAGES]
-    assert ctx.volume.exists(paths.staging_adapter_dir("foundation", "v1"))
-    assert ctx.volume.exists(paths.staging_merged_model_dir("v1", None))
+    assert ctx.volume.exists(paths.scoped_staging_adapter_dir("policy", "v1"))
 
 
 def test_training_reads_exactly_the_files_the_dataset_build_writes(client, controller):
@@ -294,7 +365,7 @@ def test_finetune_writes_a_blob_manifest_while_weights_stay_staged(client, contr
 
     rows = list_runs(client)
     assert rows, "finetune completed without recording a single run manifest"
-    foundation = get("extractor-v1", client)
+    foundation = get("policy-v1", client)
     assert foundation.artifacts.status == "staged"
     assert foundation.artifacts.staging_path
 
@@ -341,23 +412,24 @@ def test_training_is_one_run_with_no_per_type_fan_out(client, controller):
 
     assert report.ok, report.render()
     runs = ctx.results["training"].data["runs"]
-    assert runs == ["extractor-v1"], f"expected one unified run, got {runs}"
-    assert ctx.results["training"].data["run_type"] == "unified"
+    assert runs == ["policy-v1"], f"expected one policy run, got {runs}"
+    assert ctx.results["training"].data["run_type"] == "scoped"
 
 
-def test_the_unified_run_produces_one_merged_model(client, controller):
-    """One adapter, one merge. v1 produced a merged model per document type
-    because each carried its own stacked adapter."""
+def test_the_policy_run_stages_one_adapter_and_merges_nothing(client, controller):
+    """One adapter, staged under its own path, and no merged model at all: the
+    release is served as a LoRA on the base (decision 2026-10-23). v1 produced a
+    merged model per document type because each carried its own stacked adapter."""
     seed_corpus(client)
     ctx = make_context(client, controller)
     report = run_stages(ctx, stages_for("finetune"), command="finetune")
 
     assert report.ok, report.render()
-    assert ctx.volume.exists(paths.staging_merged_model_dir("v1", None))
+    assert ctx.volume.exists(paths.scoped_staging_adapter_dir("policy", "v1"))
+    for scope in ("policy", None):
+        assert not ctx.volume.exists(paths.staging_merged_model_dir("v1", scope=scope))
     for doc_type in ctx.doc_types:
-        assert not ctx.volume.exists(paths.staging_merged_model_dir("v1", doc_type)), (
-            f"a per-type merged model was produced for {doc_type}; there is one model now"
-        )
+        assert not ctx.volume.exists(paths.staging_merged_model_dir("v1", doc_type))
 
 
 # --------------------------------------------------------------------------
@@ -367,12 +439,12 @@ def test_the_unified_run_produces_one_merged_model(client, controller):
 
 def test_a_regression_stops_the_release_not_the_build(client, controller):
     """Under v1 the gate ran before merge, so a regression stopped the build. It
-    now runs AFTER merge, quantize and calibrate (arch v2.1 §13), because the
-    gate scores the merged model in each serving format — not the bare adapter.
+    now runs AFTER checkpoint selection and calibrate (arch v2.1 §13), because the
+    gate scores what is served: the base with the selected adapter applied.
 
-    So merging still happens. What a regression stops is the RELEASE: nothing is
-    packaged, nothing is published, and the staged artifacts sit on a volume that
-    will be reclaimed."""
+    So the adapter is still built and chosen. What a regression stops is the
+    RELEASE: nothing is packaged, nothing is published, and the staged adapter
+    sits on a volume that will be reclaimed."""
     seed_corpus(client)
     regressed = {**PASSING_METRICS, "list_field_recall": 0.60}
     ctx = make_context(
@@ -384,7 +456,8 @@ def test_a_regression_stops_the_release_not_the_build(client, controller):
 
     assert report.blocked_at == "evaluation_gate"
     assert report.exit_code == 1
-    assert "merge" in ctx.results, "the gate scores the merged model, so merge precedes it"
+    assert "checkpoint_eval" in ctx.results and "calibrate" in ctx.results, (
+        "the gate scores the selected, calibrated adapter, so both precede it")
     assert "package" not in ctx.results, "a blocked release is never packaged"
 
 
@@ -416,7 +489,7 @@ def test_the_block_records_the_evidence_not_just_the_verdict(client, controller)
     )
     run_stages(ctx, stages_for("all"), command="all")
 
-    decision = client.read_json(paths.gate_decision("v1"))
+    decision = client.read_json(paths.gate_decision("v1", scope="policy"))
     verdict = next(v for v in decision["verdicts"] if v["name"] == "lob_detection_accuracy")
     assert verdict["non_inferior"] is False
     assert verdict["basis"] in ("point_estimate", "paired_bootstrap")
@@ -433,9 +506,9 @@ def test_all_never_reaches_package_on_a_failed_gate(client, controller):
     report = run_stages(ctx, stages_for("all"), command="all")
 
     ran = {r.name for r in report.results}
-    # Quantize and calibrate run BEFORE the gate now: the gate reads
-    # auto_accept_error_rate, which does not exist until thresholds are chosen.
-    assert "quantize" in ran and "calibrate" in ran
+    # Calibrate runs BEFORE the gate now: the gate reads auto_accept_error_rate,
+    # which does not exist until thresholds are chosen.
+    assert "calibrate" in ran
     assert "package" not in ran, "nothing is packaged past a failed gate"
     assert report.blocked_at == "evaluation_gate"
 
@@ -494,7 +567,7 @@ def test_the_gate_reads_an_existing_eval_report_when_no_provider_is_given(client
     from artifact_registry import paths
 
     seed_corpus(client)
-    client.write_json(paths.eval_report("v1"), {"gate_metrics": dict(PASSING_METRICS),
+    client.write_json(paths.eval_report("v1", scope="policy"), {"gate_metrics": dict(PASSING_METRICS),
                                                 "eval_set": _scored_on()})
 
     ctx = make_context(client, controller, metrics_provider=None)
@@ -515,7 +588,9 @@ def test_an_eval_report_not_recorded_for_this_tenant_is_scored_again(client, con
     report = {"gate_metrics": {**PASSING_METRICS, "field_normalized_match": 0.97}}
     if eval_set == "other_tenant":
         report["eval_set"] = _scored_on(tenant="acme", policy=160)
-    client.write_json(paths.eval_report("v1"), report)
+    client.write_json(paths.eval_report("v1", scope="policy"), report)
+    # The lines the release serves, from its corpus: the scoring needs them.
+    client.write_json(paths.corpus_manifest("v1"), {"policy_line_counts": {"homeowners": 1}})
 
     with pytest.raises(PipelineError, match=f"not reused.*{why}.*metrics nobody measured"):
         eval_report_metrics(make_context(client, controller, metrics_provider=None))
@@ -536,14 +611,12 @@ def test_the_baseline_comes_from_the_promoted_version_s_own_report(client, contr
     never supplied one."""
     from artifact_registry import paths
     from orchestration.pipeline_dag import default_baseline_metrics
-    from registry_utils.query_registry import get
-    from registry_utils.write_run_manifest import mark_promoted
 
     seed_corpus(client)
     first = make_context(client, controller, out_version="v1")
     run_stages(first, stages_for("all"), command="all")
-    mark_promoted(get("extractor-v1", client), client, promoted_by="test")
-    client.write_json(paths.eval_report("v1"), {"gate_metrics": dict(PASSING_METRICS)})
+    promote_in_index(client, "v1")
+    client.write_json(paths.eval_report("v1", scope="policy"), {"gate_metrics": dict(PASSING_METRICS)})
 
     probe = make_context(client, controller, out_version="v1.1", baseline_metrics=None)
     baseline = default_baseline_metrics(probe)
@@ -555,35 +628,33 @@ def test_per_document_scores_in_both_reports_gate_on_a_paired_bootstrap(client, 
     bootstrap and the improvement rule is enforced (arch §15.5): a release no
     better than the last is blocked unless it names the defect it fixes."""
     from artifact_registry import paths
-    from registry_utils.query_registry import get
-    from registry_utils.write_run_manifest import mark_promoted
 
     seed_corpus(client)
     run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
-    mark_promoted(get("extractor-v1", client), client, promoted_by="test")
+    promote_in_index(client, "v1")
     same = {f"doc_{i:02d}": 0.9 for i in range(20)}
     per_document = {"field_normalized_match": same, "list_field_recall": same}
     for version in ("v1", "v1.1", "v1.2"):
-        client.write_json(paths.eval_report(version), {
+        client.write_json(paths.eval_report(version, scope="policy"), {
             "gate_metrics": dict(PASSING_METRICS), "per_document": per_document,
             "eval_set": _scored_on(),
         })
 
-    ctx = make_context(client, controller, out_version="v1.1", release_id="release-2026.9.2",
+    ctx = make_context(client, controller, out_version="v1.1",
                        metrics_provider=None)
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.blocked_at == "evaluation_gate"
-    decision = client.read_json(paths.gate_decision("v1.1"))
+    decision = client.read_json(paths.gate_decision("v1.1", scope="policy"))
     assert decision["failed_gates"] == ["improvement"]
     assert decision["paired_documents"]["field_normalized_match"] == 20
     basis = {v["name"]: v["basis"] for v in decision["verdicts"]}
     assert basis["field_normalized_match"] == "paired_bootstrap"
     assert basis["field_exact_match"] == "point_estimate"
 
-    fixed = make_context(client, controller, out_version="v1.2", release_id="release-2026.9.3",
+    fixed = make_context(client, controller, out_version="v1.2",
                          metrics_provider=None, fixes_defect="TICKET-12: wrong edition dates")
     assert run_stages(fixed, stages_for("all"), command="all").ok
-    assert client.read_json(paths.gate_decision("v1.2"))["fixes_defect"].startswith("TICKET-12")
+    assert client.read_json(paths.gate_decision("v1.2", scope="policy"))["fixes_defect"].startswith("TICKET-12")
 
 
 def test_an_eval_set_accepted_small_caps_the_release_at_interim(client, controller):
@@ -598,7 +669,7 @@ def test_an_eval_set_accepted_small_caps_the_release_at_interim(client, controll
     production = {**PASSING_METRICS, "field_normalized_match": 0.97}
     ctx = make_context(client, controller, metrics_provider=lambda _c: dict(production))
     assert run_stages(ctx, stages_for("all"), command="all").ok
-    decision = client.read_json(paths.gate_decision("v1"))
+    decision = client.read_json(paths.gate_decision("v1", scope="policy"))
     assert decision["tier"] == "interim"
     assert decision["eval_set"]["small_set_accepted"] is True
     assert decision["warnings"]
@@ -618,16 +689,13 @@ def _scored_on(tenant: str | None = None, frozen_at: str = "2026-10-01T00:00:00+
 
 
 def _promoted_and_candidate(client, controller, promoted: dict, candidate: dict) -> None:
-    """extractor-v1 promoted with ``promoted`` as its eval report, and ``candidate``
+    """Release v1 promoted with ``promoted`` as its eval report, and ``candidate``
     as v1.1's."""
-    from registry_utils.query_registry import get
-    from registry_utils.write_run_manifest import mark_promoted
-
     seed_corpus(client)
     run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
-    mark_promoted(get("extractor-v1", client), client, promoted_by="test")
-    client.write_json(paths.eval_report("v1"), promoted)
-    client.write_json(paths.eval_report("v1.1"), candidate)
+    promote_in_index(client, "v1")
+    client.write_json(paths.eval_report("v1", scope="policy"), promoted)
+    client.write_json(paths.eval_report("v1.1", scope="policy"), candidate)
 
 
 @pytest.mark.parametrize("case, why", [
@@ -642,7 +710,10 @@ def test_a_promoted_release_on_another_yardstick_is_not_compared(client, control
     release's numbers say nothing about this candidate's. Compared as a point
     estimate, its 0.99 on the old yardstick blocked a 0.93 on the new one as a
     regression. The candidate is judged on its floors alone, with no
-    non-inferiority and no improvement rule, and the decision says why."""
+    non-inferiority and no improvement rule, and the decision says why.
+
+    Trained fresh: a cycle that continued v1 is also held to v1 line by line,
+    which another yardstick cannot do (tests/test_incremental_training.py)."""
     scores = {f"doc_{i:02d}": 0.9 for i in range(20)}
     per_document = {"field_normalized_match": scores, "list_field_recall": scores}
     promoted = {"gate_metrics": {**PASSING_METRICS, "field_normalized_match": 0.99},
@@ -659,11 +730,11 @@ def test_a_promoted_release_on_another_yardstick_is_not_compared(client, control
         "gate_metrics": dict(PASSING_METRICS), "eval_set": _scored_on(), "per_document": per_document,
     })
 
-    ctx = make_context(client, controller, out_version="v1.1", release_id="release-2026.9.2",
-                       metrics_provider=None)
+    ctx = make_context(client, controller, out_version="v1.1",
+                       metrics_provider=None, fresh=True)
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.ok, report.render()
-    decision = client.read_json(paths.gate_decision("v1.1"))
+    decision = client.read_json(paths.gate_decision("v1.1", scope="policy"))
     assert decision["failed_gates"] == [] and decision["paired_documents"] == {}
     assert {v["basis"] for v in decision["verdicts"]} == {"floor_only"}
     assert decision["baseline_metrics"] is None
@@ -699,10 +770,10 @@ def test_reports_on_one_yardstick_that_cannot_be_paired_say_so_in_the_decision(
         "per_document": {"field_normalized_match": scores, "list_field_recall": scores},
     })
 
-    ctx = make_context(client, controller, out_version="v1.1", release_id="release-2026.9.2",
+    ctx = make_context(client, controller, out_version="v1.1",
                        metrics_provider=None)
     assert run_stages(ctx, stages_for("all"), command="all").ok
-    decision = client.read_json(paths.gate_decision("v1.1"))
+    decision = client.read_json(paths.gate_decision("v1.1", scope="policy"))
     assert decision["paired_documents"] == {} and decision["baseline_not_comparable"] is None
     assert {v["basis"] for v in decision["verdicts"] if v["current"] is not None} == {"point_estimate"}
     assert any("not paired" in w and why in w for w in decision["warnings"]), decision["warnings"]
@@ -738,66 +809,55 @@ def test_a_report_without_weights_pairs_unweighted_on_both_sides(client, control
     assert result.improved_metrics == [] and "improvement" in result.failed_gates
 
     # Both sides weighted: each document counts as it counts in the report.
-    client.write_json(paths.eval_report("v1"), {
-        **client.read_json(paths.eval_report("v1")), "per_document_weights": {"list_field_recall": weights},
+    client.write_json(paths.eval_report("v1", scope="policy"), {
+        **client.read_json(paths.eval_report("v1", scope="policy")), "per_document_weights": {"list_field_recall": weights},
     })
     assert paired_document_scores(ctx, []) == {"list_field_recall": (
         same, same, [weights[d] for d in sorted(weights)], [weights[d] for d in sorted(weights)])}
 
 
-def test_the_interim_cap_follows_what_the_scope_was_scored_on(client, controller):
-    """small_set_accepted describes the whole set. A GL-only scope scored on 9 GL
-    policies of a set frozen with 160 policies reached production; a policy
-    scope scored on 200 policies was capped because the set held 9 Loss Runs."""
-    from evaluation.freeze_eval_set import MIN_FROZEN_DOCS_PER_TYPE
-    from orchestration.pipeline_dag import scope_eval_set_size
+def test_the_interim_cap_follows_what_the_candidate_was_scored_on(client, controller):
+    """small_set_accepted describes the whole set, other types included: a policy
+    candidate scored on 200 policies was capped because the set held 9 Loss Runs.
+    Only the real documents of the adapter's own types count, and lines do not
+    narrow them - the one adapter is scored on every frozen policy."""
+    from evaluation.freeze_eval_set import MIN_FROZEN_DOCS_PER_TYPE, manifest_key
+    from orchestration.pipeline_dag import eval_set_size
 
-    gl = _scoped_ctx(client, controller, "casualty_fleet")
-    large_set = {"small_set_accepted": False, "documents_by_doc_type": {"policy": 160},
-                 "documents_by_line": {"general_liability": 9, "homeowners": 151},
-                 "real_documents_by_doc_type": {"policy": 160},
-                 "real_policies_by_line": {"general_liability": 9, "homeowners": 151}}
-    assert scope_eval_set_size(gl, large_set) == (
-        {"policy": 9}, "frozen_manifest.real_policies_by_line")
+    ctx = make_context(client, controller)
+    large_set = {"small_set_accepted": True, "documents_by_doc_type": {"policy": 200, "lossrun": 9},
+                 "real_documents_by_doc_type": {"policy": 200, "lossrun": 9},
+                 "real_policies_by_line": {"general_liability": 9, "homeowners": 191}}
+    assert eval_set_size(ctx, large_set) == (
+        {"policy": 200}, "frozen_manifest.real_documents_by_doc_type")
     # The candidate's own report, when it records them, is what it was scored on.
-    client.write_json(paths.eval_report("v1", scope="casualty_fleet"),
-                      {"eval_set": _scored_on(policy=9)})
-    assert scope_eval_set_size(gl, large_set) == ({"policy": 9}, "eval_report")
+    client.write_json(paths.eval_report("v1", scope="policy"), {"eval_set": _scored_on(policy=9)})
+    assert eval_set_size(ctx, large_set) == ({"policy": 9}, "eval_report")
     # Another tenant's report at the same path says nothing about this one.
-    client.write_json(paths.eval_report("v1", scope="casualty_fleet"),
+    client.write_json(paths.eval_report("v1", scope="policy"),
                       {"eval_set": _scored_on(tenant="other-tenant", policy=400)})
-    assert scope_eval_set_size(gl, large_set)[1] == "frozen_manifest.real_policies_by_line"
-    assert scope_eval_set_size(gl, {}) == ({}, "unknown")
+    assert eval_set_size(ctx, large_set)[1] == "frozen_manifest.real_documents_by_doc_type"
+    assert eval_set_size(ctx, {}) == ({}, "unknown")
     assert MIN_FROZEN_DOCS_PER_TYPE == 150
 
-    from evaluation.freeze_eval_set import manifest_key
-
     seed_corpus(client)
-    client.write_json(manifest_key(), {
-        "small_set_accepted": True, "documents_by_doc_type": {"policy": 200, "lossrun": 9},
-        "real_documents_by_doc_type": {"policy": 200, "lossrun": 9},
-        "frozen_from_corpus": "corpus/v1",
-    })
+    client.write_json(manifest_key(), {**large_set, "frozen_from_corpus": "corpus/v1"})
     client.write_json(paths.eval_report("v1", scope="policy"), {"eval_set": _scored_on(policy=200)})
-    policy = _scoped_ctx(client, controller, "policy", metrics_provider=lambda _c: dict(PASSING_METRICS))
+    policy = make_context(client, controller, metrics_provider=lambda _c: dict(PASSING_METRICS))
     assert run_stages(policy, stages_for("all"), command="all").ok
     decision = client.read_json(paths.gate_decision("v1", scope="policy"))
     assert decision["tier"] == "production"
-    assert decision["eval_set"]["scope_documents_by_doc_type"] == {"policy": 200}
-    assert decision["eval_set"]["scope_documents_counted_from"] == "eval_report"
-    assert decision["eval_set"]["small_for_scope"] is False
-
-    unified = _scoped_ctx(client, controller, "unified")
-    assert run_stages(unified, stages_for("all"), command="all").ok
-    decision = client.read_json(paths.gate_decision("v1"))
-    assert decision["tier"] == "interim"
-    assert decision["eval_set"]["scope_documents_by_doc_type"] == {
-        "acord": 0, "policy": 200, "lossrun": 9}
+    assert decision["eval_set"]["scored_documents_by_doc_type"] == {"policy": 200}
+    assert decision["eval_set"]["scored_documents_counted_from"] == "eval_report"
+    assert decision["eval_set"]["small"] is False
+    # The decision names the adapter it judged; there is no scope to name.
+    assert decision["adapter"] == "policy-v1" and decision["doc_types"] == ["policy"]
+    assert "scope" not in decision
 
 
 def test_synthetic_twins_do_not_count_toward_the_production_minimum(client, controller):
     """Decision 2026-10-22: the 150 documents per type that decide production
-    count real documents only. A policy scope scored on 160 policies, 60 of them
+    count real documents only. A policy candidate scored on 160 policies, 60 of them
     twins, was scored on 100 real ones: interim. A manifest frozen before it
     counted real documents cannot say, so its count is unknown: interim, and
     the decision says why."""
@@ -805,7 +865,7 @@ def test_synthetic_twins_do_not_count_toward_the_production_minimum(client, cont
 
     from evaluation.freeze_eval_set import manifest_key
     from evaluation.run_eval import eval_set_record
-    from orchestration.pipeline_dag import scope_eval_set_size
+    from orchestration.pipeline_dag import eval_set_size
 
     scored = ([SimpleNamespace(doc_type="policy", synthetic=False)] * 100
               + [SimpleNamespace(doc_type="policy", synthetic=True)] * 60)
@@ -816,10 +876,10 @@ def test_synthetic_twins_do_not_count_toward_the_production_minimum(client, cont
     seed_corpus(client)
     client.write_json(paths.eval_report("v1", scope="policy"), {"eval_set": record})
     production = {**PASSING_METRICS, "field_normalized_match": 0.97}
-    policy = _scoped_ctx(client, controller, "policy", metrics_provider=lambda _c: dict(production))
+    policy = make_context(client, controller, metrics_provider=lambda _c: dict(production))
     assert run_stages(policy, stages_for("all"), command="all").ok
     decision = client.read_json(paths.gate_decision("v1", scope="policy"))
-    assert decision["eval_set"]["scope_documents_by_doc_type"] == {"policy": 100}
+    assert decision["eval_set"]["scored_documents_by_doc_type"] == {"policy": 100}
     assert decision["tier"] == "interim"
 
     # The report records no real counts, and the manifest predates them.
@@ -829,35 +889,85 @@ def test_synthetic_twins_do_not_count_toward_the_production_minimum(client, cont
     client.write_json(paths.eval_report("v1", scope="policy"),
                       {"eval_set": {**record, "real_documents_by_doc_type": None}})
     warnings: list[str] = []
-    assert scope_eval_set_size(policy, old_manifest, warnings) == ({}, "unknown")
+    assert eval_set_size(policy, old_manifest, warnings) == ({}, "unknown")
     assert any("no real_documents_by_doc_type" in w and "interim" in w for w in warnings), warnings
 
 
 def test_the_baseline_is_this_tenant_s_promoted_release(client, controller):
-    """latest_promoted took the newest promoted run of the lineage whatever its
-    tenant, so one tenant's candidate was gated against another's release."""
-    from datetime import timedelta
+    """The newest promoted run of the lineage, whatever its tenant, was once the
+    baseline, so one tenant's candidate was gated against another's release. The
+    baseline is now read from the tenant's own release index."""
+    from orchestration.pipeline_dag import _promoted_eval_report_key, promoted_version
 
-    from registry_utils.query_registry import get, latest_promoted
-    from registry_utils.write_run_manifest import mark_promoted, write_manifest
+    promote_in_index(client, "v1")
+    promote_in_index(client, "v2", "acme", created_at="2026-10-02T00:00:00+00:00")
+    client.write_json(paths.eval_report("v1", scope="policy"), {"gate_metrics": dict(PASSING_METRICS)})
+    client.write_json(paths.eval_report("v2", scope="policy"), {"gate_metrics": dict(PASSING_METRICS)})
+
+    probe = make_context(client, controller, out_version="v3")
+    assert promoted_version(probe) == "v1"
+    assert _promoted_eval_report_key(probe) == paths.eval_report("v1", scope="policy")
+    assert promoted_version(make_context(client, controller, out_version="v3", tenant_id="acme")) == "v2"
+
+
+def test_the_promoted_release_s_eval_report_is_the_gate_baseline(client, controller):
+    """Release v2 promoted in the tenant's index, with its eval report at the
+    policy adapter's path, is what candidate v3 is gated against."""
+    from orchestration.pipeline_dag import default_baseline_metrics, promoted_version
+
+    baseline = {**PASSING_METRICS, "field_normalized_match": 0.95}
+    promote_in_index(client, "v2")
+    client.write_json(paths.eval_report("v2", scope="policy"), {"gate_metrics": baseline})
+
+    candidate = make_context(client, controller, out_version="v3")
+    assert promoted_version(candidate) == "v2"
+    assert default_baseline_metrics(candidate) == baseline
+
+
+def test_the_candidate_s_own_release_is_never_its_baseline(client, controller):
+    """A resumed package may find its own release already promoted; comparing a
+    candidate with itself would pass every regression check by construction."""
+    from orchestration.pipeline_dag import promoted_version
+
+    promote_in_index(client, "v2")
+    promote_in_index(client, "v3", created_at="2026-10-05T00:00:00+00:00")
+    assert promoted_version(make_context(client, controller, out_version="v3")) == "v2"
+
+    only = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    promote_in_index(only, "v3")
+    assert promoted_version(make_context(only, controller, out_version="v3")) is None
+
+
+def test_a_run_manifest_marked_promoted_is_not_a_baseline(client, controller):
+    """The baseline was read from run-manifest status, which no real run ever
+    set, so every candidate was gated as a first version. Only a promoted
+    release in the index counts; with none, the candidate is a first version."""
+    from evaluation.gating import apply_to_manifest, promotion_gate
+    from orchestration.pipeline_dag import default_baseline_metrics, promoted_version
+    from registry_utils.query_registry import get
+    from registry_utils.write_run_manifest import mark_promoted
 
     seed_corpus(client)
-    run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
-    own = mark_promoted(get("extractor-v1", client), client, promoted_by="test")
-    other = own.model_copy(update={"run_id": "extractor-v2", "tenant_id": "acme",
-                                   "created_at": own.created_at + timedelta(days=1)})
-    write_manifest(other, client)
+    run_stages(make_context(client, controller), stages_for("finetune"), command="finetune")
+    passed = apply_to_manifest(promotion_gate(dict(PASSING_METRICS), None), get("policy-v1", client))
+    assert mark_promoted(passed, client, promoted_by="test").status == "promoted"
+    client.write_json(paths.eval_report("v1", scope="policy"), {"gate_metrics": dict(PASSING_METRICS)})
 
-    assert latest_promoted(client, "unified", scope="unified") == "extractor-v2"
-    assert latest_promoted(client, "unified", scope="unified", tenant="acme") == "extractor-v2"
-    assert latest_promoted(client, "unified", scope="unified",
-                           tenant=paths._tenant(None)) == "extractor-v1"
-    from orchestration.pipeline_dag import _promoted_eval_report_key
+    candidate = make_context(client, controller, out_version="v2")
+    assert promoted_version(candidate) is None
+    assert default_baseline_metrics(candidate) is None
 
-    client.write_json(paths.eval_report("v1"), {"gate_metrics": dict(PASSING_METRICS)})
-    client.write_json(paths.eval_report("v2"), {"gate_metrics": dict(PASSING_METRICS)})
-    probe = make_context(client, controller, out_version="v3")
-    assert _promoted_eval_report_key(probe) == paths.eval_report("v1")
+
+def test_a_legacy_release_id_gives_its_adapter_s_version(client, controller):
+    """An index written before releases were named by version holds
+    release-YYYY.M.N ids: the baseline is the version of the adapter it served."""
+    from orchestration.pipeline_dag import promoted_version
+
+    client.write_json(paths.release_index(), [
+        {"release_id": "release-2026.9.1", "status": "promoted", "adapter": "policy-v2",
+         "created_at": "2026-09-01T00:00:00+00:00"},
+    ])
+    assert promoted_version(make_context(client, controller, out_version="v3")) == "v2"
 
 
 def test_paired_documents_records_only_what_was_bootstrapped(client, controller):
@@ -869,14 +979,14 @@ def test_paired_documents_records_only_what_was_bootstrapped(client, controller)
     })
     seed_corpus(client)
     assert run_stages(ctx, stages_for("all"), command="all").ok
-    decision = client.read_json(paths.gate_decision("v1"))
+    decision = client.read_json(paths.gate_decision("v1", scope="policy"))
     assert decision["paired_documents"] == {"field_normalized_match": 20}
     basis = {v["name"]: v["basis"] for v in decision["verdicts"]}
     assert basis["scanned_accuracy"] == "point_estimate"
 
 
 def test_an_unreviewed_frozen_gold_is_refused_before_the_model_loads_and_once(client, controller):
-    """The gate loaded the merged bf16 model, then learned from the frozen set
+    """The gate loaded the bf16 model, then learned from the frozen set
     that a gold had no review record - and the stage was retried, loading the
     model a second time to learn it again."""
     from evaluation.freeze_eval_set import manifest_key
@@ -935,7 +1045,7 @@ def test_a_written_override_can_be_given_on_the_command_line(client, controller)
     seed_corpus(client)
     regressed = {**PASSING_METRICS, "list_field_recall": 0.60}
     ctx = _cli_context(client, controller, [
-        "all", "--input", "./intake", "--out-version", "v1", "--release-id", "release-2026.9.1",
+        "all", "--input", "./intake", "--version", "v1",
         "--override-approver", "A. Reviewer", "--override-reason", _REASON,
         "--override-gate", "list_field_recall",
     ], baseline_metrics=dict(PASSING_METRICS), metrics_provider=lambda _c: dict(regressed))
@@ -944,10 +1054,10 @@ def test_a_written_override_can_be_given_on_the_command_line(client, controller)
 
     report = cli.run_command("all", ctx)
     assert report.ok, report.render()
-    decision = client.read_json(paths.gate_decision("v1"))
+    decision = client.read_json(paths.gate_decision("v1", scope="policy"))
     assert decision["waived_gates"] == ["list_field_recall"]
     assert decision["override"]["approver"] == "A. Reviewer"
-    bundle = client.read_json(paths.release_bundle("release-2026.9.1"))
+    bundle = client.read_json(paths.release_bundle("v1"))
     assert bundle["override"]["approver"] == "A. Reviewer"
 
 
@@ -963,7 +1073,7 @@ def test_a_written_override_can_be_given_on_the_command_line(client, controller)
 def test_an_override_flag_alone_is_no_way_round_the_gate(client, controller, flags, match):
     """All three or none: a named person, a reason of 20 characters or more and
     the gates waived. Refused before any work, never a bare bypass."""
-    base = ["all", "--out-version", "v1", "--release-id", "release-2026.9.1"]
+    base = ["all", "--version", "v1"]
     with pytest.raises(cli.GateOverrideError, match=match):
         _cli_context(client, controller, base + flags)
 
@@ -971,18 +1081,22 @@ def test_an_override_flag_alone_is_no_way_round_the_gate(client, controller, fla
 def test_an_override_names_real_gates_and_says_when_it_waived_nothing(client, controller):
     """A misspelt gate was accepted, waived nothing, and left the release
     blocked; a waiver of a gate that passed showed only in the log."""
-    base = ["all", "--input", "./intake", "--out-version", "v1", "--release-id", "release-2026.9.1",
+    base = ["all", "--input", "./intake", "--version", "v1",
             "--override-approver", "A. Reviewer", "--override-reason", _REASON]
     with pytest.raises(cli.GateOverrideError, match=r"\['list_recall'\], which is not a gate"):
         _cli_context(client, controller, base + ["--override-gate", "list_recall"])
-    for gate in ("improvement", "cross_type_regression_evidence", "cross_type:lossrun", "table_f1"):
+    for gate in ("improvement", "line_regression_evidence", "line:homeowners", "table_f1"):
         assert _cli_context(client, controller, base + ["--override-gate", gate]).gate_override
+    # The cross-type gates went with continued Foundations (decision 2026-10-23).
+    for gone in ("cross_type_regression_evidence", "cross_type:lossrun", "line:not_a_line"):
+        with pytest.raises(cli.GateOverrideError, match="which is not a gate"):
+            _cli_context(client, controller, base + ["--override-gate", gone])
 
     seed_corpus(client)
     ctx = _cli_context(client, controller, base + ["--override-gate", "list_field_recall"],
                        metrics_provider=lambda _c: dict(PASSING_METRICS))
     assert cli.run_command("all", ctx).ok
-    decision = client.read_json(paths.gate_decision("v1"))
+    decision = client.read_json(paths.gate_decision("v1", scope="policy"))
     assert decision["waived_gates"] == []
     assert any("['list_field_recall'], which did not fail" in w for w in decision["warnings"])
 
@@ -996,7 +1110,7 @@ def test_flags_are_refused_before_the_command_detaches_on_the_pod(monkeypatch, c
     started: list[object] = []
     monkeypatch.setattr(detach, "should_detach", lambda: True)
     monkeypatch.setattr(detach, "detach", lambda command, hint: started.append(command) or "all-test")
-    base = ["all", "--input", "./intake", "--out-version", "v9", "--release-id", "release-2026.10.1"]
+    base = ["all", "--input", "./intake", "--version", "v9"]
     for flags, said in ((["--fixes-defect", " "], "names no defect"),
                         (["--override-gate", "list_field_recall"], "name the person"),
                         (["--override-approver", "A. Reviewer", "--override-reason", _REASON,
@@ -1028,41 +1142,20 @@ def test_mark_held_out_and_mark_reviewed_both_run(monkeypatch, capsys):
     assert printed == {"held_out_source_ids": ["p1"], "still_without_review_record": {}}
 
 
-def test_one_override_cannot_cover_several_scopes(client, controller):
-    with pytest.raises(cli.GateOverrideError, match="one release"):
-        _cli_context(client, controller, [
-            "all", "--out-version", "v1", "--scope", "policy", "--scope", "lossrun",
-            "--release-id", "policy=release-2026.9.1", "--release-id", "lossrun=release-2026.9.2",
-            "--override-approver", "A. Reviewer", "--override-reason", _REASON,
-            "--override-gate", "improvement",
-        ])
-
-
-def test_fixes_defect_is_checked_and_given_per_scope(client, controller):
-    """`--fixes-defect " "` lifted the improvement rule, and one value under
-    `all --scope policy --scope lossrun` lifted it for both releases."""
-    from common.scopes import get_scope
-
-    policy, lossrun = get_scope("policy"), get_scope("lossrun")
+def test_fixes_defect_is_checked_before_any_work(client, controller):
+    """`--fixes-defect " "` lifted the improvement rule. A blank or placeholder
+    value is refused; a defect's own sentence is taken as written."""
     for blank in (" ", "-", "n/a"):
         with pytest.raises(cli.FixesDefectError, match="names no defect"):
-            cli.fixes_defect_for([blank], policy, [policy])
-    assert cli.fixes_defect_for(["TICKET-12"], policy, [policy]) == "TICKET-12"
-    assert cli.fixes_defect_for([], policy, [policy]) is None
-    # A defect's own sentence may hold "=": only a scope's name makes a pair.
-    assert cli.fixes_defect_for(["FID-9: rate=0 on endorsements"], policy, [policy]).startswith("FID-9")
+            cli.fixes_defect_for(blank)
+    assert cli.fixes_defect_for("TICKET-12") == "TICKET-12"
+    assert cli.fixes_defect_for(None) is None
+    # A sentence holding "=" is a sentence: there is no scope=defect pair any more.
+    assert cli.fixes_defect_for("FID-9: rate=0 on endorsements").startswith("FID-9")
 
-    both = [policy, lossrun]
-    with pytest.raises(cli.FixesDefectError, match="which release"):
-        cli.fixes_defect_for(["TICKET-12"], policy, both)
-    with pytest.raises(cli.FixesDefectError, match="does not include"):
-        cli.fixes_defect_for(["unified=TICKET-12"], policy, both)
-
-    argv = ["all", "--out-version", "v1", "--scope", "policy", "--scope", "lossrun",
-            "--release-id", "policy=release-2026.9.1", "--release-id", "lossrun=release-2026.9.2",
-            "--fixes-defect", "policy=TICKET-12"]
-    assert _cli_context(client, controller, argv, scope=policy).fixes_defect == "TICKET-12"
-    assert _cli_context(client, controller, argv, scope=lossrun).fixes_defect is None
+    argv = ["all", "--version", "v1", "--fixes-defect", "TICKET-12"]
+    assert _cli_context(client, controller, argv).fixes_defect == "TICKET-12"
+    assert _cli_context(client, controller, ["all", "--version", "v1"]).fixes_defect is None
 
 
 def test_a_gold_with_no_review_record_never_trains(client, controller):
@@ -1071,7 +1164,7 @@ def test_a_gold_with_no_review_record_never_trains(client, controller):
     from orchestration.pipeline_dag import load_labeled_documents
 
     seeded = seed_corpus(client)
-    source_id = seeded[0]
+    source_id = seeded_policies(seeded)[0]
     doc_type = source_id.rsplit("_", 1)[0]
     label = client.read_json(paths.golden_label(doc_type, source_id))
     label["fideon:provenance"] = {"provenance": "Seed gold drafted by Claude Code, not reviewed"}
@@ -1113,7 +1206,6 @@ def test_a_completed_stage_re_runs_as_a_no_op(client, controller):
     by_name = {r.name: r for r in second.results}
     assert by_name["dataset_build"].status == "skipped"
     assert by_name["training"].status == "skipped"
-    assert by_name["merge"].status == "skipped"
     assert "no-op" in by_name["training"].detail
 
 
@@ -1124,14 +1216,14 @@ def test_the_gate_is_never_skipped_as_already_complete():
     assert gate.is_complete is None
 
 
-def test_resuming_at_merge_does_not_retrain(client, controller):
+def test_resuming_at_checkpoint_selection_does_not_retrain(client, controller):
     seed_corpus(client)
     ctx = make_context(client, controller)
     run_stages(ctx, stages_for("finetune"), command="finetune")
 
     resumed = make_context(client, controller)
-    report = run_stages(resumed, stages_from("merge", "finetune"), command="finetune")
-    assert [r.name for r in report.results] == ["merge"]
+    report = run_stages(resumed, stages_from("checkpoint_eval", "finetune"), command="finetune")
+    assert [r.name for r in report.results] == ["checkpoint_eval"]
     assert "training" not in resumed.results
 
 
@@ -1171,17 +1263,17 @@ def test_package_will_not_publish_a_run_that_never_finished(client, controller):
     _mark_trained(client, "v1")
 
     # The run died on the pod.
-    crashed = get("extractor-v1", client)
+    crashed = get("policy-v1", client)
     crashed.status = "failed"
     write_manifest(crashed, client)
 
     package_ctx = make_context(client, controller)
     run_stages(package_ctx, stages_for("package"), command="package")
 
-    assert get("extractor-v1", client).artifacts.status == "staged",         "a failed run was published, advertising a Blob path serving would find empty"
+    assert get("policy-v1", client).artifacts.status == "staged",         "a failed run was published, advertising a Blob path serving would find empty"
 
 
-def test_package_pushes_all_three_artifact_classes_and_publishes(client, controller):
+def test_package_pushes_the_adapter_and_publishes(client, controller):
     seed_corpus(client)
     ctx = make_context(client, controller)
     run_stages(ctx, stages_for("finetune"), command="finetune")
@@ -1196,25 +1288,18 @@ def test_package_pushes_all_three_artifact_classes_and_publishes(client, control
     report = run_stages(package_ctx, stages_for("package"), command="package")
     assert report.ok, report.render()
 
+    # The adapter alone: it is the release, served as a LoRA on the base, so
+    # nothing merged or quantized is pushed (decision 2026-10-23).
     pushed = package_ctx.results["package"].data["pushed"]
-    assert any(k.startswith("adapter:") for k in pushed)
-    assert any(k.startswith("merged:") for k in pushed)
-    assert any(k.startswith("quantized:") for k in pushed)
+    assert pushed == {"adapter:policy": paths.scoped_adapter_dir("policy", "v1")}
 
     from registry_utils.query_registry import get
 
-    foundation = get("extractor-v1", client)
+    foundation = get("policy-v1", client)
     assert foundation.artifacts.status == "published"
     assert foundation.artifacts.staging_path is None
-    assert foundation.artifacts.adapter_weights
-
-    # The unified run owns the adapter AND the merged and quantized models —
-    # there is one of each under arch v2.1 §4.1. Under v1 it owned only the
-    # adapter, because the merged models were produced per document type by the
-    # per-type runs stacked on top of it.
-    assert foundation.artifacts.merged_model
-    # bf16 is the merged model, never a quantized export, so a bf16-only
-    # cycle publishes no quantized format.
+    assert foundation.artifacts.adapter_weights == paths.scoped_adapter_dir("policy", "v1")
+    assert foundation.artifacts.merged_model is None
     assert foundation.artifacts.quantized_formats == []
     assert foundation.artifacts.quantized_model is None
 
@@ -1234,8 +1319,9 @@ def test_no_per_type_run_is_produced_by_a_default_build(client, controller):
             get(f"{doc_type}-adapter-v1", client)
 
 
-def test_a_default_build_publishes_the_unified_model(client, controller):
-    """The unified paths ARE what was built, so the run legitimately owns them."""
+def test_a_default_build_publishes_the_adapter_alone(client, controller):
+    """The adapter's path IS what was built, so the run owns it, and nothing
+    else: no merged or quantized model exists to publish."""
     seed_corpus(client)
     ctx = make_context(client, controller)
     run_stages(ctx, stages_for("finetune"), command="finetune")
@@ -1243,12 +1329,13 @@ def test_a_default_build_publishes_the_unified_model(client, controller):
 
     from registry_utils.query_registry import get
 
-    foundation = get("extractor-v1", client)
-    assert foundation.artifacts.merged_model
-    # bf16 is the merged model, never a quantized export, so a bf16-only
-    # cycle publishes no quantized format.
+    foundation = get("policy-v1", client)
+    assert foundation.artifacts.adapter_weights == paths.scoped_adapter_dir("policy", "v1")
+    assert foundation.artifacts.merged_model is None
     assert foundation.artifacts.quantized_formats == []
     assert foundation.artifacts.quantized_model is None
+    # A dry run's placeholder, where the adapter's own config would be.
+    assert client.exists(f"{paths.scoped_adapter_dir('policy', 'v1')}/adapter_config.json")
 
 
 def test_package_clears_staging_after_a_verified_push(client, controller):
@@ -1270,21 +1357,22 @@ def test_keep_staging_retains_the_volume_copy(client, controller):
 
 
 def test_package_fails_loudly_with_remediation_when_nothing_is_staged(client, controller):
-    ctx = make_context(client, controller, skip_quantize=True)
+    ctx = make_context(client, controller)
     report = run_stages(ctx, stages_for("package"), command="package")
 
     # The FIRST stage of package, not the last: the remediation is about a
-    # reclaimed volume, and discovering it after quantize, calibrate and the gate
-    # have run wastes the whole command to say something knowable up front.
-    assert report.failed_at == "quantize"
+    # reclaimed volume, and discovering it after calibrate and the gate have run
+    # wastes the whole command to say something knowable up front.
+    assert report.failed_at == "calibrate"
     detail = report.results[-1].detail
     assert "not on the staging volume" in detail
-    assert "--from-stage merge" in detail and "--push-adapters" in detail
+    assert "--from-stage training" in detail and "--push-adapters" in detail
 
 
-def test_push_adapters_leaves_only_the_merged_model_staged(client, controller):
-    """Recommended when commands 1 and 2 may be separated by more than a day —
-    the adapters are tens of MB, the merged model is ~16 GB (IMPL-13 §3)."""
+def test_push_adapters_in_a_dry_run_pushes_no_placeholder(client, controller):
+    """Recommended when commands 1 and 2 may be separated by more than a day:
+    the adapter is tens of MB, and pushed early a reclaimed volume loses nothing
+    (IMPL-13 §3)."""
     seed_corpus(client)
     ctx = make_context(client, controller, push_adapters=True)
     run_stages(ctx, stages_for("finetune"), command="finetune")
@@ -1292,7 +1380,7 @@ def test_push_adapters_leaves_only_the_merged_model_staged(client, controller):
     # A dry run trained nothing, so there is no adapter to push — and the
     # placeholder note that used to stand in for one is gone. The real upload
     # is covered by test_push_adapters_uploads_the_adapter_itself.
-    assert not client.exists(f"{paths.adapter_dir('foundation', 'v1')}/adapter_placeholder.json")
+    assert not client.exists(f"{paths.scoped_adapter_dir('policy', 'v1')}/adapter_placeholder.json")
 
 
 # --------------------------------------------------------------------------
@@ -1313,20 +1401,20 @@ def test_a_pod_without_the_staging_volume_is_refused(tmp_path):
 
 
 def test_a_pod_leaves_no_process_behind_even_when_the_job_raises(controller):
-    with pytest.raises(RuntimeError, match="boom"), controller.pod(controller.spec_for("merge")):
+    with pytest.raises(RuntimeError, match="boom"), controller.pod(controller.spec_for("calibrate")):
         raise RuntimeError("boom")
     assert controller.active_pods == []
 
 
 def test_run_job_reports_a_failure_instead_of_leaking_a_pod(controller):
-    result = controller.run_job(controller.spec_for("quantize"), lambda _h: 1 / 0)
+    result = controller.run_job(controller.spec_for("evaluation_gate"), lambda _h: 1 / 0)
     assert not result.ok and "division" in (result.error or "")
     assert controller.active_pods == []
 
 
 def test_every_gpu_stage_runs_on_the_one_h200_pod(controller):
     """The deployment runs every GPU stage on one H200 SXM pod, in process: OCR,
-    training, selection, merge, calibration and the gate share the card, and a
+    training, selection, calibration and the gate share the card, and a
     corpus never moves between pods. (The earlier plan put OCR on a cheaper card.)"""
     assert set(GPU_CLASS_BY_STAGE.values()) == {"H200-SXM"}
 
@@ -1342,19 +1430,22 @@ def test_every_gpu_stage_has_a_declared_class(controller):
         assert settings.gpu_class_for(stage.name, "UNSET") != "UNSET", stage.name
 
 
-def test_a_scope_can_override_the_card_a_stage_runs_on(controller, monkeypatch):
-    """Whether a run fits a card is decided by its largest task cap, which is a
-    property of the scope: a policy run at 32k against a lossrun run at 20480."""
+def test_the_card_a_stage_runs_on_is_set_per_stage_only(controller, monkeypatch):
+    """There is one adapter, so there is no per-scope card to choose: a stage's
+    card comes from gpu_class_by_stage, else the fallback."""
+    import inspect
+
     from orchestration import settings
 
     monkeypatch.setattr(
         settings, "pipeline_config",
-        lambda: {"gpu_class_by_stage": {"training": "A100-40G"},
-                 "gpu_class_by_scope": {"policy": {"training": "A100-80G"}}},
+        lambda: {"gpu_class_by_stage": {"training": "A100-40G"}},
     )
     assert settings.gpu_class_for("training") == "A100-40G"
-    assert settings.gpu_class_for("training", scope="policy") == "A100-80G"
-    assert settings.gpu_class_for("training", scope="lossrun") == "A100-40G"
+    assert settings.gpu_class_for("calibrate", "L40S") == "L40S"
+    assert "scope" not in inspect.signature(settings.gpu_class_for).parameters
+    monkeypatch.undo()
+    assert "gpu_class_by_scope" not in settings.pipeline_config()
 
 
 def test_finetune_uses_one_pod_for_the_whole_training_fan_out(client, controller):
@@ -1369,14 +1460,14 @@ def test_finetune_uses_one_pod_for_the_whole_training_fan_out(client, controller
 
 
 def test_a_pod_will_not_clone_a_moving_branch():
-    spec = PodSpec(name="p", stage="merge", gpu_class="L40S", volume_id="vol", git_commit=None)
+    spec = PodSpec(name="p", stage="calibrate", gpu_class="L40S", volume_id="vol", git_commit=None)
     with pytest.raises(PodLaunchError, match="no resolvable git commit"):
         spec.clone_command("git@example.com:repo.git")
 
 
 def test_an_unresolved_commit_is_not_treated_as_pinned():
     """`capture_git_commit` returns 'unknown' off a git tree; a pod cannot clone it."""
-    spec = PodSpec(name="p", stage="merge", gpu_class="L40S", volume_id="vol", git_commit="unknown")
+    spec = PodSpec(name="p", stage="calibrate", gpu_class="L40S", volume_id="vol", git_commit="unknown")
     with pytest.raises(PodLaunchError):
         spec.clone_command("git@example.com:repo.git")
 
@@ -1426,17 +1517,23 @@ def test_rollback_needs_somewhere_to_roll_back_to(controller):
 # --------------------------------------------------------------------------
 
 
-def test_finetune_requires_an_out_version():
+def test_a_fresh_finetune_names_no_version_and_package_must():
+    """A fresh cycle takes the next version itself (``cycle_version``); package
+    publishes one cycle, so it names it."""
+    assert cli.build_parser().parse_args(["finetune", "--input", "./intake"]).version is None
     with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["finetune", "--input", "./intake"])
+        cli.build_parser().parse_args(["package"])
+    for gone in ("--out-version", "--release-id", "--scope", "--doc-types"):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(["all", "--input", "./intake", gone, "x"])
 
 
 def test_all_accepts_the_union_of_both_flag_sets():
     args = cli.build_parser().parse_args([
-        "all", "--input", "./intake", "--out-version", "v2",
-        "--formats", "bf16", "fp8", "--keep-staging",
+        "all", "--input", "./intake", "--version", "v2",
+        "--fresh", "--keep-staging",
     ])
-    assert args.out_version == "v2" and args.formats == ["bf16", "fp8"] and args.keep_staging
+    assert args.version == "v2" and args.fresh and args.keep_staging
 
 
 def test_extract_takes_base_as_a_first_class_model():
@@ -1458,42 +1555,44 @@ def test_the_cli_holds_no_stage_logic():
 
 def test_build_context_carries_the_flags_through(client, controller):
     args = cli.build_parser().parse_args([
-        "finetune", "--input", "./intake", "--out-version", "v3",
-        "--scope", "policy", "--push-adapters", "--dry-run", "--min-labels-per-type", "5",
+        "finetune", "--input", "./intake", "--version", "v3",
+        "--push-adapters", "--dry-run", "--min-labels-per-type", "5",
     ])
     ctx = cli.build_context(args, client=client, controller=controller,
                             raw_client=ingestion_client(client))
-    assert ctx.out_version == "v3" and ctx.scope.name == "policy" and ctx.push_adapters
+    assert ctx.out_version == "v3" and ctx.push_adapters
     assert ctx.dry_run and ctx.min_labels_per_type == 5
     assert ctx.corpus == "v3"  # corpus defaults to the output version
+    # One number names the run, the adapter and the release.
+    assert ctx.release_id == "v3"
+    assert ctx.doc_types == ["policy"]
 
 
-def test_all_without_a_release_id_stops_before_training(client, controller):
-    """release_id defaulted to "" and nothing set it, so calibrate fitted every
-    calibrator and then failed to save them. Under `all` that was after a whole
-    training run."""
-    seed_corpus(client)
-    ctx = make_context(client, controller, release_id="")
-    report = run_stages(ctx, stages_for("all"), command="all")
-
-    assert not report.ok
-    assert report.failed_at == "ingestion"
-    assert [r.name for r in report.results] == ["ingestion"]
-    assert "--release-id release-" in report.results[0].detail
-    assert not ctx.volume.exists(paths.staging_adapter_dir("foundation", "v1"))
+def test_the_release_id_is_the_cycle_s_version(client, controller):
+    """A release is named by its version: there is no separate id to pass, and
+    so none to get wrong between a failed run and its resume."""
+    ctx = make_context(client, controller, out_version="v4")
+    assert ctx.release_id == "v4"
+    assert paths.is_valid_release_id(ctx.release_id)
+    # The release-YYYY.M.N form an older index holds still reads.
+    assert paths.is_valid_release_id("release-2026.9.1")
+    assert not paths.is_valid_release_id("policy-v4")
+    with pytest.raises(TypeError):
+        make_context(client, controller, release_id="v9")
 
 
-def test_the_suggested_release_id_is_the_next_free_one_this_month():
-    used = ["release-2026.9.1", "release-2026.9.3", "release-2026.8.7", "release-2026.10.9"]
-    assert paths.next_release_id(used, 2026, 9) == "release-2026.9.4"
-    assert paths.next_release_id([], 2026, 9) == "release-2026.9.1"
-    assert paths.is_valid_release_id(paths.next_release_id(used, 2026, 9))
+def test_the_next_version_is_one_more_than_any_used():
+    assert paths.next_version([]) == "v1"
+    assert paths.next_version(["v1", "v3", "v2.1"]) == "v4"
+    assert paths.next_version(["v2", "v10", "release-2026.9.1", "policy-v40", "latest"]) == "v11"
+    assert paths.version_number("v3") == 3 and paths.version_number("v2.1") == 2
+    assert paths.version_number("release-2026.9.1") is None
 
 
 def test_run_command_dispatches_all_through_both_commands(client, controller):
     seed_corpus(client)
     args = cli.build_parser().parse_args([
-        "all", "--input", "./intake", "--out-version", "v1", "--release-id", "release-2026.9.1",
+        "all", "--input", "./intake", "--version", "v1",
     ])
     ctx = cli.build_context(
         args, client=client, controller=controller, raw_client=ingestion_client(client),
@@ -1519,25 +1618,16 @@ def test_gate_blocked_is_distinguishable_from_a_failure():
 
 
 def _promote_foundation(client: BlobClient, controller: RunPodController, version: str) -> None:
-    """Run a cycle and promote it, so the next one has something to bump from.
+    """Run a cycle and promote its release, so the next one has something to bump from.
 
-    One run under arch v2.1 §4.1: the unified extractor. v1 promoted a Foundation
-    plus one adapter per document type, a topology vLLM cannot serve.
+    One run per cycle: the policy adapter (``common.adapter``). v1 promoted a
+    Foundation plus one adapter per document type, a topology vLLM cannot serve.
+    The cascade reads the promoted release from the tenant's release index.
     """
-    from evaluation.gating import apply_to_manifest, promotion_gate
-    from registry_utils.query_registry import get
-    from registry_utils.write_run_manifest import mark_promoted
-
     ctx = make_context(client, controller, out_version=version)
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.ok, report.render()
-
-    # Gate first, then promote — the order a real cycle uses. `mark_promoted`
-    # requires the affirmative gate result, so a manifest that was never
-    # evaluated cannot be promoted at all.
-    passed = promotion_gate(dict(PASSING_METRICS), None)
-    manifest = apply_to_manifest(passed, get(f"extractor-{version}", client))
-    mark_promoted(manifest, client, promoted_by="test")
+    promote_in_index(client, version)
 
 
 def _graduate_adapter(client: BlobClient, doc_type: str, foundation_version: str) -> str:
@@ -1570,7 +1660,7 @@ def _graduate_adapter(client: BlobClient, doc_type: str, foundation_version: str
             base_model="Qwen/Qwen3-VL-8B-Instruct@abc1234",
             corpus_version=f"corpus/{foundation_version}",
             code_git_commit="abc1234",
-            foundation_version=f"extractor-{foundation_version}",
+            foundation_version=f"policy-{foundation_version}",
         ),
         training_config=TrainingConfig(
             technique="LoRA", base_quantization="bf16_frozen_base", optimizer="adamw_torch",
@@ -1601,7 +1691,7 @@ def test_a_minor_bump_does_not_trigger_the_cascade(client, controller):
     seed_corpus(client)
     _promote_foundation(client, controller, "v1")
 
-    ctx = make_context(client, controller, out_version="v1.1")
+    ctx = make_context(client, controller, out_version="v1.1", fresh=True)
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.ok, report.render()
 
@@ -1614,7 +1704,7 @@ def test_a_major_bump_blocks_until_dependent_adapters_are_revalidated(client, co
     _promote_foundation(client, controller, "v1")
     _graduate_adapter(client, "policy", "v1")
 
-    ctx = make_context(client, controller, out_version="v2")
+    ctx = make_context(client, controller, out_version="v2", fresh=True)
     report = run_stages(ctx, stages_for("all"), command="all")
 
     assert report.blocked_at == "evaluation_gate"
@@ -1633,9 +1723,9 @@ def test_the_cascade_clears_once_every_dependent_has_passed(client, controller):
 
     probe = make_context(client, controller, out_version="v2")
     dependents = foundation_upgrade_work_list(probe).dependents
-    assert dependents, "the graduated adapters should depend on extractor-v1"
+    assert dependents, "the graduated adapters should depend on policy-v1"
 
-    ctx = make_context(client, controller, out_version="v2",
+    ctx = make_context(client, controller, out_version="v2", fresh=True,
                        revalidation_evidence=dict.fromkeys(dependents, True))
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.ok, report.render()
@@ -1654,7 +1744,7 @@ def test_partial_revalidation_still_blocks(client, controller):
     partial = dict.fromkeys(dependents, True)
     partial[dependents[0]] = False
 
-    ctx = make_context(client, controller, out_version="v2", revalidation_evidence=partial)
+    ctx = make_context(client, controller, out_version="v2", fresh=True, revalidation_evidence=partial)
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.blocked_at == "evaluation_gate"
     assert dependents[0] in report.results[-1].detail
@@ -1707,7 +1797,7 @@ def test_every_stage_records_its_wall_time_and_the_run_report_is_written_after_e
 
     monkeypatch.setenv(PROGRESS_DIR_ENV, str(tmp_path))
     ctx = make_context(client, controller, out_version="v1")
-    name = f"run-finetune-{ctx.scope.name}-{paths._tenant(ctx.tenant_id)}-v1.json"
+    name = f"run-finetune-{paths._tenant(ctx.tenant_id)}-v1.json"
     written = []
 
     def first(_ctx):
@@ -1725,15 +1815,14 @@ def test_every_stage_records_its_wall_time_and_the_run_report_is_written_after_e
     assert final["failed_at"] == "second" and "wall_seconds" in final["stages"][1]
 
 
-def test_two_scopes_under_one_version_keep_their_own_run_reports(client, controller):
-    from common.scopes import get_scope
+def test_two_tenants_under_one_version_keep_their_own_run_reports(client, controller):
     from orchestration.pipeline_dag import RunReport, progress_report_name
 
     report = RunReport(command="finetune", version="v1")
-    cgl = make_context(client, controller, scope=get_scope("casualty_fleet"), tenant_id="cgl")
-    personal = make_context(client, controller, scope=get_scope("personal_lines"), tenant_id="personal")
+    cgl = make_context(client, controller, tenant_id="cgl")
+    personal = make_context(client, controller, tenant_id="personal")
     assert progress_report_name(report, cgl) != progress_report_name(report, personal)
-    assert progress_report_name(report, cgl) == "run-finetune-casualty_fleet-cgl-v1.json"
+    assert progress_report_name(report, cgl) == "run-finetune-cgl-v1.json"
 
 
 def test_a_blocked_gate_is_never_retried(client, controller):
@@ -1758,22 +1847,24 @@ def test_the_config_file_is_actually_read():
     assert settings.gpu_class_for("training").startswith("H200")
     assert "A100" not in settings.gpu_class_for("preprocessing")
     assert settings.retry_policy()["retry_on_gate_block"] is False
-    assert settings.defaults()["formats"] == ["bf16"]
+    assert settings.defaults()["min_labels_per_type"] == 25
+    # Nothing is merged or quantized, so there is no format or merge dtype to
+    # configure (decision 2026-10-23).
+    assert "formats" not in settings.defaults() and "dtype" not in settings.defaults()
 
 
 def test_cli_defaults_come_from_the_config_file():
     from orchestration import settings
 
-    args = cli.build_parser().parse_args(["package", "--version", "v2"])
-    assert args.formats == settings.defaults()["formats"]
-    assert args.dtype == settings.defaults()["dtype"]
+    args = cli.build_parser().parse_args(["finetune", "--input", "./intake"])
+    assert args.min_labels_per_type == settings.defaults()["min_labels_per_type"]
 
 
 def test_the_gpu_flag_actually_reaches_the_training_pod(client, controller):
     """A flag that parses and changes nothing is worse than no flag."""
     seed_corpus(client)
     args = cli.build_parser().parse_args([
-        "finetune", "--out-version", "v1", "--gpu", "H100-80G", "--skip-ingest",
+        "finetune", "--version", "v1", "--gpu", "H100-80G", "--skip-ingest",
     ])
     ctx = cli.build_context(args, client=client, controller=controller,
                             raw_client=ingestion_client(client),
@@ -1792,16 +1883,18 @@ def test_the_gpu_flag_actually_reaches_the_training_pod(client, controller):
 # Checkpoint selection in the pipeline (arch v2.1 §11.2)
 # --------------------------------------------------------------------------
 
-def test_the_selected_checkpoint_is_what_gets_merged(client, controller):
-    """The selection is worth nothing if merge ignores it and folds in the
-    staged adapter directory anyway."""
+def test_the_selected_checkpoint_is_what_gets_served(client, controller):
+    """The selection is worth nothing if calibration, the gate and package
+    ignore it and take the staged adapter directory anyway."""
+    from orchestration.pipeline_dag import selected_checkpoint
+
     seed_corpus(client)
-    chosen = "/runpod-volume/staging/adapters/foundation/v1/checkpoint-300"
+    chosen = "/runpod-volume/staging/adapters/scope/policy/v1/checkpoint-300"
     ctx = make_context(
         client, controller,
         checkpoints=[
-            "/runpod-volume/staging/adapters/foundation/v1/checkpoint-100",
-            "/runpod-volume/staging/adapters/foundation/v1/checkpoint-200",
+            "/runpod-volume/staging/adapters/scope/policy/v1/checkpoint-100",
+            "/runpod-volume/staging/adapters/scope/policy/v1/checkpoint-200",
             chosen,
         ],
         checkpoint_scorer=lambda p: {
@@ -1813,34 +1906,36 @@ def test_the_selected_checkpoint_is_what_gets_merged(client, controller):
 
     assert report.ok, report.render()
     assert ctx.results["checkpoint_eval"].data["selected"] == chosen
-    assert ctx.results["merge"].data["selected_checkpoint"] == chosen
+    assert selected_checkpoint(ctx) == chosen
 
 
 def test_a_run_with_no_checkpoints_skips_selection_rather_than_guessing(client, controller):
     """A dry run never launched ms-swift, so there is nothing to choose between.
-    Merging the staged adapter directory is the honest fallback."""
+    Serving the staged adapter directory is the honest fallback."""
+    from orchestration.pipeline_dag import selected_checkpoint
+
     seed_corpus(client)
     ctx = make_context(client, controller)
     report = run_stages(ctx, stages_for("finetune"), command="finetune")
 
     assert report.ok, report.render()
     assert ctx.results["checkpoint_eval"].status == "skipped"
-    assert ctx.results["merge"].data["selected_checkpoint"] is None
+    assert selected_checkpoint(ctx) is None
 
 
 def test_the_selection_is_recorded_where_a_later_review_can_read_it(client, controller):
-    """The merged weights do not say which checkpoint they came from, and once
-    the staging volume is reclaimed nothing else does either."""
+    """The adapter's weights do not say which checkpoint they came from, and
+    once the staging volume is reclaimed nothing else does either."""
     seed_corpus(client)
     ctx = make_context(
         client, controller,
-        checkpoints=["/runpod-volume/staging/adapters/foundation/v1/checkpoint-100"],
+        checkpoints=["/runpod-volume/staging/adapters/scope/policy/v1/checkpoint-100"],
         checkpoint_scorer=lambda _p: {"field_normalized_match": 0.9},
 
     )
     run_stages(ctx, stages_for("finetune"), command="finetune")
 
-    record = client.read_json(paths.checkpoint_selection("v1"))
+    record = client.read_json(paths.checkpoint_selection("v1", scope="policy"))
     assert record["selected"].endswith("checkpoint-100")
     assert record["selection_metric"] == "field_normalized_match"
 
@@ -1882,7 +1977,6 @@ def test_calibration_fits_per_serving_format(client, controller):
     seed_corpus(client)
     ctx = make_context(
         client, controller,
-        release_id="release-2026.11.1",
         calibration_samples={"bf16": _calibration_samples()},
     )
     report = run_stages(ctx, stages_for("all"), command="all")
@@ -1890,7 +1984,7 @@ def test_calibration_fits_per_serving_format(client, controller):
     assert report.ok, report.render()
     assert "bf16" in ctx.calibrators and "bf16" in ctx.thresholds
 
-    stored = client.read_json(paths.release_calibrators("release-2026.11.1", "bf16"))
+    stored = client.read_json(paths.release_calibrators("v1", "bf16"))
     assert stored["calibrators"]["serving_format"] == "bf16"
     assert stored["thresholds"]["fitted_on"].startswith("validation threshold half")
 
@@ -1901,13 +1995,12 @@ def test_no_calibrator_is_shared_across_serving_formats(client, controller):
     seed_corpus(client)
     ctx = make_context(
         client, controller,
-        release_id="release-2026.11.1",
         calibration_samples={"*": _calibration_samples()},
     )
     run_stages(ctx, stages_for("all"), command="all")
 
     assert "bf16" not in ctx.calibrators
-    assert not client.exists(paths.release_calibrators("release-2026.11.1", "bf16"))
+    assert not client.exists(paths.release_calibrators("v1", "bf16"))
 
 
 def test_a_release_with_no_labelled_features_ships_uncalibrated_and_says_so(client, controller):
@@ -1915,7 +2008,7 @@ def test_a_release_with_no_labelled_features_ships_uncalibrated_and_says_so(clie
     nothing to fit, every field routes to review, and an operator should know
     that happened rather than discover it in the review queue."""
     seed_corpus(client)
-    ctx = make_context(client, controller, release_id="release-2026.11.1")
+    ctx = make_context(client, controller)
     report = run_stages(ctx, stages_for("all"), command="all")
 
     calibrate = ctx.results["calibrate"]
@@ -1930,7 +2023,6 @@ def test_the_calibration_stage_reports_its_guarantee(client, controller):
     seed_corpus(client)
     ctx = make_context(
         client, controller,
-        release_id="release-2026.11.1",
         calibration_samples={"bf16": _calibration_samples()},
     )
     run_stages(ctx, stages_for("all"), command="all")
@@ -1965,18 +2057,6 @@ def test_a_failed_run_is_not_resurrected_by_the_gate():
     assert manifest.status == "failed", "a run that never wrote weights cannot be evaluated"
 
 
-def test_the_staging_precondition_survives_skip_quantize(client, controller):
-    """`package` operates on what `finetune` staged, so a reclaimed volume is a
-    precondition failure for the whole command. Checking it inside the first
-    stage meant --skip-quantize turned that stage into a no-op and the check
-    disappeared with it."""
-    ctx = make_context(client, controller, skip_quantize=True)
-    report = run_stages(ctx, stages_for("package"), command="package")
-
-    assert report.failed_at == "quantize"
-    assert "not on the staging volume" in report.results[-1].detail
-
-
 # --------------------------------------------------------------------------
 # The release bundle (arch v2.1 §12.3)
 # --------------------------------------------------------------------------
@@ -1987,222 +2067,166 @@ def test_package_writes_the_release_bundle_it_pins(client, controller):
     so nothing pinned the prompt, schema, calibrators and OCR version that the
     served weights depend on."""
     seed_corpus(client)
-    ctx = make_context(client, controller, release_id="release-2026.11.1")
+    ctx = make_context(client, controller)
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.ok, report.render()
 
-    bundle = client.read_json(paths.release_bundle("release-2026.11.1"))
-    assert bundle["adapter"] == "extractor-v1"
-    assert bundle["serving_formats"]["bf16"] == paths.merged_model_dir("v1")
+    bundle = client.read_json(paths.release_bundle("v1"))
+    assert bundle["adapter"] == "policy-v1"
+    # The release IS its adapter, served as a LoRA on the bf16 base: nothing is
+    # merged, so bf16's artifact is the adapter's directory (decision 2026-10-23).
+    assert bundle["served_as"] == "lora_on_base" and bundle["merged_model"] == ""
+    assert bundle["serving_formats"] == {"bf16": paths.scoped_adapter_dir("policy", "v1")}
+    # What it may serve: policies. Which lines is trained_lines' to say.
+    assert bundle["doc_types"] == ["policy"]
     assert bundle["prompt_hash"] and bundle["vllm_config_hash"] and bundle["lockfile_hash"]
     assert bundle["ocr_pin"]["mineru_version"] == "2.0.0"
     assert "bf16" in bundle["gate_reports"]
 
     index = client.read_json(paths.release_index())
-    assert [row["release_id"] for row in index] == ["release-2026.11.1"]
+    assert [row["release_id"] for row in index] == ["v1"]
+
+
+def test_the_release_serves_the_lines_the_corpus_trained(client, controller):
+    """The bundle records the lines the adapter trained on, as canonical schema
+    names; serving sends a policy of any other line to the base model. With no
+    train view on the run manifest, the corpus's own line counts say."""
+    from orchestration.pipeline_dag import trained_lines
+
+    ctx = make_context(client, controller)
+    corpus = {"policy_line_counts": {"wc": 1, "auto": 2, "homeowners": 0, "not_a_line": 4}}
+    assert trained_lines(ctx, corpus) == ["auto", "wc"]
+    assert trained_lines(ctx, {}) == []
+
+
+def test_the_lines_of_the_run_s_own_train_view_are_canonical(client, controller):
+    seed_corpus(client)
+    ctx = make_context(client, controller)
+    assert run_stages(ctx, stages_for("all"), command="all").ok
+    # The view keys lines by their schema names (labels say commercial_auto,
+    # workers_comp), as the release and the data mix name them.
+    train = ctx.manifests["policy"].data_stats.examples_by_line["train"]
+    assert set(train) == {"auto", "wc"}
+    assert client.read_json(paths.release_bundle("v1"))["lines"] == ["auto", "wc"]
 
 
 def test_an_uncalibrated_release_is_gated_not_promoted(client, controller):
     seed_corpus(client)
-    ctx = make_context(client, controller, release_id="release-2026.11.1")
+    ctx = make_context(client, controller)
     run_stages(ctx, stages_for("all"), command="all")
 
-    bundle = client.read_json(paths.release_bundle("release-2026.11.1"))
+    bundle = client.read_json(paths.release_bundle("v1"))
     assert bundle["status"] == "gated"
     reasons = ctx.results["package"].data["not_promoted_because"]
     assert any("no calibrator" in r for r in reasons)
+
+
+def _package_for_real(ctx) -> None:
+    """The release step as a real `package` ends: the bundle written and promoted."""
+    from orchestration.pipeline_dag import build_release_bundle, write_release_bundle
+
+    ctx.dry_run = False
+    bundle, _reasons = build_release_bundle(ctx)
+    write_release_bundle(ctx, bundle)
 
 
 def test_a_calibrated_gated_bf16_release_is_promoted(client, controller):
     seed_corpus(client)
     ctx = make_context(
         client, controller,
-        release_id="release-2026.11.1",
         calibration_samples={"bf16": _calibration_samples()},
     )
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.ok, report.render()
+    # A dry run pushed placeholders, so it never promotes: the bundle stays gated.
+    assert client.read_json(paths.release_bundle("v1"))["status"] == "gated"
+    _package_for_real(ctx)
 
-    bundle = client.read_json(paths.release_bundle("release-2026.11.1"))
+    bundle = client.read_json(paths.release_bundle("v1"))
     assert bundle["status"] == "promoted", ctx.results["package"].data["not_promoted_because"]
-    assert bundle["calibrators"]["bf16"] == paths.release_calibrators("release-2026.11.1", "bf16")
+    assert bundle["calibrators"]["bf16"] == paths.release_calibrators("v1", "bf16")
+    # The index row says so too: it is what serving and the next gate read.
+    [row] = client.read_json(paths.release_index())
+    assert row["release_id"] == "v1" and row["status"] == "promoted"
 
 
-def test_a_quantized_format_is_not_promoted_on_the_bf16_gate_run(client, controller):
+def test_a_promoted_release_archives_the_one_it_replaces(client, controller):
+    """One promoted release per tenant: packaging a promoted v2 archives v1, in
+    the index and in v1's own bundle, so serving and the next gate read v2.
+    Each from the base: a v2 continuing v1 needs v1's per-line scores, which
+    is tests/test_incremental_training.py's subject."""
+    from orchestration.pipeline_dag import promoted_version
+
     seed_corpus(client)
-    ctx = make_context(
-        client, controller,
-        release_id="release-2026.11.1",
-        formats=["bf16", "fp8"], fp8_verified=True,
-        calibration_samples={"bf16": _calibration_samples(), "fp8": _calibration_samples()},
-    )
-    report = run_stages(ctx, stages_for("all"), command="all")
-    assert report.ok, report.render()
+    for version in ("v1", "v2"):
+        ctx = make_context(client, controller, out_version=version, fresh=True,
+                           calibration_samples={"bf16": _calibration_samples()})
+        report = run_stages(ctx, stages_for("all"), command="all")
+        assert report.ok, report.render()
+        _package_for_real(ctx)
 
-    bundle = client.read_json(paths.release_bundle("release-2026.11.1"))
-    assert bundle["status"] == "gated"
-    assert set(bundle["gate_reports"]) == {"bf16"}
+    status = {row["release_id"]: row["status"] for row in client.read_json(paths.release_index())}
+    assert status == {"v1": "archived", "v2": "promoted"}
+    assert client.read_json(paths.release_bundle("v1"))["status"] == "archived"
+    assert client.read_json(paths.release_bundle("v2"))["status"] == "promoted"
+    # Archived, not deleted: its calibrators and gate decision stay for a rollback.
+    assert client.exists(paths.release_calibrators("v1", "bf16"))
+    assert client.exists(paths.release_gate_decision("v1", "bf16"))
+    assert promoted_version(make_context(client, controller, out_version="v3")) == "v2"
 
 
 # --------------------------------------------------------------------------
-# Scopes: independent runs sharing one corpus (arch v2.1 §4.1)
+# Versions: each cycle its own run, model and release (decision 2026-10-22)
 # --------------------------------------------------------------------------
 
 
-def _scoped_ctx(client, controller, scope_name: str, **over):
-    from common.scopes import get_scope
-
-    return make_context(
-        client, controller,
-        scope=get_scope(scope_name),
-        release_id=f"release-2026.9.{1 if scope_name == 'unified' else 2}",
-        **over,
-    )
-
-
-def test_the_shared_stages_run_once_and_the_rest_run_per_scope(client, controller):
-    """Stages 1-4 build the corpus every scope reads. Running them per scope would
-    re-ingest and re-split the same documents, and a second split draw is the
-    leakage the corpus view exists to avoid."""
-    from common.scopes import get_scope
-    from orchestration.pipeline_dag import PER_SCOPE_STAGES, SHARED_STAGES, run_multi_scope
-
-    seed_corpus(client)
-    contexts = {}
-
-    def build(scope):
-        ctx = _scoped_ctx(client, controller, scope.name)
-        contexts[scope.name] = ctx
-        return ctx
-
-    report = run_multi_scope(
-        build, [get_scope("unified"), get_scope("policy")], command="all",
-    )
-
-    assert report.ok, report.render()
-    assert [r.name for r in report.shared.results] == [s.name for s in SHARED_STAGES]
-    for name in ("unified", "policy"):
-        assert [r.name for r in report.by_scope[name].results] == [
-            s.name for s in PER_SCOPE_STAGES
-        ], name
-
-
-def test_two_scopes_at_one_version_publish_only_their_own_artifacts(client, controller):
+def test_packaging_one_version_publishes_only_its_own_run(client, controller):
     """stage_push matched runs with run_id.endswith(version), so packaging one
-    scope published every scope's run at that tag — each against THIS scope's
-    paths, advertising prefixes holding another scope's weights or nothing."""
+    run published every run at that tag, against THIS run's paths. Two cycles
+    trained on one volume: packaging v2 publishes policy-v2 and nothing else."""
+    from registry_utils.query_registry import get
+
+    seed_corpus(client)
+    for version in ("v1", "v2"):
+        run_stages(make_context(client, controller, out_version=version),
+                   stages_for("finetune"), command="finetune")
+    v2 = make_context(client, controller, out_version="v2")
+    assert run_stages(v2, stages_for("package"), command="package").ok
+
+    assert v2.results["package"].data["published"] == ["policy-v2"]
+    pushed = v2.results["package"].data["pushed"]
+    assert set(pushed) == {"adapter:policy"}
+    assert "/scope/policy/v2" in pushed["adapter:policy"]
+    assert get("policy-v1", client).artifacts.status == "staged"
+
+
+def test_packaging_one_version_leaves_another_version_s_staged_adapter_alone(client, controller):
+    """The clear wiped the whole staging root, so packaging one run deleted
+    another's staged weights - the only copy until its own package run."""
     seed_corpus(client)
 
-    unified = _scoped_ctx(client, controller, "unified")
-    run_stages(unified, stages_for("all"), command="all")
-    policy = _scoped_ctx(client, controller, "policy")
-    run_stages(policy, stages_for("all"), command="all")
+    first = make_context(client, controller, out_version="v1")
+    run_stages(first, stages_for("finetune"), command="finetune")
+    staged_v1 = paths.scoped_staging_adapter_dir("policy", "v1")
+    assert first.volume.exists(staged_v1)
 
-    assert unified.results["package"].data["published"] == ["extractor-v1"]
-    assert policy.results["package"].data["published"] == ["policy-v1"]
-
-    pushed = policy.results["package"].data["pushed"]
-    assert "adapter:policy" in pushed and "adapter:unified" not in pushed
-    assert "/scope/policy/" in pushed["merged:policy"]
-
-
-def test_packaging_one_scope_leaves_another_scopes_staged_model_alone(client, controller):
-    """The clear wiped the whole staging root, so packaging `policy` deleted
-    `unified`'s staged merged model — the only copy until its own package run."""
-    seed_corpus(client)
-
-    unified = _scoped_ctx(client, controller, "unified")
-    run_stages(unified, stages_for("finetune"), command="finetune")
-    staged_unified = paths.staging_merged_model_dir("v1", scope="unified")
-    assert unified.volume.exists(staged_unified)
-
-    # The same controller, so the same staging volume — which is exactly the
+    # The same controller, so the same staging volume - which is exactly the
     # situation the old blanket clear destroyed.
-    policy = _scoped_ctx(client, controller, "policy")
-    report = run_stages(policy, stages_for("all"), command="all")
+    second = make_context(client, controller, out_version="v2")
+    report = run_stages(second, stages_for("all"), command="all")
 
     assert report.ok, report.render()
-    assert unified.volume.exists(staged_unified), "packaging policy cleared unified's merge"
-    assert not unified.volume.exists(paths.staging_merged_model_dir("v1", scope="policy"))
+    assert first.volume.exists(staged_v1), "packaging v2 cleared v1's adapter"
+    assert not first.volume.exists(paths.scoped_staging_adapter_dir("policy", "v2"))
 
 
-def test_each_scope_writes_its_own_release_bundle(client, controller):
-    seed_corpus(client)
-    for name in ("unified", "policy"):
-        ctx = _scoped_ctx(client, controller, name)
-        assert run_stages(ctx, stages_for("all"), command="all").ok
-
-    unified = client.read_json(paths.release_bundle("release-2026.9.1"))
-    policy = client.read_json(paths.release_bundle("release-2026.9.2"))
-
-    assert unified["adapter"] == "extractor-v1" and unified["scope"] == "unified"
-    assert unified["doc_types"] == [], "empty means every active type"
-    assert policy["adapter"] == "policy-v1" and policy["scope"] == "policy"
-    assert policy["doc_types"] == ["policy"], "what this release may serve"
-
-
-def test_a_gate_block_in_one_scope_does_not_stop_another(client, controller):
-    """They are separate adapters: a policy regression says nothing about the
-    lossrun model, and stopping the second run would only mean re-running it."""
-    from common.scopes import get_scope
-    from orchestration.pipeline_dag import run_multi_scope
-
-    seed_corpus(client)
-    regressed = {**PASSING_METRICS, "field_exact_match": 0.10}
-
-    def build(scope):
-        return _scoped_ctx(
-            client, controller, scope.name,
-            metrics_provider=(
-                (lambda _c: dict(regressed)) if scope.name == "policy"
-                else (lambda _c: dict(PASSING_METRICS))
-            ),
-        )
-
-    report = run_multi_scope(
-        build, [get_scope("policy"), get_scope("unified")], command="all",
-    )
-
-    assert not report.by_scope["policy"].ok
-    assert report.by_scope["unified"].ok, "one scope's block stopped another"
-    assert not report.ok, "the aggregate must still fail"
-    assert report.exit_code == 1
-
-
-def test_the_release_id_is_resolved_per_scope():
-    """Each scope produces its own release, so sharing one id would write every
-    scope's calibrators and gate decision to one prefix."""
-    from common.scopes import get_scope
-
-    policy, unified = get_scope("policy"), get_scope("unified")
-
-    assert cli.release_id_for("release-2026.9.1", policy) == "release-2026.9.1"
-    pairs = ["unified=release-2026.9.1", "policy=release-2026.9.2"]
-    assert cli.release_id_for(pairs, unified) == "release-2026.9.1"
-    assert cli.release_id_for(pairs, policy) == "release-2026.9.2"
-    # Named for other scopes only: refused later by assert_release_id, rather
-    # than silently taking an id meant for a different release.
-    assert cli.release_id_for(["unified=release-2026.9.1"], policy) == ""
-
-
-def test_scope_choices_come_from_the_config_file():
-    """A new scope is a YAML entry, never a code change — including at the CLI."""
-    from common.scopes import load_scopes
-
-    args = cli.build_parser().parse_args(
-        ["all", "--out-version", "v2", "--scope", "policy", "--scope", "unified"]
-    )
-    assert args.scopes == ["policy", "unified"]
-    assert set(load_scopes()) >= {"unified", "policy", "lossrun"}
-
-
-def test_the_gate_reads_its_own_scopes_eval_report(client, controller):
-    """The gate became scope-aware while its INPUT did not, so a policy run was
-    judged on the unified model's numbers — or found no report and failed."""
+def test_the_gate_reads_the_policy_adapter_s_eval_report(client, controller):
+    """The gate reads the adapter's own report, where stage_push records it on
+    the manifest - not the unscoped key the unified extractor used."""
     from orchestration.pipeline_dag import eval_report_metrics
 
     seed_corpus(client)
-    ctx = _scoped_ctx(client, controller, "policy")
+    ctx = make_context(client, controller)
 
     client.write_json(paths.eval_report("v1"), {"gate_metrics": {"field_exact_match": 0.10},
                                                 "eval_set": _scored_on()})
@@ -2214,21 +2238,8 @@ def test_the_gate_reads_its_own_scopes_eval_report(client, controller):
     assert eval_report_metrics(ctx)["field_exact_match"] == 0.99
 
 
-def test_two_scopes_cannot_share_one_release_id():
-    """Each scope produces its own release, all addressed by the id, so the
-    second bundle would overwrite the first and delete its index row."""
-    from common.scopes import get_scope
-
-    with pytest.raises(cli.ReleaseIdError, match="cannot share an id"):
-        cli.release_id_for(["release-2026.9.1"], get_scope("policy"), scope_count=2)
-
-    assert cli.release_id_for(
-        ["release-2026.9.1"], get_scope("policy"), scope_count=1
-    ) == "release-2026.9.1"
-
-
 # --------------------------------------------------------------------------
-# Phase 1: deterministic failures, resumed merges
+# Phase 1: deterministic failures, resumed packages
 # --------------------------------------------------------------------------
 
 
@@ -2267,16 +2278,16 @@ def test_a_transient_failure_is_still_retried(client, controller):
     assert report.ok and len(calls) == 2
 
 
-def test_a_resumed_merge_reads_the_checkpoint_already_selected(client, controller):
-    """`--from-stage merge` did not run checkpoint_eval, but an earlier process
-    did and wrote its choice down."""
-    from orchestration.pipeline_dag import stage_merge
+def test_a_resumed_package_reads_the_checkpoint_already_selected(client, controller):
+    """`--from-stage calibrate` (or `package`) did not run checkpoint_eval, but an
+    earlier process did and wrote its choice down: calibration, the gate and the
+    push read it there."""
+    from orchestration.pipeline_dag import selected_checkpoint
 
     ctx = make_context(client, controller)
-    chosen = "/runpod-volume/staging/adapters/foundation/v1/v0-1/checkpoint-150"
-    client.write_json(paths.checkpoint_selection("v1", scope=ctx.scope.name), {"selected": chosen})
-    result = stage_merge(ctx)
-    assert result.data["selected_checkpoint"] == chosen
+    chosen = "/runpod-volume/staging/adapters/scope/policy/v1/v0-1/checkpoint-150"
+    client.write_json(paths.checkpoint_selection("v1", scope="policy"), {"selected": chosen})
+    assert selected_checkpoint(ctx) == chosen
 
 
 def test_package_refuses_a_version_whose_gate_blocked(client, controller):
@@ -2285,11 +2296,11 @@ def test_package_refuses_a_version_whose_gate_blocked(client, controller):
     from orchestration.pipeline_dag import stage_push
 
     seed_corpus(client)
-    ctx = make_context(client, controller, release_id="release-2026.11.1")
+    ctx = make_context(client, controller)
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.ok, report.render()
 
-    key = paths.gate_decision("v1")
+    key = paths.gate_decision("v1", scope="policy")
     client.write_json(key, {**client.read_json(key), "passed": False, "failed_gates": ["x"]})
     with pytest.raises(PipelineError, match="did not pass its promotion gate"):
         stage_push(ctx)
@@ -2302,12 +2313,12 @@ def test_a_resumed_package_finds_the_calibrators_in_blob(client, controller):
 
     seed_corpus(client)
     first = make_context(
-        client, controller, release_id="release-2026.11.1",
+        client, controller,
         calibration_samples={"bf16": _calibration_samples()},
     )
     assert run_stages(first, stages_for("all"), command="all").ok
 
-    resumed = make_context(client, controller, release_id="release-2026.11.1")
+    resumed = make_context(client, controller)
     bundle, reasons = build_release_bundle(resumed)
     assert "bf16" in bundle.calibrators
     assert not any("no calibrator" in r for r in reasons)
@@ -2319,7 +2330,7 @@ def test_a_policy_corpus_built_with_another_window_plan_neither_trains_nor_packa
     from orchestration.pipeline_dag import build_release_bundle, stage_training
 
     seed_corpus(client)
-    ctx = make_context(client, controller, release_id="release-2026.11.1")
+    ctx = make_context(client, controller)
     assert run_stages(ctx, stages_for("all"), command="all").ok
     key = paths.corpus_manifest(ctx.corpus, ctx.tenant_id)
     manifest = client.read_json(key)
@@ -2328,7 +2339,7 @@ def test_a_policy_corpus_built_with_another_window_plan_neither_trains_nor_packa
     client.write_json(key, {**manifest, "window_plan_version": "1"})
     with pytest.raises(PipelineError, match="Rebuild the corpus and retrain"):
         stage_training(ctx)
-    with pytest.raises(PipelineError, match="release release-2026.11.1 rests on a corpus built with window plan 1"):
+    with pytest.raises(PipelineError, match="release v1 rests on a corpus built with window plan 1"):
         build_release_bundle(ctx)
 
 
@@ -2341,7 +2352,7 @@ def test_a_corpus_built_before_the_review_rule_neither_trains_nor_packages(clien
     from orchestration.pipeline_dag import build_release_bundle, stage_training
 
     seed_corpus(client)
-    ctx = make_context(client, controller, release_id="release-2026.11.1")
+    ctx = make_context(client, controller)
     assert run_stages(ctx, stages_for("all"), command="all").ok
     bundle, _reasons = build_release_bundle(ctx)
     assert bundle.window_plan_version == window_plan_id()             # serving checks it
@@ -2385,20 +2396,32 @@ def test_a_render_only_document_is_not_trained_as_ocr(client, controller):
     ocr_plus_image rows it would teach that full pages can be blank."""
     from orchestration.pipeline_dag import load_labeled_documents
 
-    seeded = seed_corpus(client)
-    _set_ocr_meta(client, seeded[0], render_only=True)
+    first, *others = seeded_policies(seed_corpus(client))
+    _set_ocr_meta(client, first, render_only=True)
     loaded = {d.source_id for d in load_labeled_documents(make_context(client, controller))}
-    assert seeded[0] not in loaded
-    assert set(seeded[1:]) <= loaded
+    assert first not in loaded
+    assert set(others) <= loaded and others
 
 
 def test_a_document_with_no_recorded_pages_is_skipped_not_assumed_one(client, controller):
     from orchestration.pipeline_dag import load_labeled_documents
 
-    seeded = seed_corpus(client)
-    _set_ocr_meta(client, seeded[0], page_count=0)
+    first, *others = seeded_policies(seed_corpus(client))
+    _set_ocr_meta(client, first, page_count=0)
     loaded = {d.source_id for d in load_labeled_documents(make_context(client, controller))}
-    assert seeded[0] not in loaded
+    assert first not in loaded
+    assert set(others) <= loaded and others
+
+
+def test_a_policy_cycle_loads_no_other_document_type(client, controller):
+    """The corpus is built over the adapter's types: policies. The fixtures'
+    ACORD form and Loss Run are labelled and OCR'd, and never loaded."""
+    from orchestration.pipeline_dag import load_labeled_documents
+
+    seeded = seed_corpus(client)
+    ctx = make_context(client, controller)
+    assert ctx.doc_types == ["policy"]
+    assert {d.source_id for d in load_labeled_documents(ctx)} == set(seeded_policies(seeded))
 
 
 def test_a_corpus_with_no_training_rows_is_refused(client, controller, monkeypatch):
@@ -2427,11 +2450,14 @@ def test_a_corpus_that_set_aside_too_many_documents_is_refused_by_the_build(clie
     from data_pipeline.dataset_builder import build_jsonl
     from orchestration import pipeline_dag, preflight
 
+    # Four policies: the fixtures' two and two copies.
     seed_corpus(client)
+    seed_policy_copy(client, "policy_0003", like="policy_0001")
+    seed_policy_copy(client, "policy_0004", like="policy_0002")
     real = build_jsonl.build_corpus
 
     def one_document_set_aside(*args, **kwargs):
-        # Every split filled from the fixture's 4 documents, and the 4th set aside.
+        # Every split filled from the 4 policies, and the 4th set aside.
         built = real(*args, **kwargs)
         rows = built.all_rows
         ids = sorted({r["source_id"] for r in rows})
@@ -2442,7 +2468,7 @@ def test_a_corpus_that_set_aside_too_many_documents_is_refused_by_the_build(clie
 
     monkeypatch.setattr(pipeline_dag, "build_corpus", one_document_set_aside, raising=False)
     monkeypatch.setattr(build_jsonl, "build_corpus", one_document_set_aside)
-    # 1 of the fixture's 4 documents is 25%: lowered so one document crosses it.
+    # 1 of 4 documents is 25%: lowered so one document crosses it.
     monkeypatch.setattr(preflight, "FAIL_REJECTED_SHARE", 0.2)
     ctx = make_context(client, controller, dry_run=False)
     with pytest.raises(PipelineError, match="set aside 1 of 4"):

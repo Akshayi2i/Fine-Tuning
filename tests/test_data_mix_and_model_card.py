@@ -9,8 +9,9 @@ import pytest
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient, InMemoryBackend
+from common.adapter import ADAPTER
 from common.constants import MODALITY_MIX
-from common.scopes import get_scope
+from common.lob import known_lines
 from training import data_mix
 from training.corpus_view import materialize
 from training.data_mix import (
@@ -22,7 +23,7 @@ from training.data_mix import (
     select_documents,
 )
 
-PERSONAL = get_scope("personal_lines")
+LINES = known_lines()
 
 
 @pytest.fixture
@@ -123,24 +124,40 @@ def test_a_scanned_share_on_rows_that_do_not_say_is_refused():
 # --------------------------------------------------------------------------
 
 def test_a_misspelt_line_or_an_impossible_share_is_refused():
-    with pytest.raises(DataMixError, match="does not cover"):
-        parse_settings({"lines": {"homeowner": {"scanned_share": 0.3}}}, lines=PERSONAL.lines)
+    with pytest.raises(DataMixError, match="no known line"):
+        parse_settings({"lines": {"homeowner": {"scanned_share": 0.3}}}, lines=LINES)
     with pytest.raises(DataMixError, match="between 0 and 1"):
         parse_settings({"synthetic_fraction": 1.5})
     with pytest.raises(DataMixError, match="unknown key"):
         parse_settings({"synthetic_share": 0.5})
 
 
-def test_personal_lines_reads_its_own_config_over_unified():
+def test_the_adapter_reads_its_shares_from_the_unified_config():
+    """The one training config holds the data mix (moved from personal_lines.yaml):
+    both shares null until they are known, and no per-line entries."""
     from common.config import training_config
 
-    assert PERSONAL.training_config == "personal_lines"
-    own, base = training_config("personal_lines"), training_config("unified")
-    assert own["lora"] == base["lora"] and own["optimization"] == base["optimization"]
-    assert "extends" not in own and "data_mix" in own and "data_mix" not in base
-    settings = data_mix.mix_settings(PERSONAL)
-    assert set(settings.lines) == set(PERSONAL.lines)
+    assert ADAPTER.training_config == "unified"
+    raw = training_config("unified")["data_mix"]
+    assert raw["synthetic_fraction"] is None and raw["scanned_share"] is None
+    assert not raw.get("lines")
+    settings = data_mix.mix_settings()
+    assert settings.lines == {}
     assert not settings.steers                                   # null until the shares are known
+
+
+def test_a_configured_line_must_be_a_known_line(monkeypatch):
+    """Per-line entries are checked against every line with a canonical
+    policy schema: a misspelt line would otherwise steer nothing, unsaid."""
+    from common import config
+
+    monkeypatch.setattr(config, "training_config",
+                        lambda name: {"data_mix": {"lines": {"homeowner": {"scanned_share": 0.3}}}})
+    with pytest.raises(DataMixError, match="no known line"):
+        data_mix.mix_settings()
+    monkeypatch.setattr(config, "training_config",
+                        lambda name: {"data_mix": {"lines": {"homeowners": {"scanned_share": 0.3}}}})
+    assert data_mix.mix_settings().for_line("homeowners") == (None, 0.3)
 
 
 def test_a_config_that_extends_itself_is_refused(tmp_path, monkeypatch):
@@ -158,25 +175,25 @@ def test_a_config_that_extends_itself_is_refused(tmp_path, monkeypatch):
 # The input-mode mix
 # --------------------------------------------------------------------------
 
-def test_the_mode_mix_is_the_global_default_unless_the_scope_sets_one(monkeypatch):
+def test_the_mode_mix_is_the_global_default_unless_the_config_sets_one(monkeypatch):
     from common import config
 
-    assert configured_modality_mix(PERSONAL) == MODALITY_MIX
+    assert configured_modality_mix() == MODALITY_MIX
     own = {"ocr_plus_image": 0.4, "noisy_ocr_image": 0.2, "image_only": 0.4}
     monkeypatch.setattr(config, "training_config", lambda name: {"modality_mix": own})
-    assert configured_modality_mix(PERSONAL) == own
+    assert configured_modality_mix() == own
 
 
 def test_a_run_on_a_corpus_drawn_with_another_mix_is_refused(monkeypatch):
     other = {"ocr_plus_image": 0.4, "noisy_ocr_image": 0.2, "image_only": 0.4}
     with pytest.raises(DataMixError, match="rebuild it"):
-        assert_corpus_mix(PERSONAL, {"modality_mix_target": other})
-    assert_corpus_mix(PERSONAL, {"modality_mix_target": dict(MODALITY_MIX)})
-    assert_corpus_mix(PERSONAL, {})                                  # a corpus from before the record
+        assert_corpus_mix({"modality_mix_target": other})
+    assert_corpus_mix({"modality_mix_target": dict(MODALITY_MIX)})
+    assert_corpus_mix({})                                  # a corpus from before the record
 
 
 # --------------------------------------------------------------------------
-# The scope's view
+# The adapter's view
 # --------------------------------------------------------------------------
 
 def _seed(client, train, val):
@@ -187,10 +204,10 @@ def _seed(client, train, val):
 
 def test_the_view_keeps_the_same_documents_every_epoch_and_never_samples_validation(client, monkeypatch):
     settings = MixSettings(synthetic_fraction=0.5)
-    monkeypatch.setattr(data_mix, "mix_settings", lambda scope: settings)
+    monkeypatch.setattr(data_mix, "mix_settings", lambda: settings)
     val = _rows("homeowners", 1, 5, prefix="val")
     _seed(client, _rows("homeowners", 4, 10) + _rows("motorcycle", 2, 10), val)
-    view = materialize(PERSONAL, "v1", client)
+    view = materialize("v1", client)
     epochs = [{json.loads(line)["source_id"] for line in client.read_text(f).splitlines() if line.strip()}
               for f in view.epoch_files]
     assert all(e == epochs[0] for e in epochs)
@@ -225,11 +242,11 @@ def _scoped_manifest(client, monkeypatch):
 
     settings = MixSettings(synthetic_fraction=0.8, scanned_share=0.35,
                            lines={"motorcycle": {"synthetic_fraction": 0.6, "scanned_share": 0.9}})
-    monkeypatch.setattr(data_mix, "mix_settings", lambda scope: settings)
+    monkeypatch.setattr(data_mix, "mix_settings", lambda: settings)
     _seed(client, _rows("homeowners", 4, 10, scanned=False, twin_scanned=lambda t: t < 4)
           + _rows("motorcycle", 2, 10), _rows("homeowners", 1, 2, prefix="val"))
-    view = materialize(PERSONAL, "v1", client)
-    _swift, recorded = build_training_config(corpus_paths=view.epoch_files, output_dir="/tmp/out", scope=PERSONAL)
+    view = materialize("v1", client)
+    _swift, recorded = build_training_config(corpus_paths=view.epoch_files, output_dir="/tmp/out")
     stats = DataStats(
         train_examples=view.train_rows, val_examples=view.val_rows, test_examples=view.test_rows,
         modality_mix={"ocr_plus_image": 0.49, "noisy_ocr_image": 0.21, "image_only": 0.3},
@@ -240,9 +257,9 @@ def _scoped_manifest(client, monkeypatch):
         data_mix={"settings": view.mix_settings, "lines": view.data_mix, "rested_documents": view.rested_documents},
         examples_by_line=view.examples_by_line,
     )
-    return build_manifest(run_id=PERSONAL.run_id("v9"), corpus_version="v1", corpus_manifest={},
+    return build_manifest(run_id=ADAPTER.run_id("v9"), corpus_version="v1", corpus_manifest={},
                           training_cfg=recorded, data_stats=stats,
-                          staging_path=paths.scoped_staging_adapter_dir(PERSONAL.name, "v9"), scope=PERSONAL)
+                          staging_path=paths.scoped_staging_adapter_dir(ADAPTER.name, "v9"))
 
 
 def test_the_model_card_lists_every_configured_value(client, monkeypatch):
@@ -275,14 +292,14 @@ def test_the_gate_result_and_tier_reach_the_card_written_beside_the_manifest(cli
     assert manifest.promotion.tier == "interim" and manifest.eval_metrics.field_normalized_match == 0.89
     key = write_manifest(manifest, client)
     card = client.read_text(key.replace("run_manifest.json", "model_card.md"))
-    assert key.endswith("/run_manifest.json") and "registry/scope/personal_lines/" in key
+    assert key.endswith("/run_manifest.json") and "registry/scope/policy/" in key
     assert "Verdict: passed, interim release." in card and "| field_normalized_match | 0.89 |" in card
 
 
-def test_a_lines_null_takes_the_scope_default():
+def test_a_lines_null_takes_the_default():
     settings = parse_settings({"synthetic_fraction": 0.8, "scanned_share": 0.5,
                                "lines": {"homeowners": {"synthetic_fraction": None, "scanned_share": None},
-                                         "motorcycle": {"synthetic_fraction": 0.6}}}, lines=PERSONAL.lines)
+                                         "motorcycle": {"synthetic_fraction": 0.6}}}, lines=LINES)
     assert settings.for_line("homeowners") == (0.8, 0.5)
     assert settings.for_line("motorcycle") == (0.6, 0.5)
     assert settings.steers
@@ -290,7 +307,7 @@ def test_a_lines_null_takes_the_scope_default():
 
 def test_a_package_line_matches_in_any_order():
     settings = parse_settings({"lines": {"personal_auto,homeowners": {"synthetic_fraction": 0.7}}},
-                              lines=PERSONAL.lines)
+                              lines=LINES)
     assert settings.for_line("homeowners,personal_auto") == (0.7, None)
 
 

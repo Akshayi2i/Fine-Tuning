@@ -198,7 +198,7 @@ def _delivery(tmp_path: Path) -> Path:
     add("Train", "homeowners", "Acme/homeowners/ho_1.pdf", 0, "original")
     add("Train", "homeowners", "Acme/homeowners/ho_1.pdf", 1, "synthetic")
     add("Test", "homeowners", "Acme/homeowners/ho_2.pdf", 1, "synthetic")
-    add("Train", "flood", "Acme/flood/fl_1.pdf", 1, "synthetic", write=False)       # out of scope, files gone
+    add("Train", "flood", "Acme/flood/fl_1.pdf", 1, "synthetic", write=False)       # outside --lines, files gone
     add("Val", "homeowners", "Acme/homeowners/ho_3.pdf", 1, "synthetic", ok="False")  # flagged
     add("Val", "homeowners", "Acme/homeowners/ho_4.pdf", 1, "synthetic", write=False)  # missing files
     with (root / "manifest.csv").open("w", newline="", encoding="utf-8") as fh:
@@ -209,14 +209,15 @@ def _delivery(tmp_path: Path) -> Path:
 
 
 def test_prepare_bundles_writes_one_folder_per_document(tmp_path):
-    from common.scopes import get_scope
+    from common.schemas import SNAPSHOT_LINES
     from data_pipeline.ingestion.prepare_bundles import prepare_bundles
 
     out = tmp_path / "bundles"
-    report = prepare_bundles(_delivery(tmp_path), out, lines=get_scope("personal_lines").lines)
+    report = prepare_bundles(_delivery(tmp_path), out, lines=frozenset(SNAPSHOT_LINES))
     assert report.documents == 3
     assert report.written == {("train", "real"): 1, ("train", "synthetic"): 1, ("test", "synthetic"): 1}
     assert report.skipped_lines == {"flood": 1}
+    assert "outside --lines: flood 1" in report.describe()
     assert report.skipped == {"flagged by the generator (ok is false)": 1,
                               "files listed in the manifest are missing": 1}
     folder = out / "homeowners__ho_1__synth_001"
@@ -315,7 +316,7 @@ def test_excluded_documents_stay_out_and_an_earlier_folder_is_removed(tmp_path):
 def test_a_month_and_year_is_not_a_date_error(parsed, flagged):
     from data_pipeline.audit import AuditReport, _check_formats
 
-    report = AuditReport(root=".", scope=None)
+    report = AuditReport(root=".")
     _check_formats("doc", [("forms_and_endorsements[0].edition_date", {"raw": parsed, "parsed": parsed})], report)
     assert bool(report.formats) is flagged
 
@@ -323,7 +324,7 @@ def test_a_month_and_year_is_not_a_date_error(parsed, flagged):
 def test_an_indicator_and_a_signed_return_are_not_amount_errors():
     from data_pipeline.audit import AuditReport, _check_formats
 
-    report = AuditReport(root=".", scope=None)
+    report = AuditReport(root=".")
     _check_formats("doc", [
         ("document_type_detail.policy_change.additional_or_return_premium", {"raw": "Return", "parsed": "Return"}),
         ("document_type_detail.policy_change.net_change_amount", {"raw": "$109.00", "parsed": -109.0}),

@@ -68,8 +68,12 @@ class ConfidenceInterval:
         not how good. A point estimate that improved can still have a lower bound
         below −δ when the eval set is small, and that is the honest answer —
         there is not enough evidence to rule out a real regression.
+
+        Read to six places, as :meth:`as_dict` records it: float subtraction
+        left a bound of exactly −δ sometimes just above it and sometimes just
+        below, so one drop of exactly δ passed or blocked by the digits.
         """
-        return self.lower > -abs(delta)
+        return round(self.lower, 6) > -abs(delta)
 
     @property
     def improved(self) -> bool:

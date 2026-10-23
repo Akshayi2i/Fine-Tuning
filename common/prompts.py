@@ -275,7 +275,7 @@ def lob_meanings() -> dict[str, str]:
     """Each registered line of business and what it is (configs/lob_meanings.yaml),
     in the file's order. Role-based: no line is described by a printed label."""
     from common.config import CONFIG_DIR, load_yaml
-    from common.scopes import known_lines
+    from common.lob import known_lines
 
     meanings = load_yaml(CONFIG_DIR / "lob_meanings.yaml").get("lines") or {}
     registered = known_lines()
@@ -287,9 +287,8 @@ def render_classifier_prompt(*, lines: Iterable[str] | None = None, line_only: b
 
     A policy's line of business is asked for too, from ``lines`` (every
     registered line by default), each with its meaning: a policy that reaches L3
-    with no line from L1/L2 still needs one to choose its adapter and schema.
-    ``line_only`` asks for the line alone - the family adapter's stage, choosing
-    among its own lines once the family is known.
+    with no line from L1/L2 still needs one to choose its schema.
+    ``line_only`` asks for the line alone, among ``lines``.
     """
     meanings = lob_meanings()
     chosen = list(meanings) if lines is None else [line for line in lines if line in meanings]
@@ -344,11 +343,10 @@ def prompt_input_files() -> list[Path]:
 
     The line overlays compose the common model, and their coverage-code files
     give each code the meaning the prompt shows, so both are prompt input too.
-    So are the classifier's: each line's meaning (``lob_meanings.yaml``) is
-    written into its prompt, and the layout families (``layout_families.yaml``)
-    pick the lines a family's line question offers.
+    So is the classifier's: each line's meaning (``lob_meanings.yaml``) is
+    written into its prompt.
     """
-    from common.config import CONFIG_DIR, LAYOUT_FAMILIES_CONFIG
+    from common.config import CONFIG_DIR
     from common.model_view import MODEL_VIEW_CONFIG
     from common.schemas import CANONICAL_DIR, COMMON_MODEL, SCHEMA_DIR
 
@@ -360,7 +358,7 @@ def prompt_input_files() -> list[Path]:
         + sorted(CANONICAL_DIR.glob("*.coverage_codes.yaml"))
         + [MODEL_VIEW_CONFIG]
         + [CONFIG_DIR / "schema_sections.yaml"]
-        + [CONFIG_DIR / "lob_meanings.yaml", LAYOUT_FAMILIES_CONFIG]
+        + [CONFIG_DIR / "lob_meanings.yaml"]
     )
 
 

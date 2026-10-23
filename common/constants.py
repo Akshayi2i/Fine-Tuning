@@ -18,13 +18,12 @@ from typing import Final, NamedTuple
 #: Active document types. Quote and Endorsement are deferred (master §1).
 #:
 #: This is the **write** vocabulary: what may be labeled, minted as a new
-#: ``source_id``, and served. It is deliberately NOT the set a given training run
-#: covers — that is ``common.scopes.Scope.doc_types``, which may be narrower (a
-#: policy-only run). Three sets, three jobs:
+#: ``source_id``, and served. It is deliberately NOT the set the adapter trains
+#: — that is ``common.adapter.ADAPTER.doc_types``, policies. Three sets, three jobs:
 #:
 #: * ``KNOWN_DOC_TYPES``  — every type this repo has ever named (read path).
 #: * ``ACTIVE_DOC_TYPES`` — what may be minted and served today (write path).
-#: * ``Scope.doc_types``  — what one run trains.
+#: * ``ADAPTER.doc_types`` — what a fine-tuning cycle trains.
 ACTIVE_DOC_TYPES: Final[tuple[str, ...]] = ("acord", "policy", "lossrun")
 
 #: ACORD form numbers with their own schema. One shared `acord` ADAPTER covers

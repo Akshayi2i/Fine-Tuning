@@ -58,7 +58,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint", default=None, help="adapter directory to apply")
     parser.add_argument("--corpus", default="v0")
     parser.add_argument("--tenant", default="smoke")
-    parser.add_argument("--scope", default="personal_lines")
     parser.add_argument("--source", default=None, help="only rows of this source_id")
     parser.add_argument("--rows", type=int, default=8)
     parser.add_argument("--out", default=None, help="report path (default under /workspace/logs)")
@@ -538,20 +537,21 @@ def _document_report_path(source_id: str) -> str:
 
 
 def _eval_rows(client, args) -> list[dict]:
-    """The scope's rows of ``args.split``.
+    """The adapter's rows of ``args.split``.
 
-    Training writes a scope's own copy of train and val only; test lives in the
-    corpus-wide file. Without a scoped copy, that file is read and narrowed to the
-    scope's document types.
+    Training writes the adapter's own copy of train and val only; test lives in
+    the corpus-wide file. Without that copy, the file is read and narrowed to the
+    adapter's document types.
     """
     from artifact_registry import paths
-    from common.scopes import get_scope
+    from common.adapter import ADAPTER
     from evaluation.validation_generation import read_rows
 
-    scoped = paths.corpus_scope_eval_split(args.corpus, args.split, args.scope, args.tenant)
-    if client.exists(scoped):
-        return read_rows(client.read_text(scoped))
-    doc_types = set(get_scope(args.scope).doc_types)
+    own = paths.corpus_scope_eval_split(args.corpus, args.split, ADAPTER.name, args.tenant)
+    if client.exists(own):
+        return read_rows(client.read_text(own))
+    doc_types = set(ADAPTER.doc_types)
+
     rows = read_rows(client.read_text(paths.corpus_eval_split(args.corpus, args.split, args.tenant)))
     return [r for r in rows if r.get("doc_type") in doc_types]
 

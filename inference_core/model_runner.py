@@ -580,19 +580,25 @@ class HFBackend(ModelBackend):
         self._processor = AutoProcessor.from_pretrained(base, trust_remote_code=True)
         return self._model, self._processor
 
+    def loaded_adapters(self) -> list[str]:
+        """The adapters bound at load time: the only ones a request may name."""
+        return [str(path) for path in (self.resolved.get("foundation_adapter"),
+                                       self.resolved.get("type_adapter")) if path]
+
     def generate(self, messages, config, adapter=None) -> Generation:
+        import contextlib
         import time
 
         # Checked before the dependency import: asking this backend to hot-swap
         # an adapter is a contract violation whether or not torch is installed,
         # and reporting it as a missing dependency sends the reader to the wrong
         # problem entirely.
-        if adapter and adapter not in (self.resolved.get("type_adapter") or ""):
+        if adapter and adapter not in self.loaded_adapters():
             # HF applies adapters at load time, not per request. Silently ignoring
             # a mismatch would serve one document type's weights under another's
             # routing decision.
             raise ModelRunnerError(
-                f"this backend was loaded with adapter {self.resolved.get('type_adapter')!r} and "
+                f"this backend was loaded with adapter(s) {self.loaded_adapters()} and "
                 f"was asked to generate with {adapter!r}. Transformers binds adapters at load "
                 "time; per-request hot-swap is the vLLM path (IMPL-11). Load a runner per adapter, "
                 "or serve through vLLM."
@@ -612,8 +618,12 @@ class HFBackend(ModelBackend):
         ).to(model.device)
         prompt_len = inputs["input_ids"].shape[-1]
 
+        # No adapter on the base + adapter model is the base alone (NO_ADAPTER: the
+        # line classifier's read): the adapter bound at load is switched off for it.
+        base_only = (adapter is None and self.resolved.get("kind") == "base_plus_adapter"
+                     and hasattr(model, "disable_adapter"))
         started = time.perf_counter()
-        with torch.no_grad():
+        with torch.no_grad(), (model.disable_adapter() if base_only else contextlib.nullcontext()):
             out = model.generate(
                 **inputs,
                 max_new_tokens=config.max_new_tokens,
@@ -753,16 +763,23 @@ def load_model(
     if adapter is not None and tag != "base":
         raise ModelRunnerError(
             f"--adapter applies a LoRA to the BASE model, but --model is {tag!r}. Use --model base "
-            "with --adapter for base + adapter, or --model vN alone for that version's merged weights."
+            "with --adapter for base + adapter, or --model vN alone for that version (the base with its adapter)."
         )
     resolved = resolve_model_version(tag, client, doc_type=doc_type, quant_format=quant_format)
     default_adapter = None
+    if adapter is None and resolved.get("kind") == "base_plus_adapter" and resolved.get("foundation_adapter"):
+        # A version of the policy adapter is served as a LoRA on the base, never
+        # merged (decision 2026-10-23): the base with its adapter on every request.
+        default_adapter = prepare_adapter(str(resolved["foundation_adapter"]), client, config)
     if adapter is not None:
         default_adapter = prepare_adapter(adapter, client, config)
+        tag = label or adapter_label(default_adapter)
+    if default_adapter is not None:
+        # The local copy, not the Blob prefix: vLLM is handed it per request, and
+        # the HF backend binds it at load time (HFBackend._load).
         resolved = type(resolved)(resolved)
         resolved["kind"] = "base_plus_adapter"
         resolved["foundation_adapter"] = default_adapter
-        tag = label or adapter_label(default_adapter)
 
     if backend_impl is not None:
         impl = backend_impl

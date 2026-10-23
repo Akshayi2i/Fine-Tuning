@@ -9,12 +9,12 @@ Four properties are requirements, not aspirations:
 
 * **Every stage reads and writes Blob or the staging volume, never pod-local disk.**
   A pod is ephemeral; anything written to its own disk is gone at teardown.
-* **Every training, evaluation and quantization job writes a run manifest.**
+* **Every training and evaluation job writes a run manifest.**
 * **Stages are idempotent and resumable.** Re-running a completed stage is a
   no-op, not a duplicate — which is what makes ``--from-stage`` safe to reach for
   after a mid-pipeline failure.
-* **Stage 6 is a hard stop.** A candidate that regresses any gating metric does
-  not merge, and there is no way round it but a named, written override of the
+* **The gate (stage 8) is a hard stop.** A candidate that regresses any gating
+  metric is not packaged, and there is no way round it but a named, written override of the
   gates that failed (arch §15.5), recorded in the decision and the bundle.
   ``all`` therefore never reaches ``package`` on a failed gate.
 """
@@ -33,12 +33,11 @@ from typing import Any, Literal
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
+from common.adapter import ADAPTER
 from common.constants import ACTIVE_DOC_TYPES, DAY_ZERO_MIN_LABELS_PER_TYPE
 from common.run_ids import is_valid_run_id, version_of
-from common.scopes import Scope, default_scope
 from orchestration.runpod_controller import RunPodController, StagingVolume
 from orchestration.settings import gpu_class_for
-from registry_utils.models import RunType
 
 log = logging.getLogger(__name__)
 
@@ -82,20 +81,16 @@ class StageContext:
     raw_client: BlobClient | None = None
     corpus_version: str = ""
     input_dir: Path | None = None
-    #: The types the CORPUS is built over (stages 1-4). What a training run
-    #: covers is `scope`, which may be narrower — the corpus is built once and
-    #: filtered per scope (`training.corpus_view`).
-    doc_types: list[str] = field(default_factory=lambda: list(ACTIVE_DOC_TYPES))
-
-    #: What stages 5-11 train, merge, quantize, gate and publish. Defaults to the
-    #: unified scope, whose run ids and artifact paths are unchanged.
-    scope: Scope = field(default_factory=default_scope)
+    #: The types the corpus is built over (stages 1-4): the adapter's
+    #: (``common.adapter``), policies.
+    doc_types: list[str] = field(default_factory=lambda: list(ADAPTER.doc_types))
     tenant_id: str | None = None
-    #: Serving formats, vLLM-native (arch v2.1 §13a). bf16 alone until Phase 0
-    #: spike item 9 verifies FP8; the v1 default produced GGUF files the serving
-    #: endpoint could not load.
+    #: Serving formats. bf16 only: the release is its adapter, served as a LoRA
+    #: on the bf16 base, and nothing is merged or quantized (decision 2026-10-23).
     formats: list[str] = field(default_factory=lambda: ["bf16"])
-    dtype: str = "fp16"
+    #: Start from the base model, not the promoted adapter (``--fresh``): after
+    #: a data deletion, or to reset drift (decision 2026-10-23).
+    fresh: bool = False
     #: Overrides the configured class for the training pod. ``None`` means the
     #: class in ``config/pipeline.yaml``.
     gpu_class: str | None = None
@@ -106,7 +101,6 @@ class StageContext:
     train_vit: bool = False
     min_labels_per_type: int = DAY_ZERO_MIN_LABELS_PER_TYPE
     push_adapters: bool = False
-    skip_quantize: bool = False
     keep_staging: bool = False
     from_blob: bool = False
     git_commit: str | None = None
@@ -130,25 +124,13 @@ class StageContext:
     #: The production version's scores to gate against. ``None`` means this is
     #: the first version and there is nothing to regress against.
     baseline_metrics: dict[str, Any] | None = None
-    #: Per-format metrics from the IMPL-12 extraction routine over the frozen
-    #: golden eval set, keyed by format. Supplied, the quantize stage applies the
-    #: IMPL-10 thresholds and refuses to publish a format that fails.
-    quant_metrics: dict[str, dict[str, Any]] | None = None
     #: Per-adapter re-validation results for a Foundation major bump: every
     #: dependent adapter retrained against the new Foundation and gated. Absent
     #: evidence blocks promotion rather than deferring the question (arch §12).
     #: Per-doc-type "has this adapter been revalidated against the new
     #: Foundation" flags, for the arch §12 cascade block.
     revalidation_evidence: dict[str, bool] | None = None
-    #: Cross-type regression evidence for a CONTINUED Foundation, as
-    #: ``{doc_type: {"current": {...}, "candidate": {...}}}`` — both sides, the
-    #: shape `promotion_gate` reads. Separate from `revalidation_evidence`
-    #: because that field holds booleans for a different question; reusing it
-    #: produced ``{"acord": {"candidate": {...}}}`` with no ``"current"``, which
-    #: the gate correctly rejected as empty. The result was that a continued
-    #: Foundation could not pass by ANY input: supply metrics and it read as
-    #: empty evidence, supply the booleans and it read as no evidence at all.
-    cross_type_evidence: dict[str, dict[str, dict[str, float]]] | None = None
+
     #: A named, written waiver of specific gates (arch v2.1 §15.5), recorded in
     #: the gate decision and the release bundle. ``None`` is the normal case.
     #: From the CLI's ``--override-*`` flags (``run.gate_override_from``).
@@ -181,21 +163,12 @@ class StageContext:
     #: ``None`` loads the staged weights into vLLM; tests pass a stub backend.
     serving_model_loader: Any = None
 
-    #: Set once Phase 0 spike item 9 confirms a decoder-only FP8 export loads and
-    #: runs in vLLM. Until then FP8 is refused rather than produced untested: an
-    #: unverified serving format is a deployment that fails at load, or worse,
-    #: one that loads and reads badly (arch v2.1 §13a).
-    fp8_verified: bool = False
-
     #: ``{serving_format: {"calibration": [(features, correct)], "threshold": [...]}}``
     #: from the two halves of the validation split (arch v2.1 §8.2). Keyed by the
     #: exact format: there is no wildcard, because a calibrator fitted on bf16
     #: logprobs reports confidence for a distribution FP8 does not produce.
     calibration_samples: dict[str, Any] = field(default_factory=dict)
 
-    #: The release this cycle produces. Everything gated, promoted and served is
-    #: addressed by it (arch v2.1 §12.3).
-    release_id: str = ""
     #: Family grouping evidence per doc type, from the dataset build (arch v2.1 §8.2).
     grouping: dict[str, Any] = field(default_factory=dict)
 
@@ -221,6 +194,12 @@ class StageContext:
     def corpus(self) -> str:
         """The corpus version being trained on; defaults to the output version."""
         return self.corpus_version or self.out_version
+
+    @property
+    def release_id(self) -> str:
+        """The release this cycle produces: its version (decision 2026-10-22).
+        Everything gated, promoted and served is addressed by it (arch v2.1 §12.3)."""
+        return self.out_version
 
 
 @dataclass
@@ -320,12 +299,25 @@ def stage_ingestion(ctx: StageContext) -> StageResult:
     # type stored every PDF as an ACORD, a policy AND a Loss Run: dedup is per
     # type, and the raw layer is write-once.
     typed = [dt for dt in ctx.doc_types if (ctx.input_dir / dt).is_dir()]
+    others = sorted(dt for dt in ACTIVE_DOC_TYPES
+                    if dt not in ctx.doc_types and (ctx.input_dir / dt).is_dir())
+    if others and not typed:
+        # Read flat, the other types' folders would be stored as policies, for
+        # good: the raw layer is write-once.
+        raise PipelineError(
+            f"{ctx.input_dir} holds {', '.join(o + '/' for o in others)} but no "
+            f"{'/, '.join(ctx.doc_types)}/ folder: read as one folder, every PDF under it, "
+            "theirs too, would be stored as a policy. Put the policies in "
+            f"{ctx.input_dir.name}/policy/, or ingest a folder of policies only."
+        )
+    if others:
+        log.info("%s under %s: not ingested, the adapter trains %s only",
+                 ", ".join(o + "/" for o in others), ctx.input_dir, list(ctx.doc_types))
     if not typed and len(ctx.doc_types) > 1:
         raise PipelineError(
             f"{ctx.input_dir} has no {'/, '.join(ctx.doc_types)}/ subfolder, so nothing says "
             "which document type each PDF is. Put each type's PDFs in a folder named after it "
-            f"({ctx.input_dir.name}/policy/...), or run a scope that covers one type "
-            "(--scope policy, --scope personal_lines)."
+            f"({ctx.input_dir.name}/policy/...)."
         )
     skipped = [dt for dt in ctx.doc_types if typed and dt not in typed]
     if skipped:
@@ -944,9 +936,9 @@ def plan_corpus(ctx: StageContext) -> CorpusPlan:
     from data_pipeline.dataset_builder.split_groups import cap_twins
 
     documents = cap_twins(documents, assignment, seed=ctx.seed)
-    # The global input-mode mix unless the scope's config sets its own
-    # (training.data_mix); recorded on the corpus manifest, so a run whose
-    # scope wants another mix is refused rather than mislabelled.
+    # The global input-mode mix unless the training config sets its own
+    # (training.data_mix); recorded on the corpus manifest, so a run that
+    # wants another mix is refused rather than mislabelled.
     mix = modality_mix_of(ctx)
     modes = sample_modes(train_source_ids(documents, assignment), seed=ctx.seed, mix=mix)
     assert_mix_is_close(modes, mix=mix)
@@ -955,11 +947,11 @@ def plan_corpus(ctx: StageContext) -> CorpusPlan:
 
 
 def modality_mix_of(ctx: StageContext) -> dict[str, float]:
-    """The input-mode mix this build draws: the scope's, else the global default."""
+    """The input-mode mix this build draws: the training config's, else the global default."""
     from training.data_mix import DataMixError, configured_modality_mix
 
     try:
-        return configured_modality_mix(ctx.scope)
+        return configured_modality_mix()
     except DataMixError as exc:
         raise PipelineError(str(exc)) from exc
 
@@ -1108,7 +1100,7 @@ def _is_trained(ctx: StageContext) -> bool:
 
     from training.train import training_completed
 
-    adapter_dir = paths.scoped_staging_adapter_dir(ctx.scope.name, ctx.out_version)
+    adapter_dir = paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)
     if os.path.isdir(adapter_dir):
         return training_completed(adapter_dir)
     return ctx.volume.exists(adapter_dir)
@@ -1145,29 +1137,142 @@ def _assert_corpus_pins(corpus_manifest: dict[str, Any], what: str) -> None:
         raise PipelineError(str(exc)) from exc
 
 
+def staging_parent_adapter_dir(version: str) -> str:
+    """Where cycle ``version`` keeps the adapter it continues, on the staging volume."""
+    return paths.staging_parent_adapter_dir(ADAPTER.name, version)
+
+
+def continuation(ctx: StageContext) -> tuple[str | None, str | None]:
+    """``(parent version, None)`` when this cycle continues the promoted adapter;
+    ``(None, why)`` when it starts from the base model (decision 2026-10-23).
+
+    A cycle continues the tenant's promoted release - its adapter's weights,
+    trained further on new and existing data, on the same base model. It starts
+    from the base instead when asked (``--fresh``: after a data deletion, or to
+    reset drift), when nothing is promoted, and whenever continuing would teach
+    the adapter on top of what it can no longer use:
+
+    - its run manifest or its adapter in Blob cannot be read;
+    - it was trained on another base model;
+    - it has another LoRA rank, alpha or set of target modules (the weights
+      would not fit), or was saved with another dropout, rsLoRA or bias
+      setting (ms-swift would keep its own);
+    - it was packaged with another prompt hash or window plan: a template,
+      schema or section-map change, so its outputs have another shape;
+    - it has no eval report, or one on another yardstick (the set frozen
+      again, or other scoring code): the gate holds a continued run to its
+      parent line by line, and would block this cycle only after training it.
+    """
+    from artifact_registry.transfer import ADAPTER_FILES
+    from common.config import base_model_config, training_config
+    from common.prompts import prompt_hash
+    from data_pipeline.dataset_builder.policy_windows import window_plan_id
+    from evaluation.run_eval import eval_set_record, yardstick_difference
+    from registry_utils.query_registry import RegistryQueryError
+    from registry_utils.query_registry import get as get_manifest
+    from training.train import adapter_config_mismatch
+
+    if ctx.fresh:
+        return None, "asked for (--fresh)"
+    promoted = promoted_release(ctx)
+    if promoted is None:
+        return None, "no release of the policy adapter is promoted for this tenant"
+    release_id, parent = promoted
+    run_id = ADAPTER.run_id(parent)
+    try:
+        manifest = get_manifest(run_id, ctx.client)
+    except (RegistryQueryError, KeyError, FileNotFoundError, ValueError):
+        # ValueError: not JSON, or a manifest this build cannot validate.
+        return None, f"the promoted release's run manifest ({run_id}) cannot be read"
+    base = base_model_config()["model"]
+    wanted = f"{base['model_id']}@{base['revision']}"
+    if manifest.dependencies.base_model != wanted:
+        return None, f"{run_id} trained on base {manifest.dependencies.base_model}, this cycle on {wanted}"
+    cfg = training_config(ADAPTER.training_config)
+    lora = cfg["lora"]
+    modules = list(lora["target_modules"]) + (["merger"] if lora.get("include_vision_projector") else [])
+    recorded = manifest.training_config
+    for name, now, then in (("LoRA rank", lora["rank"], recorded.lora_rank),
+                            ("LoRA alpha", lora["alpha"], recorded.lora_alpha),
+                            ("target modules", sorted(modules), sorted(recorded.target_modules))):
+        if now != then:
+            return None, f"{run_id} has {name} {then}, this cycle's config {now}"
+    adapter_dir = paths.scoped_adapter_dir(ADAPTER.name, parent)
+    missing = [name for name in ADAPTER_FILES if not ctx.client.exists(f"{adapter_dir}/{name}")]
+    if missing:
+        return None, f"{run_id}'s adapter is not in Blob at {adapter_dir} (no {', '.join(missing)})"
+    try:
+        saved = ctx.client.read_json(f"{adapter_dir}/adapter_config.json")
+    except ValueError as exc:  # not JSON
+        return None, f"{run_id}'s adapter_config.json cannot be read ({type(exc).__name__})"
+    # ms-swift continues an adapter with the settings it was SAVED with, not the
+    # config's (training.train.adapter_config_mismatch): a changed dropout or
+    # rsLoRA would never apply, while the manifest recorded it.
+    differs = adapter_config_mismatch(saved, lora)
+    if differs:
+        return None, (f"{run_id}'s adapter was trained with other LoRA settings ({differs}); "
+                      "continued, it would train with its own")
+    bundle_key = paths.release_bundle(release_id, ctx.tenant_id)
+    if not ctx.client.exists(bundle_key):
+        return None, f"the promoted release {release_id} has no bundle at {bundle_key}"
+    bundle = ctx.client.read_json(bundle_key)
+    if bundle.get("prompt_hash") != prompt_hash():
+        return None, (f"{parent} was packaged with another prompt hash: a template, schema or "
+                      "section-map change since, so its outputs have another shape")
+    if bundle.get("window_plan_version") != window_plan_id():
+        return None, f"{parent} was trained on policies cut with another window plan"
+    report_key = paths.eval_report(parent, scope=ADAPTER.name)
+    if not ctx.client.exists(report_key):
+        return None, (f"{run_id} has no eval report at {report_key}, so the gate could not "
+                      "compare this cycle with it line by line")
+    different = yardstick_difference(ctx.client.read_json(report_key).get("eval_set"),
+                                     eval_set_record(ctx.client, ctx.tenant_id, []), ctx.tenant_id)
+    if different:
+        return None, (f"{run_id}'s eval report is on another yardstick, so the gate could not "
+                      f"compare this cycle with it line by line: {different}")
+    return parent, None
+
+
+def stage_parent_adapter(ctx: StageContext, parent: str) -> str:
+    """Copy the parent's adapter to the staging volume; return the local directory.
+    A dry run copies nothing and returns where it would go."""
+    local = staging_parent_adapter_dir(ctx.out_version)
+    if not ctx.dry_run:
+        copied = ctx.client.download_dir(paths.scoped_adapter_dir(ADAPTER.name, parent), local)
+        log.info("copied %s's adapter (%d file(s)) to %s", ADAPTER.run_id(parent), copied, local)
+        ctx.volume.mark(local)
+    return local
+
+
 def stage_training(ctx: StageContext) -> StageResult:
-    """ONE unified extractor run (arch v2.1 §4.1).
+
+    """ONE run of the policy adapter (decision 2026-10-22), continuing the
+    promoted adapter or starting from the base (``continuation``, decision
+    2026-10-23).
 
     v1 trained a Foundation and then fanned out one adapter per document type,
     sequentially, because each sat on top of the Foundation's weights. That
     topology is gone: vLLM applies one LoRA per request, so a Foundation LoRA and
-    a per-type LoRA could never both be active on the same call — the stack was
-    unservable, not merely awkward. Per-type adapters return only through the
-    §4.2 graduation gate, trained on the MERGED foundation and never stacked.
+    a per-type LoRA could never both be active on the same call. Each cycle now
+    trains the one adapter (``common.adapter``), always on the original base
+    model, never on a merged one.
     """
-    from common.scopes import ScopeError, assert_one_output_shape
     from registry_utils.models import DataStats
     from training.train import count_examples, train
 
     corpus_manifest = ctx.client.read_json(paths.corpus_manifest(ctx.corpus, ctx.tenant_id))
     _assert_corpus_pins(corpus_manifest, f"training run {ctx.out_version}")
-    try:
-        # A layout family part-way to the common model is two output shapes:
-        # no scope trains on documents of both until the family has moved.
-        assert_one_output_shape(ctx.scope, [line for line, count in
-                                            (corpus_manifest.get("policy_line_counts") or {}).items() if count])
-    except ScopeError as exc:
-        raise PipelineError(str(exc)) from exc
+    # Continue the promoted adapter, or start from the base, and why.
+    parent, fresh_reason = continuation(ctx)
+    continue_from = parent_run_id = None
+    if parent is None:
+        log.info("%s starts from the base model: %s", ctx.out_version, fresh_reason)
+    else:
+        parent_run_id = ADAPTER.run_id(parent)
+        continue_from = stage_parent_adapter(ctx, parent)
+        log.info("%s continues %s (its adapter, at %s)", ctx.out_version, parent_run_id, continue_from)
+    # One output shape is checked by training.train, on the documents the
+    # adapter's view really trains (common.adapter.assert_one_output_shape).
     counts = corpus_manifest.get("example_counts", {})
     data_stats = DataStats(
         train_examples=count_examples(counts.get("train")),
@@ -1182,7 +1287,7 @@ def stage_training(ctx: StageContext) -> StageResult:
         split_policy=split_policy(corpus_manifest.get("split_assignment") or {}),
     )
 
-    gpu_class = ctx.gpu_class or gpu_class_for("training", scope=ctx.scope.name)
+    gpu_class = ctx.gpu_class or gpu_class_for("training")
     with ctx.controller.session_pod("training", gpu_class=gpu_class):
         _swift, manifest = train(
             corpus_version=ctx.corpus,
@@ -1193,55 +1298,48 @@ def stage_training(ctx: StageContext) -> StageResult:
             train_vit=ctx.train_vit,
             dry_run=ctx.dry_run,
             tenant_id=ctx.tenant_id,
-            scope=ctx.scope,
+            continue_from=continue_from,
+            parent_run_id=parent_run_id,
+            fresh_reason=fresh_reason,
         )
-        # Keyed by scope, because two scoped runs can be in flight at one
-        # version and a single well-known key would hand the gate whichever ran
-        # last. `manifest_of` reads it, falling back to the old "foundation" key
-        # so a resume against a context built by the previous version still works.
-        ctx.manifests[ctx.scope.name] = manifest
+        ctx.manifests[ADAPTER.name] = manifest
+
         if not ctx.dry_run and not ctx.checkpoints:
             # Nothing else fills these in, so checkpoint selection skipped on
             # every real run and merge took whatever load_best_model_at_end left.
             from evaluation.checkpoint_eval import discover_checkpoints
 
-            staged = paths.scoped_staging_adapter_dir(ctx.scope.name, ctx.out_version)
+            staged = paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)
             ctx.checkpoints, ctx.best_loss_checkpoint = discover_checkpoints(staged)
             if not ctx.checkpoints:
                 # A failure, not a warning. ms-swift exiting 0 is not evidence
                 # that an adapter exists: zero steps (a resume past max_steps, a
-                # tiny corpus) exits cleanly too, and merge would then fall back
-                # to the output root, which holds no adapter at all.
+                # tiny corpus) exits cleanly too, and package would then fall
+                # back to the output root, which holds no adapter at all.
                 raise PipelineError(
                     f"training for {manifest.run_id} exited cleanly but wrote no checkpoint "
-                    f"under {staged}, so there is no adapter to select or merge. Check the "
+                    f"under {staged}, so there is no adapter to select or publish. Check the "
                     "ms-swift log for the step count."
                 )
-        # The staging volume is where merge, quantize and push look for the
-        # weights. Without this mark the artifacts exist and the pipeline cannot
+        # The staging volume is where calibration, the gate and push look for
+        # the adapter. Without this mark the artifacts exist and the pipeline cannot
         # find them.
-        ctx.volume.mark(paths.scoped_staging_adapter_dir(ctx.scope.name, ctx.out_version))
+        ctx.volume.mark(paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version))
 
-    if ctx.push_adapters and not ctx.dry_run:
-        # Belt and braces: the adapter is tens of MB, so pushing it now costs
-        # little and means a reclaimed volume loses only the merged model. The
-        # adapter itself — the checkpoint that loss preferred, or the last one —
-        # not the placeholder note this used to write in its place.
-        # The adapter files only, as package publishes them - never the
-        # checkpoint's resume state, which would stay in the published prefix.
-        from artifact_registry.transfer import push_scoped_adapter
-
-        adapter = ctx.best_loss_checkpoint or ctx.checkpoints[-1]
-        blob_dir = push_scoped_adapter(adapter, ctx.scope.name, ctx.out_version, client=ctx.client)
-        log.info("pushed the adapter from %s -> %s", adapter, blob_dir)
+    # --push-adapters pushes the SELECTED checkpoint, once checkpoint selection
+    # has chosen it (stage_checkpoint_eval): pushed here, it was the one
+    # validation loss preferred, which package --from-blob could not use.
 
     return StageResult(
         "training", "completed",
-        f"trained {manifest.run_id} on {manifest.data_stats.train_examples} examples",
+        f"trained {manifest.run_id} on {manifest.data_stats.train_examples} examples, "
+        + (f"continuing {parent_run_id}" if parent_run_id else f"from the base ({fresh_reason})"),
         {
             "runs": [manifest.run_id],
             "run_type": manifest.run_type,
             "push_adapters": ctx.push_adapters,
+            "continued": parent_run_id,
+            "fresh_reason": fresh_reason,
         },
     )
 
@@ -1253,25 +1351,25 @@ def stage_training(ctx: StageContext) -> StageResult:
 
 def _rediscover_checkpoints(ctx: StageContext) -> None:
     """Fill ``ctx.checkpoints`` from the staging volume when this process did
-    not train. ``--from-stage checkpoint_eval``, ``--from-stage merge`` and a
+    not train. ``--from-stage checkpoint_eval``, ``--from-stage calibrate`` and a
     training stage skipped as already complete all left it empty, so checkpoint
-    selection "skipped" and merge fell back to the ms-swift output root — which
+    selection "skipped" and the next stage fell back to the ms-swift output root — which
     holds a ``v0-<timestamp>/`` directory, not a loadable adapter."""
     if ctx.dry_run or ctx.checkpoints:
         return
     from evaluation.checkpoint_eval import discover_checkpoints
 
-    staged = paths.scoped_staging_adapter_dir(ctx.scope.name, ctx.out_version)
+    staged = paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)
     if Path(staged).is_dir():
         ctx.checkpoints, ctx.best_loss_checkpoint = discover_checkpoints(staged)
 
 
 def _selection_settings(ctx: StageContext) -> dict[str, Any]:
-    """The validation cut's settings for checkpoint selection, from the scope's config."""
+    """The validation cut's settings for checkpoint selection, from the training config."""
     from common.config import training_config
     from common.constants import MODALITY_MODES
 
-    evaluation = training_config(ctx.scope.training_config)["evaluation"]
+    evaluation = training_config(ADAPTER.training_config)["evaluation"]
     # The reading modes the finalists' whole-document pass reads (none = all).
     modes = [str(m) for m in (evaluation.get("selection_document_modes") or [])]
     unknown = sorted(set(modes) - set(MODALITY_MODES))
@@ -1300,18 +1398,17 @@ def _checkpoint_scorer(ctx: StageContext) -> Any:
     selection = _selection_settings(ctx)
     settings = {
         "client": ctx.client,
-        # The scope's own validation view: scoring a policy checkpoint on
-        # Loss Runs it never trained on measures the base model.
-        "val_path": paths.corpus_scope_eval_split(ctx.corpus, "val", ctx.scope.name, ctx.tenant_id),
+        # The adapter's own validation view: the policy rows it trains on.
+        "val_path": paths.corpus_scope_eval_split(ctx.corpus, "val", ADAPTER.name, ctx.tenant_id),
         "images_root": paths.staging_train_images_dir(ctx.corpus, ctx.tenant_id),
         "sample_rows": int(selection["validation_sample_rows"]),
         # The finalists' whole-document pass (and a near-tie) reads these modes only.
         "full_modes": selection["selection_document_modes"],
     }
-    distributed = training_config(ctx.scope.training_config).get("distributed") or {}
+    distributed = training_config(ADAPTER.training_config).get("distributed") or {}
     gpus = scoring_gpus()[: training_gpus(distributed)]
     if len(gpus) > 1:
-        staged = paths.scoped_staging_adapter_dir(ctx.scope.name, ctx.out_version)
+        staged = paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)
         return parallel_vllm_scorer(**settings, gpus=gpus, work_dir=Path(staged) / "checkpoint_scores")
     return vllm_scorer(**settings)
 
@@ -1326,8 +1423,11 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
     the only thing the gate reads.
 
     Skipped, explicitly, when nothing was staged: a dry run never launched
-    ms-swift, so there is nothing to choose between, and merging the staged
+    ms-swift, so there is nothing to choose between, and packaging the staged
     adapter directory is the honest fallback rather than a silent one.
+
+    With ``--push-adapters`` the selected checkpoint is pushed to Blob here, so
+    a reclaimed volume does not lose it (``package --from-blob``).
     """
     from evaluation.checkpoint_eval import CheckpointEvalError, select_best
 
@@ -1336,7 +1436,7 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
     if not checkpoints:
         return StageResult(
             "checkpoint_eval", "skipped",
-            "no staged checkpoints to choose between; merge takes the staged adapter directory",
+            "no staged checkpoints to choose between; package takes the staged adapter directory",
             {"selected": None},
         )
     # No separate dry-run branch: a dry run never launched ms-swift, so it has no
@@ -1373,14 +1473,25 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
             "arbitrary one would ship a model nobody measured."
         ) from exc
     finally:
-        # The base engine is done once selection is; merge and calibration need
-        # the card for the next model.
+        # The base engine is done once selection is; calibration needs the card
+        # for the next model.
         if callable(getattr(scorer, "close", None)):
             scorer.close()
 
     ctx.client.write_json(
-        paths.checkpoint_selection(ctx.out_version, scope=ctx.scope.name), report.as_dict()
+        paths.checkpoint_selection(ctx.out_version, scope=ADAPTER.name), report.as_dict()
     )
+    if ctx.push_adapters and not ctx.dry_run:
+        # Belt and braces: the adapter is small, so pushing it now costs little
+        # and means a reclaimed volume does not lose it. The checkpoint
+        # selected - the one calibration, the gate and package use - and the
+        # adapter files only, never the checkpoint's resume state.
+        from artifact_registry.transfer import push_scoped_adapter
+
+        blob_dir = push_scoped_adapter(str(report.selected), ADAPTER.name, ctx.out_version,
+                                       client=ctx.client)
+        _record_pushed(ctx, str(report.selected))
+        log.info("pushed the selected adapter %s -> %s", report.selected, blob_dir)
     detail = f"selected {report.selected} (margin {report.margin:+.4f} field F1)"
     if report.loss_and_f1_disagreed:
         detail += f"; validation loss would have shipped {report.best_loss_checkpoint}"
@@ -1394,7 +1505,7 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
 
 
 # --------------------------------------------------------------------------
-# Stage 6 — evaluation and the promotion gate (HARD STOP)
+# Stage 8 — evaluation and the promotion gate (HARD STOP)
 # --------------------------------------------------------------------------
 
 
@@ -1407,8 +1518,8 @@ def _major(version: str) -> str:
 def is_major_bump(previous: str | None, candidate: str) -> bool:
     """Whether the candidate is a new Foundation **major** version.
 
-    A patch that continues from the previous Foundation is a different case,
-    handled by the gate's own cross-type evidence rule.
+    A run that continues the promoted adapter is a different case, held line by
+    line to the runs before it (``gating._require_line_non_regression``).
     """
     if not previous:
         return False
@@ -1445,14 +1556,13 @@ class CascadeWorkList:
 
 def foundation_upgrade_work_list(ctx: StageContext) -> CascadeWorkList:
     """The dependent-adapter re-validation list for a Foundation major bump."""
-    from registry_utils.query_registry import adapters_depending_on, latest_promoted
+    from registry_utils.query_registry import adapters_depending_on
 
     # "unified" under arch v2.1 §4.1. A graduated per-type adapter (§4.2) still
     # records the unified run it was trained on as its foundation_version, so the
     # dependency-upgrade rule is unchanged — only the run_type it looks for moved.
-    previous = latest_promoted(
-        ctx.client, _promoted_lineage(ctx.scope), scope=ctx.scope.name
-    )
+    promoted = promoted_version(ctx)
+    previous = ADAPTER.run_id(promoted) if promoted else None
     work = CascadeWorkList(previous_foundation=previous)
     if not is_major_bump(previous, ctx.out_version):
         return work
@@ -1483,11 +1593,15 @@ def eval_report_metrics(ctx: StageContext) -> dict[str, Any]:
 
     assert_eval_set_disjoint(ctx.client, ctx.corpus, ctx.tenant_id)
 
-    # This scope's report, not the unified one. Reading the unscoped key gated a
-    # policy candidate on the UNIFIED model's numbers — or found no report and
-    # failed — while stage_push recorded the scoped key on the manifest.
-    summary_key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
+    # The adapter's report, where stage_push records it on the manifest.
+    summary_key = paths.eval_report(ctx.out_version, scope=ADAPTER.name)
     calibrators, thresholds = release_calibration(ctx, "bf16")
+    # The lines the release will serve, and so the documents it is scored on:
+    # serving sends every other policy to the base model.
+    lines = served_lines(ctx)
+    # The checkpoint scored: a report of another one (selected again since) is
+    # never this release's.
+    scored = adapter_checkpoint(ctx)
     not_reused: str | None = None
     if ctx.client.exists(summary_key):
         report = ctx.client.read_json(summary_key)
@@ -1496,6 +1610,12 @@ def eval_report_metrics(ctx: StageContext) -> dict[str, Any]:
         tenant = paths._tenant(ctx.tenant_id)
         if not metrics:
             not_reused = "it holds no gate metrics"
+        elif "lines_scored" in report and report["lines_scored"] != lines:
+            not_reused = (f"it was scored on lines {report['lines_scored'] or 'all'}, and this release "
+                          f"serves {lines}")
+        elif "adapter_checkpoint" in report and report["adapter_checkpoint"] != scored:
+            not_reused = (f"it scored checkpoint {report['adapter_checkpoint']}, and the checkpoint "
+                          f"selected now is {scored}")
         elif not recorded.get("tenant_id"):
             not_reused = ("it does not record which tenant's frozen set it was scored on (written "
                           "before reports recorded it), so it cannot be shown to be this tenant's")
@@ -1520,24 +1640,30 @@ def eval_report_metrics(ctx: StageContext) -> dict[str, Any]:
         )
 
     # No report yet: produce it. The frozen golden set goes through the serving
-    # pipeline with the merged bf16 model and the release's own bf16 calibrators,
-    # so the gate measures what production would serve — windows, merge, date
-    # post-process and calibrated confidence included.
+    # pipeline with the bf16 base, this cycle's adapter applied, and the release's
+    # own bf16 calibrators, so the gate measures what production would serve —
+    # windows, the merge of their outputs, date post-process and calibrated
+    # confidence included.
     from evaluation.golden_eval import assert_scoreable, evaluate_version
     from inference_core.model_runner import release_model
 
     # Before the model is loaded: a frozen gold with no review record is refused
-    # by the scoring, and learning that after loading the merged model bought
+    # by the scoring, and learning that after loading the model bought
     # nothing.
-    assert_scoreable(ctx.client, ctx.scope.doc_types, tenant_id=ctx.tenant_id)
+    assert_scoreable(ctx.client, ADAPTER.doc_types, tenant_id=ctx.tenant_id)
+    if not lines:
+        raise PipelineError(
+            f"{ctx.out_version} trained on no single-line policy of a known line (its run's train "
+            "view and its corpus record none), so it has no line to serve or to be scored on."
+        )
     loader = ctx.serving_model_loader or _staged_serving_model
     model = loader(ctx, "bf16")
     try:
         report = evaluate_version(
             ctx.client, model,
-            version=ctx.out_version, corpus_version=ctx.corpus, scope=ctx.scope,
-            tenant_id=ctx.tenant_id,
-            calibrators=calibrators, thresholds=thresholds,
+            version=ctx.out_version, corpus_version=ctx.corpus, tenant_id=ctx.tenant_id,
+            calibrators=calibrators, thresholds=thresholds, lines=lines,
+            adapter_checkpoint=scored,
         )
     finally:
         release_model(model)
@@ -1563,6 +1689,13 @@ def release_calibration(ctx: StageContext, fmt: str) -> tuple[Any, Any]:
     from calibration.thresholds import ThresholdSet
 
     body = ctx.client.read_json(key)
+    fitted_on, selected = body.get("adapter_checkpoint"), adapter_checkpoint(ctx)
+    if fitted_on is not None and fitted_on != selected:
+        raise PipelineError(
+            f"the {fmt} calibrators at {key} were fitted on checkpoint {fitted_on}, and the "
+            f"checkpoint selected now is {selected}: confidence from one checkpoint's logprobs "
+            "says nothing about another's. Run package again from calibrate."
+        )
     calibrators = CalibratorSet.from_dict(body["calibrators"])
     thresholds = ThresholdSet.from_dict(body["thresholds"])
     ctx.calibrators[fmt], ctx.thresholds[fmt] = calibrators, thresholds
@@ -1576,8 +1709,8 @@ def default_baseline_metrics(ctx: StageContext) -> dict[str, Any] | None:
     ``None`` means there is no promoted version yet — a genuine first version,
     which the gate handles. It never means "could not find one".
 
-    This tenant's promoted version (``latest_promoted(tenant=...)``), never
-    another tenant's newer one. Whether its scores can be compared with the
+    This tenant's promoted release (:func:`promoted_version`), never another
+    tenant's newer one. Whether its scores can be compared with the
     candidate's at all is :func:`baseline_not_comparable`.
     """
     key = _promoted_eval_report_key(ctx)
@@ -1606,8 +1739,18 @@ def baseline_not_comparable(ctx: StageContext) -> str | None:
     promoted_key = _promoted_eval_report_key(ctx)
     if promoted_key is None:
         return None
-    promoted = ctx.client.read_json(promoted_key).get("eval_set")
-    candidate_key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
+    promoted_report = ctx.client.read_json(promoted_key)
+    if promoted_report.get("calibrated") is False:
+        # Scored without its calibrators (an ad-hoc `run_eval`, which writes the
+        # same key): every field flagged, so auto_accept_error_rate reads 0.0.
+        return (f"the promoted release's report at {promoted_key} was scored without its "
+                "calibrators")
+    candidate_lines = served_lines(ctx)
+    if "lines_scored" in promoted_report and promoted_report["lines_scored"] != candidate_lines:
+        return (f"the promoted release was scored on lines {promoted_report['lines_scored'] or 'all'} "
+                f"and the candidate serves {candidate_lines} (promoted report {promoted_key})")
+    promoted = promoted_report.get("eval_set")
+    candidate_key = paths.eval_report(ctx.out_version, scope=ADAPTER.name)
     candidate = (ctx.client.read_json(candidate_key).get("eval_set")
                  if ctx.client.exists(candidate_key) else None)
     if not candidate:
@@ -1616,22 +1759,54 @@ def baseline_not_comparable(ctx: StageContext) -> str | None:
     return f"{reason} (promoted report {promoted_key})" if reason else None
 
 
-def _promoted_eval_report_key(ctx: StageContext) -> str | None:
-    """Where this tenant's promoted version's eval report lives; ``None`` with no report."""
-    from registry_utils.query_registry import latest_promoted
+def promoted_version(ctx: StageContext) -> str | None:
+    """The adapter version of this tenant's promoted release, other than this
+    cycle's own; ``None`` when none is promoted (:func:`promoted_release`)."""
+    promoted = promoted_release(ctx)
+    return promoted[1] if promoted else None
 
-    promoted = latest_promoted(
-        ctx.client, _promoted_lineage(ctx.scope), scope=ctx.scope.name,
-        tenant=paths._tenant(ctx.tenant_id),
-    )
+
+def promoted_release(ctx: StageContext) -> tuple[str, str] | None:
+    """``(release id, adapter version)`` of this tenant's promoted release,
+    other than this cycle's own; ``None`` when none is promoted, or when it is
+    a release of another model.
+
+    Read from the tenant's release index - what serving serves - not from run
+    manifests: no real run ever set a manifest's status to promoted, so every
+    candidate was gated as a first version, with no regression check at all.
+    A release named by version is its adapter's version; one named before
+    releases were (``release-YYYY.M.N``) gives its adapter's, and keeps its own
+    name for its bundle.
+    """
+    from common.run_ids import RunIdError, parse_run_id
+    from serving.release_router import promoted_rows
+
+    for row in promoted_rows(ctx.client, ctx.tenant_id):
+        release_id = str(row.get("release_id") or "")
+        if release_id == ctx.release_id:
+            continue
+        if paths.version_number(release_id) is not None:
+            return release_id, release_id
+        try:
+            parsed = parse_run_id(str(row.get("adapter") or ""))
+        except (RunIdError, ValueError):
+            parsed = None
+        if parsed is None or parsed.lineage != ADAPTER.name:
+            # Another model (an older unified extractor, say): the policy
+            # adapter's report at that number would be someone else's.
+            log.warning("promoted release %s is not a release of the policy adapter (adapter %r); "
+                        "nothing to regress against", release_id, row.get("adapter"))
+            return None
+        return release_id, parsed.version
+    return None
+
+
+def _promoted_eval_report_key(ctx: StageContext) -> str | None:
+    """Where this tenant's promoted release's eval report lives; ``None`` with no report."""
+    promoted = promoted_version(ctx)
     if not promoted:
         return None
-    # The promoted run's OWN scope decides where its report lives, and it is this
-    # scope's previous release by construction — `latest_promoted` was already
-    # filtered by scope. Reading the unscoped key compared a policy candidate
-    # against unified numbers, or silently degraded to "first version" and
-    # dropped the regression check altogether.
-    key = paths.eval_report(version_of(promoted), scope=ctx.scope.name)
+    key = paths.eval_report(promoted, scope=ADAPTER.name)
     if not ctx.client.exists(key):
         log.warning(
             "promoted version %s has no eval report at %s, so this candidate is gated as a first "
@@ -1673,7 +1848,7 @@ def paired_document_scores(
     promoted_key = _promoted_eval_report_key(ctx)
     if promoted_key is None:
         return None
-    candidate_key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
+    candidate_key = paths.eval_report(ctx.out_version, scope=ADAPTER.name)
     if not ctx.client.exists(candidate_key):
         _not_paired(notes, f"the candidate has no eval report at {candidate_key}")
         return None
@@ -1747,44 +1922,41 @@ def _not_paired(notes: list[str], reason: str,
     notes.append(note)
 
 
-def scope_eval_set_size(
+def eval_set_size(
     ctx: StageContext, manifest: dict[str, Any], warnings: list[str] | None = None,
 ) -> tuple[dict[str, int], str]:
-    """How many frozen REAL documents of each type this scope was scored on, and
-    where the count was read: ``(counts, source)``. Synthetic twins do not count
-    toward the production minimum (decision 2026-10-22).
+    """How many frozen REAL documents of each type the candidate was scored on,
+    and where the count was read: ``(counts, source)``. Synthetic twins do not
+    count toward the production minimum (decision 2026-10-22).
 
     From the candidate's own eval report when it records them
     (``eval_set.real_documents_by_doc_type``): exactly the documents it was
-    scored on, after the scope's doc types and lines. Otherwise from the frozen
-    manifest: a line-scoped policy scope counts the real policies of its lines
-    (``real_policies_by_line``), any other scope the real documents of its
-    types (``real_documents_by_doc_type``). Empty when neither says - a manifest
-    frozen before it counted real documents, with a report that does not either
-    - and the reason is added to ``warnings``: its counts include twins, so
-    they cannot show the minimum was met, and the release is capped at interim.
+    scored on. Otherwise from the frozen manifest's
+    ``real_documents_by_doc_type``, of the types the adapter trains. Empty when
+    neither says - a manifest frozen before it counted real documents, with a
+    report that does not either - and the reason is added to ``warnings``: its
+    counts include twins, so they cannot show the minimum was met, and the
+    release is capped at interim.
 
-    Not the manifest's ``small_set_accepted``: that describes the whole set. A
-    GL-only scope scored on 9 GL policies of a set frozen with 150 policies was
-    let through to production, and a policy scope scored on 200 policies was
-    capped because the set held 9 Loss Runs.
+    Not the manifest's ``small_set_accepted``: that describes the whole set,
+    other types included.
     """
     notes = warnings if warnings is not None else []
-    key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
+    key = paths.eval_report(ctx.out_version, scope=ADAPTER.name)
     report = ctx.client.read_json(key) if ctx.client.exists(key) else {}
     recorded_set = report.get("eval_set") or {}
     recorded = recorded_set.get("real_documents_by_doc_type")
     # The report path names no tenant: another tenant's report says nothing here.
     if (isinstance(recorded, dict)
             and recorded_set.get("tenant_id") == paths._tenant(ctx.tenant_id)):
-        return {t: int(recorded.get(t) or 0) for t in ctx.scope.doc_types}, "eval_report"
+        return {t: int(recorded.get(t) or 0) for t in ADAPTER.doc_types}, "eval_report"
     if not manifest:
         return {}, "unknown"
-    counted = "real_policies_by_line" if ctx.scope.lines else "real_documents_by_doc_type"
+    counted = "real_documents_by_doc_type"
     counts = manifest.get(counted)
     if not isinstance(counts, dict):
         note = (
-            f"how many real documents this scope was scored on is unknown: the frozen manifest has "
+            f"how many real documents the candidate was scored on is unknown: the frozen manifest has "
             f"no {counted} (frozen before the manifest counted real documents apart from synthetic "
             "twins, which do not count toward the minimum, decision 2026-10-22) and the "
             "candidate's eval report does not record them, so the release is capped at interim. "
@@ -1793,20 +1965,116 @@ def scope_eval_set_size(
         log.warning("%s", note)
         notes.append(note)
         return {}, "unknown"
-    if ctx.scope.lines:
-        # A package's lines are joined with "+" (split_groups.line_of). Line
-        # scopes are policy scopes (configs/scopes.yaml).
-        count = sum(int(n) for line, n in counts.items() if ctx.scope.covers_lob(line.split("+")))
-        return {t: count for t in ctx.scope.doc_types}, f"frozen_manifest.{counted}"
-    return {t: int(counts.get(t) or 0) for t in ctx.scope.doc_types}, f"frozen_manifest.{counted}"
+    return {t: int(counts.get(t) or 0) for t in ADAPTER.doc_types}, f"frozen_manifest.{counted}"
+
+
+def line_evidence(
+    ctx: StageContext, parent_run_id: str, warnings: list[str] | None = None,
+) -> tuple[Any, str | None]:
+    """What a continued run is held to, line by line (decision 2026-10-23):
+    ``(gating.LineEvidence, None)``, or ``(None, why)`` when no comparison can
+    be made - the candidate's or the parent's eval report missing, the parent's
+    on another yardstick (``run_eval.yardstick_difference``), or either written
+    before reports recorded each document's line.
+
+    Each line the candidate serves is held to the BEST run on it since the last
+    run from the base: the parent, its parent, and so on down ``parent_run_id``
+    to the run that started from the base. Best is the highest field match over
+    the line's real documents both reports scored, among the runs sharing at
+    least ``gating.LINE_MIN_DOCUMENTS`` of them with the candidate; the
+    comparison pairs those documents' scores. A run on the chain whose report is
+    missing or on another yardstick is left out with a warning - except the
+    parent, which is required. Lines the parent's release serves (its report's
+    ``lines_scored``) and the candidate does not are ``dropped``.
+    """
+    from evaluation.gating import LINE_MIN_DOCUMENTS, LineComparison, LineEvidence
+    from evaluation.run_eval import line_document_scores, yardstick_difference
+    from registry_utils.query_registry import RegistryQueryError
+    from registry_utils.query_registry import get as get_manifest
+
+    notes = warnings if warnings is not None else []
+    candidate_key = paths.eval_report(ctx.out_version, scope=ADAPTER.name)
+    if not ctx.client.exists(candidate_key):
+        return None, f"the candidate has no eval report at {candidate_key}"
+    candidate_report = ctx.client.read_json(candidate_key)
+    mine_by_line = line_document_scores(candidate_report)
+    if mine_by_line is None:
+        return None, (f"the candidate's report at {candidate_key} records no document's line "
+                      "(written before reports recorded them)")
+
+    # The runs since the last run from the base, parent first, with their
+    # per-line document scores.
+    chain: list[tuple[str, dict[str, dict[str, tuple[float, float]]], dict[str, Any]]] = []
+    run_id: str | None = parent_run_id
+    seen: set[str] = set()
+    while run_id and run_id not in seen:
+        seen.add(run_id)
+        key = paths.eval_report(version_of(run_id), scope=ADAPTER.name)
+        report = ctx.client.read_json(key) if ctx.client.exists(key) else None
+        if report is None:
+            why = f"it has no eval report at {key}"
+        else:
+            why = yardstick_difference(report.get("eval_set"), candidate_report.get("eval_set"),
+                                       ctx.tenant_id)
+        scores = line_document_scores(report) if report is not None and not why else None
+        if scores is None and not why:
+            why = f"its report at {key} records no document's line (written before reports recorded them)"
+        if why:
+            if run_id == parent_run_id:
+                return None, f"{run_id}: {why}"
+            notes.append(f"{run_id}, on the chain of runs this one continued, is not compared line by "
+                         f"line: {why}")
+        else:
+            chain.append((run_id, scores, report))
+        try:
+            run_id = get_manifest(run_id, ctx.client).parent_run_id
+        except (RegistryQueryError, KeyError, FileNotFoundError, ValueError) as exc:
+            notes.append(f"the chain of runs this one continued stops at {run_id}: its run manifest "
+                         f"cannot be read ({type(exc).__name__})")
+            break
+
+    parent_scores, parent_report = chain[0][1], chain[0][2]
+    parent_lines = set(parent_report.get("lines_scored") or parent_scores)
+    served = set(served_lines(ctx))
+    evidence = LineEvidence(dropped=sorted(parent_lines - served), added=sorted(served - parent_lines),
+                            chain=[run for run, _scores, _report in chain])
+    for line in sorted(served):
+        mine = mine_by_line.get(line) or {}
+        best: tuple[float, str, list[str], dict[str, tuple[float, float]]] | None = None
+        most_shared = 0
+        for run, scores, _report in chain:
+            theirs = scores.get(line) or {}
+            shared = sorted(set(theirs) & set(mine))
+            most_shared = max(most_shared, len(shared))
+            if len(shared) < LINE_MIN_DOCUMENTS:
+                continue
+            weights = [theirs[d][1] for d in shared]
+            mean = sum(theirs[d][0] * w for d, w in zip(shared, weights, strict=True)) / (sum(weights) or 1.0)
+            # Strictly higher: on a tie the nearer run (parent first) is held to.
+            if best is None or mean > best[0]:
+                best = (mean, run, shared, theirs)
+        if best is None:
+            if most_shared or line in parent_lines:
+                evidence.thin[line] = most_shared
+            continue
+        _mean, run, shared, theirs = best
+        evidence.compared.append(LineComparison(
+            line=line, reference=run,
+            reference_scores=[theirs[d][0] for d in shared],
+            candidate_scores=[mine[d][0] for d in shared],
+            reference_weights=[theirs[d][1] for d in shared],
+            candidate_weights=[mine[d][1] for d in shared],
+        ))
+    return evidence, None
 
 
 def stage_evaluation_gate(ctx: StageContext) -> StageResult:
+
     """Score the candidate against the frozen golden eval set, then gate.
 
     **This stage is a hard stop inside ``package``** (arch v2.1 §13). It runs
-    after merge, quantize and calibrate, so a regression stops the RELEASE, not
-    the build: the merged model exists on the staging volume, but nothing is
+    after calibrate, so a regression stops the RELEASE, not the build: the
+    adapter exists on the staging volume, but nothing is
     published, the release bundle is never written, and the command exits
     non-zero with per-metric verdicts. There is no ``--force``. There is a named,
     written override (``ctx.gate_override``, §15.5; ``--override-approver``,
@@ -1820,7 +2088,7 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
     candidate = provider(ctx)
     baseline = ctx.baseline_metrics
     per_document = ctx.per_document
-    # Why per-document scores could not be paired, or the scope's size could
+    # Why per-document scores could not be paired, or the set's size could
     # not be counted, for the decision's warnings.
     pairing: list[str] = []
     # Why the promoted release is on another yardstick, when it is: the
@@ -1837,32 +2105,41 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
 
     # Read the manifest back from the registry when this run did not train it —
     # a resume, or --from-stage evaluation_gate, leaves ctx.manifests empty, and
-    # the gate then saw continued_from=None and silently dropped the cross-type
-    # requirement a continued Foundation is supposed to face. It also skipped
-    # recording the decision, while stage_push published the run regardless.
+    # the gate then saw no parent and silently dropped the line-by-line
+    # comparison a continued run is held to. It also skipped recording the
+    # decision, while stage_push published the run regardless.
     foundation = manifest_of(ctx)
     if foundation is None:
         from registry_utils.query_registry import RegistryQueryError
         from registry_utils.query_registry import get as get_manifest
 
         try:
-            run_id = ctx.scope.run_id(ctx.out_version)
+            run_id = ADAPTER.run_id(ctx.out_version)
             foundation = get_manifest(run_id, ctx.client)
-            ctx.manifests[ctx.scope.name] = foundation
+            ctx.manifests[ADAPTER.name] = foundation
         except (RegistryQueryError, KeyError, FileNotFoundError) as exc:
             raise PipelineError(
                 f"no run manifest for {run_id}, so the gate cannot tell "
-                "whether this Foundation continued from a previous checkpoint — and a continued "
-                "one must show cross-type regression evidence before promotion (arch §12). "
+                "whether this run continued an adapter — and a continued one is held line by "
+                "line to the runs before it (decision 2026-10-23). "
                 f"Re-run training for this version rather than gating blind ({exc})."
             ) from exc
-    # The set the candidate was scored on. A scope scored on fewer than the
-    # minimum documents of a type it covers caps the release at interim, with a
-    # warning - whatever the whole set's own flag says (scope_eval_set_size).
-    # A count nothing records is not shown to be large enough.
+    # The set the candidate was scored on. Fewer real documents than the
+    # minimum caps the release at interim, with a warning (eval_set_size). A
+    # count nothing records is not shown to be large enough.
     eval_set = frozen_manifest(ctx.client, tenant_id=ctx.tenant_id)
-    scored_on, counted_from = scope_eval_set_size(ctx, eval_set, warnings=pairing)
+    scored_on, counted_from = eval_set_size(ctx, eval_set, warnings=pairing)
     small = not scored_on or any(n < MIN_FROZEN_DOCS_PER_TYPE for n in scored_on.values())
+    # A run that continued an adapter: held, line by line, to the runs before it
+    # since the last run from the base (line_evidence). One continued by hand
+    # from a directory (training.train --continue-from) names no parent run, so
+    # there is nothing to compare it with.
+    parent_run = getattr(foundation, "parent_run_id", None)
+    continued = parent_run or getattr(foundation, "continued_from", None)
+    evidence, line_missing = (line_evidence(ctx, parent_run, warnings=pairing)
+                              if parent_run else (None, None))
+    if continued and not parent_run:
+        line_missing = f"it continued {continued}, a directory, not a run of the adapter"
     result = promotion_gate(
         candidate,
         baseline,
@@ -1873,22 +2150,19 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         # let the improvement rule be enforced (arch §15.5).
         per_document=per_document,
         fixes_defect=ctx.fixes_defect,
-        continued_from=getattr(foundation, "continued_from", None),
-        # Passed through verbatim: the operator supplies both sides, because
-        # only they know which promoted per-type report is the baseline.
-        cross_type_evidence=ctx.cross_type_evidence or None,
+        # A continued run is held, line by line, to the run it continued
+        # (decision 2026-10-23): continued training compounds drift.
+        continued_from=continued,
+        line_evidence=evidence,
+        line_evidence_missing=line_missing,
         override=ctx.gate_override,
-        # Decides which metrics are NOT APPLICABLE and supplies this scope's
-        # floors. Without it a policy-only run blocks for ever on Loss Run
-        # reconciliation, which nothing it covers could have produced.
-        scope=ctx.scope,
     )
 
     # `gate_decision`, not `eval_report`. Writing here used to clobber the
     # scored EvalReport at the same key, taking `by_doc_type` and every error
     # record with it — which is what `vit_gate` reads to decide whether the
     # vision encoder is the bottleneck.
-    report_key = paths.gate_decision(ctx.out_version, scope=ctx.scope.name)
+    report_key = paths.gate_decision(ctx.out_version, scope=ADAPTER.name)
     # Before the decision is written, not after: `package --from-stage package`
     # reads the recorded decision, and one saying "passed" for a version the
     # cascade then blocked let it be published.
@@ -1918,6 +2192,17 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         "paired_documents": {
             v.name: v.interval.documents for v in result.verdicts if v.interval is not None
         },
+        # A continued run's line-by-line comparison (decision 2026-10-23): the
+        # runs compared, each line's numbers and the run it was held to, and the
+        # lines not compared - or why no comparison could be made.
+        "line_comparison": (
+            {"continued": continued, "runs_compared": list(evidence.chain),
+             "lines": list(result.line_verdicts), "not_compared": dict(evidence.thin),
+             "dropped": list(evidence.dropped), "added": list(evidence.added)}
+            if evidence is not None
+            else {"continued": continued, "missing": line_missing} if continued else None
+        ),
+        "blocking_reasons": list(result.blocking_reasons),
         "fixes_defect": ctx.fixes_defect,
         "eval_set": {
             "small_set_accepted": bool(eval_set.get("small_set_accepted")),
@@ -1925,29 +2210,31 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
             "real_documents_by_doc_type": eval_set.get("real_documents_by_doc_type"),
             "frozen_from_corpus": eval_set.get("frozen_from_corpus"),
             "frozen_at": eval_set.get("frozen_at"),
-            # What decided the interim cap: this scope's real documents per
-            # type, where that count was read, and the minimum it was held to.
-            "scope_documents_by_doc_type": scored_on,
-            "scope_documents_counted_from": counted_from,
+            # What decided the interim cap: the real documents per type the
+            # candidate was scored on, where that count was read, and the
+            # minimum it was held to.
+            "scored_documents_by_doc_type": scored_on,
+            "scored_documents_counted_from": counted_from,
             "minimum_per_doc_type": MIN_FROZEN_DOCS_PER_TYPE,
-            "small_for_scope": small,
+            "small": small,
         },
         "warnings": list(result.warnings),
         # Fideon SPEC_09 §6: production (field match >= 0.92) or interim; None if
         # blocked, by the gate or by the cascade.
         "tier": result.tier if not cascade_blocked else None,
     }
-    decision["scope"] = ctx.scope.name
-    decision["doc_types"] = list(ctx.scope.doc_types)
+    decision["adapter"] = ADAPTER.run_id(ctx.out_version)
+    decision["doc_types"] = list(ADAPTER.doc_types)
+
     ctx.client.write_json(report_key, decision)
     # Also under the release, where the bundle points. The candidate metrics are
-    # the merged bf16 model's, so this is bf16's gate run and no other format's:
-    # a quantized format inherits nothing from it (arch v2.1 §13a).
+    # the bf16 base's with the adapter applied: bf16 is the only format served
+    # (decision 2026-10-23).
     ctx.client.write_json(
         paths.release_gate_decision(ctx.release_id, "bf16", ctx.tenant_id), decision
     )
     ctx.volume.write(
-        paths.staging_eval_report(ctx.out_version, scope=ctx.scope.name), json.dumps(candidate)
+        paths.staging_eval_report(ctx.out_version, scope=ADAPTER.name), json.dumps(candidate)
     )
 
     apply_to_manifest(result, foundation, metrics=candidate)
@@ -1983,164 +2270,67 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
 
 
 # --------------------------------------------------------------------------
-# Stage 7 — merge
+# The selected adapter, as calibration, the gate and package load it
 # --------------------------------------------------------------------------
-
-
-def _is_merged(ctx: StageContext) -> bool:
-    """One merged model is a complete merge stage (arch v2.1 §4.1)."""
-    return ctx.volume.exists(paths.staging_merged_model_dir(ctx.out_version, scope=ctx.scope.name))
 
 
 def selected_checkpoint(ctx: StageContext) -> str | None:
     """The checkpoint the §11.2 selector picked, from this process or from Blob.
 
-    ONE reader for merge and package: the adapter published must be the one
-    merged. A resumed process (``--from-stage merge`` or ``package``) did not run
-    checkpoint_eval, but an earlier one did and wrote its choice down.
+    ONE reader for calibration, the gate and package: the adapter published must
+    be the one scored. A resumed process (``--from-stage calibrate`` or
+    ``package``) did not run checkpoint_eval, but an earlier one did and wrote
+    its choice down.
     """
     selection = ctx.results.get("checkpoint_eval")
     selected = (selection.data or {}).get("selected") if selection else None
     if selected is None:
-        key = paths.checkpoint_selection(ctx.out_version, scope=ctx.scope.name)
+        key = paths.checkpoint_selection(ctx.out_version, scope=ADAPTER.name)
         if ctx.client.exists(key):
             selected = ctx.client.read_json(key).get("selected")
     return selected
 
 
-def stage_merge(ctx: StageContext) -> StageResult:
-    """PEFT ``merge_and_unload()`` — ONE adapter into the bf16 base.
+def adapter_checkpoint(ctx: StageContext) -> str:
+    """The checkpoint this version ships, as calibration, the gate and package
+    name it: the selected one, else the staged adapter directory. Recorded with
+    the eval report and the calibrators, so neither is reused for another."""
+    return selected_checkpoint(ctx) or paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)
 
-    v1 merged Foundation first and then the per-type LoRA on top, producing one
-    model per document type. There is one adapter now (arch v2.1 §4.1), so there
-    is one merge and one model. A graduated per-type adapter (§4.2) is never
-    merged: it is applied at serving time on top of these merged weights, one
-    LoRA per request.
-    """
-    from common.config import base_model_config
-    from training.merge import merge, plan_merge
 
-    base = base_model_config()["model"]
-    selected = selected_checkpoint(ctx)
-    if selected is None and not ctx.dry_run:
-        raise PipelineError(
-            f"no checkpoint was selected for {ctx.out_version}: run checkpoint_eval first. "
-            "Merging the ms-swift output root would merge a directory with no adapter in it."
-        )
+def serving_adapter(ctx: StageContext) -> str:
+    """Where calibration and the gate load that checkpoint from: the staging
+    volume, or with ``--from-blob`` the version's adapter in Blob, which
+    :func:`assert_staged` has shown to be that checkpoint, pushed."""
+    if ctx.from_blob:
+        return paths.scoped_adapter_dir(ADAPTER.name, ctx.out_version)
+    return adapter_checkpoint(ctx)
 
-    plan = plan_merge(
-        base_model=f"{base['model_id']}@{base['revision']}",
-        version=ctx.out_version,
-        dtype=ctx.dtype,  # type: ignore[arg-type]
-        selected_checkpoint=selected,
-        scope=ctx.scope.name,
-    )
-    output = merge(plan, dry_run=ctx.dry_run)
-    ctx.volume.mark(output)
 
-    return StageResult(
-        "merge", "completed", plan.describe(),
-        {"merged": [ctx.scope.name], "selected_checkpoint": selected},
-    )
+def _record_pushed(ctx: StageContext, source: str) -> None:
+    """Note in the checkpoint selection which checkpoint was pushed to Blob, so
+    ``package --from-blob`` can tell the adapter there is the one selected."""
+    key = paths.checkpoint_selection(ctx.out_version, scope=ADAPTER.name)
+    selection = ctx.client.read_json(key) if ctx.client.exists(key) else {}
+    ctx.client.write_json(key, {**selection, "pushed": source})
 
 
 # --------------------------------------------------------------------------
-# Stage 8 — quantize (package)
-# --------------------------------------------------------------------------
-
-
-def _is_quantized(ctx: StageContext) -> bool:
-    if ctx.skip_quantize:
-        return True
-    # ONE model under arch v2.1 §4.1, so one set of formats — not one per
-    # document type. bf16 is the merged model itself and is never exported, so a
-    # bf16-only cycle has nothing to check and is complete once merge is.
-    quantized = [f for f in ctx.formats if f != "bf16"]
-    if not quantized:
-        return True
-    return all(
-        ctx.volume.exists(
-            paths.staging_quantized_model_dir(ctx.out_version, fmt, scope=ctx.scope.name)
-        )
-        for fmt in quantized
-    )
-
-
-def stage_quantize(ctx: StageContext) -> StageResult:
-    """Produce the vLLM-native serving formats (arch v2.1 §13a).
-
-    bf16 is the merged model itself and is never re-exported. FP8 is produced
-    only once Phase 0 spike item 9 has verified that a decoder-only export — with
-    the vision tower, the mergers and lm_head excluded — loads and runs in vLLM.
-
-    GGUF is not produced here at all. It is llama.cpp's format, the endpoint runs
-    vLLM, and v1 spent conversion and eval compute every cycle on a file nothing
-    could deploy. An edge build goes through ``postprocessing.quantize.export_gguf``
-    on request, and is validated in llama.cpp rather than by this gate.
-    """
-    from postprocessing.quantize import plan_quantization, quantize
-
-    if ctx.skip_quantize:
-        return StageResult("quantize", "skipped", "--skip-quantize")
-
-    # ONE model under arch v2.1 §4.1, so one plan — not one per document type.
-    plan = plan_quantization(
-        version=ctx.out_version,
-        formats=ctx.formats,
-        fp8_verified=ctx.fp8_verified,
-        scope=ctx.scope.name,
-    )
-    outputs = quantize(plan, dry_run=ctx.dry_run)
-    for fmt, directory in outputs.items():
-        if fmt != "bf16":   # bf16 IS the merged model; already marked by merge
-            ctx.volume.mark(directory)
-    produced: dict[str, list[str]] = {ctx.scope.name: sorted(outputs)}
-
-    # The threshold gate, between quantize and push (IMPL-13 §4). It runs only
-    # when the caller supplied per-format metrics: scoring each GGUF needs the
-    # IMPL-12 extraction routine on a GPU, and a gate that invented numbers to
-    # have something to judge would be worse than one that says it has none.
-    validation: dict[str, Any] = {}
-    if ctx.quant_metrics:
-        from postprocessing.validate_quant import assert_servable, validate_quant
-
-        report = validate_quant(ctx.quant_metrics, serving_formats=ctx.formats)
-        assert_servable(report, ctx.formats)          # raises; no override path
-        validation = report.manifest_entry()
-    elif not ctx.skip_quantize:
-        log.warning(
-            "no per-format metrics supplied, so the quantization thresholds were not applied. "
-            "Cycle 1 serves bf16, which IS the reference, so there is nothing to compare — but a "
-            "QUANTIZED format that reaches serving unvalidated has not passed (IMPL-10 §4)."
-        )
-
-    return StageResult(
-        "quantize", "completed", f"formats {ctx.formats}",
-        {"produced": produced, "quant_threshold_results": validation},
-    )
-
-
-# --------------------------------------------------------------------------
-# Stage 9 — calibrate (package)
+# Stage 7 — calibrate (package)
 # --------------------------------------------------------------------------
 
 
 def _staged_serving_model(ctx: StageContext, fmt: str) -> Any:  # pragma: no cover - needs a GPU
-    """The staged model for one serving format, loaded for vLLM generation."""
-    from inference_core.model_runner import LoadedModel, VLLMBackend
-    from inference_core.runner_config import load_runner_config
-    from registry_utils.query_registry import ResolvedModel
+    """The model as it will be served: the bf16 base with this cycle's selected
+    adapter applied to every request, never merged (decision 2026-10-23).
+    Calibration and the gate score what is served."""
+    from inference_core.model_runner import load_model
 
-    weights = (
-        paths.staging_merged_model_dir(ctx.out_version, scope=ctx.scope.name) if fmt == "bf16"
-        else paths.staging_quantized_model_dir(ctx.out_version, fmt, scope=ctx.scope.name)
-    )
-    config = load_runner_config("vllm")
-    resolved = ResolvedModel(
-        tag=f"{ctx.out_version}:{fmt}", kind="merged", merged_model=weights, from_staging=True,
-    )
-    return LoadedModel(tag=resolved["tag"], resolved=resolved,
-                       backend=VLLMBackend(resolved, config), config=config)
+    if fmt != "bf16":
+        raise PipelineError(f"{fmt} is not served: the release is a LoRA on the bf16 base")
+    adapter = serving_adapter(ctx)
+    return load_model("base", ctx.client, backend="vllm", adapter=adapter,
+                      label=f"{ADAPTER.run_id(ctx.out_version)}:bf16")
 
 
 def collect_calibration_samples(ctx: StageContext) -> dict[str, Any]:
@@ -2159,7 +2349,7 @@ def collect_calibration_samples(ctx: StageContext) -> dict[str, Any]:
     )
     from inference_core.model_runner import release_model
 
-    val_key = paths.corpus_scope_eval_split(ctx.corpus, "val", ctx.scope.name, ctx.tenant_id)
+    val_key = paths.corpus_scope_eval_split(ctx.corpus, "val", ADAPTER.name, ctx.tenant_id)
     if not ctx.client.exists(val_key):
         log.warning("no validation split at %s; nothing to calibrate on", val_key)
         return {}
@@ -2174,8 +2364,7 @@ def collect_calibration_samples(ctx: StageContext) -> dict[str, Any]:
     loader = ctx.serving_model_loader or _staged_serving_model
 
     samples: dict[str, Any] = {}
-    formats = ["bf16"] if ctx.skip_quantize else list(ctx.formats)
-    for fmt in formats:
+    for fmt in ctx.formats:
         # One engine at a time: each format's model is freed before the next
         # loads, or the second format finds the card still full of the first.
         model = loader(ctx, fmt)
@@ -2262,7 +2451,9 @@ def stage_calibrate(ctx: StageContext) -> StageResult:
         )
         ctx.client.write_json(
             paths.release_calibrators(ctx.release_id, fmt, ctx.tenant_id),
-            {"calibrators": calibrators.as_dict(), "thresholds": thresholds.as_dict()},
+            {"calibrators": calibrators.as_dict(), "thresholds": thresholds.as_dict(),
+             # Fitted on this checkpoint's generations, and never reused for another.
+             "adapter_checkpoint": adapter_checkpoint(ctx)},
         )
         ctx.calibrators[fmt] = calibrators
         ctx.thresholds[fmt] = thresholds
@@ -2302,57 +2493,39 @@ def _calibration_errors(scored_by_type: dict[str, list[tuple[float, bool]]]) -> 
 
 
 # --------------------------------------------------------------------------
-# Stage 11 — package: push artifacts and write the release bundle
+# Stage 9 — package: push the adapter and write the release bundle
 # --------------------------------------------------------------------------
 
 
 def manifest_of(ctx: StageContext) -> Any:
-    """This scope's run manifest, or ``None``.
+    """This cycle's run manifest, or ``None`` when this process did not train it."""
+    return ctx.manifests.get(ADAPTER.name)
 
-    Falls back to the v2.1 ``"foundation"`` key so a `--from-stage` resume
-    against a context built before scopes existed still finds it.
+
+
+def assert_not_released(ctx: StageContext) -> None:
+    """Refuse to package a version that already has a promoted or archived release.
+
+    Packaging it again re-runs its gate against the release live now: a pass
+    promoted it with no named person (a rollback by another route), a failure
+    overwrote the decision that let it be promoted, so ``promote`` could no
+    longer put it back. A rollback is ``promote --version vN``; a new model is a
+    new cycle. A ``gated`` release (a format still missing its calibrator) may
+    be packaged again.
     """
-    return ctx.manifests.get(ctx.scope.name) or (
-        ctx.manifests.get("foundation") if ctx.scope.is_unified else None
-    )
-
-
-def _promoted_lineage(scope: Scope) -> RunType:
-    """Which run type counts as "the previous release" for this scope.
-
-    The baseline a policy run is gated against is the previous POLICY run, not
-    whichever run happens to be newest.
-    """
-    return "unified" if scope.is_unified else "scoped"
-
-
-def assert_release_id(ctx: StageContext) -> None:
-    """Refuse to package without a valid, operator-named release id.
-
-    Everything calibrate, the gate and the bundle write is addressed by it
-    (arch v2.1 §12.3). It is named explicitly rather than derived: a derived id
-    moves between a failed run and its ``--from-stage`` resume, splitting one
-    release's calibrators and gate decisions across two ids.
-    """
-    if paths.is_valid_release_id(ctx.release_id):
-        return
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
-    existing = {
-        key[len(paths.releases_root(ctx.tenant_id)):].strip("/").split("/", 1)[0]
-        for key in ctx.client.list(paths.releases_root(ctx.tenant_id) + "/")
-    }
-    suggestion = paths.next_release_id(existing, now.year, now.month)
-    given = f"{ctx.release_id!r} is not a valid release id" if ctx.release_id else "no --release-id"
-    raise PipelineError(
-        f"{given}. package addresses every calibrator, gate decision and bundle by release "
-        f"id (release-YYYY.M.N). The next free id this month is {suggestion}: re-run with "
-        f"--release-id {suggestion}, and pass the same id when resuming."
-    )
+    index_key = paths.release_index(ctx.tenant_id)
+    rows = ctx.client.read_json(index_key) if ctx.client.exists(index_key) else []
+    status = next((r.get("status") for r in rows or [] if r.get("release_id") == ctx.release_id), None)
+    if status in ("promoted", "archived"):
+        raise PipelineError(
+            f"{ctx.release_id} is already released ({status}) for tenant "
+            f"{paths._tenant(ctx.tenant_id)}. To serve it again: python -m orchestration.run "
+            f"promote --version {ctx.release_id} --by \"<person>\". A new model is a new cycle."
+        )
 
 
 def assert_gate_passed(ctx: StageContext) -> None:
+
     """Refuse to package a version whose promotion gate did not pass.
 
     ``finetune`` stops at a blocked gate, but ``package`` is its own command and
@@ -2360,7 +2533,7 @@ def assert_gate_passed(ctx: StageContext) -> None:
     running package next. The recorded decision is the authority; an override is
     already folded into its ``passed``.
     """
-    key = paths.gate_decision(ctx.out_version, scope=ctx.scope.name)
+    key = paths.gate_decision(ctx.out_version, scope=ADAPTER.name)
     if not ctx.client.exists(key):
         if ctx.dry_run:
             log.warning("no gate decision at %s; a dry run packages without one", key)
@@ -2393,7 +2566,7 @@ def resolve_corpus_version(ctx: StageContext) -> None:
     from registry_utils.query_registry import RegistryQueryError
     from registry_utils.query_registry import get as get_manifest
 
-    run_id = ctx.scope.run_id(ctx.out_version)
+    run_id = ADAPTER.run_id(ctx.out_version)
     try:
         recorded = get_manifest(run_id, ctx.client).dependencies.corpus_version
     except (RegistryQueryError, KeyError, FileNotFoundError, AttributeError):
@@ -2417,8 +2590,9 @@ def assert_staged(ctx: StageContext) -> None:
     import os
 
     if ctx.from_blob:
+        _assert_in_blob(ctx)
         return
-    expected = paths.scoped_staging_adapter_dir(ctx.scope.name, ctx.out_version)
+    expected = paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)
     # The mount itself, as _is_trained reads it: the volume record lives in the
     # process that trained, so a `package` run later - a new process - found
     # nothing recorded and refused a version that was sitting on the disk.
@@ -2427,9 +2601,38 @@ def assert_staged(ctx: StageContext) -> None:
     raise PipelineError(
         f"version {ctx.out_version} is not on the staging volume — expected {expected}. "
         "The volume is working storage and may have been reclaimed since finetune ran. "
-        "Re-run `finetune --from-stage merge` to rebuild it, or pass --from-blob if the adapters "
-        "were pushed with `finetune --push-adapters` (IMPL-13 §4)."
+        "Re-run `finetune --version <it> --from-stage training` to rebuild it, or pass --from-blob "
+        "if the selected checkpoint was pushed (`finetune --push-adapters`, or an earlier "
+        "package run) (IMPL-13 §4)."
     )
+
+
+def _assert_in_blob(ctx: StageContext) -> None:
+    """``--from-blob``: the version's adapter is in Blob, and it is the
+    checkpoint selected (the push recorded it in the checkpoint selection), so
+    calibration, the gate and the release are all that one checkpoint. A dry
+    run loads nothing, so it checks nothing."""
+    from artifact_registry.transfer import ADAPTER_FILES
+
+    if ctx.dry_run:
+        return
+    blob_dir = paths.scoped_adapter_dir(ADAPTER.name, ctx.out_version)
+    missing = [name for name in ADAPTER_FILES if not ctx.client.exists(f"{blob_dir}/{name}")]
+    if missing:
+        raise PipelineError(
+            f"--from-blob: {blob_dir} holds no {', '.join(missing)}, so version {ctx.out_version}'s "
+            "adapter is not in Blob. Re-run finetune for it, with --push-adapters to keep a copy "
+            "in Blob."
+        )
+    key = paths.checkpoint_selection(ctx.out_version, scope=ADAPTER.name)
+    pushed = (ctx.client.read_json(key) if ctx.client.exists(key) else {}).get("pushed")
+    wanted = adapter_checkpoint(ctx)
+    if pushed != wanted:
+        raise PipelineError(
+            f"--from-blob: the adapter at {blob_dir} is not shown to be the checkpoint selected for "
+            f"{ctx.out_version} ({wanted}): {key} records {pushed or 'no push'}. Calibration, the "
+            "gate and the release must all be that checkpoint."
+        )
 
 
 def _file_hash(*files: Path) -> str:
@@ -2461,13 +2664,10 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
     corpus_manifest = ctx.client.read_json(paths.corpus_manifest(ctx.corpus, ctx.tenant_id))
     _assert_corpus_pins(corpus_manifest, f"release {ctx.release_id}")
 
-    formats = ["bf16"] if ctx.skip_quantize else list(ctx.formats)
-    serving_formats = {
-        # bf16 is the merged model itself; it is never re-exported.
-        fmt: paths.merged_model_dir(ctx.out_version, scope=ctx.scope.name) if fmt == "bf16"
-        else paths.quantized_model_dir(ctx.out_version, fmt, scope=ctx.scope.name)
-        for fmt in formats
-    }
+    formats = list(ctx.formats)
+    # The release IS its adapter, served as a LoRA on the bf16 base: nothing is
+    # merged, so there is no other format (decision 2026-10-23).
+    serving_formats = {fmt: paths.scoped_adapter_dir(ADAPTER.name, ctx.out_version) for fmt in formats}
     # In memory when calibrate ran in this process; in Blob when package runs on
     # its own (`package`, or a resumed `--from-stage package`). Reading memory
     # alone marked every resumed release "gated: no calibrator" although the
@@ -2505,6 +2705,17 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
             waived_gates=list(ctx.gate_override.waived_gates),
         )
 
+    lines = trained_lines(ctx, corpus_manifest)
+    if not lines:
+        # An empty list reads as "every line" at serving (a bundle written before
+        # lines were recorded), so a release with none would serve every line.
+        message = (f"release {ctx.release_id} has no line of business it trained on (no "
+                   "single-line policy of a known line in its train view or corpus), so it "
+                   "would serve every line.")
+        if not ctx.dry_run:
+            raise PipelineError(message + " Train it on policies of known lines.")
+        log.warning("dry run: %s", message)
+
     # The training environment's lock (scripts/lock_requirements.sh): every
     # resolved version the model was trained, calibrated and gated with (§10.2).
     # pyproject.toml only if the lock is missing, which records ranges, not versions.
@@ -2517,16 +2728,14 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
             status="gated" if reasons else "promoted",
             tier=tier,
             tenant_scope=paths._tenant(ctx.tenant_id),
-            scope=ctx.scope.name,
-            # What this release may SERVE. Serving routes each document type to
-            # the narrowest promoted release covering it, so an empty list —
-            # which is what every release written before scopes existed carries —
-            # reads as "every active type".
-            doc_types=[] if ctx.scope.is_unified else list(ctx.scope.serves),
-            lines=sorted(ctx.scope.lines),
+            scope=ADAPTER.name,
+            # What this release may SERVE: the types and lines it trained on.
+            # Serving sends a policy of any other line to the base model.
+            doc_types=list(ADAPTER.doc_types),
+            lines=lines,
             base_model=f"{base['model_id']}@{base['revision']}",
-            adapter=ctx.scope.run_id(ctx.out_version),
-            merged_model=paths.merged_model_dir(ctx.out_version, scope=ctx.scope.name),
+            adapter=ADAPTER.run_id(ctx.out_version),
+            served_as="lora_on_base",
             serving_formats=serving_formats,
             calibrators=calibrators,
             gate_reports=gate_reports,
@@ -2550,6 +2759,53 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
     return bundle, reasons
 
 
+def trained_lines(ctx: StageContext, corpus_manifest: dict[str, Any]) -> list[str]:
+    """The lines of business the adapter trained on, which its release serves.
+
+    From the run's own train view (``data_stats.examples_by_line``). Single
+    lines only: the view trains no package and no policy without a line
+    (``training.corpus_view._filter``), so a line seen only inside a package was
+    never trained. Each key is read as its schema's name (``workers_comp`` is
+    ``wc``, ``common.lob.lob_lines``).
+
+    A run that recorded no view falls back to the corpus's
+    ``policy_line_counts``, which count a package once per line, so a line seen
+    only in a package would count there. No run this code trains reaches it:
+    ``training.train`` always records the view, and refuses a view with no
+    train rows.
+    """
+    from common.lob import known_lines, lob_lines
+
+    manifest = manifest_of(ctx)
+    if manifest is None:
+        from registry_utils.query_registry import RegistryQueryError
+        from registry_utils.query_registry import get as get_manifest
+
+        try:
+            manifest = get_manifest(ADAPTER.run_id(ctx.out_version), ctx.client)
+        except (RegistryQueryError, KeyError, FileNotFoundError):
+            manifest = None
+    by_line = (getattr(getattr(manifest, "data_stats", None), "examples_by_line", None) or {})
+    train = by_line.get("train") if isinstance(by_line, dict) else None
+    if train:
+        found: set[str] = set()
+        for key in train:
+            if "," not in str(key) and str(key) != "unknown":
+                found |= lob_lines(str(key))
+    else:
+        found = {line for line, count in (corpus_manifest.get("policy_line_counts") or {}).items()
+                 if count}
+    return sorted(found & known_lines())
+
+
+def served_lines(ctx: StageContext) -> list[str]:
+    """The lines this cycle's release serves (:func:`trained_lines`), from its
+    corpus's manifest when the run manifest records none."""
+    key = paths.corpus_manifest(ctx.corpus, ctx.tenant_id)
+    corpus = ctx.client.read_json(key) if ctx.client.exists(key) else {}
+    return trained_lines(ctx, corpus)
+
+
 def record_release_measurements(ctx: StageContext, bundle: Any) -> None:
     """Latency, GPU memory and the routing table, onto the bundle (Fideon SPEC_09 handoff item 6).
 
@@ -2559,10 +2815,9 @@ def record_release_measurements(ctx: StageContext, bundle: Any) -> None:
     line that cannot be routed, or one this release was trained for that would
     not reach it, stops the release here.
     """
-    from serving.release_router import build_serving_plan
     from serving.routing_check import RoutingCheckError, plan_with_candidate, routing_table
 
-    report_key = paths.eval_report(ctx.out_version, scope=ctx.scope.name)
+    report_key = paths.eval_report(ctx.out_version, scope=ADAPTER.name)
     report = ctx.client.read_json(report_key) if ctx.client.exists(report_key) else {}
     measured = report.get("release_measurements") or {}
     bundle.latency_p95_ms_by_adapter = {
@@ -2575,43 +2830,53 @@ def record_release_measurements(ctx: StageContext, bundle: Any) -> None:
         log.warning("%s: no release measurements in %s; latency and GPU memory are not recorded",
                     bundle.release_id, report_key)
 
-    from serving.release_router import ServingPlanError
-    from serving.vllm_entrypoint import release_pins
-
     try:
-        # With the serving config's rollback pins, as the endpoint will route.
-        plan = plan_with_candidate(
-            build_serving_plan(ctx.client, tenant_id=ctx.tenant_id, pins=release_pins()),
-            json.loads(bundle.model_dump_json()))
+        plan = plan_with_candidate(json.loads(bundle.model_dump_json()))
         bundle.routing = routing_table(plan, bundle.release_id, bundle.lines)
-    except (RoutingCheckError, ServingPlanError) as exc:
+    except RoutingCheckError as exc:
         raise PipelineError(f"{bundle.release_id} is not released: {exc}") from exc
 
 
 def write_release_bundle(ctx: StageContext, bundle: Any) -> None:
-    """Write the bundle, and replace its row in the tenant's release index."""
+    """Write the bundle and its row in the tenant's release index. A promoted
+    bundle becomes the tenant's one promoted release, and the one it replaces
+    is archived (``registry_utils.releases.promote_release``)."""
+    from registry_utils.releases import ReleaseError, promote_release, write_index
+
+    # Written as gated until the promotion has happened: a promotion refused
+    # below must not leave an index claiming two promoted releases, or this one.
+    written = bundle.model_copy(update={"status": "gated"}) if bundle.status == "promoted" else bundle
     ctx.client.write_json(
         paths.release_bundle(bundle.release_id, ctx.tenant_id),
-        json.loads(bundle.model_dump_json()),
+        json.loads(written.model_dump_json()),
     )
     index_key = paths.release_index(ctx.tenant_id)
     rows = ctx.client.read_json(index_key) if ctx.client.exists(index_key) else []
-    rows = [r for r in rows if r.get("release_id") != bundle.release_id] + [bundle.index_row()]
-    ctx.client.write_json(index_key, sorted(rows, key=lambda r: r["release_id"]))
+    rows = [r for r in rows if r.get("release_id") != bundle.release_id] + [written.index_row()]
+    write_index(ctx.client, rows, ctx.tenant_id)
+    if bundle.status != "promoted":
+        return
+    if ctx.dry_run:
+        # A dry run pushed placeholders, not weights: promoting it would point
+        # serving at them and archive the release that works.
+        log.warning("dry run: %s would be promoted; it is left gated", bundle.release_id)
+        return
+    try:
+        archived = promote_release(ctx.client, bundle.release_id, ctx.tenant_id,
+                                   promoted_by=f"package {ctx.out_version}")
+    except ReleaseError as exc:
+        raise PipelineError(str(exc)) from exc
+    if archived:
+        log.info("%s is promoted; archived %s", bundle.release_id, ", ".join(archived))
 
 
 def _clear_staged_scope(ctx: StageContext) -> int:
-    """Drop the staged artifacts this scope owns, and nothing else."""
+    """Drop the staged artifacts this version owns, and nothing else."""
     owned = [
-        paths.scoped_staging_adapter_dir(ctx.scope.name, ctx.out_version),
-        paths.staging_merged_model_dir(ctx.out_version, scope=ctx.scope.name),
-        paths.staging_eval_report(ctx.out_version, scope=ctx.scope.name),
+        paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version),
+        paths.staging_eval_report(ctx.out_version, scope=ADAPTER.name),
+        staging_parent_adapter_dir(ctx.out_version),
     ]
-    if not ctx.skip_quantize:
-        owned += [
-            paths.staging_quantized_model_dir(ctx.out_version, fmt, scope=ctx.scope.name)
-            for fmt in ctx.formats
-        ]
     return sum(ctx.volume.clear(path) + _remove_from_mount(path) for path in owned)
 
 
@@ -2639,68 +2904,49 @@ def _remove_from_mount(path: str) -> int:
 
 def _record_dry_run_push(ctx: StageContext) -> dict[str, str]:
     """A dry run trained nothing, so it records where each artifact WOULD go."""
-    scope = ctx.scope
+    name = ADAPTER.name
     pushed: dict[str, str] = {}
-    blob_dir = paths.scoped_adapter_dir(scope.name, ctx.out_version)
+    blob_dir = paths.scoped_adapter_dir(name, ctx.out_version)
     ctx.client.write_json(f"{blob_dir}/adapter_config.json", {
         "version": ctx.out_version,
-        "kind": "foundation" if scope.is_unified else "scoped",
-        "scope": scope.name,
-        "doc_types": list(scope.doc_types),
+        "kind": "scoped",
+        "scope": name,
+        "doc_types": list(ADAPTER.doc_types),
         "doc_type": None,
     })
-    pushed[f"adapter:{scope.name}"] = blob_dir
-
-    merged_dir = paths.merged_model_dir(ctx.out_version, scope=scope.name)
-    ctx.client.write_json(f"{merged_dir}/config.json", {"dtype": ctx.dtype})
-    pushed[f"merged:{scope.name}"] = merged_dir
-
-    if not ctx.skip_quantize:
-        for fmt in ctx.formats:
-            quant_dir = paths.quantized_model_dir(ctx.out_version, fmt, scope=scope.name)
-            ctx.client.write_json(f"{quant_dir}/config.json", {"format": fmt})
-            pushed[f"quantized:{scope.name}:{fmt}"] = quant_dir
+    pushed[f"adapter:{name}"] = blob_dir
     return pushed
 
 
 def _push_weights(ctx: StageContext) -> dict[str, str]:
-    """Upload the adapter, the merged model and each quantized format to Blob.
+    """Upload the selected adapter to Blob: it is the release (decision
+    2026-10-23) - nothing is merged or quantized.
 
     Package used to write a one-line JSON at each destination — a placeholder
-    ``adapter_config.json`` and ``config.json`` — and publish the run against
-    them, so a "published" release pointed serving at prefixes holding no
-    weights. Every upload goes through :mod:`artifact_registry.transfer`, which
-    refuses a missing source directory rather than creating an empty prefix.
+    ``adapter_config.json`` — and publish the run against it, so a "published"
+    release pointed serving at a prefix holding no weights. The upload goes
+    through :mod:`artifact_registry.transfer`, which refuses a missing source
+    directory rather than creating an empty prefix.
     """
-    from artifact_registry.transfer import push_merged_model, push_quantized, push_scoped_adapter
+    from artifact_registry.transfer import push_scoped_adapter
 
-    scope = ctx.scope
-    adapter = selected_checkpoint(ctx) or paths.scoped_staging_adapter_dir(
-        scope.name, ctx.out_version
-    )
-    pushed = {
-        f"adapter:{scope.name}": push_scoped_adapter(
-            adapter, scope.name, ctx.out_version, client=ctx.client
-        ),
-        f"merged:{scope.name}": push_merged_model(
-            paths.staging_merged_model_dir(ctx.out_version, scope=scope.name), ctx.out_version,
-            client=ctx.client, scope=scope.name,
-        ),
-    }
-    if not ctx.skip_quantize:
-        for fmt in ctx.formats:
-            if fmt == "bf16":
-                continue   # bf16 IS the merged model, pushed above
-            pushed[f"quantized:{scope.name}:{fmt}"] = push_quantized(
-                paths.staging_quantized_model_dir(ctx.out_version, fmt, scope=scope.name),
-                ctx.out_version, fmt, client=ctx.client, scope=scope.name,
-            )
+    name = ADAPTER.name
+    adapter = adapter_checkpoint(ctx)
+    if ctx.from_blob:
+        # _assert_in_blob showed the adapter there is this checkpoint, pushed.
+        blob_dir = paths.scoped_adapter_dir(name, ctx.out_version)
+        log.info("%s is in Blob already at %s (pushed from %s)",
+                 ADAPTER.run_id(ctx.out_version), blob_dir, adapter)
+        return {f"adapter:{name}": blob_dir}
+    pushed = {f"adapter:{name}": push_scoped_adapter(adapter, name, ctx.out_version, client=ctx.client)}
+    # So a release left gated, its staging cleared, can be packaged again with --from-blob.
+    _record_pushed(ctx, adapter)
     return pushed
 
 
 def stage_push(ctx: StageContext) -> StageResult:
-    """Copy adapters, merged model and quantized models into Blob, then flip the
-    manifest from ``staged`` to ``published``.
+    """Copy the selected adapter into Blob, then flip the manifest from
+    ``staged`` to ``published``.
 
     The layouts mirror each other deliberately (IMPL-13 §3), so this copies
     rather than translates — a translation step is where a path convention drifts
@@ -2718,29 +2964,22 @@ def stage_push(ctx: StageContext) -> StageResult:
     bundle, not_promoted = build_release_bundle(ctx)
     pushed: dict[str, str] = {}
 
-    # ONE adapter and ONE merged model (arch v2.1 §4.1). v1 fanned this out per
-    # document type; that topology is gone, because vLLM applies one LoRA per
-    # request and a Foundation plus a per-type adapter could never both be
-    # active. A graduated per-type adapter (§4.2) is published by its own run,
-    # not by this one.
+    # ONE adapter (arch v2.1 §4.1), and nothing merged: the release is served as
+    # a LoRA on the base (decision 2026-10-23).
     #
     # Through the IMPL-02 §3 helper's path, never assembled here. The only place
     # that built these inline is the place that published a Foundation against
     # paths that were never produced.
-    scope = ctx.scope
     if ctx.dry_run:
         pushed.update(_record_dry_run_push(ctx))
     else:
         pushed.update(_push_weights(ctx))
 
-    quantized = [] if ctx.skip_quantize else [f for f in ctx.formats if f != "bf16"]
     published: list[str] = []
-    for row in list_runs(ctx.client, scope=scope.name):
+    for row in list_runs(ctx.client, scope=ADAPTER.name):
         run_id = str(row.get("run_id", ""))
-        # Parsed, not suffix-matched. `endswith(version)` matched every scope's
-        # run at that tag, so packaging one scope published all of them — each
-        # against THIS scope's paths, advertising Blob prefixes that hold another
-        # scope's weights or nothing at all.
+        # Parsed, not suffix-matched: `endswith(version)` once matched every
+        # run at that tag.
         if not is_valid_run_id(run_id) or version_of(run_id) != ctx.out_version:
             continue
         # A run that crashed or never finished has no weights to publish.
@@ -2756,36 +2995,13 @@ def stage_push(ctx: StageContext) -> StageResult:
                 run_id, status,
             )
             continue
-        doc_type = row.get("doc_type")
-        is_graduated = row.get("run_type") == "per_type_adapter"
-        run_kind: paths.AdapterKind = "doc_type" if is_graduated else "foundation"
         manifest = get_manifest(run_id, ctx.client)
-        manifest.artifacts.eval_report = paths.eval_report(ctx.out_version, scope=scope.name)
-        # The unified run owns the adapter AND the merged and quantized models —
-        # there is one of each under arch v2.1 §4.1. A graduated per-type adapter
-        # (§4.2) owns only its own weights; it is merged into nothing, because it
-        # is applied at serving time on top of the merged foundation.
-        # A scoped run owns its OWN merged and quantized models, under its own
-        # paths. Only a §4.2 graduated adapter owns none: it is applied on top of
-        # a merged model rather than being one.
-        owns_a_model = not is_graduated
+        manifest.artifacts.eval_report = paths.eval_report(ctx.out_version, scope=ADAPTER.name)
+        # The run's adapter is the whole release: nothing is merged.
         mark_published(
             manifest,
             ctx.client,
-            adapter_weights=(
-                paths.adapter_dir(run_kind, ctx.out_version, doc_type) if is_graduated
-                else paths.scoped_adapter_dir(scope.name, ctx.out_version)
-            ),
-            merged_model=(
-                paths.merged_model_dir(ctx.out_version, scope=scope.name) if owns_a_model else None
-            ),
-            # The first QUANTIZED format. formats[0] is bf16, which is the merged
-            # model and is never exported, so this pointed at an empty prefix.
-            quantized_model=(
-                paths.quantized_model_dir(ctx.out_version, quantized[0], scope=scope.name)
-                if owns_a_model and quantized else None
-            ),
-            quantized_formats=list(quantized) if owns_a_model else [],
+            adapter_weights=paths.scoped_adapter_dir(ADAPTER.name, ctx.out_version),
         )
         published.append(run_id)
 
@@ -2802,10 +3018,11 @@ def stage_push(ctx: StageContext) -> StageResult:
         # happened — so a run where no manifest matched the version deleted every
         # staged adapter, merged model and GGUF and reported success.
         #
-        # And only THIS scope's paths: clearing the whole staging root while
-        # packaging `policy` would delete `unified`'s staged merged model, which
-        # is the only copy until its own package run publishes it.
+        # And only THIS version's paths: clearing the whole staging root would
+        # delete another version's staged adapter, the only copy until its
+        # own package run publishes it.
         cleared = _clear_staged_scope(ctx)
+
     elif not ctx.keep_staging:
         log.warning(
             "no run manifest matched version %s, so nothing was published and the staging volume "
@@ -2865,8 +3082,8 @@ def _deterministic_errors() -> tuple[type[BaseException], ...]:
     the DAG stays importable without the training stack.
 
     The gate's own refusals too: an unreviewed or interrupted frozen set, a
-    leaked eval set, a refused override. A retry loaded the merged bf16 model
-    again to fail on the same frozen gold.
+    leaked eval set, a refused override. A retry loaded the model again to
+    fail on the same frozen gold.
     """
     import subprocess
 
@@ -2904,21 +3121,18 @@ STAGES: tuple[Stage, ...] = (
     # Between training and the gate: the gate scores what ships, so what ships
     # has to be chosen first (arch v2.1 §11.2).
     Stage(6, "checkpoint_eval", "finetune", True, stage_checkpoint_eval, None),
-    Stage(7, "merge", "finetune", True, stage_merge, _is_merged),
-    Stage(8, "quantize", "package", True, stage_quantize, _is_quantized),
+    # No merge and no quantize (decision 2026-10-23): the release IS the
+    # adapter, served as a LoRA on the bf16 base, so calibration and the gate
+    # score the base with the adapter applied - what is served.
+    #
     # Calibrate BEFORE the gate: the gate reads auto_accept_error_rate, which is
     # the rate of wrong values that reached a user without a human looking — and
     # that number does not exist until thresholds are chosen (arch v2.1 §5.4).
-    Stage(9, "calibrate", "package", True, stage_calibrate, None),
-    # The gate moved AFTER merge, quantize and calibrate (arch v2.1 §13). Under
-    # v1 it ran before merge, so it scored the bare adapter — not the merged
-    # model, and certainly not the merged model in each serving format.
-    # Quantization degrades exactly what was fine-tuned in, so an FP8 release
-    # inherits nothing from bf16's result.
-    Stage(10, "evaluation_gate", "package", True, stage_evaluation_gate, None),
-    Stage(11, "package", "package", False, stage_push, None),
-    Stage(12, "serving", "deploy-endpoint", False, stage_deploy, None),
-    Stage(13, "feedback_loop", "extract", False, stage_feedback, None),
+    Stage(7, "calibrate", "package", True, stage_calibrate, None),
+    Stage(8, "evaluation_gate", "package", True, stage_evaluation_gate, None),
+    Stage(9, "package", "package", False, stage_push, None),
+    Stage(10, "serving", "deploy-endpoint", False, stage_deploy, None),
+    Stage(11, "feedback_loop", "extract", False, stage_feedback, None),
 )
 
 STAGE_BY_NAME: dict[str, Stage] = {s.name: s for s in STAGES}
@@ -2928,20 +3142,6 @@ STAGE_BY_NAME: dict[str, Stage] = {s.name: s for s in STAGES}
 #: shortcut would let a re-run inherit a pass it did not earn.
 FINETUNE_STAGES = tuple(s for s in STAGES if s.command == "finetune")
 PACKAGE_STAGES = tuple(s for s in STAGES if s.command == "package")
-
-#: Stages 1-4 build the corpus, which every scope shares. Running them per scope
-#: would re-ingest, re-OCR and re-split the same documents — and a second split
-#: draw is the leakage `corpus_view` exists to avoid.
-SHARED_STAGES = tuple(s for s in STAGES if s.name in
-                      ("ingestion", "preprocessing", "labeling", "dataset_build"))
-
-#: Stages 5-11 produce one scope's adapter, model, calibrators and release. They
-#: run once per scope, each against its own StageContext.
-PER_SCOPE_STAGES = tuple(
-    s for s in STAGES
-    if s.command in ("finetune", "package") and s not in SHARED_STAGES
-)
-
 
 def stages_for(command: str) -> tuple[Stage, ...]:
     """The stages a command runs. ``all`` is ``finetune`` + ``package``, and
@@ -2956,93 +3156,6 @@ def stages_for(command: str) -> tuple[Stage, ...]:
         f"{command!r} does not map to pipeline stages. `extract` runs the §17 extraction routine "
         "through serving/pipeline.py, not the build DAG."
     )
-
-
-@dataclass
-class MultiScopeReport:
-    """One shared corpus build, then one report per scope.
-
-    Kept as its own type rather than a merged RunReport: each scope produces an
-    independent adapter, gate verdict and release, and flattening them would make
-    "did it pass" unanswerable for any one of them.
-    """
-
-    command: str
-    version: str
-    shared: RunReport | None = None
-    by_scope: dict[str, RunReport] = field(default_factory=dict)
-
-    @property
-    def ok(self) -> bool:
-        reports = ([self.shared] if self.shared else []) + list(self.by_scope.values())
-        return all(r.ok for r in reports)
-
-    @property
-    def exit_code(self) -> int:
-        return 0 if self.ok else 1
-
-    def render(self) -> str:
-        lines = [f"{self.command} {self.version}: {'OK' if self.ok else 'FAILED'}"]
-        if self.shared:
-            lines.append(self.shared.render())
-        for name, report in self.by_scope.items():
-            lines.append(f"-- scope {name} --")
-            lines.append(report.render())
-        return "\n".join(lines)
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "command": self.command,
-            "version": self.version,
-            "ok": self.ok,
-            "shared": self.shared.as_dict() if self.shared else None,
-            "by_scope": {name: r.as_dict() for name, r in self.by_scope.items()},
-        }
-
-
-def run_multi_scope(
-    build_context: Callable[[Scope], StageContext],
-    scopes: Sequence[Scope],
-    *,
-    command: str = "all",
-    from_stage: str | None = None,
-) -> MultiScopeReport:
-    """Build the corpus once, then run stages 5-11 once per scope.
-
-    Each scope gets its own ``StageContext`` — its own release id, checkpoints,
-    calibrators and manifests — because they are independent runs that happen to
-    share a corpus.
-
-    **A block in one scope does not stop the others.** They are separate
-    adapters: a policy regression says nothing about the lossrun model, and
-    stopping the second run would only mean re-running the first. The aggregate
-    exit code is still non-zero, so a pipeline never mistakes "one passed" for
-    "all passed".
-    """
-    if not scopes:
-        raise PipelineError("no scope to run; name at least one with --scope")
-
-    first = build_context(scopes[0])
-    report = MultiScopeReport(command=command, version=first.out_version)
-
-    shared = [s for s in _selected(command, from_stage) if s in SHARED_STAGES]
-    if shared:
-        # Over the union of every scope's types, so one build serves them all.
-        first.doc_types = sorted({dt for scope in scopes for dt in scope.doc_types})
-        report.shared = run_stages(first, tuple(shared), command=command)
-        if not report.shared.ok:
-            return report
-
-    per_scope = [s for s in _selected(command, from_stage) if s in PER_SCOPE_STAGES]
-    for scope in scopes:
-        ctx = first if scope is scopes[0] else build_context(scope)
-        ctx.scope = scope
-        report.by_scope[scope.name] = run_stages(ctx, tuple(per_scope), command=command)
-    return report
-
-
-def _selected(command: str, from_stage: str | None) -> tuple[Stage, ...]:
-    return stages_from(from_stage, command) if from_stage else stages_for(command)
 
 
 def stages_from(stage_name: str, command: str = "finetune") -> tuple[Stage, ...]:
@@ -3079,16 +3192,15 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
     """
     # `package` operates on what `finetune` staged, so a reclaimed volume is a
     # precondition failure for the whole command. Checked here rather than inside
-    # a stage: --skip-quantize turned the first stage into a no-op, and the check
-    # disappeared with it.
+    # a stage: a stage skipped as a no-op once took the check with it.
     report = RunReport(command=command, version=ctx.out_version)
     preconditions = []
     if command == "package" and stages:
         preconditions += [resolve_corpus_version, assert_staged]
     if any(stage.command == "package" for stage in stages):
-        # Before any work, including a whole `all` training run: an invalid id
-        # used to surface only when calibrate tried to SAVE, after fitting.
-        preconditions.append(assert_release_id)
+        # Before any work: packaging a released version again re-runs its gate
+        # against the release live now and overwrites its own decision.
+        preconditions.append(assert_not_released)
     for precondition in preconditions:
         try:
             precondition(ctx)
@@ -3145,7 +3257,7 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
                 # identical message after an entirely pointless backoff. Retries
                 # are for transient faults — a throttled Blob read, a pod that
                 # dropped — not for "below the day-zero floor" or a malformed
-                # --out-version.
+                # --version.
                 result = _timed(StageResult(stage.name, "failed", str(exc)), began)
                 ctx.results[stage.name] = result
                 report.results.append(result)
@@ -3203,10 +3315,8 @@ PROGRESS_DIR_ENV = "FIDEON_LOG_DIR"
 
 
 def progress_report_name(report: RunReport, ctx: StageContext) -> str:
-    """``run-<command>-<scope>-<tenant>-<version>.json``: two scopes or tenants
-    trained under one version tag (CGL v1, personal-lines v1) keep their own."""
-    scope = ctx.scope.name if getattr(ctx, "scope", None) is not None else "unified"
-    return f"run-{report.command}-{scope}-{paths._tenant(ctx.tenant_id)}-{report.version}.json"
+    """``run-<command>-<tenant>-<version>.json``: two tenants' runs keep their own."""
+    return f"run-{report.command}-{paths._tenant(ctx.tenant_id)}-{report.version}.json"
 
 
 def _write_progress(report: RunReport, ctx: StageContext) -> None:

@@ -18,7 +18,7 @@ from evaluation.freeze_eval_set import FreezeError, freeze_eval_set, is_frozen, 
 from evaluation.golden_eval import load_golden_set
 from evaluation.run_eval import eval_set_source_ids
 from orchestration.runpod_controller import LocalBackend, RunPodController
-from tests.test_orchestration import make_context, seed_corpus
+from tests.test_orchestration import make_context, seed_corpus, seed_policy_copy, seeded_policies
 
 
 @pytest.fixture
@@ -35,6 +35,10 @@ def _built_corpus(client, controller):
     from orchestration.pipeline_dag import run_stages, stages_from
 
     seed_corpus(client)
+    # A policy corpus: the fixtures hold two policies, too few families to draw
+    # a test split, so eight more accounts, each a family of its own, make ten.
+    for n in range(3, 11):
+        seed_policy_copy(client, f"policy_{n:04d}", like=f"policy_000{1 + n % 2}", own_family=True)
     ctx = make_context(client, controller)
     report = run_stages(ctx, stages_from("dataset_build")[:1])
     assert report.ok, report.render()
@@ -303,7 +307,7 @@ def test_an_id_frozen_in_one_tenant_is_not_frozen_in_another(client, controller)
     from orchestration.pipeline_dag import exclude_eval_families, plan_corpus
 
     seeded = seed_corpus(client)                       # the default tenant's documents
-    colliding = seeded[0]
+    colliding = seeded_policies(seeded)[0]             # one the policy corpus loads
     other = paths.golden_eval_set_dir("other")
     client.write_json(f"{other}/{colliding}/golden.json", {})
     client.write_json(manifest_key(tenant_id="other"), {"source_ids": [colliding]})
@@ -356,12 +360,11 @@ def test_a_set_frozen_at_the_unscoped_root_is_refused_with_where_to_move_it(clie
     with pytest.raises(FreezeError, match=guidance):
         assert_eval_set_disjoint(client, "v1", "personal")
     # The gate too, although this tenant's own prefix is empty.
-    from common.scopes import get_scope
     from evaluation.golden_eval import evaluate_version
 
     with pytest.raises(FreezeError, match=guidance):
         evaluate_version(client, object(), version="v1", corpus_version="v1",
-                         scope=get_scope("policy"), tenant_id="personal")
+                         tenant_id="personal")
     assert not client.exists(manifest_key(tenant_id="personal"))   # nothing was frozen
 
     # Moved under its tenant, it is that tenant's frozen set again.

@@ -23,13 +23,15 @@ def test_a_classic_auto_request_is_served_as_personal_auto():
     assert request_lob({"lob": "homeowners"}) == "homeowners"
 
 
-# 2 - rows and requests written before the merge are still in the personal-lines scope
-def test_a_classic_auto_row_is_inside_the_personal_lines_scope():
-    from common.scopes import load_scopes, lob_lines
+# 2 - rows and requests written before the merge still read as personal auto
+def test_a_classic_auto_row_is_read_as_personal_auto():
+    from common.lob import lob_lines, parse_lines, within_lines
     from training.corpus_view import _line_of
 
     assert lob_lines("classic_auto") == lob_lines("personal_auto")
-    assert load_scopes()["personal_lines"].covers_lob(["classic_auto"])
+    # A --lines filter naming personal auto keeps a row written before the merge.
+    assert within_lines(["classic_auto"], frozenset({"personal_auto"}))
+    assert parse_lines("classic_auto") == frozenset({"personal_auto"})
     assert _line_of({"lob": ["classic_auto"]}) == _line_of({"lob": ["personal_auto"]})
 
 
@@ -79,12 +81,13 @@ def _fingerprint(corpus="v1", manifest=None, rank=64):
     recorded = SimpleNamespace(lora_rank=rank, lora_alpha=128, learning_rate=1e-4,
                                lr_scheduler="cosine", epochs=3, effective_batch_size=8,
                                target_modules=["q_proj"])
-    return run_fingerprint(corpus, manifest or {"rows": 10}, recorded, SimpleNamespace(name="s"))
+    return run_fingerprint(corpus, manifest or {"rows": 10}, recorded)
 
 
 def test_a_run_resumes_only_checkpoints_of_the_same_corpus_and_settings(tmp_path):
     from training.train import TrainingError, assert_resumable, record_fingerprint
 
+    assert _fingerprint()["adapter"] == "policy"
     record_fingerprint(tmp_path, _fingerprint())
     assert_resumable(tmp_path, _fingerprint())                          # the same run
     with pytest.raises(TrainingError, match="corpus_manifest_sha256"):
@@ -118,16 +121,20 @@ def test_the_classifier_gets_the_first_pages_in_order_with_their_text():
     assert _classifier_input(image_only)[1] is None
 
 
-# 9 - line balance not applied to the unified scope is said, not silent
-def test_the_unified_scope_says_line_balance_is_not_applied(caplog):
-    from artifact_registry.blob_client import BlobClient, InMemoryBackend
-    from common.scopes import load_scopes
-    from training.corpus_view import materialize
+# 9 - line balance is applied in the adapter's view, never silently skipped. (It
+# was skipped, with a warning, for the unified scope; the one adapter's view of
+# the corpus now always applies it.)
+def test_the_adapter_s_view_applies_the_configured_line_balance():
+    from common.config import training_config
+    from training.corpus_view import _balance_settings, line_repeats
 
-    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
-    with caplog.at_level(logging.WARNING):
-        materialize(load_scopes()["unified"], "v1", client)
-    assert "line_balance is configured but is not applied" in caplog.text
+    configured = training_config("unified")["line_balance"]
+    assert _balance_settings() == {"min_documents": int(configured["min_documents"]),
+                                   "max_repeat": int(configured["max_repeat"])}
+    rows = ([{"source_id": f"h{i}", "lob": "homeowners"} for i in range(120)]
+            + [{"source_id": "m0", "lob": "motorcycle"}])
+    repeats = line_repeats(rows, **_balance_settings())
+    assert repeats["homeowners"] == 1 and repeats["motorcycle"] == int(configured["max_repeat"])
 
 
 # 7 - a small line owned by a held-out carrier is tested, and recorded as such

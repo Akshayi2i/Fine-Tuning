@@ -172,7 +172,9 @@ def test_each_smoke_step_runs_in_its_own_environment_under_the_smoke_tenant(tmp_
                     check_out=tmp_path / "c")
     assert cmds["ocr"][0] == str(OCR_PYTHON)
     assert all(c[c.index("--tenant") + 1] == "smoke" for c in cmds.values())
-    assert "--out-version" in cmds["finetune"] and "v0" in cmds["finetune"]
+    finetune = cmds["finetune"]
+    assert finetune[finetune.index("--version") + 1] == "v0"
+    assert "--out-version" not in finetune and "--scope" not in finetune
     assert "freeze-eval-set" not in " ".join(sum(cmds.values(), []))
 
 

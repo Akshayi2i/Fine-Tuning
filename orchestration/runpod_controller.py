@@ -42,8 +42,8 @@ PodStatus = Literal["pending", "running", "terminated", "failed"]
 #: a training pod costs more than a cheaper OCR card saves.
 GPU_CLASS_BY_STAGE: dict[str, str] = {
     stage: "H200-SXM"
-    for stage in ("preprocessing", "dataset_build", "training", "checkpoint_eval", "merge",
-                  "quantize", "calibrate", "evaluation_gate")
+    for stage in ("preprocessing", "dataset_build", "training", "checkpoint_eval",
+                  "calibrate", "evaluation_gate")
 }
 
 DEFAULT_VOLUME_MOUNT = "/runpod-volume"

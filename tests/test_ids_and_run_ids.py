@@ -4,7 +4,7 @@ Both are join keys — a source_id ties a prediction back to its page, a run_id
 ties an artifact back to the run that made it — so both fail in the same way:
 silently, by resolving to something that matches nothing, long after the write.
 
-These cover the two rules that make scoped runs possible at all:
+These cover the two rules that make the policy adapter's runs possible at all:
 
 * reading a name is not minting one (a paused document type stays readable), and
 * one parser, so the id a trainer writes is the id the gate can reconstruct.
@@ -104,12 +104,17 @@ def test_minting_validates_on_the_way_out():
         build_run_id("extractor", "2")
 
 
-def test_the_scoped_run_ids_the_scope_work_will_mint_are_valid_today():
-    """Phase 1 hands each scope its own lineage. Those ids have to satisfy the
-    same grammar, including the checkpoint-path guard that refuses a run id."""
-    for lineage in ("extractor", "policy", "lossrun", "policy_only"):
+def test_the_run_ids_the_adapter_and_older_runs_mint_are_valid():
+    """The policy adapter mints `policy-v{n}` (common.adapter); older runs minted
+    their own lineages. All satisfy one grammar, including the checkpoint-path
+    guard that refuses a run id."""
+    from common.adapter import ADAPTER
+
+    for lineage in ("extractor", ADAPTER.name, "lossrun", "policy_only"):
         run_id = build_run_id(lineage, "v2")
         assert parse_run_id(run_id).lineage == lineage
+    assert ADAPTER.run_id("v3") == build_run_id("policy", "v3") == "policy-v3"
+    assert version_of(ADAPTER.run_id("v3")) == "v3"
 
 
 def test_the_checkpoint_guard_refuses_a_scoped_run_id_too():

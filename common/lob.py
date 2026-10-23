@@ -49,7 +49,7 @@ class LobError(ValueError):
 #: business, one canonical schema (``personal_auto.json``, block ``auto``). The
 #: Hagerty labels were already written that way. Applied wherever a line is
 #: read - labels, bundle and label metadata, schema selection - so a stored
-#: ``classic_auto`` never selects a schema, a split, a scope or a report row of
+#: ``classic_auto`` never selects a schema, a split or a report row of
 #: its own.
 #:
 #: ``watercraft`` is the L1 code for a personal boat policy (ACORD BOAT), and
@@ -221,3 +221,95 @@ def compute_coverage(
     floor = min(target, uniform_share * 0.75)
     under = {v: s for v, s in shares.items() if 0.0 < s < floor}
     return LobCoverage(counts, documents_with_a_line, shares, under, undetermined)
+
+
+# --------------------------------------------------------------------------
+# A document's lines, as canonical schema names
+# --------------------------------------------------------------------------
+
+
+def lob_lines(lob: object) -> frozenset[str]:
+    """A document's line(s) of business as canonical schema names.
+
+    Accepts the enum spelling or the schema name (``workers_comp`` and ``wc`` are
+    one line), one line or a list of them. A merged line is read as the line it
+    is (``classic_auto`` is ``personal_auto``, :data:`MERGED_LINES`), so a corpus
+    row or a request written before the merge still reads.
+    """
+    from common.schemas import LOB_SCHEMA_ALIASES
+
+    if lob is None:
+        return frozenset()
+    values = [lob] if isinstance(lob, str) else list(lob) if isinstance(lob, (list, tuple)) else []
+    out = set()
+    for value in values:
+        line = str(merge_line(str(value).strip().lower()))
+        if line:
+            out.add(LOB_SCHEMA_ALIASES.get(line, line))
+    return frozenset(out)
+
+
+def single_line(lob: object) -> str | None:
+    """The one canonical line a policy is of, or None for a package (several
+    lines) or a policy with no line.
+
+    The adapter trains on, is scored on and serves single-line policies only: a
+    package and a policy with no line are read against ``_fallback.json``, a
+    shape the adapter is not taught, so the base model reads them.
+    """
+    found = lob_lines(lob)
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def known_lines() -> frozenset[str]:
+    """Every line with a canonical policy schema of its own."""
+    from common.schemas import schema_selectors
+
+    return frozenset(q for doc_type, _f, q in schema_selectors() if doc_type == "policy" and q)
+
+
+def common_model_package(lines: frozenset[str] | set[str]) -> bool:
+    """Whether a document naming these lines is a package of common-model lines.
+
+    A package names several lines, so it is read against the client's
+    ``_fallback.json`` (common.schemas.schema_key selects a line's schema only
+    when exactly one is named). When its lines are SPEC_21 common-model lines,
+    the adapter learned another shape for them, so neither training
+    (``training.corpus_view``) nor serving (``ServedRelease.covers_lob``) gives
+    such a package to it: the base model reads it.
+    """
+    if len(lines) < 2:
+        return False
+    from common.schemas import is_common_model
+
+    return any(is_common_model("policy", None, line) for line in lines)
+
+
+def parse_lines(value: str | None) -> frozenset[str] | None:
+    """A ``--lines`` argument (``homeowners,personal_auto``) as canonical line
+    names; ``None`` (every line) when it is empty. Raises :class:`LobError` on a
+    line with no canonical policy schema, which would otherwise filter out
+    every document without a word."""
+    if not value or not value.strip():
+        return None
+    lines = lob_lines([part for part in value.split(",") if part.strip()])
+    unknown = sorted(lines - known_lines())
+    if unknown:
+        raise LobError(f"--lines names {unknown}, which have no canonical policy schema; "
+                       f"known lines: {sorted(known_lines())}")
+    return lines
+
+
+def within_lines(lob: object, lines: frozenset[str] | None) -> bool:
+    """Whether a document of this line passes a ``--lines`` filter.
+
+    No filter passes everything. A filter passes a document only when ALL its
+    lines are in it - a package with one line outside is outside - and never a
+    package of common-model lines, which is read against another shape
+    (:func:`common_model_package`). A document with no recorded line is outside
+    any filter: its line cannot be shown to be one asked for.
+    """
+    if not lines:
+        return True
+    found = lob_lines(lob)
+    return bool(found) and found <= lines and not common_model_package(found)

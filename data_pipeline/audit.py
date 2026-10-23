@@ -12,7 +12,8 @@ The checks, in five layers:
 2. **Label shape** (blocker): the importer's own validation
    (:func:`data_pipeline.ingestion.import_labeled_pdfs.check_bundle`), so the
    audit and the import never disagree — plus a ``lob`` that names a canonical
-   schema and belongs to the scope, and every ``page_ref`` inside the PDF.
+   schema (and, with ``--lines``, is one of those lines), and every ``page_ref``
+   inside the PDF.
 3. **Values against the PDF** (per value): on a page with a text layer, each
    value's ``raw`` must appear on the page its ``page_ref`` names. Found on
    another page means a wrong ``page_ref``; found nowhere means a value to check.
@@ -27,7 +28,7 @@ Plus a seeded **spot-check sample** — 5% per line — for a person to verify b
 hand, the only check that a value is *right* and not just present.
 
     python -m data_pipeline.audit                                  # the default folder
-    python -m data_pipeline.audit --input "D:/data/personal" --scope personal_lines
+    python -m data_pipeline.audit --input "D:/data/personal" --lines homeowners,personal_auto
 
 The CSVs quote label values: they hold the documents' personal data. They are
 written to ``data/audit_report/`` (git-ignored) and must not leave the machine.
@@ -102,7 +103,8 @@ class DocumentAudit:
 @dataclass
 class AuditReport:
     root: str
-    scope: str | None
+    #: The lines documents must be of (``--lines``); None for every line.
+    lines: frozenset[str] | None = None
     documents: list[DocumentAudit] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     formats: list[Finding] = field(default_factory=list)
@@ -188,7 +190,7 @@ def _read_pdf(pdf: Path) -> tuple[list[str], str | None]:
 
 
 def audit_document(folder: Path, report: AuditReport, checksums: dict[str, str]) -> DocumentAudit:
-    from common.scopes import get_scope, known_lines, lob_lines
+    from common.lob import known_lines, lob_lines, within_lines
     from data_pipeline.ingestion.import_labeled_pdfs import LabeledPdf, check_bundle
 
     name = str(folder.relative_to(report.root)) if Path(report.root) in folder.parents else folder.name
@@ -252,8 +254,8 @@ def audit_document(folder: Path, report: AuditReport, checksums: dict[str, str])
         unknown = sorted(lines - known_lines())
         if unknown:
             block("label", f"lob {lob!r}: {unknown} has no canonical schema")
-        elif report.scope and not get_scope(report.scope).covers_lob(lob):
-            block("label", f"lob {lob!r} is outside scope {report.scope}")
+        elif not within_lines(lob, report.lines):
+            block("label", f"lob {lob!r} is outside the lines audited ({sorted(report.lines or ())})")
 
     if isinstance(label, dict) and len(pdfs) == 1:
         check = check_bundle(LabeledPdf(directory=folder, pdf=pdfs[0], golden=label,
@@ -383,8 +385,8 @@ def _check_formats(name: str, envelopes: list[tuple[str, dict]], report: AuditRe
 # --------------------------------------------------------------------------
 
 
-def audit_folder(root: Path, *, scope: str | None = "personal_lines", seed: int = 42) -> AuditReport:
-    report = AuditReport(root=str(root), scope=scope)
+def audit_folder(root: Path, *, lines: frozenset[str] | None = None, seed: int = 42) -> AuditReport:
+    report = AuditReport(root=str(root), lines=lines)
     checksums: dict[str, str] = {}
     report.findings.extend(misplaced(root))
     folders = document_folders(root)
@@ -393,6 +395,7 @@ def audit_folder(root: Path, *, scope: str | None = "personal_lines", seed: int 
         if index % 100 == 0:
             log.info("audited %d of %d folders", index, len(folders))
     report.findings.extend(delivered_split_findings(report.documents))
+    report.findings.extend(output_shape_findings(report.documents))
 
     by_line: dict[str, list[str]] = defaultdict(list)
     for doc in report.documents:
@@ -402,6 +405,27 @@ def audit_folder(root: Path, *, scope: str | None = "personal_lines", seed: int 
         count = max(1, round(len(names) * SPOT_CHECK_SHARE))
         report.spot_check += sorted(rng.sample(sorted(names), min(count, len(names))))
     return report
+
+
+def output_shape_findings(documents: list[DocumentAudit]) -> list[Finding]:
+    """A blocker when the folder's single-line policies would teach the adapter
+    two output shapes: lines on the SPEC_21 common model beside lines on
+    self-contained schema files (``common.adapter.assert_one_output_shape``).
+
+    Checked here, before import, because it is the last easy place to leave
+    such documents out (``prepare_bundles --lines``): once imported, the corpus
+    build takes every policy, and training refuses every cycle of the tenant.
+    """
+    from common.adapter import AdapterError, assert_one_output_shape
+    from common.lob import known_lines
+
+    lines = sorted({doc.line for doc in documents if doc.line and doc.line in known_lines()})
+    try:
+        assert_one_output_shape(lines)
+    except AdapterError as exc:
+        return [Finding(".", "blocker", "output shape",
+                        f"{exc} Leave them out before import: prepare_bundles --lines ...")]
+    return []
 
 
 def delivered_split_findings(documents: list[DocumentAudit]) -> list[Finding]:
@@ -501,7 +525,8 @@ def render(report: AuditReport, facts: dict[str, Any]) -> str:
     lines = [
         f"# Data audit: {report.root}",
         "",
-        f"Scope: {report.scope or 'any line'} · folders: {facts['folders']} · "
+        f"Lines: {', '.join(sorted(report.lines)) if report.lines else 'every line'} · "
+        f"folders: {facts['folders']} · "
         f"importable: {facts['importable']} · digital {facts['digital']} / scanned {facts['scanned']}",
         "",
         f"## Blockers: {facts['blockers']} in {facts['documents_with_blockers']} document(s)",
@@ -549,8 +574,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit a labeled-PDF training folder (read-only)")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    parser.add_argument("--scope", default="personal_lines",
-                        help="the scope documents must belong to; 'none' for any line")
+    parser.add_argument("--lines", default=None,
+                        help="comma-separated lines documents must be of; every line by default")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args(argv)
 
@@ -562,7 +587,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.input.is_dir():
         print(f"no folder at {args.input}", file=sys.stderr)
         return 2
-    report = audit_folder(args.input, scope=None if args.scope == "none" else args.scope, seed=args.seed)
+    from common.lob import LobError, parse_lines
+
+    try:
+        lines = parse_lines(args.lines)
+    except LobError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    report = audit_folder(args.input, lines=lines, seed=args.seed)
+
     facts = write_report(report, args.out)
     print((args.out / "report.md").read_text(encoding="utf-8"))
     print(f"report and CSVs in {args.out}")

@@ -87,8 +87,8 @@ routing:
   # L1/L2 could not read) has its line read by the classifier, with the line's
   # own token probability as its confidence. At or above
   # lob_confidence_threshold it routes as the caller's line would; at or above
-  # lob_family_threshold it routes to that line's family adapter and schema,
-  # flagged lob:uncertain_within_family; below, the base model reads it against
+  # lob_uncertain_threshold it is read with that line's schema, flagged
+  # lob:uncertain for a person to check; below, the base model reads it against
   # the fallback schema, flagged lob:undetected.
   #
   # Off until it has been measured: a confident wrong line routes to the wrong
@@ -103,25 +103,17 @@ routing:
   # one release's merged model reads no line.
   detect_lob: false
   lob_confidence_threshold: 0.90
-  lob_family_threshold: 0.60
+  lob_uncertain_threshold: 0.60
 
   # Adapter paths are resolved through the registry, never hardcoded here. The
   # three keys that used to sit here were a second, silent source of truth about
   # which document types exist - a type added anywhere else was simply absent
   # from serving, with no error.
 
-  # Which promoted release answers for a document type. Normally empty: the
-  # default rule is NARROWEST COVERAGE WINS, so a policy release takes policies
-  # while an older unified release keeps ACORDs and Loss Runs.
-  #
-  # A pin overrides that - for a rollback, or to hold one type on an older
-  # release while a new one is watched. A pin naming a release that does not
-  # cover its type is an ERROR, never silently ignored: a pin is an explicit
-  # instruction about where a document goes.
-  #
-  #   release_pins:
-  #     policy: release-2026.10.2
-  release_pins: {}
+  # The tenant's promoted release serves (serving.release_router): `package`
+  # promotes each version that passes its gate, and a rollback is
+  # `python -m orchestration.run promote --version vK`.
+
 
 confidence:
   # Fields below this calibrated confidence route to human review (arch 5).

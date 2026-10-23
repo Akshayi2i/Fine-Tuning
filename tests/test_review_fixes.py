@@ -42,37 +42,47 @@ def _adapter(client, scope, version):
 # --------------------------------------------------------------------------
 
 
-def test_one_release_is_served_on_the_engine_weights_with_its_calibrators(client, tmp_path):
+def test_a_release_reading_every_line_is_served_on_the_engine_weights_with_its_calibrators(client, tmp_path):
     from serving.vllm_entrypoint import load_release_runtimes
 
-    promote(client, "release-2026.10.1", scope="policy", doc_types=["policy"], adapter="policy-v1")
-    _calibration_file(client, "release-2026.10.1")
+    promote(client, "v1", lines=())                    # it reads every line
+    _calibration_file(client, "v1")
     runtimes = load_release_runtimes(build_serving_plan(client), client, adapter_root=tmp_path)
-    runtime = runtimes["release-2026.10.1"]
+    runtime = runtimes["v1"]
     assert runtime.adapter is None                     # its merged model IS the engine
     assert runtime.calibrators is not None and runtime.thresholds is not None
 
 
-def test_several_releases_are_each_served_as_their_own_lora(client, tmp_path):
+def test_a_release_leaving_lines_to_the_base_is_served_as_its_lora(client, tmp_path):
+    """The engine holds the base, so the base model can read the other lines;
+    the release is applied per request, copied from its own adapter_dir."""
     from serving.vllm_entrypoint import load_release_runtimes
 
-    promote(client, "release-2026.10.1", adapter="extractor-v1")
-    promote(client, "release-2026.10.2", scope="policy", doc_types=["policy"], adapter="policy-v1")
-    _adapter(client, "unified", "v1")
-    _adapter(client, "policy", "v1")
-    runtimes = load_release_runtimes(build_serving_plan(client), client, adapter_root=tmp_path)
-    assert (tmp_path / "release-2026.10.2" / "adapter_config.json").is_file()
-    assert runtimes["release-2026.10.2"].adapter == str(tmp_path / "release-2026.10.2")
-    assert runtimes["release-2026.10.1"].adapter == str(tmp_path / "release-2026.10.1")
+    promote(client, "v2", lines=["homeowners"])
+    _adapter(client, "policy", "v2")
+    plan = build_serving_plan(client)
+    assert plan.release.adapter_dir == paths.scoped_adapter_dir("policy", "v2")
+    runtimes = load_release_runtimes(plan, client, adapter_root=tmp_path)
+    assert (tmp_path / "v2" / "adapter_config.json").is_file()
+    assert runtimes["v2"].adapter == str(tmp_path / "v2")
 
 
 def test_a_release_with_no_adapter_in_blob_fails_the_cold_start(client, tmp_path):
     from serving.vllm_entrypoint import ColdStartError, load_release_runtimes
 
-    promote(client, "release-2026.10.1", adapter="extractor-v1")
-    promote(client, "release-2026.10.2", scope="policy", doc_types=["policy"], adapter="policy-v1")
-    _adapter(client, "unified", "v1")
+    promote(client, "v2", lines=["homeowners"])
     with pytest.raises(ColdStartError, match="no adapter"):
+        load_release_runtimes(build_serving_plan(client), client, adapter_root=tmp_path)
+
+
+def test_a_release_recording_no_adapter_cannot_be_served_as_a_lora(client, tmp_path):
+    from serving.vllm_entrypoint import ColdStartError, load_release_runtimes
+
+    promote(client, "v2", lines=["homeowners"])
+    bundle = client.read_json(paths.release_bundle("v2"))
+    bundle["adapter"] = None
+    client.write_json(paths.release_bundle("v2"), bundle)
+    with pytest.raises(ColdStartError, match="records no adapter"):
         load_release_runtimes(build_serving_plan(client), client, adapter_root=tmp_path)
 
 
@@ -82,47 +92,31 @@ def test_extract_generates_with_the_chosen_releases_adapter_and_calibrators(clie
     from serving.pipeline import ExtractionRequest, extract
     from serving.vllm_entrypoint import load_release_runtimes
 
-    promote(client, "release-2026.10.1", adapter="extractor-v1")
-    promote(client, "release-2026.10.2", scope="policy", doc_types=["policy"], adapter="policy-v1")
-    _adapter(client, "unified", "v1")
-    _adapter(client, "policy", "v1")
-    _calibration_file(client, "release-2026.10.1")
+    promote(client, "v2", lines=["homeowners"])
+    _adapter(client, "policy", "v2")
+    _calibration_file(client, "v2")
     plan = build_serving_plan(client)
     runtimes = load_release_runtimes(plan, client, adapter_root=tmp_path)
 
-    backend = EchoBackend(json.dumps({"insured_name": "Rivera"}))
+    backend = EchoBackend(json.dumps({}))
     model = load_model("base", client, backend_impl=backend)
-    request = ExtractionRequest(
-        source_id="lossrun_0001", image_paths=["x/page_1.png"], ocr_text="claims",
-        known_doc_type="lossrun",
-    )
-    result = extract(request, model, StaticClassifier("lossrun"), None, plan=plan,
+
+    def request(lob):
+        return ExtractionRequest(source_id="policy_0001", image_paths=["x/page_1.png"],
+                                 page_texts={1: "Declarations"}, known_doc_type="policy", known_lob=lob)
+
+    result = extract(request("homeowners"), model, StaticClassifier("policy"), None, plan=plan,
                      release_runtimes=runtimes, strict_schema=False)
-    # A Loss Run: only the unified release serves it, so its LoRA is applied —
-    # and its calibrators are used, so no v1 calibration was needed (None above).
-    assert backend.calls[-1]["adapter"] == str(tmp_path / "release-2026.10.1")
-    assert result.source_id == "lossrun_0001"
+    # A line it trained on: its LoRA is applied - and its calibrators are used,
+    # so no v1 calibration was needed (None above).
+    assert backend.calls and all(call["adapter"] == str(tmp_path / "v2") for call in backend.calls)
+    assert result.route_info["adapter"] == str(tmp_path / "v2") and not result.route_info["lob_fallback_used"]
 
-
-# --------------------------------------------------------------------------
-# #3 — a rollback pin wins over a line-scoped release
-# --------------------------------------------------------------------------
-
-
-def test_a_rollback_pin_outranks_a_line_scoped_release(client):
-    from common.scopes import get_scope
-
-    promote(client, "release-2026.10.1")
-    promote(client, "release-2026.10.2", scope="personal_lines", doc_types=["policy"])
-    bundle = client.read_json(paths.release_bundle("release-2026.10.2"))
-    bundle["lines"] = sorted(get_scope("personal_lines").lines)
-    client.write_json(paths.release_bundle("release-2026.10.2"), bundle)
-
-    unpinned = build_serving_plan(client)
-    assert unpinned.release_for("policy", "homeowners").release_id == "release-2026.10.2"
-    pinned = build_serving_plan(client, pins={"policy": "release-2026.10.1"})
-    assert pinned.release_for("policy", "homeowners").release_id == "release-2026.10.1"
-    assert "by line" in pinned.describe()          # #10: line releases are listed
+    backend.calls.clear()
+    other = extract(request("gl"), model, StaticClassifier("policy"), None, plan=plan,
+                    release_runtimes=runtimes, strict_schema=False)
+    # A line it did not: the base model, no LoRA.
+    assert other.route_info["lob_fallback_used"] and all(call["adapter"] is None for call in backend.calls)
 
 
 # --------------------------------------------------------------------------
@@ -210,15 +204,15 @@ def test_thresholds_round_trip_for_serving():
 
 
 # --------------------------------------------------------------------------
-# #9 — every scope keeps classify; #11 — scoped pulls
+# #9 — the adapter keeps classify; #11 — scoped pulls
 # --------------------------------------------------------------------------
 
 
-def test_every_scope_keeps_the_classify_task():
-    from common.scopes import load_scopes
+def test_the_adapter_keeps_the_classify_task():
+    from common.adapter import ADAPTER
     from common.tasks import Task
 
-    assert all(Task.CLASSIFY in s.tasks for s in load_scopes().values())
+    assert Task.CLASSIFY in ADAPTER.tasks
 
 
 def test_a_scoped_merged_model_is_pulled_from_its_own_path(client, tmp_path):
@@ -227,9 +221,10 @@ def test_a_scoped_merged_model_is_pulled_from_its_own_path(client, tmp_path):
     source = tmp_path / "merged"
     source.mkdir()
     (source / "config.json").write_text("{}", encoding="utf-8")
-    push_merged_model(source, "v1", client=client, scope="personal_lines")
-    pulled = pull_merged_model("v1", tmp_path / "out", client=client, scope="personal_lines")
+    push_merged_model(source, "v1", client=client, scope="policy")
+    pulled = pull_merged_model("v1", tmp_path / "out", client=client, scope="policy")
     assert (pulled / "config.json").is_file()
+    assert client.exists(f"{paths.merged_model_dir('v1', scope='policy')}/config.json")
 
 
 # ==========================================================================
@@ -377,19 +372,9 @@ def test_the_gate_refuses_a_partially_frozen_set(client):
     from evaluation.golden_eval import GoldenEvalError, evaluate_version
 
     client.write_json(f"{paths.golden_eval_set_dir()}/policy_0001/golden.json", {})
-    from common.scopes import get_scope
 
     with pytest.raises(GoldenEvalError, match="interrupted"):
-        evaluate_version(client, object(), version="v1", corpus_version="v1", scope=get_scope("policy"))
-
-
-# #8 — narrowing keeps the line restriction
-def test_narrowing_a_line_scope_keeps_its_lines():
-    from common.scopes import get_scope, narrow
-
-    narrowed = narrow(get_scope("personal_lines"), ["policy"])
-    assert narrowed.lines == get_scope("personal_lines").lines
-    assert not narrowed.covers_lob("gl")
+        evaluate_version(client, object(), version="v1", corpus_version="v1")
 
 
 # #3 #4 #9 — audit: the importer's layout, malformed page_ref, unreadable PDF
@@ -400,7 +385,7 @@ def test_the_audit_flags_layouts_the_importer_cannot_read(tmp_path):
 
     _document(tmp_path / "homeowners", "doc1")           # nested one level too deep
     (tmp_path / "loose.pdf").write_bytes(b"%PDF-1.4")    # loose in the input folder
-    report = audit_folder(tmp_path, scope=None)
+    report = audit_folder(tmp_path)
     details = " ".join(f.detail for f in report.blockers)
     assert "in subfolders below homeowners/" in details
     assert "directly in the input folder" in details
@@ -416,7 +401,7 @@ def test_a_scalar_page_ref_is_one_blocker_not_a_crash(tmp_path):
     golden = copy.deepcopy(GOLDEN)
     golden["policy"]["policy_number"]["page_ref"] = 1
     _document(tmp_path, "doc", golden=golden)
-    report = audit_folder(tmp_path, scope=None)       # does not raise
+    report = audit_folder(tmp_path)       # does not raise
     assert any("page_ref must be a list" in f.detail for f in report.blockers)
 
 
@@ -429,6 +414,6 @@ def test_an_unreadable_pdf_is_one_cause_not_a_row_per_value(tmp_path):
     (folder / "golden.json").write_text(json.dumps({"policy": {"policy_number": {
         "raw": "WC-1", "parsed": "WC-1", "page_ref": [1]}}}), encoding="utf-8")
     (folder / "metadata.json").write_text(json.dumps({"lob": "homeowners"}), encoding="utf-8")
-    report = audit_folder(tmp_path, scope=None)
+    report = audit_folder(tmp_path)
     assert any("cannot be opened" in f.detail for f in report.blockers)
     assert report.values == []

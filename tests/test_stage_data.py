@@ -249,7 +249,7 @@ def test_a_real_run_points_ms_swift_at_local_staged_files(client, tmp_path, monk
 
 
 # --------------------------------------------------------------------------
-# Budgets, validation, and what a scoped run records
+# Budgets, validation, and what a run records
 # --------------------------------------------------------------------------
 
 def test_a_document_over_its_task_budget_is_set_aside_not_truncated():
@@ -308,24 +308,29 @@ def test_a_run_with_no_validation_rows_stops_before_launch(client, tmp_path, mon
         _train(client, monkeypatch, tmp_path, dry_run=False)
 
 
-def test_a_scoped_run_records_its_own_counts_not_the_corpus(client, tmp_path, monkeypatch):
-    from common.scopes import get_scope
+def test_the_policy_run_records_its_own_counts_not_the_corpus(client, tmp_path, monkeypatch):
+    """The corpus holds Loss Runs as well; the run trains the policy rows only,
+    and its manifest counts what it trains, not every row the corpus holds."""
+    from common.config import training_config
 
     built = _seed(client)
     client.write_text(paths.corpus_eval_split("v1", "test"), write_jsonl(built.rows_by_split["test"]))
-    manifest, _ = _train(client, monkeypatch, tmp_path, dry_run=True, scope=get_scope("lossrun"))
+    manifest, _ = _train(client, monkeypatch, tmp_path, dry_run=True)
+    epochs = set(range(1, int(training_config("unified")["optimization"]["num_train_epochs"]) + 1))
 
-    def lossrun_rows(split, epochs=None):
+    def policy_rows(split, epochs=None):
         return sum(
             1 for r in built.rows_by_split[split]
-            if r["doc_type"] == "lossrun" and (epochs is None or r.get("epoch") in epochs)
+            if r["doc_type"] == "policy" and (epochs is None or r.get("epoch") in epochs)
         )
 
     stats = manifest.data_stats
-    # Only the epochs the run trains (3 of the 4 materialized).
-    assert stats.train_examples == lossrun_rows("train", epochs={1, 2, 3})
-    assert stats.val_examples == lossrun_rows("val")
-    assert stats.test_examples == lossrun_rows("test")
+    # Only the epochs the run trains, of the policy rows.
+    assert stats.train_examples == policy_rows("train", epochs=epochs)
+    assert stats.val_examples == policy_rows("val")
+    assert stats.test_examples == policy_rows("test")
+    assert stats.train_examples < sum(1 for r in built.rows_by_split["train"]
+                                      if r.get("epoch") in epochs), "the Loss Runs were counted"
 
 
 # --------------------------------------------------------------------------

@@ -73,7 +73,7 @@ def test_matching_ignores_case_punctuation_and_line_breaks():
 
 def test_a_correct_document_has_no_blockers_and_its_values_are_found(tmp_path):
     _document(tmp_path, "good")
-    report = audit_folder(tmp_path, scope=None)
+    report = audit_folder(tmp_path)
     assert not report.blockers, [(f.check, f.detail) for f in report.blockers]
     results = _results(report, "good")
     assert results["policy.policy_number"] == "ok"
@@ -92,7 +92,7 @@ def test_structural_problems_are_blockers(tmp_path):
     _document(tmp_path, "no_golden", golden=False)
     folder = _document(tmp_path, "bad_json")
     (folder / "golden.json").write_text("{not json", encoding="utf-8")
-    report = audit_folder(tmp_path, scope=None)
+    report = audit_folder(tmp_path)
     details = {name: [f.detail for f in report.blockers if f.folder == name]
                for name in ("two_pdfs", "no_golden", "bad_json")}
     assert details["two_pdfs"] == ["2 PDF files (exactly one per folder)"]   # and nothing else
@@ -106,7 +106,7 @@ def test_a_duplicate_pdf_is_a_blocker(tmp_path):
     _document(tmp_path, "a")
     _document(tmp_path, "b")
     shutil.copy(tmp_path / "a" / "policy0.pdf", tmp_path / "b" / "policy0.pdf")   # the same file
-    report = audit_folder(tmp_path, scope=None)
+    report = audit_folder(tmp_path)
     assert any("same PDF as a" in f.detail for f in report.blockers if f.folder == "b")
 
 
@@ -121,29 +121,54 @@ def test_a_duplicate_pdf_is_a_blocker(tmp_path):
 ])
 def test_a_missing_or_unknown_line_is_a_blocker(tmp_path, meta, message):
     _document(tmp_path, "doc", meta=meta or {"field_provenance": {}})
-    report = audit_folder(tmp_path, scope=None)
+    report = audit_folder(tmp_path)
     assert any(message in f.detail for f in report.blockers)
 
 
 def test_a_gold_with_no_review_record_is_a_blocker_as_at_import(tmp_path):
     unreviewed = {k: v for k, v in META.items() if k not in ("reviewer_id", "review_date")}
     _document(tmp_path, "doc", meta={**unreviewed, "reviewer_id": "pending"})
-    report = audit_folder(tmp_path, scope=None)
+    report = audit_folder(tmp_path)
     assert any("no review record" in f.detail and "'pending' names nobody" in f.detail for f in report.blockers)
     assert summary(report)["importable"] == 0
 
 
-def test_a_line_outside_the_scope_is_a_blocker(tmp_path):
+def test_every_line_is_audited_by_default(tmp_path):
+    """No --lines: a document of any line with a canonical schema is importable
+    (the default was personal lines while scopes existed)."""
+    _document(tmp_path, "wc")                                      # workers_comp is commercial
+    # A personal line too. The workers' comp gold does not fit its schema, so
+    # only the line filter is asserted for it.
+    _document(tmp_path, "home", meta={**META, "lob": "homeowners"}, pages=[PAGE_1 + ["home"]])
+    report = audit_folder(tmp_path)
+    assert report.lines is None
+    assert not [f for f in report.blockers if "outside the lines" in f.detail]
+    assert not [f for f in report.blockers if f.folder == "wc"], [f.detail for f in report.blockers]
+    assert summary(report)["documents_per_line"] == {"wc": 1}
+
+
+def test_a_line_outside_lines_is_a_blocker(tmp_path):
     _document(tmp_path, "doc")                       # workers_comp is commercial
-    report = audit_folder(tmp_path, scope="personal_lines")
-    assert any("outside scope personal_lines" in f.detail for f in report.blockers)
+    report = audit_folder(tmp_path, lines=frozenset({"homeowners", "personal_auto"}))
+    outside = [f.detail for f in report.blockers if "is outside the lines audited" in f.detail]
+    assert outside and "homeowners" in outside[0] and "personal_auto" in outside[0]
+    assert summary(report)["importable"] == 0
+
+
+def test_a_line_inside_lines_passes_and_a_package_must_be_wholly_inside(tmp_path):
+    _document(tmp_path, "wc")
+    _document(tmp_path, "package", meta={**META, "lob": ["workers_comp", "gl"]},
+              pages=[PAGE_1 + ["package"]])
+    report = audit_folder(tmp_path, lines=frozenset({"wc"}))
+    blocked = {f.folder for f in report.blockers if "is outside the lines audited" in f.detail}
+    assert blocked == {"package"}                    # one of its lines is not asked for
 
 
 def test_a_page_ref_beyond_the_pdf_is_a_blocker(tmp_path):
     golden = copy.deepcopy(GOLDEN)
     golden["policy"]["policy_number"]["page_ref"] = [9]
     _document(tmp_path, "doc", golden=golden)
-    report = audit_folder(tmp_path, scope=None)
+    report = audit_folder(tmp_path)
     assert any("page_ref 9 is not a page" in f.detail for f in report.blockers)
 
 
@@ -157,14 +182,14 @@ def test_a_value_on_another_page_and_a_value_nowhere_are_reported(tmp_path):
     golden["policy"]["policy_number"]["page_ref"] = [2]              # it is printed on page 1
     golden["named_insured"]["primary_name"]["raw"] = "Riviera Fabrications Inc"   # a typo'd value
     _document(tmp_path, "doc", golden=golden)
-    results = _results(audit_folder(tmp_path, scope=None), "doc")
+    results = _results(audit_folder(tmp_path), "doc")
     assert results["policy.policy_number"] == "wrong_page"
     assert results["named_insured.primary_name"] == "not_found"
 
 
 def test_a_scanned_page_is_left_for_the_check_after_ocr(tmp_path):
     _document(tmp_path, "scan", pages=[[], []])        # no text layer
-    report = audit_folder(tmp_path, scope=None)
+    report = audit_folder(tmp_path)
     assert set(_results(report, "scan").values()) <= {"needs_ocr", "skipped_short"}
     assert not report.documents[0].digital
 
@@ -179,7 +204,7 @@ def test_format_problems_are_reported(tmp_path):
     golden["policy"]["effective_date"]["parsed"] = "sometime in April"
     golden["premium"]["total_policy_premium"]["parsed"] = 4725.0          # raw says $47,250.00
     _document(tmp_path, "doc", golden=golden)
-    formats = {f.check for f in audit_folder(tmp_path, scope=None).formats}
+    formats = {f.check for f in audit_folder(tmp_path).formats}
     assert {"date_format", "amount"} <= formats
 
 
@@ -187,12 +212,12 @@ def test_a_reversed_policy_period_is_reported(tmp_path):
     golden = copy.deepcopy(GOLDEN)
     golden["policy"]["expiration_date"]["parsed"] = "2025-04-01"
     _document(tmp_path, "doc", golden=golden)
-    assert any(f.check == "period" for f in audit_folder(tmp_path, scope=None).formats)
+    assert any(f.check == "period" for f in audit_folder(tmp_path).formats)
 
 
 def test_iso_dates_are_fine_the_build_rewrites_them(tmp_path):
     _document(tmp_path, "doc")                          # the fixture's dates are ISO
-    assert not [f for f in audit_folder(tmp_path, scope=None).formats if f.check == "date_format"]
+    assert not [f for f in audit_folder(tmp_path).formats if f.check == "date_format"]
 
 
 # --------------------------------------------------------------------------
@@ -203,7 +228,7 @@ def test_iso_dates_are_fine_the_build_rewrites_them(tmp_path):
 def test_totals_and_spot_check(tmp_path):
     for i in range(3):
         _document(tmp_path, f"doc{i}", pages=[PAGE_1 + [f"copy {i}"]])
-    report = audit_folder(tmp_path, scope=None)
+    report = audit_folder(tmp_path)
     facts = summary(report)
     assert facts["importable"] == 3
     assert facts["documents_per_line"] == {"wc": 3}
@@ -216,11 +241,33 @@ def test_the_report_is_written_and_blockers_fail_the_command(tmp_path):
     data, out = tmp_path / "data", tmp_path / "out"
     _document(data, "good", pages=[PAGE_1 + ["one"]])
     _document(data, "broken", golden=False)
-    assert main(["--input", str(data), "--out", str(out), "--scope", "none"]) == 1
+    assert main(["--input", str(data), "--out", str(out)]) == 1
     for name in ("report.md", "summary.json", "blockers.csv", "value_checks.csv",
                  "formats.csv", "spot_check.csv", "warnings.csv"):
         assert (out / name).is_file(), name
-    assert "Blockers: 1" in (out / "report.md").read_text(encoding="utf-8")
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "Blockers: 1" in report
+    assert "Lines: every line · folders: 2" in report
+
+
+def test_the_command_audits_the_lines_it_is_given(tmp_path):
+    data, out = tmp_path / "data", tmp_path / "out"
+    _document(data, "good", pages=[PAGE_1 + ["one"]])                     # workers' comp
+    assert main(["--input", str(data), "--out", str(out), "--lines", "workers_comp"]) == 0
+    assert "Lines: wc · folders: 1" in (out / "report.md").read_text(encoding="utf-8")
+    assert main(["--input", str(data), "--out", str(out), "--lines", "homeowners,personal_auto"]) == 1
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "Lines: homeowners, personal_auto" in report
+
+
+def test_the_command_refuses_a_line_with_no_schema(tmp_path, capsys):
+    """A misspelt --lines would otherwise block every document without a word
+    about why."""
+    data, out = tmp_path / "data", tmp_path / "out"
+    _document(data, "good")
+    assert main(["--input", str(data), "--out", str(out), "--lines", "homeowner"]) == 2
+    assert "homeowner" in capsys.readouterr().err
+    assert not (out / "report.md").exists()
 
 
 def test_the_audit_output_is_never_committed():

@@ -1,7 +1,7 @@
 """Before ``finetune``: everything it depends on, checked in minutes instead of found hours in.
 
-    python -m orchestration.preflight --scope personal_lines
-    python -m orchestration.preflight --scope personal_lines --tenant smoke --ocr-check /workspace/ocr_check_smoke
+    python -m orchestration.preflight
+    python -m orchestration.preflight --tenant smoke --ocr-check /workspace/ocr_check_smoke
 
 Every check says PASS, WARN or FAIL, and a FAIL says what to do. Exit 1 on any
 FAIL, so a script can refuse to start training on it.
@@ -35,6 +35,8 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from common.adapter import ADAPTER
 
 WORKSPACE = Path(os.environ.get("FIDEON_WORKSPACE") or "/workspace")  # an empty .env value means unset
 #: Free GPU memory below this share of the card means something else holds it.
@@ -186,7 +188,7 @@ def check_ocr_done(ctx, results: list[Check]) -> None:
     from data_pipeline.ocr.run_mineru import find_unprocessed
 
     raw = for_ocr()
-    for doc_type in ctx.scope.doc_types:
+    for doc_type in ADAPTER.doc_types:
         labelled = list_labeled_source_ids(ctx.client, doc_type, ctx.tenant_id)
         pending = find_unprocessed(raw, doc_type, ctx.tenant_id)
         if not labelled:
@@ -204,12 +206,12 @@ def check_ocr_done(ctx, results: list[Check]) -> None:
 
 
 def _label_metadata(ctx) -> list[tuple[str, str, dict[str, Any]]]:
-    """``(doc_type, source_id, metadata)`` for every labelled document in scope."""
+    """``(doc_type, source_id, metadata)`` for every labelled document the adapter trains on."""
     from artifact_registry import paths
     from data_pipeline.labeling.export_golden_labels import list_labeled_source_ids
 
     found = []
-    for doc_type in ctx.scope.doc_types:
+    for doc_type in ADAPTER.doc_types:
         for source_id in list_labeled_source_ids(ctx.client, doc_type, ctx.tenant_id):
             key = paths.label_metadata(doc_type, source_id, ctx.tenant_id)
             metadata = ctx.client.read_json(key) if ctx.client.exists(key) else {}
@@ -288,6 +290,25 @@ def check_ocr_report(path: Path, results: list[Check]) -> None:
                          "" if facts.get("passed") else f"read {path / 'report.md'}; fix the labels first"))
 
 
+def check_output_shape(results: list[Check], labels: list) -> None:
+    """FAIL when the imported single-line policies would teach the adapter two
+    output shapes (``common.adapter.assert_one_output_shape``): training would
+    refuse the run, after staging, and every later one of this tenant."""
+    from common.adapter import AdapterError, assert_one_output_shape
+    from common.lob import known_lines, single_line
+
+    lines = sorted({line for doc_type, _sid, meta in labels if doc_type == "policy"
+                    and (line := single_line((meta or {}).get("lob"))) in known_lines()})
+    try:
+        assert_one_output_shape(lines)
+    except AdapterError as exc:
+        results.append(Check("output shape", "FAIL", str(exc)[:300],
+                             "the tenant's imported policies mix the two shapes: remove those "
+                             "documents from the tenant, or move their lines onto the common model"))
+        return
+    results.append(Check("output shape", "PASS", f"{len(lines)} line(s), one output shape"))
+
+
 def check_corpus(ctx, results: list[Check]) -> dict[str, Any]:
     from orchestration.pipeline_dag import corpus_set_aside, plan_corpus
 
@@ -334,12 +355,12 @@ def run_preflight(args: argparse.Namespace) -> tuple[list[Check], dict[str, Any]
     _run("config invariants", check_config, results)
     _run("disk", check_disk, results)
     ctx = build_context(args, dry_run=True)
-    ctx.doc_types = list(ctx.scope.doc_types)
     _run("azure", lambda r: check_blob(ctx.client, r), results)
     _run("data", lambda r: check_ocr_done(ctx, r), results)
     labels = _run("labels", lambda r: _label_metadata(ctx), results) or []
     _run("reviewed labels", lambda r: check_reviewed_labels(ctx, r, labels), results)
     _run("label agreement", lambda r: check_label_agreement(ctx, r, labels), results)
+    _run("output shape", lambda r: check_output_shape(r, labels), results)
     _run("post-OCR check", lambda r: check_ocr_report(args.ocr_check, r), results)
     facts: dict[str, Any] = {}
     if not args.skip_corpus:
@@ -349,10 +370,10 @@ def run_preflight(args: argparse.Namespace) -> tuple[list[Check], dict[str, Any]
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI over the checks
     parser = argparse.ArgumentParser(description="Check everything finetune depends on, without training")
-    parser.add_argument("--scope", dest="scopes", action="append", default=[])
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--corpus-version", dest="corpus_version", default="v1")
-    parser.add_argument("--out-version", dest="out_version", default="v1")
+    parser.add_argument("--version", default="v1")
+
     parser.add_argument("--min-labels-per-type", dest="min_labels_per_type", type=int, default=None)
     parser.add_argument("--ocr-check", type=Path, default=WORKSPACE / "ocr_check",
                         help="the post-OCR check's output folder")

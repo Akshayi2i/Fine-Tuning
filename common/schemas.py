@@ -109,11 +109,13 @@ _SCHEMA_FILES: dict[str, str] = {
 #: base key by accident.
 SLICE_SEPARATOR = "#"
 
-#: The layout family whose rendered prompts are pinned as reference snapshots
+#: The lines whose rendered prompts are pinned as reference snapshots
 #: (``testing/prompts``). Every canonical file is registered; this only names the
-#: family whose prompts are kept under review. Read from
-#: ``configs/layout_families.yaml`` so the 8-LOB list has one definition.
-CANONICAL_FAMILY = "personal_lines"
+#: lines whose prompts are kept under review.
+SNAPSHOT_LINES: tuple[str, ...] = (
+    "homeowners", "personal_auto", "dwelling_fire", "ocean_marine",
+    "motorcycle", "recreational_vehicle", "personal_umbrella",
+)
 
 
 class SchemaError(RuntimeError):
@@ -166,9 +168,7 @@ class SchemaSource:
 def _sources() -> dict[str, SchemaSource]:
     """Every registry key mapped to its source. Built lazily.
 
-    Lazily because it reads ``configs/layout_families.yaml``, and ``common.config``
-    reaches back into ``common.scopes`` — doing this at import time would make the
-    order in which two modules are first imported decide whether the program runs.
+    Lazily because it reads every schema file, which no import should pay for.
 
     The ``schemas/`` entries come first, and :func:`schema_selectors` preserves
     that order, so a caller that scans until it finds what it needs scans the
@@ -204,11 +204,6 @@ def _sources() -> dict[str, SchemaSource]:
         if path.stem in (CANONICAL_FALLBACK, *_CANONICAL_NOT_REGISTERED):
             continue
         sources[f"policy:{path.stem}"] = _canonical_source(path)
-    # The fallback (key `policy`) is no line, so it is in no layout family; it
-    # may compose the common model like the lines do.
-    _check_overlay_families(
-        [key.split(":", 1)[1] for key, source in sources.items() if source.common_model and ":" in key]
-    )
     return sources
 
 
@@ -221,55 +216,6 @@ def _canonical_source(path: Path) -> SchemaSource:
         strip_prefixes=("fideon:",),
         common_model=common_model,
     )
-
-
-def _check_overlay_families(lines: list[str]) -> None:
-    """Refuse a layout family whose lines are only partly on the common model.
-
-    One family is one adapter, trained on one corpus with one prompt shape. A
-    family with some lines on overlays and some on self-contained files would
-    train that adapter on two output shapes at once, and nothing downstream
-    would say so.
-    """
-    from common.config import lob_to_layout_family, lobs_in_family
-
-    by_family: dict[str, set[str]] = {}
-    for line in lines:
-        family = lob_to_layout_family().get(line)
-        if family is None:
-            raise SchemaError(
-                f"{line}.json composes the common model but {line!r} is in no layout family "
-                "(configs/layout_families.yaml), so no adapter could be trained on it"
-            )
-        by_family.setdefault(family, set()).add(line)
-    for family, migrated in sorted(by_family.items()):
-        missing = sorted(set(lobs_in_family(family)) - migrated)
-        if missing:
-            # Every schema still loads - the other families' work goes on - and
-            # no scope covering this family trains until the rest arrives
-            # (common.scopes.assert_one_output_shape).
-            log.warning(
-                "layout family %r is only partly on the common model: %s still use "
-                "self-contained files. No scope covering it can train until they move too.",
-                family, ", ".join(missing))
-
-
-def partly_migrated_families() -> dict[str, tuple[str, ...]]:
-    """Layout family -> its lines still on self-contained files, for each family
-    with some lines on the common model and some not. One adapter cannot train
-    on two output shapes: a scope covering such a family is refused
-    (:func:`common.scopes.assert_one_output_shape`)."""
-    from common.config import lob_to_layout_family, lobs_in_family
-
-    migrated: dict[str, set[str]] = {}
-    for key, source in _sources().items():
-        if source.common_model and ":" in key:
-            line = key.split(":", 1)[1]
-            family = lob_to_layout_family().get(line)
-            if family is not None:
-                migrated.setdefault(family, set()).add(line)
-    return {family: tuple(sorted(set(lobs_in_family(family)) - lines))
-            for family, lines in sorted(migrated.items()) if set(lobs_in_family(family)) - lines}
 
 
 def is_canonical(

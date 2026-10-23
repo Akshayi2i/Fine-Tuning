@@ -42,6 +42,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from data_pipeline.dataset_builder.split_groups import MIN_DOCS_TO_MEASURE_LINE
 from evaluation.bootstrap import ConfidenceInterval, paired_bootstrap
 
 log = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ GATING_METRICS: dict[str, Direction] = {
     # (evaluation.metrics.auto_accept). The number the thresholds promise.
     "auto_accept_error_rate": "lower_is_better",
     # The weakest common-model line's field match (evaluation.run_eval): one
-    # line of a family adapter cannot hide behind the others' volume.
+    # line cannot hide behind the others' volume.
     "worst_line_field_match": "higher_is_better",
 }
 
@@ -123,43 +124,20 @@ CONDITIONAL_METRICS: frozenset[str] = frozenset({
 })
 
 
-def not_applicable_for(scope: Any) -> frozenset[str]:
-    """What this scope structurally cannot produce.
+def not_applicable_for() -> frozenset[str]:
+    """What the adapter structurally cannot produce.
 
-    Derived from the scope's own shape, never from what it claims: a metric the
-    scope CAN produce and did not is unmeasured, which blocks. ``scopes.yaml``
-    still declares them, and ``_build`` refuses a declaration wider than the
-    shape — but the declaration is documentation, not authority, so a Scope
-    constructed in code cannot excuse itself either.
+    Derived from what it trains (:func:`common.adapter.not_applicable_metrics`),
+    never from a list anyone declared: a metric the adapter CAN produce and did
+    not is unmeasured, which blocks.
 
     ``CONDITIONAL_METRICS`` stays on top of it. That set is about the eval SET
-    (an eval run with no Loss Run in it), which is a different question from what
-    the scope covers — a unified run whose eval set happens to hold no Loss Run
-    is still not evidence about reconciliation.
+    (no scanned document in it, say), which is a different question from what
+    the adapter covers.
     """
-    from common.scopes import structural_not_applicable
+    from common.adapter import not_applicable_metrics
 
-    if scope is None:
-        return CONDITIONAL_METRICS
-    # The SHAPE decides; the declaration is documentation. A scope that
-    # genuinely cannot produce a metric is excused whether or not it wrote the
-    # metric down, and a scope that declares one it CAN produce is not — so this
-    # holds even for a Scope built in code, which never passed `_build`.
-    return CONDITIONAL_METRICS | structural_not_applicable(scope)
-
-
-def floors_for(scope: Any) -> dict[str, float]:
-    """The §0d floors, with this scope's overrides applied.
-
-    Floors are per scope because the same number means different things to
-    different coverage: `list_field_recall` on a Loss Run corpus is claim rows,
-    on a policy corpus it is coverage schedules, and the volumes differ by an
-    order of magnitude.
-    """
-    floors = dict(PILOT_FLOORS)
-    if scope is not None:
-        floors.update(getattr(scope, "floors", {}) or {})
-    return floors
+    return CONDITIONAL_METRICS | not_applicable_metrics()
 
 #: NOT conditional, deliberately: image_only_accuracy and ocr_arbitration_accuracy.
 #: They look like subset metrics, but every document is read in both regimes, so
@@ -184,8 +162,8 @@ PILOT_FLOORS: dict[str, float] = {
     "lob_detection_accuracy": 0.85,
     "confusable_misattribution_rate": 0.05,
     "lossrun_totals_reconciliation_rate": 0.80,
-    # Applies to every release that serves Loss Runs; a scope without them
-    # cannot produce it (common.scopes.structural_not_applicable).
+    # Applies to a release that serves Loss Runs; the policy adapter cannot
+    # produce it (common.adapter.not_applicable_metrics).
     "table_f1": 0.88,
     # A pilot choice, not a measured one: at most 2 in 100 unreviewed values
     # wrong. The per-type targets are stricter (1% for money, dates, numbers,
@@ -228,21 +206,21 @@ PRIMARY_METRICS: tuple[str, ...] = ("field_normalized_match", "list_field_recall
 
 #: The gates beside GATING_METRICS that promotion_gate can fail, by the names an
 #: override waives them under: the improvement rule, and a continued run's
-#: missing cross-type evidence. A continued run's per-type regression is
-#: ``cross_type:<doc_type>`` (:func:`is_gate`).
-OTHER_GATES: tuple[str, ...] = ("improvement", "cross_type_regression_evidence")
+#: missing per-line comparison with its parent. A continued run's regression on
+#: one line is ``line:<line>`` (:func:`is_gate`).
+OTHER_GATES: tuple[str, ...] = ("improvement", "line_regression_evidence")
 
 
 def is_gate(name: str) -> bool:
     """Whether ``name`` is a gate :func:`promotion_gate` can fail, so an override
-    can waive it: a gating metric, one of :data:`OTHER_GATES`, or
-    ``cross_type:<doc_type>`` for an active document type."""
-    from common.constants import ACTIVE_DOC_TYPES
+    can waive it: a gating metric, one of :data:`OTHER_GATES`, or ``line:<line>``
+    for a line of business with a canonical policy schema."""
+    from common.lob import known_lines
 
     if name in GATING_METRICS or name in OTHER_GATES:
         return True
-    kind, sep, doc_type = name.partition(":")
-    return bool(sep) and kind == "cross_type" and doc_type in ACTIVE_DOC_TYPES
+    kind, sep, line = name.partition(":")
+    return bool(sep) and kind == "line" and line in known_lines()
 
 
 class GateError(RuntimeError):
@@ -261,8 +239,8 @@ class MetricVerdict:
     interval: ConfidenceInterval | None = None
     delta: float = DEFAULT_DELTA
 
-    #: Nothing in this run could have produced this metric — no Loss Run in the
-    #: scope, no scan in the eval set. Distinct from `unmeasured`, which means
+    #: Nothing in this run could have produced this metric — no Loss Run in
+    #: what the adapter trains, no scan in the eval set. Distinct from `unmeasured`, which means
     #: something could have produced it and did not: that blocks, this does not.
     applicable: bool = True
 
@@ -376,7 +354,7 @@ class GateOverrideRecord:
             raise GateError(
                 f"an override names {unknown}, which is not a gate. Name each gate as the gate "
                 f"decision names it: a gating metric ({', '.join(sorted(GATING_METRICS))}), "
-                f"{' or '.join(OTHER_GATES)}, or cross_type:<doc_type>."
+                f"{' or '.join(OTHER_GATES)}, or line:<line>."
             )
 
     def as_dict(self) -> dict[str, Any]:
@@ -401,10 +379,6 @@ class GateResult:
     is_first_version: bool = False
     override: GateOverrideRecord | None = None
 
-    #: Which training scope this verdict is about. A gate decision read later has
-    #: to say what it judged: "v2 passed" means nothing when two scopes share a
-    #: version.
-    scope: str | None = None
 
     #: Gates that failed but were waived. Kept separate from `failed_gates` so
     #: "passed with a waiver" is never indistinguishable from "passed".
@@ -413,7 +387,7 @@ class GateResult:
     #: ``(gate, reason)`` for every block, so an override removes a reason by the
     #: gate that raised it. Matching on the reason's opening words missed every
     #: reason not phrased as "<gate> ...", so waiving ``improvement`` or a
-    #: ``cross_type:`` gate left the release blocked with the waiver recorded.
+    #: ``line:`` gate left the release blocked with the waiver recorded.
     blocks: list[tuple[str, str]] = field(default_factory=list)
 
     #: What the decision rests on that a reader must know, without blocking:
@@ -425,6 +399,10 @@ class GateResult:
     #: were not: the candidate was then judged on its floors alone. Not a first
     #: release - there is a predecessor, on another yardstick.
     baseline_not_comparable: str | None = None
+
+    #: A continued run's line-by-line comparison: per line, the run it was held
+    #: to, both field matches and the paired interval (decision 2026-10-23).
+    line_verdicts: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def improved_metrics(self) -> list[str]:
@@ -450,6 +428,11 @@ class GateResult:
             f"  not applicable: {v.name}"
             for v in self.verdicts if v.unmeasured and not v.applicable
         )
+        lines.extend(
+            f"  line {v['line']} against {v['held_to']}: {v['reference']:.4f} -> "
+            f"{v['candidate']:.4f} (95% CI lower bound {v['interval']['ci_lower']:+.4f})"
+            for v in self.line_verdicts
+        )
         lines.extend(f"  BLOCKED: {reason}" for reason in self.blocking_reasons)
         lines.extend(f"  WARNING: {warning}" for warning in self.warnings)
         if self.override:
@@ -462,7 +445,6 @@ class GateResult:
     def as_dict(self) -> dict[str, Any]:
         return {
             "passed": self.passed,
-            "scope": self.scope,
             "is_first_version": self.is_first_version,
             "baseline_not_comparable": self.baseline_not_comparable,
             "not_applicable": sorted(
@@ -473,6 +455,7 @@ class GateResult:
             "blocking_reasons": list(self.blocking_reasons),
             "improved_metrics": self.improved_metrics,
             "verdicts": [v.as_dict() for v in self.verdicts],
+            "line_verdicts": list(self.line_verdicts),
             "override": self.override.as_dict() if self.override else None,
             "warnings": list(self.warnings),
         }
@@ -485,11 +468,11 @@ def promotion_gate(
     per_document: dict[str, tuple[Sequence[float], Sequence[float]]] | None = None,
     floors: dict[str, float] | None = None,
     continued_from: str | None = None,
-    cross_type_evidence: dict[str, Any] | None = None,
+    line_evidence: LineEvidence | None = None,
+    line_evidence_missing: str | None = None,
     require_all_measured: bool = True,
     fixes_defect: str | None = None,
     override: GateOverrideRecord | None = None,
-    scope: Any = None,
     small_eval_set: bool = False,
     warnings: Sequence[str] | None = None,
     baseline_not_comparable: str | None = None,
@@ -507,12 +490,14 @@ def promotion_gate(
             which is the whole reason this gate can be passed at all. A metric
             with fewer than two paired documents is compared as a point
             estimate instead, with a warning.
-        floors: absolute floors, defaulting to the §0d pilot-exit table. A scope's
-            own overrides are applied when ``scope`` is given and ``floors`` is not.
-        scope: what the run covered (``common.scopes``). Decides which metrics are
-            NOT APPLICABLE — a policy-only run has no Loss Run to reconcile — and
-            supplies per-scope floors. Omitted, the gate behaves exactly as it did
-            before scopes existed.
+        floors: absolute floors, defaulting to the §0d pilot-exit table. Which
+            metrics are NOT APPLICABLE comes from what the adapter trains
+            (:func:`not_applicable_for`): a policy adapter has no Loss Run to
+            reconcile.
+        continued_from: the run (or directory) this run's adapter continued, if
+            it did: it is then held line by line to the runs before it.
+        line_evidence: that line-by-line comparison (:class:`LineEvidence`), or
+            ``None`` with ``line_evidence_missing`` saying why none could be made.
         fixes_defect: satisfies the improvement requirement when a release exists
             to fix something rather than to score higher. Checked
             (:func:`documented_defect`): a blank or placeholder value is refused.
@@ -520,7 +505,7 @@ def promotion_gate(
             attributed is refused.
         small_eval_set: the release was scored on fewer eval documents of a type
             than the frozen set's minimum (a set accepted with ``freeze-eval-set
-            --allow-small``, or a scope scored on only part of a set). Its scores
+            --allow-small``). Its scores
             say too little to call a release production, so a pass is capped at
             ``interim`` and warned.
         warnings: what the caller knows about the evidence that a reader of the
@@ -546,10 +531,9 @@ def promotion_gate(
         )
         current_metrics, per_document = None, None
     baseline = current_metrics or {}
-    floor_table = floors_for(scope) if floors is None else floors
-    not_applicable = not_applicable_for(scope)
+    floor_table = dict(PILOT_FLOORS) if floors is None else floors
+    not_applicable = not_applicable_for()
     samples = per_document or {}
-    result.scope = getattr(scope, "name", None)
 
     if fixes_defect is not None:
         fixes_defect = documented_defect(fixes_defect)
@@ -626,7 +610,7 @@ def promotion_gate(
             _block(result, name, f"{name} is not non-inferior: {detail}")
 
     _require_improvement(result, fixes_defect)
-    _require_cross_type_evidence(result, continued_from, cross_type_evidence, floor_table)
+    _require_line_non_regression(result, continued_from, line_evidence, line_evidence_missing)
 
     # An override lifts only the gates it names, and only ones that actually
     # failed. Waiving a gate that passed would make the record say something
@@ -652,9 +636,9 @@ def promotion_gate(
     if small_eval_set:
         result.warnings.append(
             "this release was scored on fewer eval documents of a type than a frozen set's "
-            "minimum (a set frozen with freeze-eval-set --allow-small, or a scope scored on only "
-            "part of the set): its intervals are wide, so a pass is capped at interim until it "
-            "is scored on a full-size set."
+            "minimum (a set frozen with freeze-eval-set --allow-small): its intervals are wide, "
+            "so a pass is capped at interim until it is scored on a full-size set."
+
         )
     result.passed = not result.blocking_reasons
     result.tier = (
@@ -760,57 +744,138 @@ def _require_improvement(result: GateResult, fixes_defect: str | None) -> None:
     )
 
 
-def _require_cross_type_evidence(
+#: A continued run's line is compared with the runs before it only on at least
+#: this many real documents scored in both reports: the bar the split uses to
+#: measure a line at all (``split_groups.MIN_DOCS_TO_MEASURE_LINE``). Documents,
+#: not values: one policy read in three modes holds hundreds of values, so a
+#: bar on values let a single document decide a line.
+LINE_MIN_DOCUMENTS = MIN_DOCS_TO_MEASURE_LINE
+
+
+@dataclass
+class LineComparison:
+    """One line's paired per-document field match: the candidate's against the
+    run it is held to on that line, the best since the last run from the base.
+    Aligned by index, as :func:`evaluation.bootstrap.paired_bootstrap` pairs."""
+
+    line: str
+    #: The run held to: the best on this line since the last run from the base.
+    reference: str
+    reference_scores: list[float]
+    candidate_scores: list[float]
+    reference_weights: list[float] | None = None
+    candidate_weights: list[float] | None = None
+
+
+@dataclass
+class LineEvidence:
+    """What a continued run's line-by-line gate rests on (decision 2026-10-23)."""
+
+    compared: list[LineComparison] = field(default_factory=list)
+    #: Lines the candidate serves that no earlier run scored on enough shared
+    #: real documents, with the most it shared: not compared, and warned.
+    thin: dict[str, int] = field(default_factory=dict)
+    #: Lines the parent's release serves and the candidate does not.
+    dropped: list[str] = field(default_factory=list)
+    #: Lines the candidate serves and the parent's release does not.
+    added: list[str] = field(default_factory=list)
+    #: The runs compared with, parent first, back to the last run from the base.
+    chain: list[str] = field(default_factory=list)
+
+
+def _weighted_mean(scores: Sequence[float], weights: Sequence[float] | None) -> float:
+    weights = list(weights) if weights else [1.0] * len(scores)
+    total = sum(weights)
+    return sum(s * w for s, w in zip(scores, weights, strict=True)) / total if total else 0.0
+
+
+def _require_line_non_regression(
     result: GateResult,
     continued_from: str | None,
-    cross_type_evidence: dict[str, Any] | None,
-    floors: dict[str, float],
+    evidence: LineEvidence | None,
+    missing: str | None,
 ) -> None:
-    """A continued run must prove it did not degrade the OTHER document types.
+    """A run that continued an adapter must not have lost ground on any line.
 
-    Continued training compounds drift, and a patch aimed at one type can quietly
-    degrade the others (arch §12).
+    Continued training compounds drift (decision 2026-10-23): each cycle starts
+    from the last one's weights, so a line can slip a little every cycle. Each
+    line is therefore held to the BEST any run since the last run from the base
+    scored on it (``LineComparison.reference``), not only to the parent: a slip
+    under δ per cycle still adds up against the best, and blocks once it is
+    more than δ.
+
+    The test is the main gate's non-inferiority, per line: a paired bootstrap
+    over the line's real documents scored in both reports, whose 95% lower bound
+    on (candidate − reference) must sit above −``DEFAULT_DELTA``. A line with
+    fewer than :data:`LINE_MIN_DOCUMENTS` such documents is not compared, and is
+    named in a warning. A line the parent's release serves and the candidate
+    does not blocks as ``line:<line>`` too: its policies would move to the base
+    model unannounced.
+
+    No comparable parent scores at all (``missing`` says why: the parent's report
+    is gone, or on another frozen set or scoring code) blocks
+    ``line_regression_evidence``: drift nobody can measure is not drift that did
+    not happen. The remedy is the next cycle from the base (``--fresh``).
     """
     if not continued_from:
         return
-    if not cross_type_evidence:
+    if evidence is None:
         _block(
-            result, "cross_type_regression_evidence",
-            f"this run continued from {continued_from} rather than retraining from base, so "
-            "promotion requires cross-type regression evidence: continued training compounds "
-            "drift, and a patch aimed at one document type can quietly degrade the others "
-            "(arch §12).",
+            result, "line_regression_evidence",
+            f"this run continued {continued_from}, so each line must be compared with the runs "
+            f"before it, and that cannot be done: {missing or 'no per-line scores of the parent'}. "
+            "Train the next cycle from the base (finetune or all with --fresh, without --version), "
+            "or keep the parent's report on this frozen set.",
         )
         return
-
-    for doc_type, metrics in sorted(cross_type_evidence.items()):
-        candidate_side = metrics.get("candidate") or {}
-        baseline_side = metrics.get("current") or {}
-        if not candidate_side or not baseline_side:
-            # An empty entry is the absence of evidence, not evidence of no
-            # regression. Passing it made the whole requirement satisfiable
-            # with `{"acord": {}}`.
-            _block(
-                result, f"cross_type:{doc_type}",
-                f"cross-type evidence for {doc_type} is empty (candidate: "
-                f"{len(candidate_side)} metric(s), baseline: {len(baseline_side)}). A "
-                "continued run must show it did not degrade the other document types; an "
-                "empty entry shows nothing.",
-            )
-            continue
-
-        sub = promotion_gate(
-            candidate_side, baseline_side,
-            floors=floors,
-            require_all_measured=False,
-            # The per-type slice is small and its job is regression detection,
-            # not proving the type got better.
-            fixes_defect=f"cross-type regression check for {doc_type}",
+    for line in evidence.dropped:
+        _block(
+            result, f"line:{line}",
+            f"{line} is served by {continued_from}'s release and not by this one, so its policies "
+            "would go to the base model. Train on that line's documents again, or waive "
+            f"line:{line} if dropping it is intended.",
         )
-        if not sub.passed:
+    if evidence.added:
+        result.warnings.append(
+            f"this run serves {', '.join(evidence.added)}, which {continued_from}'s release does "
+            "not: there is no earlier run to compare them with.")
+    if evidence.thin:
+        result.warnings.append(
+            f"not compared with the runs before, fewer than {LINE_MIN_DOCUMENTS} real documents "
+            "scored in both reports: "
+            + ", ".join(f"{line} ({n})" for line, n in sorted(evidence.thin.items())))
+    if not evidence.compared and not evidence.dropped:
+        warning = (f"this run continued {continued_from}, but no line had {LINE_MIN_DOCUMENTS} or "
+                   "more real documents scored in both reports, so no line was compared with the "
+                   "runs before it.")
+        log.warning("%s", warning)
+        result.warnings.append(warning)
+    for comparison in sorted(evidence.compared, key=lambda c: c.line):
+        interval = paired_bootstrap(
+            f"line:{comparison.line}", comparison.reference_scores, comparison.candidate_scores,
+            current_weights=comparison.reference_weights,
+            candidate_weights=comparison.candidate_weights,
+        )
+        held = interval.non_inferior(DEFAULT_DELTA)
+        before = _weighted_mean(comparison.reference_scores, comparison.reference_weights)
+        after = _weighted_mean(comparison.candidate_scores, comparison.candidate_weights)
+        result.line_verdicts.append({
+            "line": comparison.line,
+            "held_to": comparison.reference,
+            "reference": round(before, 6),
+            "candidate": round(after, 6),
+            "delta": DEFAULT_DELTA,
+            "non_inferior": held,
+            "interval": interval.as_dict(),
+        })
+        if not held:
             _block(
-                result, f"cross_type:{doc_type}",
-                f"the continued run regressed {doc_type}: {'; '.join(sub.blocking_reasons)}",
+                result, f"line:{comparison.line}",
+                f"{comparison.line} is not non-inferior to {comparison.reference}, the best run on it "
+                f"since the last run from the base: field match {before:.4f} -> {after:.4f}, 95% CI "
+                f"lower bound {interval.lower:+.4f} is not above -{DEFAULT_DELTA:.3f} over "
+                f"{interval.documents} document(s). A continued run must not lose ground on a line "
+                "it already read.",
             )
 
 

@@ -26,10 +26,9 @@ import logging
 from collections.abc import Iterable
 from pathlib import Path
 
-from common.config import lobs_in_family
 from common.constants import ACORD_FORMS, ACTIVE_DOC_TYPES
 from common.prompts import PROMPT_TEMPLATE_VERSION, render_system_prompt
-from common.schemas import CANONICAL_FAMILY
+from common.schemas import SNAPSHOT_LINES
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +59,7 @@ def reference_targets() -> list[tuple[str, str | None, str | None]]:
             continue
         targets.append((doc_type, None, None))
         if doc_type == "policy":
-            targets += [(doc_type, None, lob) for lob in lobs_in_family(CANONICAL_FAMILY)]
+            targets += [(doc_type, None, lob) for lob in SNAPSHOT_LINES]
     return targets
 
 
@@ -73,7 +72,7 @@ def window_targets() -> list[tuple[str, str]]:
     from common.schema_sections import groups_for
     from common.schemas import is_common_model
 
-    return [(lob, group) for lob in lobs_in_family(CANONICAL_FAMILY)
+    return [(lob, group) for lob in SNAPSHOT_LINES
             if is_common_model("policy", None, lob) for group in groups_for(lob)]
 
 

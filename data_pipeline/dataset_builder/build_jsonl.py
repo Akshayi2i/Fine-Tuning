@@ -433,21 +433,21 @@ def _held_unprinted(plan: Any, lob: Any, unprinted: list[tuple[str, str, set[int
 def classify_rows(
     document: SourceDocument, split: str, modes: tuple[str, ...], *, seed: int = 42,
 ) -> list[dict[str, Any]]:
-    """The family adapter's line question for one policy: one row per mode.
+    """The adapter's line question for one policy: one row per mode.
 
-    Stage 2 of line detection (serving.doc_type_classifier): once the base model
-    has placed a policy in a layout family, the family's own adapter chooses
-    among the family's lines - where the confusable pairs are (homeowners and
-    dwelling fire; personal auto, motorcycle and RV). The messages are the
+    A later stage of line detection (serving.doc_type_classifier): the adapter
+    itself chooses the policy's line among every known line - where the
+    confusable pairs are (homeowners and dwelling fire; personal auto,
+    motorcycle and RV) - rather than the base model alone. The messages are the
     classifier's own (``classifier_messages``) over the input serving picks
     (``classifier_input``: the first two pages' images, their text joined, none
     under ``image_only``) - the text in the row's own mode, corrupted under
     ``noisy_ocr_image`` as a window's is, so the input trained is the input
     served. Serving does not ask this question yet (``build_corpus`` refuses
     the rows until it does). Nothing for a document that is no policy, names
-    several lines, or has a line in no family.
+    several lines, or has a line with no schema.
     """
-    from common.config import lob_to_layout_family, lobs_in_family
+    from common.lob import known_lines
     from serving.doc_type_classifier import (
         CLASSIFIER_PAGES,
         classifier_input,
@@ -457,10 +457,9 @@ def classify_rows(
 
     lines = document.lob if isinstance(document.lob, list) else [document.lob]
     line = known_line(lines[0]) if document.doc_type == "policy" and len(lines) == 1 else None
-    family = lob_to_layout_family().get(line) if line else None
-    if family is None:
+    if line is None:
         return []
-    choices = list(lobs_in_family(family))
+    choices = sorted(known_lines())
     # Page N is the N-th image and the N-th text, as in every other row.
     pages = range(1, len(document.image_paths) + 1)
     rows = []
@@ -505,12 +504,12 @@ def build_corpus(
     with the same seed. Train always gets one row per epoch; there is no path
     that expands a train document into all three regimes.
 
-    ``with_classify_rows`` would add, per policy whose line has a layout
-    family, the family adapter's line question (:func:`classify_rows`). It is
-    refused: those rows train the family stage's question, which serving does
-    not ask yet - its classifier asks every document the type-and-line
-    question - so the rows would teach an answer nothing reads. The family
-    stage at serving and these rows are turned on together, once the base
+    ``with_classify_rows`` would add, per policy with a known line, the
+    adapter's line question (:func:`classify_rows`). It is refused: serving
+    does not ask the adapter that question yet - its classifier asks every
+    document the type-and-line question on the base model - so the rows would
+    teach an answer nothing reads. That stage at serving and these rows are
+    turned on together, once the base
     model's zero-shot line detection has been measured and found short of its
     target; that is also when ``common.tasks.CORPUS_TASKS`` gains ``classify``.
 
@@ -524,10 +523,10 @@ def build_corpus(
 
     if with_classify_rows:
         raise CorpusBuildError(
-            "with_classify_rows trains the family stage's line question, which serving does not "
-            "ask yet: its classifier asks every document the type-and-line question. Add the "
-            "family stage to serving and turn both on together, or the rows teach an answer "
-            "nothing reads."
+            "with_classify_rows trains the adapter's line question, which serving does not ask "
+            "it yet: its classifier asks every document the type-and-line question on the base "
+            "model. Add that stage to serving and turn both on together, or the rows teach an "
+            "answer nothing reads."
         )
     result = BuildResult(rows_by_split={"train": [], "val": [], "test": []})
     common_model_failures: list[tuple[str, str]] = []
@@ -568,7 +567,7 @@ def build_corpus(
                     ) from exc
             continue
 
-        if with_classify_rows:  # refused above until serving asks the family question
+        if with_classify_rows:  # refused above until serving asks the adapter's line question
             rows += classify_rows(document, split, epoch_modes, seed=seed)
 
         # Reject, never truncate. A row over its task budget would be clipped on
@@ -602,10 +601,10 @@ def build_corpus(
             # row (the seed is group_id). twin_index is None for real documents.
             row["carrier"] = document.carrier
             row["twin_index"] = document.twin_index
-            # Which render of its twin it is (digital / scanned): a scope's view
+            # Which render of its twin it is (digital / scanned): the training view
             # trains one render of a twin per epoch (training.corpus_view).
             row["render_mode"] = document.render_mode
-            # What a scope's scanned_share counts (training.data_mix), and the
+            # What the data mix's scanned_share counts (training.data_mix), and the
             # scanned subset of a validation report.
             row["is_scanned"] = document.is_scanned
             if assignment.half_of(document.family):

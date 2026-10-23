@@ -30,10 +30,10 @@ from typing import Any
 
 from evaluation.metrics.lob_detection import DETECTION_FLOOR, PER_LINE_MIN_SUPPORT, score_lob_detection
 
-#: The thresholds the sweep tries. A family threshold above the line threshold
-#: is skipped: no reading could then be uncertain within its family.
+#: The thresholds the sweep tries. An uncertain threshold above the line
+#: threshold is skipped: no reading could then be uncertain.
 SWEEP_LINE_THRESHOLDS: tuple[float, ...] = (0.80, 0.85, 0.90, 0.95, 0.99)
-SWEEP_FAMILY_THRESHOLDS: tuple[float, ...] = (0.40, 0.50, 0.60, 0.70)
+SWEEP_UNCERTAIN_THRESHOLDS: tuple[float, ...] = (0.40, 0.50, 0.60, 0.70)
 
 
 @dataclass
@@ -78,7 +78,8 @@ class _ReadOnce:
 
 
 def serving_lob_thresholds() -> tuple[float, float]:
-    """``(line threshold, family threshold)`` as the endpoint would serve them:
+    """``(line threshold, uncertain threshold)`` as the endpoint would serve them:
+
     configs/inference/vllm_serving.yaml, else :func:`serving.pipeline.extract`'s
     own defaults."""
     from serving.pipeline import extract
@@ -88,7 +89,7 @@ def serving_lob_thresholds() -> tuple[float, float]:
     tuning = serving_thresholds()
     return (
         tuning.get("lob_confidence_threshold", defaults["lob_confidence_threshold"].default),
-        tuning.get("lob_family_threshold", defaults["lob_family_threshold"].default),
+        tuning.get("lob_uncertain_threshold", defaults["lob_uncertain_threshold"].default),
     )
 
 
@@ -134,7 +135,7 @@ def detection_cases(
     return cases
 
 
-def _resolve(case: DetectionCase, reader: _ReadOnce, line_threshold: float, family_threshold: float) -> Any:
+def _resolve(case: DetectionCase, reader: _ReadOnce, line_threshold: float, uncertain_threshold: float) -> Any:
     """Serving's own resolution of ``case`` with no line and no hint."""
     from serving.adapter_router import Route
     from serving.pipeline import _resolve_lob
@@ -145,7 +146,7 @@ def _resolve(case: DetectionCase, reader: _ReadOnce, line_threshold: float, fami
                    schema_doc_type="policy", schema_acord_form=None)
     request = replace(case.request, known_lob=None, lob_hypothesis=None)
     return _resolve_lob(request, reader, route_, detect=True,
-                        line_threshold=line_threshold, family_threshold=family_threshold)
+                        line_threshold=line_threshold, uncertain_threshold=uncertain_threshold)
 
 
 def _summary(resolved: Sequence[tuple[DetectionCase, Any]], *, floor: float, min_support: int) -> dict[str, Any]:
@@ -189,11 +190,11 @@ def measure_lob_detection(
     classifier: Any,
     *,
     line_threshold: float,
-    family_threshold: float,
+    uncertain_threshold: float,
     floor: float = DETECTION_FLOOR,
     min_support: int = PER_LINE_MIN_SUPPORT,
     line_thresholds: Sequence[float] = SWEEP_LINE_THRESHOLDS,
-    family_thresholds: Sequence[float] = SWEEP_FAMILY_THRESHOLDS,
+    uncertain_thresholds: Sequence[float] = SWEEP_UNCERTAIN_THRESHOLDS,
 ) -> dict[str, Any]:
     """How the line ``classifier`` reads would have routed each of ``cases``.
 
@@ -209,11 +210,11 @@ def measure_lob_detection(
 
     readers = [(case, _ReadOnce(classifier)) for case in cases]
     kwargs = {"floor": floor, "min_support": min_support}
-    resolved = [(case, _resolve(case, reader, line_threshold, family_threshold)) for case, reader in readers]
+    resolved = [(case, _resolve(case, reader, line_threshold, uncertain_threshold)) for case, reader in readers]
     body = _summary(resolved, **kwargs)
     body.update({
         "line_threshold": line_threshold,
-        "family_threshold": family_threshold,
+        "uncertain_threshold": uncertain_threshold,
         "floor": floor,
         "min_support": min_support,
         "clears_floor": body["overall"] is not None and body["overall"] >= floor and not body["below_floor"],
@@ -223,15 +224,15 @@ def measure_lob_detection(
 
     sweep = []
     for line_at in line_thresholds:
-        for family_at in family_thresholds:
-            if family_at > line_at:
+        for uncertain_at in uncertain_thresholds:
+            if uncertain_at > line_at:
                 continue
-            routed = [(case, _resolve(case, reader, line_at, family_at)) for case, reader in readers]
+            routed = [(case, _resolve(case, reader, line_at, uncertain_at)) for case, reader in readers]
             summary = _summary(routed, **kwargs)
             total = summary["documents"] or 1
             sources = summary["sources"]
             sweep.append({
-                "line_threshold": line_at, "family_threshold": family_at,
+                "line_threshold": line_at, "uncertain_threshold": uncertain_at,
                 "accuracy": summary["overall"],
                 "confidently_wrong_rate": summary["confidently_wrong_rate"],
                 "detected_share": round(sources.get("detected", 0) / total, 4),

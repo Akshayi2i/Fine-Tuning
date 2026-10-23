@@ -1,6 +1,5 @@
 """Real documents of one line with no twins and no split - the CGL source data -
-turned into bundles, and the casualty_fleet scope they train
-(data_pipeline.ingestion.prepare_bundles.prepare_original_bundles)."""
+turned into bundles (data_pipeline.ingestion.prepare_bundles.prepare_original_bundles)."""
 
 from __future__ import annotations
 
@@ -155,23 +154,38 @@ def test_two_documents_that_would_share_a_folder_are_refused(tmp_path):
         prepare_original_bundles(root, tmp_path / "bundles", lob="gl")
 
 
-def test_a_line_outside_the_scope_is_refused(tmp_path):
+def test_a_line_outside_lines_is_refused(tmp_path):
     root = _source(tmp_path, {("Utica First", "dec_01"): _gl_gold()})
-    from common.scopes import get_scope
 
-    with pytest.raises(BundleError, match="outside the scope"):
-        prepare_original_bundles(root, tmp_path / "bundles", lob="gl", lines=get_scope("personal_lines").lines)
+    with pytest.raises(BundleError, match=r"outside --lines \['homeowners', 'personal_auto'\]"):
+        prepare_original_bundles(root, tmp_path / "bundles", lob="gl",
+                                 lines=frozenset({"homeowners", "personal_auto"}))
 
 
 def test_the_command_line_needs_the_line_of_real_documents_alone(tmp_path, capsys):
     from data_pipeline.ingestion.prepare_bundles import main
 
     root = _source(tmp_path, {("Utica First", "dec_01"): _gl_gold()})
-    assert main(["--input", str(root), "--out", str(tmp_path / "bundles"), "--scope", "casualty_fleet"]) == 1
+    assert main(["--input", str(root), "--out", str(tmp_path / "bundles")]) == 1
     assert "pass --lob" in capsys.readouterr().err
-    assert main(["--input", str(root), "--out", str(tmp_path / "bundles"), "--scope", "casualty_fleet",
-                 "--lob", "gl"]) == 0
+    assert main(["--input", str(root), "--out", str(tmp_path / "bundles"), "--lob", "gl"]) == 0
     assert (tmp_path / "bundles" / "gl__utica_first__dec_01" / "metadata.json").is_file()
+
+
+def test_the_command_line_keeps_the_lines_it_is_given(tmp_path, capsys):
+    """--lines is optional (every line by default); given, the real documents'
+    line must be one of them, and a line with no schema is refused outright."""
+    from data_pipeline.ingestion.prepare_bundles import main
+
+    root = _source(tmp_path, {("Utica First", "dec_01"): _gl_gold()})
+    out = tmp_path / "bundles"
+    assert main(["--input", str(root), "--out", str(out), "--lob", "gl", "--lines", "homeowners"]) == 1
+    assert "outside --lines" in capsys.readouterr().err
+    assert main(["--input", str(root), "--out", str(out), "--lob", "gl", "--lines", "no_such_line"]) == 1
+    assert "no canonical policy schema" in capsys.readouterr().err
+    assert not out.exists() or not any(out.iterdir())
+    assert main(["--input", str(root), "--out", str(out), "--lob", "gl", "--lines", "general_liability"]) == 0
+    assert "--lines gl" in capsys.readouterr().out                 # the audit it points to
 
 
 def test_the_command_line_needs_an_out_folder_for_real_documents(tmp_path, capsys):
@@ -180,16 +194,15 @@ def test_the_command_line_needs_an_out_folder_for_real_documents(tmp_path, capsy
     from data_pipeline.ingestion.prepare_bundles import main
 
     root = _source(tmp_path, {("Utica First", "dec_01"): _gl_gold()})
-    assert main(["--input", str(root), "--scope", "casualty_fleet", "--lob", "gl"]) == 1
+    assert main(["--input", str(root), "--lob", "gl"]) == 1
     assert "pass --out" in capsys.readouterr().err
 
 
 def test_the_cgl_code_bundles_as_general_liability(tmp_path):
     root = _source(tmp_path, {("Utica First", "dec_01"): _gl_gold(code="GL_ADDITIONAL_INSURED")})
-    from common.scopes import get_scope
 
     out = tmp_path / "bundles"
-    report = prepare_original_bundles(root, out, lob="CGL", lines=get_scope("casualty_fleet").lines)
+    report = prepare_original_bundles(root, out, lob="CGL", lines=frozenset({"gl"}))
 
     assert report.documents == 1
     meta = json.loads((out / "gl__utica_first__dec_01" / "metadata.json").read_text(encoding="utf-8"))
@@ -370,22 +383,16 @@ def test_the_corpus_build_records_the_delivered_held_out_documents():
 
 
 # --------------------------------------------------------------------------
-# The casualty_fleet scope
+# The general liability line
 # --------------------------------------------------------------------------
 
 
-def test_the_casualty_fleet_adapter_covers_only_the_line_it_trains_on():
-    """Serving routes by a release's lines: listed before they are trained,
-    auto, wc and umbrella policies would reach an adapter that never saw them."""
-    from common.scopes import assert_one_output_shape, get_scope
+def test_every_spelling_of_general_liability_is_one_line():
+    from common.lob import lob_lines, within_lines
 
-    scope = get_scope("casualty_fleet")
-    assert scope.lines == frozenset({"gl"})
-    assert scope.covers_lob("gl") and scope.covers_lob("general_liability") and scope.covers_lob("cgl")
-    assert not scope.covers_lob("auto") and not scope.covers_lob("wc") and not scope.covers_lob("umbrella")
-    # Its corpus holds general liability alone, whatever else the tenant holds.
-    assert_one_output_shape(scope, ["gl", "auto"])
-    assert scope.run_id("v1") == "casualty_fleet-v1"
+    assert lob_lines("cgl") == lob_lines("general_liability") == lob_lines("gl") == frozenset({"gl"})
+    assert within_lines("cgl", frozenset({"gl"}))
+    assert not within_lines("auto", frozenset({"gl"}))
 
 
 def test_the_cgl_code_reads_the_general_liability_schema():
@@ -394,15 +401,16 @@ def test_the_cgl_code_reads_the_general_liability_schema():
     assert schema_key("policy", None, "cgl") == schema_key("policy", None, "gl") == "policy:gl"
 
 
-def test_the_smoke_run_trains_the_scope_it_is_given(tmp_path):
+def test_the_smoke_run_of_the_cgl_batch_trains_the_one_adapter(tmp_path):
+    """No scope to pick any more: a CGL smoke run trains the policy adapter on
+    whatever its batch holds, as a real cycle does."""
     from orchestration.smoke_run import commands, parse_args
 
-    args, _ = parse_args(["--scope", "casualty_fleet", "--batch", "cgl-v1", "--tenant", "smoke-cgl"])
+    args, _ = parse_args(["--batch", "cgl-v1", "--tenant", "smoke-cgl"])
     steps = commands(batch_dir=tmp_path, subset_dir=tmp_path, tenant=args.tenant, version="v0",
-                     check_out=tmp_path, scope=args.scope)
+                     check_out=tmp_path)
     for step in ("preflight", "finetune"):
-        assert steps[step][steps[step].index("--scope") + 1] == "casualty_fleet"
-    default = commands(batch_dir=tmp_path, subset_dir=tmp_path, tenant="smoke", version="v0", check_out=tmp_path)
-    assert default["finetune"][default["finetune"].index("--scope") + 1] == "personal_lines"
+        assert "--scope" not in steps[step]
+        assert steps[step][steps[step].index("--tenant") + 1] == "smoke-cgl"
     with pytest.raises(SystemExit):
-        parse_args(["--scope", "no_such_scope"])
+        parse_args(["--scope", "casualty_fleet", "--tenant", "smoke-cgl"])

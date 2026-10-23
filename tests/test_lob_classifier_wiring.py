@@ -1,7 +1,8 @@
 """The endpoint's line classifier: built at cold start when detection is on.
 
-A policy's line decides which release's adapter reads it, so the line is read
-first, by the base model with no adapter. The endpoint builds that classifier
+A policy's line decides whether the release's adapter or the base model reads
+it, and against which schema, so the line is read first, by the base model with
+no adapter. The endpoint builds that classifier
 only when routing.detect_lob is on and the engine really holds the base model;
 otherwise it holds what it held before detection existed.
 """
@@ -56,12 +57,17 @@ def test_the_line_classifier_reads_with_the_base_weights_alone():
     assert isinstance(classifier, ZeroShotClassifier) and classifier.adapter == NO_ADAPTER
 
 
-def test_an_engine_serving_releases_as_loras_holds_the_base():
+def test_an_engine_serving_the_release_as_a_lora_holds_the_base():
+    """A release that leaves lines to the base model is served as a LoRA on it."""
+    from serving.release_router import ServedRelease, ServingPlan
     from serving.vllm_entrypoint import line_classifier
 
     merged_or_lora = SimpleNamespace(is_base=False)
-    two_releases = SimpleNamespace(served=["release-a", "release-b"])
-    assert line_classifier(merged_or_lora, two_releases) is not None
+    some_lines = ServingPlan(ServedRelease("v3", "base@abc1234", "merged", doc_types=("policy",),
+                                           lines=("homeowners",)))
+    every_line = ServingPlan(ServedRelease("v3", "base@abc1234", "merged", doc_types=("policy",)))
+    assert line_classifier(merged_or_lora, some_lines) is not None
+    assert line_classifier(merged_or_lora, every_line) is None        # the engine is its merged model
 
 
 def test_an_engine_holding_one_merged_release_reads_no_line():

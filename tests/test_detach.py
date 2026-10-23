@@ -59,10 +59,16 @@ def test_the_pipeline_cli_detaches_on_the_pod_and_runs_nothing_here(launched, mo
     from orchestration import run as cli
 
     monkeypatch.setenv("RUNPOD_POD_ID", "pod-123")
-    monkeypatch.setattr(cli, "run_scopes", lambda *a, **k: pytest.fail("ran in the foreground"))
-    assert cli.main(["finetune", "--out-version", "v1", "--dry-run"]) == 0
+    monkeypatch.setattr(cli, "run_command", lambda *a, **k: pytest.fail("ran in the foreground"))
+    monkeypatch.setattr(cli, "cycle_version", lambda *a, **k: pytest.fail("decided a version here"))
+    assert cli.main(["finetune", "--version", "v1", "--dry-run"]) == 0
     [cmd] = launched
-    assert cmd[-4:] == ["finetune", "--out-version", "v1", "--dry-run"]
+    assert cmd[-4:] == ["finetune", "--version", "v1", "--dry-run"]
+
+    # A fresh cycle detaches as given: the detached run takes the next version,
+    # so the number is decided once, where the work happens.
+    assert cli.main(["finetune", "--dry-run"]) == 0
+    assert launched[-1][-2:] == ["finetune", "--dry-run"]
 
 
 def test_switching_the_endpoint_stays_in_the_foreground(launched, monkeypatch):

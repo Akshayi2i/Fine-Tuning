@@ -38,19 +38,6 @@ SERVING_CONFIG = CONFIG_DIR / "inference" / "vllm_serving.yaml"
 SHARED_VISION_CONFIG = CONFIG_DIR / "shared" / "vision.yaml"
 SHARED_SEQUENCE_CONFIG = CONFIG_DIR / "shared" / "sequence.yaml"
 
-#: WHAT a run covers — which document types and tasks (arch v2.1 §4.1). Read by
-#: training, orchestration, the gate and serving alike, for the same reason the
-#: shared files above are: a scope two stages disagree about is a model gated on
-#: one coverage and served as another.
-SCOPES_CONFIG = CONFIG_DIR / "scopes.yaml"
-
-#: WHICH LOBs share a visual grammar (Fideon SPEC_09 §2.1). One table, two readers:
-#: training uses it to decide which documents a family's adapter trains on, and
-#: the schema registry uses it to decide which canonical schemas to register.
-#: Two copies of this mapping would eventually disagree, and the symptom would be
-#: a document extracted by an adapter that never saw its layout.
-LAYOUT_FAMILIES_CONFIG = CONFIG_DIR / "layout_families.yaml"
-
 
 class ConfigError(RuntimeError):
     """Raised on a missing config, a missing required env var, or a broken invariant."""
@@ -163,70 +150,6 @@ def env(name: str, default: str | None = None, *, required: bool = False) -> str
             f"required environment variable {name} is not set — see .env.example for the full list"
         )
     return value
-
-
-@lru_cache(maxsize=1)
-def scopes_config() -> dict[str, Any]:
-    """The raw scope declarations. Parsed and validated by :mod:`common.scopes`."""
-    return load_yaml(SCOPES_CONFIG)
-
-
-@lru_cache(maxsize=1)
-def layout_families_config() -> dict[str, Any]:
-    """The raw family declarations. See :func:`lobs_in_family`."""
-    return load_yaml(LAYOUT_FAMILIES_CONFIG)
-
-
-def lobs_in_family(family: str) -> tuple[str, ...]:
-    """The lines of business belonging to one layout family, in declared order.
-
-    Order is preserved because it is the order the LOBs are registered in and
-    reported in; a set would make the schema registry's iteration order depend on
-    hash seeding, and a corpus manifest that lists its schemas in a different
-    order on every build cannot be diffed across model versions.
-    """
-    families = layout_families_config().get("families") or {}
-    entry = families.get(family)
-    if entry is None:
-        raise ConfigError(
-            f"no layout family {family!r} in {LAYOUT_FAMILIES_CONFIG.name}; "
-            f"declared families: {sorted(families)}"
-        )
-    return tuple(entry.get("lobs") or ())
-
-
-class UnknownLineError(ConfigError):
-    """Raised for a line of business in no layout family and not known to have none."""
-
-
-@lru_cache(maxsize=1)
-def lob_to_layout_family() -> dict[str, str | None]:
-    """LOB_TO_LAYOUT_FAMILY: every known line -> its layout family, or None.
-
-    The one table (``configs/layout_families.yaml``): a line listed twice is
-    refused, because training and serving would each pick one.
-    """
-    config = layout_families_config()
-    mapping: dict[str, str | None] = {}
-    entries = [(family, line) for family, entry in (config.get("families") or {}).items()
-               for line in entry.get("lobs") or ()]
-    entries += [(None, line) for line in config.get("no_family") or ()]
-    for family, line in entries:
-        if line in mapping:
-            raise ConfigError(f"line {line!r} is listed twice in {LAYOUT_FAMILIES_CONFIG.name} "
-                              f"({mapping[line]!r} and {family!r}); it must have one layout family")
-        mapping[line] = family
-    return mapping
-
-
-def layout_family_of(line: str) -> str | None:
-    """The layout family of one canonical line; None when it has none. Raises when unknown."""
-    mapping = lob_to_layout_family()
-    if line not in mapping:
-        raise UnknownLineError(
-            f"line of business {line!r} is in no layout family and not listed under no_family in "
-            f"{LAYOUT_FAMILIES_CONFIG.name}; it is never routed silently.")
-    return mapping[line]
 
 
 @lru_cache(maxsize=1)
@@ -454,6 +377,40 @@ def assert_effective_batch(config: dict[str, Any], n_gpu: int = 1) -> None:
         )
 
 
+#: The ``continued_training`` keys that must be positive when set.
+_POSITIVE_CONTINUED = ("num_train_epochs", "learning_rate")
+
+
+def continued_training_problem(config: dict[str, Any]) -> str | None:
+    """What is wrong with a training config's ``continued_training`` block, or None.
+
+    Its values replace the ``optimization`` block's for a run that continues an
+    adapter (``training.train.optimization_for``). A key that block does not
+    have - ``epochs:`` for ``num_train_epochs:`` - would be silently unused, and
+    an epoch count or learning rate of 0 would be accepted here and fail only
+    once a continued run reached it.
+    """
+    block = config.get("continued_training")
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        return f"continued_training must map optimization keys to values, got {block!r}"
+    known = set(config.get("optimization") or {})
+    for key, value in block.items():
+        if key not in known:
+            return (f"continued_training.{key} is not a key of the optimization block "
+                    f"({', '.join(sorted(known))}), so it would be silently unused")
+        if value is None or key not in _POSITIVE_CONTINUED:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+            # PyYAML reads 5e-5 (no dot) as text, not a number.
+            hint = " (YAML reads 5e-5 as text: write 5.0e-5)" if isinstance(value, str) else ""
+            return f"continued_training.{key} must be a positive number or null, got {value!r}{hint}"
+        if key == "num_train_epochs" and value != int(value):
+            return f"continued_training.num_train_epochs must be a whole number of passes, got {value!r}"
+    return None
+
+
 def assert_model_revision_pinned() -> None:
     """A floating base-model revision makes a regression unattributable."""
     revision = base_model_config().get("model", {}).get("revision")
@@ -473,14 +430,14 @@ def validate_all(*, require_pinned_revision: bool = False) -> None:
     resolution_cap_px()
     assert_resolution_parity()
     assert_task_budgets_are_coherent()
-    # Every scope's training config, not one literal name: a scope pointing at a
-    # missing or incoherent config must fail at launch rather than when that
-    # scope is first trained.
-    from common.scopes import assert_scopes_are_coherent, load_scopes
+    from common.adapter import ADAPTER
 
-    assert_scopes_are_coherent()
-    for name in sorted({scope.training_config for scope in load_scopes().values()}):
-        assert_effective_batch(training_config(name))
+    training = training_config(ADAPTER.training_config)
+    assert_effective_batch(training)
+    # Before any work, not when a continued run reaches it.
+    problem = continued_training_problem(training)
+    if problem:
+        raise ConfigError(f"configs/training/{ADAPTER.training_config}.yaml: {problem}")
     if require_pinned_revision:
         assert_model_revision_pinned()
 

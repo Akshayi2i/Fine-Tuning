@@ -1,16 +1,17 @@
 """Scope-addressed artifact paths (arch v2.1 §4.1, §18).
 
-Two properties, and the first one is the whole reason the design is shaped this
-way:
+The policy adapter (common.adapter) is filed under its name, ``scope/policy``;
+older runs were filed as ``unified``. Two properties, and the first one is the
+whole reason the design is shaped this way:
 
-1. **The unified scope renders byte-identically to what it always rendered.**
+1. **The unified layout renders byte-identically to what it always rendered.**
    ``adapters/foundation/v1``, ``merged-models/unified/v1`` and
    ``eval-reports/v1/gate_decision.json`` exist in Blob today. If any of those
    strings moves, the artifacts are still there and nothing can address them —
    a silent break, discovered when a deploy pulls an empty prefix.
 
-2. **Two scopes at one version never collide.** Same version tag, different
-   scope, different key, for every artifact a run produces.
+2. **Two names at one version never collide.** Same version tag, different
+   name, different key, for every artifact a run produces.
 
 The expected strings below are written out as literals rather than derived, so
 the test fails when a path changes rather than changing with it.
@@ -62,7 +63,7 @@ def test_staging_mirrors_blob_for_a_scoped_run():
 
 
 # --------------------------------------------------------------------------
-# Two scopes, one version
+# Two names, one version
 # --------------------------------------------------------------------------
 
 
@@ -79,8 +80,9 @@ SCOPED_HELPERS = [
 
 @pytest.mark.parametrize(("label", "render"), SCOPED_HELPERS)
 def test_two_scopes_at_one_version_never_share_a_key(label, render):
-    """A policy run and a lossrun run are both "v2". Sharing a key would mean the
-    second one silently overwrites the first — its weights, or its gate verdict."""
+    """An older unified run and the policy adapter can both be "v2". Sharing a
+    key would mean the second one silently overwrites the first — its weights,
+    or its gate verdict."""
     keys = {render("unified"), render("policy"), render("lossrun")}
     assert len(keys) == 3, f"{label} collides across scopes: {sorted(keys)}"
 
@@ -114,15 +116,3 @@ def test_scoped_artifacts_keep_their_tenancy_classification():
     sub-prefix inherits it — model weights stay shared, not tenant-scoped."""
     assert not paths.is_tenant_scoped(paths.scoped_adapter_dir("policy", "v2"))
     assert not paths.is_tenant_scoped(paths.merged_model_dir("v2", scope="policy"))
-
-
-def test_every_declared_scope_renders_a_distinct_adapter_path():
-    """Config-driven: whatever scopes exist in configs/scopes.yaml, none of them
-    may share an artifact prefix."""
-    from common.scopes import load_scopes
-
-    rendered = {
-        scope.name: paths.scoped_adapter_dir(scope.name, "v2")
-        for scope in load_scopes().values()
-    }
-    assert len(set(rendered.values())) == len(rendered), rendered

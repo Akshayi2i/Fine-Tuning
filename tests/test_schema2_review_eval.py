@@ -413,10 +413,12 @@ def test_a_self_contained_report_scores_as_before():
 #: to look for ("OH", "1") is no longer counted as grounded (0.3333 before); and
 #: the page-list measures added since (accuracy plan, stage 0.3); and the line
 #: it is filed under, gl until gl moved to the common model (1.1.0), every
-#: number unchanged by the move.
+#: number unchanged by the move; and how many values the line's accuracy is
+#: over, which a continued run's gate reads (decision 2026-10-23).
 PINNED_OLD_STYLE = {
     "auto_accept_error_rate": 0.2222, "confusable_misattribution_rate": 0.0,
     "false_null_rate": 0.1667, "field_accuracy_by_lob": {SELF_CONTAINED: 0.6667},
+    "field_scored_by_lob": {SELF_CONTAINED: 3},
     "field_exact_match": 0.6667, "field_f1": 0.6667, "field_f1_list_fields": 0.6667,
     "field_normalized_match": 0.6667, "field_precision": 0.6667, "field_recall": 0.6667,
     "hallucination_rate": 0.3571, "list_field_precision": 0.6667, "list_field_recall": 0.6667,

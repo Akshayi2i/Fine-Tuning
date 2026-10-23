@@ -341,10 +341,24 @@ def _pod_volume(tenant: str, doc_type: str | None = None, source_id: str | None 
              "tenant: check each by hand"),
             (_prefix(f"{testing}/metrics"), "their metrics, filed the same way: check each by hand"),
         ]
+    # staging_parent_adapter_dir checks its scope and version, so it takes no
+    # '*': the glob is built on a real version's folder, two levels up.
+    parents = paths.staging_parent_adapter_dir("policy", "v1").rsplit("/", 2)[0]
+    # serving.vllm_entrypoint.cold_start's default adapter_root.
+    serving_cache = f"{paths.staging_root().rstrip('/')}/serving-adapters"
     entries += [
         (_prefix(paths.staging_train_data_dir("*", "*")),
          "each run's staged training rows (labels included), one folder per scope and version - "
          "delete the folders of the runs under trained_weights"),
+        (_prefix(f"{parents}/*/*"),
+         "the parent adapters copied for continued training, one folder per scope and version that "
+         "continued one, holding its parent's weights (the run's continued_from names it) - cleared "
+         "only after a successful package, so a failed or stopped cycle leaves its copy: delete the "
+         "folders of the runs under trained_weights"),
+        (_prefix(serving_cache),
+         "adapters copied from Blob to serve releases as LoRAs on the base "
+         "(serving.vllm_entrypoint.cold_start), one folder per release id, on every volume an "
+         "endpoint served from - delete the folders of the releases under trained_weights"),
         (_prefix(f"{OCR_CHECK_OUT.as_posix()}*"),
          "ocr_check reports, whose CSVs quote label values - delete them or run the check again "
          "after the purge (and any --out folder it was given)"),
@@ -595,6 +609,10 @@ def _run_entry(manifest: Any, releases: dict[str, list[str]] | str, action: str)
         "quantized_models": _quantized_models(manifest),
         # The weights on the pod's volume while they are staged.
         "staging_path": artifacts.staging_path,
+        # The run it continued, and where on the volume it started from: the
+        # parent's weights, copied there until the cycle is packaged.
+        "parent_run_id": manifest.parent_run_id,
+        "continued_from": manifest.continued_from,
         # Both under shared prefixes (eval-reports/, calibration/), so no tenant
         # prefix reaches them: the report's error_records hold documents'
         # expected values, and the calibrator was fitted on the tenant's fields.
@@ -622,6 +640,9 @@ def runs_trained_on(
     Lineage counts as well as the corpus. A run that continued from a checkpoint
     carries what earlier corpora taught it though its own corpus may not list
     the document, and a per-type adapter is built on its Foundation's weights.
+    One whose chain of parents never reaches a run read as clean - a parent no
+    longer in the registry, another tenant's run, a chain that loops - is
+    listed to check by hand, with every run continued from it.
 
     A storage call that fails is listed to check by hand with the error's type,
     never its message (it can quote a URL), and the rest of the plan goes on.
@@ -647,7 +668,15 @@ def runs_trained_on(
             f"check by hand: the run registry cannot be read ({type(exc).__name__}), so no run "
             "trained on the data is listed")}]
     found: list[dict[str, Any]] = []
-    adapters: list[Any] = []
+    # Runs decided by the run they came from: run id -> (manifest, that run's
+    # id, how it came from it).
+    waiting: dict[str, tuple[Any, str | None, str]] = {}
+    # Read and found clean: the corpus does not list the document, and the run
+    # neither continued another nor sits on a Foundation.
+    clean: set[str] = set()
+    # Another tenant's runs: not this plan's to list, and not clean either - a
+    # run continued from one is checked by hand.
+    foreign: set[str] = set()
     for row in rows:
         run_id = str(row.get("run_id"))
         try:
@@ -665,6 +694,7 @@ def runs_trained_on(
             found.append({"run_id": run_id, "action": "check by hand: the run records no tenant"})
             continue
         if paths._tenant(manifest.tenant_id) != tenant:
+            foreign.add(manifest.run_id)
             continue
         action = "needs retrain or delete"
         if source_id is not None:
@@ -672,28 +702,79 @@ def runs_trained_on(
             if isinstance(listed, str):
                 action = f"check by hand: {listed}"
             elif not listed:
+                if manifest.parent_run_id:
+                    # It continued another run's adapter (decision 2026-10-23),
+                    # so it holds what that run learned: decided below, by its parent.
+                    waiting[manifest.run_id] = (manifest, manifest.parent_run_id, "continued")
+                    continue
                 if manifest.continued_from:
                     # A checkpoint PATH (training.train --continue-from), not a
                     # run id, so the corpora behind it cannot be read from here.
                     action = (f"check by hand: continued from {manifest.continued_from}, "
                               "which may carry earlier corpora")
                 elif manifest.run_type == "per_type_adapter":
-                    adapters.append(manifest)
+                    waiting[manifest.run_id] = (manifest, manifest.dependencies.foundation_version,
+                                                "built on")
                     continue
                 else:
+                    clean.add(manifest.run_id)
                     continue
         found.append(_run_entry(manifest, releases, action))
 
-    # A per-type adapter trained on a listed Foundation sits on weights that
-    # learned the document, whatever its own corpus lists.
-    listed_runs = {entry["run_id"]: entry["action"] for entry in found}
-    for manifest in adapters:
-        foundation = manifest.dependencies.foundation_version
-        if foundation in listed_runs:
-            verdict = ("needs retrain or delete" if listed_runs[foundation] == "needs retrain or delete"
-                       else "check by hand with it")
-            found.append(_run_entry(manifest, releases, f"built on {foundation}, listed here: {verdict}"))
+    # A run continued from a listed run sits on weights that learned the
+    # document, whatever its own corpus lists, and so does a per-type adapter
+    # trained on a listed Foundation - and every run continued from either, down
+    # the chain, in whatever order the registry lists them.
+    verdicts = {entry["run_id"]: entry["action"] for entry in found}
+    _settle_lineage(waiting, verdicts, clean, found, releases)
+    # What still waits never reached a run read as clean, and absent evidence is
+    # not a clean model. Where the chain runs out of what this plan read - a
+    # parent whose manifest is not in the registry (its row removed once a purge
+    # reached it, or lost) or another tenant's run - the run is checked by hand,
+    # and the runs continued from it with it.
+    for run_id in [run_id for run_id, (_m, parent, _how) in waiting.items() if parent not in waiting]:
+        manifest, parent, how = waiting.pop(run_id)
+        why = ("another tenant's run, whose lineage this plan does not follow" if parent in foreign
+               else "whose manifest is not in the registry")
+        action = f"check by hand: {how} {parent}, {why} (it may have learned the document)"
+        found.append(_run_entry(manifest, releases, action))
+        verdicts[run_id] = action
+    _settle_lineage(waiting, verdicts, clean, found, releases)
+    # Left: a chain of parents that loops (v2 continued v3, which continued v2),
+    # and the runs continued from one. No run in it was read as clean.
+    for manifest, parent, how in waiting.values():
+        found.append(_run_entry(manifest, releases, (
+            f"check by hand: {how} {parent}, whose chain of parents loops back on itself, so it "
+            "never reaches a run read as clean")))
     return found
+
+
+def _settle_lineage(
+    waiting: dict[str, tuple[Any, str | None, str]], verdicts: dict[str, str], clean: set[str],
+    found: list[dict[str, Any]], releases: dict[str, list[str]] | str,
+) -> None:
+    """Decide every waiting run whose parent is decided, until a pass decides none.
+
+    On a listed parent the run is listed, with the parent's verdict when that is
+    "needs retrain or delete" and to check by hand with it otherwise; on a clean
+    parent it is clean. A pass that decides nothing ends it, so a chain that
+    loops cannot hang the plan.
+    """
+    progress = True
+    while progress:
+        progress = False
+        for run_id, (manifest, parent, how) in list(waiting.items()):
+            if parent in verdicts:
+                verdict = ("needs retrain or delete" if verdicts[parent] == "needs retrain or delete"
+                           else "check by hand with it")
+                found.append(_run_entry(manifest, releases, f"{how} {parent}, listed here: {verdict}"))
+                verdicts[run_id] = verdict
+            elif parent in clean:
+                clean.add(run_id)
+            else:
+                continue
+            del waiting[run_id]
+            progress = True
 
 
 def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin CLI

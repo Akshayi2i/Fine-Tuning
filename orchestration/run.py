@@ -1,11 +1,17 @@
 """The operator command surface (IMPL-13 §1).
 
-Three commands plus one umbrella::
+One fine-tuning cycle trains the policy adapter (``common.adapter``) and takes
+the next version number, which names its run, adapter and release::
 
-    python -m orchestration.run finetune --input ./intake --out-version v2 --gpu a100-80
-    python -m orchestration.run package  --version v2 --formats bf16 fp8
+    python -m orchestration.run all      --input ./intake          # the next version, e.g. v3
+    python -m orchestration.run finetune --input ./intake          # stages 1-6 of a new version
+    python -m orchestration.run package  --version v3              # stages 7-9 of that version
+    python -m orchestration.run promote  --version v2 --by "Name"  # a rollback to v2
+    python -m orchestration.run versions                           # the registry, per version
     python -m orchestration.run extract  --model base --input testing/test_data/
-    python -m orchestration.run all      --input ./intake --out-version v2
+
+A fresh ``finetune`` or ``all`` takes the next version itself; ``--version``
+names one only to resume a cycle (``--from-stage``) or rerun one that failed.
 
 ``all`` is ``finetune`` then ``package``. **It never runs ``extract``** —
 extraction is run against a chosen model version whenever you want, including
@@ -27,15 +33,15 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from artifact_registry.blob_client import BlobClient, for_ingestion
-from common.constants import ACTIVE_DOC_TYPES, DAY_ZERO_MIN_LABELS_PER_TYPE
-from common.scopes import Scope, ScopeError, load_scopes, parse_scopes
+from artifact_registry import paths
+from artifact_registry.blob_client import BlobClient, BlobError, for_ingestion
+from common.adapter import ADAPTER
+from common.constants import DAY_ZERO_MIN_LABELS_PER_TYPE
 from orchestration import pipeline_dag
 from orchestration.pipeline_dag import (
-    MultiScopeReport,
+    STAGE_BY_NAME,
     RunReport,
     StageContext,
-    run_multi_scope,
     run_stages,
     stages_for,
     stages_from,
@@ -50,14 +56,11 @@ log = logging.getLogger(__name__)
 
 
 def build_context(args: argparse.Namespace, *, client: BlobClient | None = None,
-                  controller: RunPodController | None = None,
-                  scope: Scope | None = None, **over: object) -> StageContext:
+                  controller: RunPodController | None = None, **over: object) -> StageContext:
     """Turn parsed arguments into the one object the stages share."""
     from registry_utils.write_run_manifest import capture_git_commit
 
     commit = getattr(args, "commit", None) or capture_git_commit()
-    scopes = parse_scopes(getattr(args, "scopes", None))
-    scope = scope or scopes[0]
     controller = controller or RunPodController(git_commit=commit)
 
     kwargs: dict[str, object] = {
@@ -66,28 +69,22 @@ def build_context(args: argparse.Namespace, *, client: BlobClient | None = None,
         # works from processed/ (arch §18a).
         "raw_client": None if client else for_ingestion(),
         "controller": controller,
-        "out_version": getattr(args, "out_version", None) or getattr(args, "version", ""),
+        "out_version": getattr(args, "version", None) or "",
         "corpus_version": getattr(args, "corpus_version", "") or "",
         "input_dir": Path(args.input) if getattr(args, "input", None) else None,
-        "doc_types": list(getattr(args, "doc_types", None) or ACTIVE_DOC_TYPES),
+        "doc_types": list(ADAPTER.doc_types),
         "tenant_id": getattr(args, "tenant", None),
-        "formats": list(getattr(args, "formats", None) or ["bf16"]),
-        "release_id": release_id_for(
-            getattr(args, "release_id", None), scope, scope_count=len(scopes)
-        ),
-        "scope": scope,
-        "dtype": getattr(args, "dtype", "bf16"),
+        "fresh": getattr(args, "fresh", False),
         "gpu_class": getattr(args, "gpu", None),
         "dry_run": getattr(args, "dry_run", False),
         "skip_ingest": getattr(args, "skip_ingest", False),
         "train_vit": getattr(args, "train_vit", False),
         "min_labels_per_type": getattr(args, "min_labels_per_type", DAY_ZERO_MIN_LABELS_PER_TYPE),
         "push_adapters": getattr(args, "push_adapters", False),
-        "skip_quantize": getattr(args, "skip_quantize", False),
         "keep_staging": getattr(args, "keep_staging", False),
         "from_blob": getattr(args, "from_blob", False),
-        "fixes_defect": fixes_defect_for(getattr(args, "fixes_defect", None), scope, scopes),
-        "gate_override": gate_override_from(args, scopes),
+        "fixes_defect": fixes_defect_for(getattr(args, "fixes_defect", None)),
+        "gate_override": gate_override_from(args),
         "git_commit": commit,
         "max_attempts": int(retry_policy()["max_attempts"]),
         "retry_backoff_seconds": backoff_seconds(),
@@ -96,107 +93,32 @@ def build_context(args: argparse.Namespace, *, client: BlobClient | None = None,
     return StageContext(**kwargs)  # type: ignore[arg-type]
 
 
-class ReleaseIdError(ValueError):
-    """Raised when --release-id cannot be resolved for the scopes being run."""
-
-
-def release_id_for(
-    given: list[str] | str | None, scope: Scope, *, scope_count: int = 1
-) -> str:
-    """This scope's release id, from ``--release-id``.
-
-    One bare id when a single scope is named; ``scope=id`` pairs when several
-    are. Each scope produces its OWN release — its own calibrators, gate decision
-    and bundle, all addressed by the id — so two scopes sharing one id means the
-    second bundle overwrites the first and deletes its index row, taking the
-    first release's calibrators and gate decision with it.
-
-    That is refused here, before any work, rather than discovered afterwards as a
-    release that quietly lost half its record.
-    """
-    values = [given] if isinstance(given, str) else list(given or [])
-    bare = [v.strip() for v in values if "=" not in v and v.strip()]
-    pairs = dict(v.split("=", 1) for v in values if "=" in v)
-
-    if scope.name in pairs:
-        return pairs[scope.name].strip()
-    if bare and scope_count > 1:
-        raise ReleaseIdError(
-            f"--release-id {bare[0]!r} was given for {scope_count} scopes. Each scope produces "
-            "its own release, so they cannot share an id — the second bundle would overwrite "
-            "the first. Name one per scope: --release-id "
-            f"{scope.name}={bare[0]} --release-id <other-scope>=<its-id>"
-        )
-    if pairs and not bare:
-        # Pairs were given and this scope is not among them: left empty so
-        # `assert_release_id` refuses it by name, with the next free id.
-        return ""
-    return bare[0] if len(bare) == 1 else ""
-
-
 class FixesDefectError(ValueError):
-    """Raised when --fixes-defect names no defect, or cannot be told apart per scope."""
+    """Raised when --fixes-defect names no defect."""
 
 
-def fixes_defect_for(
-    given: list[str] | str | None, scope: Scope, scopes: Sequence[Scope] = ()
-) -> str | None:
-    """This scope's ``--fixes-defect``, or ``None``.
+def fixes_defect_for(given: str | None) -> str | None:
+    """``--fixes-defect``, checked, or ``None``.
 
-    One bare value when a single scope runs; ``scope=TICKET`` pairs when several
-    do, as ``--release-id`` takes them. A scope no pair names fixes nothing. It
-    lifts the improvement rule for the release it names, so one value under
-    ``all --scope policy --scope lossrun`` lifted it for both - including the
-    release that fixed nothing. Every value is checked before any work, and a
-    blank or placeholder one (``" "``, ``-``) is refused
+    It lifts the improvement rule for this release alone. Checked before any
+    work: a blank or placeholder value (``" "``, ``-``) is refused
     (``evaluation.gating.documented_defect``).
     """
     from evaluation.gating import GateError, documented_defect
 
-    values = [given] if isinstance(given, str) else list(given or [])
-    names = {s.name for s in scopes} or {scope.name}
-    known = set(load_scopes())
-    bare: list[str] = []
-    pairs: dict[str, str] = {}
-    for value in values:
-        # Only a known scope's name makes a pair: a defect's own sentence may hold "=".
-        name, sep, text = value.partition("=")
-        if sep and name.strip() in known:
-            if name.strip() in pairs:
-                raise FixesDefectError(f"--fixes-defect names scope {name.strip()!r} twice")
-            pairs[name.strip()] = text
-        else:
-            bare.append(value)
-    for value in [*bare, *pairs.values()]:
-        try:
-            documented_defect(value)
-        except GateError as exc:
-            raise FixesDefectError(f"--fixes-defect: {exc}") from exc
-    outside = sorted(set(pairs) - names)
-    if outside:
-        raise FixesDefectError(
-            f"--fixes-defect names scope(s) {outside}, which this run does not include "
-            f"({sorted(names)})."
-        )
-    if bare and (pairs or len(bare) > 1 or len(names) > 1):
-        raise FixesDefectError(
-            f"--fixes-defect {bare[0]!r} does not say which release it is for. It lifts the "
-            "improvement rule for that release alone, so when several scopes run, or several "
-            "values are given, name each scope: --fixes-defect "
-            f"{scope.name}={bare[0]} [--fixes-defect <other-scope>=<its defect>]"
-        )
-    if scope.name in pairs:
-        return documented_defect(pairs[scope.name])
-    return documented_defect(bare[0]) if bare else None
+    if given is None:
+        return None
+    try:
+        return documented_defect(given)
+    except GateError as exc:
+        raise FixesDefectError(f"--fixes-defect: {exc}") from exc
 
 
 class GateOverrideError(ValueError):
     """Raised when the --override-* flags do not make a valid written override."""
 
 
-def gate_override_from(
-    args: argparse.Namespace, scopes: Sequence[Scope] = ()
-) -> GateOverrideRecord | None:
+def gate_override_from(args: argparse.Namespace) -> GateOverrideRecord | None:
     """The written gate override (arch §15.5) the ``--override-*`` flags name, or ``None``.
 
     The one way past a gate that failed: a named person, a written reason and
@@ -204,8 +126,7 @@ def gate_override_from(
     as the gate validates it (``GateOverrideRecord.validate``, which also refuses
     a name that is not a gate), and recorded in the gate decision and the
     release bundle as waived, never as passed. It lifts only the named gates
-    that failed. One scope per run, because a waiver is a decision about one
-    release.
+    that failed.
     """
     approver = getattr(args, "override_approver", None)
     reason = getattr(args, "override_reason", None)
@@ -214,12 +135,6 @@ def gate_override_from(
         return None
     from evaluation.gating import GateError, GateOverrideRecord
 
-    if len(scopes) > 1:
-        raise GateOverrideError(
-            f"a gate override was given for {len(scopes)} scopes. A waiver is a decision about one "
-            "release: run the scope whose gate it waives on its own (package --scope NAME "
-            "--from-stage evaluation_gate ...)."
-        )
     override = GateOverrideRecord(
         approver=(approver or "").strip(), reason=(reason or "").strip(), waived_gates=gates,
     )
@@ -236,38 +151,41 @@ def gate_override_from(
 def _selected_stages(command: str, from_stage: str | None) -> Sequence[pipeline_dag.Stage]:
     if not from_stage:
         return stages_for(command)
-    # `--from-stage` on `all` still spans both commands: resuming at `merge`
+    # `--from-stage` on `all` still spans both commands: resuming at `checkpoint_eval`
     # should carry on into packaging, not stop at the end of finetune.
     return stages_from(from_stage, command)
 
 
 def run_command(command: str, ctx: StageContext, *, from_stage: str | None = None) -> RunReport:
-    """Run one build command for ONE scope. ``all`` is the two commands back to back."""
+    """Run one build command. ``all`` is the two commands back to back."""
     return run_stages(ctx, _selected_stages(command, from_stage), command=command)
 
 
-def run_scopes(
-    args: argparse.Namespace,
-    command: str,
-    *,
-    client: BlobClient | None = None,
-    controller: RunPodController | None = None,
-    **over: object,
-) -> MultiScopeReport:
-    """Run a command across every scope named on the command line.
+class VersionError(ValueError):
+    """Raised when a cycle's version cannot be decided."""
 
-    Stages 1-4 build the corpus once over the union of the scopes' document
-    types; stages 5-11 then run once per scope, each with its own context.
+
+def cycle_version(args: argparse.Namespace, client: BlobClient) -> str:
+    """The version this command works on.
+
+    ``--version`` when given. A fresh ``finetune`` or ``all`` without one takes
+    the next version (``registry_utils.releases.next_cycle_version``); a resume
+    (``--from-stage``) must name its version, because the next free number
+    after a first attempt that wrote anything is not that attempt's.
     """
-    scopes = parse_scopes(getattr(args, "scopes", None))
-    return run_multi_scope(
-        lambda scope: build_context(
-            args, client=client, controller=controller, scope=scope, **over
-        ),
-        scopes,
-        command=command,
-        from_stage=getattr(args, "from_stage", None),
-    )
+    from registry_utils.releases import next_cycle_version
+
+    given = getattr(args, "version", None)
+    if given:
+        return str(given)
+    if getattr(args, "from_stage", None):
+        raise VersionError(
+            "--from-stage resumes a cycle: name its version with --version (the next free "
+            "number would be a new cycle)."
+        )
+    version = next_cycle_version(client, getattr(args, "tenant", None))
+    log.info("this cycle is %s (the next version)", version)
+    return version
 
 
 # --------------------------------------------------------------------------
@@ -313,24 +231,26 @@ def run_extract(args: argparse.Namespace) -> int:
 
 def _add_finetune_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input", type=Path, help="directory of PDFs to ingest")
-    parser.add_argument("--doc-types", nargs="+", dest="doc_types", choices=list(ACTIVE_DOC_TYPES))
-    parser.add_argument("--corpus-version", dest="corpus_version", default="")
-    parser.add_argument("--out-version", dest="out_version", required=True)
+    parser.add_argument("--corpus-version", dest="corpus_version", default="",
+                        help="train on a corpus already built; defaults to the cycle's version")
+    parser.add_argument("--version", default=None,
+                        help="the cycle's version (vN); a fresh cycle takes the next one itself. "
+                             "Name it to resume (--from-stage) or rerun a failed cycle")
     parser.add_argument("--gpu", default=None, help="GPU class override for the training pod")
     parser.add_argument("--commit", default=None, help="repo commit the pod clones; defaults to HEAD")
     parser.add_argument("--from-stage", dest="from_stage", default=None,
                         help="resume at this stage; earlier stages are not re-run")
     parser.add_argument("--skip-ingest", dest="skip_ingest", action="store_true")
-    parser.add_argument("--scope", dest="scopes", action="append", default=[],
-                        choices=sorted(load_scopes()),
-                        help="what to train (configs/scopes.yaml). Repeatable: each scope is an "
-                             "independent adapter. Defaults to the unified scope.")
+    parser.add_argument("--fresh", action="store_true",
+                        help="train from the base model, not the promoted adapter (after a data "
+                             "deletion, or to reset drift); a cycle continues the promoted one "
+                             "by default")
     parser.add_argument("--train-vit", dest="train_vit", action="store_true",
                         help="LoRA on the vision encoder; never a full fine-tune (arch §3)")
     parser.add_argument("--min-labels-per-type", dest="min_labels_per_type", type=int,
                         default=defaults().get("min_labels_per_type", DAY_ZERO_MIN_LABELS_PER_TYPE))
     parser.add_argument("--push-adapters", dest="push_adapters", action="store_true",
-                        help="also push adapters to Blob immediately, leaving only the merged model staged")
+                        help="also push the adapter to Blob as soon as it is trained")
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true",
                         help="assemble and record everything without launching GPU work")
@@ -339,23 +259,14 @@ def _add_finetune_flags(parser: argparse.ArgumentParser) -> None:
 def _add_package_flags(parser: argparse.ArgumentParser, *, version_required: bool = True) -> None:
     if version_required:
         parser.add_argument("--version", required=True)
-    parser.add_argument("--formats", nargs="+", default=list(defaults().get("formats", ["bf16"])))
-    parser.add_argument("--release-id", dest="release_id", action="append", default=[],
-                        help="release-YYYY.M.N, or scope=release-YYYY.M.N when several scopes "
-                             "are named. Required, and the same on a --from-stage resume")
-    parser.add_argument("--skip-quantize", dest="skip_quantize", action="store_true")
     parser.add_argument("--keep-staging", dest="keep_staging", action="store_true")
     parser.add_argument("--from-blob", dest="from_blob", action="store_true",
                         help="artifacts were pushed with --push-adapters; read them from Blob")
-    # bf16: the adapter trained against a bf16 base and FP8 is quantized from the
-    # merge, so an fp16 merge inserts a precision change nothing asked for.
-    parser.add_argument("--dtype", default=defaults().get("dtype", "bf16"), choices=["bf16", "fp16"])
     # Satisfies the gate's improvement rule only (arch §15.5): floors and
     # non-inferiority still apply, and the text is recorded in the decision.
-    parser.add_argument("--fixes-defect", dest="fixes_defect", action="append", default=[],
-                        help="the documented defect this release fixes (ticket or sentence), or "
-                             "scope=TICKET when several scopes are named; stands in for 'a "
-                             "primary metric improved' and nothing else")
+    parser.add_argument("--fixes-defect", dest="fixes_defect", default=None,
+                        help="the documented defect this release fixes (ticket or sentence); "
+                             "stands in for 'a primary metric improved' and nothing else")
     # The written override of arch §15.5, never a bypass: all three together,
     # validated before any work, recorded as waived in the decision and bundle.
     parser.add_argument("--override-approver", dest="override_approver", default=None,
@@ -372,18 +283,7 @@ def _add_package_flags(parser: argparse.ArgumentParser, *, version_required: boo
         # flags and adding them twice is an argparse conflict.
         #
         # `finetune` decides which models get built; `package` publishes their
-        # locations. Without these, a standalone `package` published whatever the
-        # defaults said rather than what finetune actually produced, writing Blob
-        # prefixes for adapters and merged models that were never built — an
-        # empty prefix that later reads as a published model. `--scope` is the
-        # sharpest case: packaging the wrong scope publishes another scope's
-        # paths under this one's release.
-        parser.add_argument("--scope", dest="scopes", action="append", default=[],
-                            choices=sorted(load_scopes()),
-                            help="must match the finetune run that produced this version")
-        parser.add_argument("--doc-types", dest="doc_types", nargs="+",
-                            default=list(ACTIVE_DOC_TYPES),
-                            help="must match the finetune run that produced this version")
+        # locations, so it reads the version's own run manifest and corpus.
         parser.add_argument("--tenant", default=None)
         parser.add_argument("--corpus-version", dest="corpus_version", default="",
                             help="the corpus the version trained on; read from its run "
@@ -398,9 +298,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    _add_finetune_flags(sub.add_parser("finetune", help="stages 1-7: ingest through merge; artifacts staged"))
+    _add_finetune_flags(sub.add_parser(
+        "finetune", help="stages 1-6 of a cycle: ingest through checkpoint selection; the adapter "
+                         "is staged. Continues the promoted adapter unless --fresh"))
 
-    package = sub.add_parser("package", help="stages 8-9: quantize and push to Azure Blob")
+    package = sub.add_parser(
+        "package", help="stages 7-9: calibrate, gate, push the adapter and promote the release")
     _add_package_flags(package)
     parser_all = sub.add_parser("all", help="finetune then package. Never runs extract.")
     _add_finetune_flags(parser_all)
@@ -425,6 +328,17 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--format", dest="quant_format", default=None)
     extract.add_argument("--limit", type=int, default=None)
     extract.add_argument("--tenant", default=None)
+
+    promote = sub.add_parser(
+        "promote", help="make a version the tenant's promoted release (a rollback); the one "
+                        "promoted now is archived")
+    promote.add_argument("--version", required=True, help="the version to serve, e.g. v2")
+    promote.add_argument("--by", dest="promoted_by", required=True,
+                         help="the person accountable for the change (not a system identity)")
+    promote.add_argument("--tenant", default=None)
+
+    versions = sub.add_parser("versions", help="the registry: every version, its run and release")
+    versions.add_argument("--tenant", default=None)
 
     deploy = sub.add_parser("deploy-endpoint", help="point the serving endpoint at a promoted version")
     deploy.add_argument("--model", required=True)
@@ -459,7 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 #: Commands that finish in seconds and so run in the foreground even on the pod.
-QUICK_COMMANDS = frozenset({"deploy-endpoint", "rollback-endpoint"})
+QUICK_COMMANDS = frozenset({"deploy-endpoint", "rollback-endpoint", "promote", "versions"})
 
 
 def flag_problem(args: argparse.Namespace) -> str | None:
@@ -468,9 +382,9 @@ def flag_problem(args: argparse.Namespace) -> str | None:
     Checked by :func:`main` before the command detaches on the pod. While only
     :func:`build_context` checked them, after the detach, a refused
     ``--fixes-defect`` or ``--override-*`` surfaced inside tmux with the
-    operator's command already exited 0, and off the pod as a traceback. Every
-    scope's ``--release-id`` and ``--fixes-defect`` and the written override are
-    read here exactly as ``build_context`` reads them.
+    operator's command already exited 0, and off the pod as a traceback.
+    ``--fixes-defect`` and the written override are read here exactly as
+    ``build_context`` reads them.
     """
     if args.command == "freeze-eval-set":
         marks = [flag for flag, given in (("--mark-held-out", args.mark_held_out),
@@ -482,17 +396,104 @@ def flag_problem(args: argparse.Namespace) -> str | None:
         if not marks and not args.corpus:
             return "freeze-eval-set needs --corpus (or --mark-held-out / --mark-reviewed on a frozen set)"
         return None
+    if args.command == "promote":
+        from registry_utils.releases import is_named_person
+
+        if not is_named_person(args.promoted_by):
+            return "promote --by must name the person accountable for it, not a system identity"
+        return None
     if args.command not in ("finetune", "package", "all"):
         return None
+    from_stage = getattr(args, "from_stage", None)
+    if from_stage and (problem := from_stage_problem(args.command, from_stage)):
+        return problem
+    if from_stage and not getattr(args, "version", None):
+        return ("--from-stage resumes a cycle: name its version with --version (the next free "
+                "number would be a new cycle)")
+    if getattr(args, "fresh", False) and from_stage and (
+            STAGE_BY_NAME[from_stage].number > STAGE_BY_NAME["training"].number):
+        # Training is not in the stages run, so --fresh would change nothing and
+        # the adapter already trained would go through the gate as it is.
+        return (f"--fresh decides where training starts, and --from-stage {from_stage} resumes "
+                f"after training: nothing would train from the base, and {args.version}'s adapter "
+                "would go through the gate as it trained. --fresh applies to a new cycle: run "
+                "finetune/all without --version")
     try:
-        scopes = parse_scopes(getattr(args, "scopes", None))
-        for scope in scopes:
-            release_id_for(getattr(args, "release_id", None), scope, scope_count=len(scopes))
-            fixes_defect_for(getattr(args, "fixes_defect", None), scope, scopes)
-        gate_override_from(args, scopes)
-    except (ScopeError, ReleaseIdError, FixesDefectError, GateOverrideError) as exc:
+        fixes_defect_for(getattr(args, "fixes_defect", None))
+        gate_override_from(args)
+    except (FixesDefectError, GateOverrideError) as exc:
         return str(exc)
     return None
+
+
+#: Stages removed from the pipeline, and why. Named by ``--from-stage`` they are
+#: refused with the reason, before the command detaches.
+REMOVED_STAGES: dict[str, str] = {
+    "merge": "removed on 2026-10-23: nothing is merged or quantized; the release is its adapter",
+    "quantize": "removed on 2026-10-23: nothing is merged or quantized; the release is its adapter",
+}
+
+
+def from_stage_problem(command: str, stage: str) -> str | None:
+    """Why ``--from-stage stage`` cannot resume ``command``; ``None`` when it can.
+
+    Checked by :func:`flag_problem`, before the detach: ``stages_from`` refuses
+    the same name, but only inside the detached run, with the operator's command
+    already exited 0 and the traceback in tmux.
+    """
+    names = [s.name for s in stages_for(command)]
+    if stage in names:
+        return None
+    if stage in REMOVED_STAGES:
+        return f"--from-stage {stage}: the {stage} stage was {REMOVED_STAGES[stage]}. Resume at one of {names}"
+    return f"--from-stage {stage!r} is not a stage of {command}; expected one of {names}"
+
+
+#: Run statuses that mean the run's training finished (``training`` is still
+#: running or was interrupted, ``failed`` never finished).
+TRAINED_STATUSES = frozenset({"trained", "evaluated", "promoted", "archived"})
+
+
+def fresh_problem(args: argparse.Namespace, client: BlobClient | None = None) -> str | None:
+    """Why ``--fresh`` cannot apply to the version named; ``None`` when it can.
+
+    ``--fresh`` decides where training starts, so it means nothing for a version
+    that already trained: training is skipped as complete, and the adapter it
+    trained - continued from the promoted one, as a cycle is by default - goes
+    through the gate as if it had started from the base. Read from the
+    version's run manifest (and, on the pod, the training stage's completion
+    marker, as ``pipeline_dag._is_trained`` reads it), by :func:`main` before any
+    work and before the command detaches. Kept out of :func:`flag_problem`,
+    which reads the flags alone.
+    """
+    version = getattr(args, "version", None)
+    if (args.command not in ("finetune", "all") or not getattr(args, "fresh", False)
+            or not version or paths.version_number(str(version)) is None):
+        return None
+    from registry_utils.query_registry import RegistryQueryError, get
+    from training.train import training_completed
+
+    run_id = ADAPTER.run_id(str(version))
+    try:
+        manifest = get(run_id, client or BlobClient())
+    except RegistryQueryError as exc:
+        if isinstance(exc.__cause__, BlobError):
+            return f"--fresh with --version {version}: cannot read whether it already trained ({exc})"
+        manifest = None  # no run of it yet: its first attempt has not trained
+    except ValueError as exc:
+        return f"--fresh with --version {version}: its run manifest {run_id} cannot be read ({exc})"
+    trained = manifest is not None and (
+        manifest.status in TRAINED_STATUSES or manifest.artifacts.status == "published")
+    if not trained and not training_completed(paths.scoped_staging_adapter_dir(ADAPTER.name, str(version))):
+        return None
+    if manifest is None:
+        how = "its training stage is complete on the staging volume"
+    elif manifest.parent_run_id or manifest.continued_from:
+        how = f"continued from {manifest.parent_run_id or manifest.continued_from}"
+    else:
+        how = "from the base" + (f": {manifest.fresh_reason}" if manifest.fresh_reason else "")
+    return (f"{version} already trained ({how}); --fresh applies to a new cycle: run finetune/all "
+            f"without --version. To resume {version} as it trained, drop --fresh")
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -504,6 +505,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     # Before the detach below: a refusal after it is seen by nobody.
     if problem := flag_problem(args):
+        parser.error(problem)
+    if problem := fresh_problem(args):
         parser.error(problem)
 
     # On the pod, every long command runs detached in tmux, so shutting the laptop
@@ -541,6 +544,24 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(json.dumps(manifest, indent=2, ensure_ascii=False))
         return 0
 
+    if args.command == "promote":
+        from registry_utils.releases import ReleaseError, promote_release
+
+        try:
+            archived = promote_release(BlobClient(), args.version, args.tenant,
+                                       promoted_by=args.promoted_by.strip())
+        except ReleaseError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        print(f"{args.version} is promoted" + (f"; archived {', '.join(archived)}" if archived else ""))
+        return 0
+
+    if args.command == "versions":
+        from registry_utils.releases import version_table
+
+        print(json.dumps(version_table(BlobClient(), args.tenant), indent=2, ensure_ascii=False))
+        return 0
+
     if args.command in ("deploy-endpoint", "rollback-endpoint"):
         controller = RunPodController()
         if args.command == "deploy-endpoint":
@@ -549,10 +570,16 @@ def main(argv: Iterable[str] | None = None) -> int:
             controller.rollback_endpoint(dry_run=args.dry_run)
         return 0
 
-    if args.command == "all" and not getattr(args, "version", None):
-        args.version = args.out_version
+    client = BlobClient()
+    try:
+        args.version = cycle_version(args, client)
+    except VersionError as exc:
+        parser.error(str(exc))
+    # The raw-documents login too: only ingestion and OCR may reach raw-documents/
+    # (arch §18a), and an injected client would otherwise stand in for both.
+    report = run_command(args.command, build_context(args, client=client, raw_client=for_ingestion()),
+                         from_stage=getattr(args, "from_stage", None))
 
-    report = run_scopes(args, args.command)
 
     print(report.render())
     print(json.dumps(report.as_dict(), indent=2, ensure_ascii=False))

@@ -2,7 +2,7 @@
 
 Wherever a line is read - a label's line_of_business, bundle and label metadata,
 schema selection - classic_auto is read as personal_auto, so it never selects a
-schema, a split, a scope or a report row of its own.
+schema, a split, a routed line or a report row of its own.
 """
 
 from __future__ import annotations
@@ -36,8 +36,10 @@ def test_a_source_document_carries_the_merged_line():
     assert doc.lob == "personal_auto"
 
 
-def test_the_personal_lines_scope_has_one_auto_line():
-    from common.scopes import load_scopes
+def test_there_is_one_auto_line_to_route_and_snapshot():
+    from common.lob import known_lines, lob_lines
+    from common.schemas import SNAPSHOT_LINES
 
-    lines = load_scopes()["personal_lines"].lines
-    assert "personal_auto" in lines and "classic_auto" not in lines
+    assert "personal_auto" in known_lines() and "classic_auto" not in known_lines()
+    assert lob_lines("classic_auto") == frozenset({"personal_auto"})
+    assert "personal_auto" in SNAPSHOT_LINES and "classic_auto" not in SNAPSHOT_LINES

@@ -61,11 +61,10 @@ def test_added_paths_are_the_merged_labels_own_and_survive_a_second_fill():
 
 # 3 - package knows the corpus its version trained on
 def _ctx(client, **over):
-    scope = SimpleNamespace(name="personal_lines", doc_types=("policy",),
-                            run_id=lambda version: f"personal_lines-{version}")
+    # The release id is the version, as StageContext.release_id returns it.
     base = dict(client=client, corpus_version="", out_version="v1", dry_run=False, tenant_id=None,
-                scope=scope, from_blob=False, release_id="release-2026.10.1",
-                calibrators={}, thresholds={})
+                from_blob=False, release_id="v1", calibrators={}, thresholds={}, manifests={},
+                results={})
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -75,10 +74,12 @@ def test_package_takes_its_corpus_from_the_run_manifest(client, monkeypatch):
     from registry_utils import query_registry
 
     manifest = SimpleNamespace(dependencies=SimpleNamespace(corpus_version="corpus/c7"))
-    monkeypatch.setattr(query_registry, "get", lambda run_id, c: manifest)
+    asked: list[str] = []
+    monkeypatch.setattr(query_registry, "get", lambda run_id, c: asked.append(run_id) or manifest)
     ctx = _ctx(client)
     pipeline_dag.resolve_corpus_version(ctx)
     assert ctx.corpus_version == "c7"
+    assert asked == ["policy-v1"]                       # the policy adapter's run of v1
 
 
 def test_package_refuses_when_no_corpus_is_known(client, monkeypatch):
@@ -102,12 +103,15 @@ def test_a_version_on_the_mount_counts_as_staged(client, tmp_path, monkeypatch):
 
     adapter = tmp_path / "adapter"
     adapter.mkdir()
-    monkeypatch.setattr(paths, "scoped_staging_adapter_dir", lambda scope, version: str(adapter))
+    asked: list[tuple[str, str]] = []
+    monkeypatch.setattr(paths, "scoped_staging_adapter_dir",
+                        lambda scope, version: asked.append((scope, version)) or str(adapter))
     volume = SimpleNamespace(exists=lambda path: False)
     pipeline_dag.assert_staged(_ctx(client, volume=volume))                 # does not raise
     adapter.rmdir()
     with pytest.raises(pipeline_dag.PipelineError, match="not on the staging volume"):
         pipeline_dag.assert_staged(_ctx(client, volume=volume))
+    assert set(asked) == {("policy", "v1")}
 
 
 def test_clearing_staging_removes_real_files_only_inside_the_staging_root(tmp_path, monkeypatch):
@@ -235,7 +239,9 @@ def test_a_cached_eval_report_made_without_calibrators_is_not_reused(client, mon
     from orchestration import pipeline_dag
 
     ctx = _ctx(client, serving_model_loader=lambda c, fmt: object(), corpus="v1")
-    key = paths.eval_report("v1", scope="personal_lines")
+    # The lines the release serves, from its corpus.
+    client.write_json(paths.corpus_manifest("v1"), {"policy_line_counts": {"homeowners": 1}})
+    key = paths.eval_report("v1", scope="policy")
     # Recorded for this tenant, so the missing calibrators are what refuse it.
     client.write_json(key, {"gate_metrics": {"auto_accept_error_rate": 0.0}, "calibrated": False,
                             "eval_set": {"tenant_id": paths._tenant(None)}})

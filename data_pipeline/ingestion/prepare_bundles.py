@@ -26,8 +26,9 @@ and the importer and the audit read one folder per document:
                  without one (export_golden_labels.review_problem, decision
                  2026-10-22). A twin's own review columns are never read.
 
-Rows outside the scope's lines (flood, for personal_lines), rows the generator
-flagged (``ok`` false) and rows whose files are missing are skipped and counted.
+Rows outside the lines asked for (``--lines``; every line by default), rows the
+generator flagged (``ok`` false) and rows whose files are missing are skipped
+and counted.
 
     python -m data_pipeline.ingestion.prepare_bundles --input "data/training data" --out data/bundles
 
@@ -71,7 +72,7 @@ its gold gets the same corrections.
 ``<input>/Gold JSON/<carrier>/<name>.gold.json`` (the CGL source data):
 
     python -m data_pipeline.ingestion.prepare_bundles --input "data/CGL source data" --lob gl \\
-        --scope casualty_fleet --out data/cgl_bundles
+        --out data/cgl_bundles
 
 Each pair becomes ``<line>__<carrier>__<name>``, its gold corrected as above. Its
 review record comes from ``<input>/reviews.csv`` (``document,reviewer_id,
@@ -95,6 +96,8 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+
+from common.lob import within_lines
 
 DEFAULT_OUT = Path("data") / "bundles"
 #: Where a SPEC_21 delivery's seed documents are: pdfs/ and gold json/.
@@ -134,7 +137,7 @@ class PrepareReport:
     out: Path
     written: Counter = field(default_factory=Counter)          # (split, kind) -> documents
     skipped: Counter = field(default_factory=Counter)          # reason -> rows
-    skipped_lines: Counter = field(default_factory=Counter)    # lob -> rows outside the scope
+    skipped_lines: Counter = field(default_factory=Counter)    # lob -> rows outside --lines
     relined: Counter = field(default_factory=Counter)          # "old -> new" -> rows given another line
     linked: int = 0
     copied: int = 0
@@ -160,7 +163,7 @@ class PrepareReport:
         for reason, n in sorted(self.skipped.items()):
             lines.append(f"  skipped {n}: {reason}")
         if self.skipped_lines:
-            lines.append("  outside the scope: " + ", ".join(f"{k} {v}" for k, v in sorted(self.skipped_lines.items())))
+            lines.append("  outside --lines: " + ", ".join(f"{k} {v}" for k, v in sorted(self.skipped_lines.items())))
         if self.relined:
             lines.append("  line overridden: " + ", ".join(f"{k} ({v})" for k, v in sorted(self.relined.items())))
         for kind, n in sorted(self.corrections.items()):
@@ -255,7 +258,7 @@ def prepare_bundles(
 
         # Classic auto is read as personal auto (common.lob.MERGED_LINES).
         lob = str(merge_line(lob))
-        if lines is not None and lob not in lines:
+        if not within_lines(lob, lines):
             report.skipped_lines[lob] += 1
             continue
         if row["ok"].strip().lower() != "true":
@@ -351,7 +354,7 @@ def prepare_twin_bundles(
     reviews = twin_seed_reviews(rows)
     for row in rows:
         lob = delivery_line(row["lob"])
-        if lines is not None and lob not in lines:
+        if not within_lines(lob, lines):
             report.skipped_lines[lob] += 2
             continue
         gold_path = delivery / row["gold"]
@@ -499,7 +502,7 @@ def _bundle_originals(
             raise BundleError(f"seed {seed!r} has twins in {known['split']!r} and {row['split']!r}")
     for seed, row in sorted(seeds.items()):
         lob = delivery_line(row["lob"])
-        if lines is not None and lob not in lines:
+        if not within_lines(lob, lines):
             report.skipped_lines[lob] += 1
             continue
         pdf, gold_path = pdfs.get(seed), golds.get(seed)
@@ -632,8 +635,8 @@ def prepare_original_bundles(
     from data_pipeline.dataset_builder.split_groups import GroupRecord, assign_group_splits
 
     line = delivery_line(lob)
-    if lines is not None and line not in lines:
-        raise BundleError(f"{line} is outside the scope's lines {sorted(lines)}; pass that line's scope")
+    if not within_lines(line, lines):
+        raise BundleError(f"{line} is outside --lines {sorted(lines)}; add it, or leave --lines out")
     if mode not in ("link", "copy"):
         raise BundleError(f"mode {mode!r}: real documents are bundled by link or copy, never moved - "
                           "a re-run would remove the folder holding the only copy of a moved PDF")
@@ -1011,7 +1014,7 @@ def read_exclusions(path: Path) -> dict[str, str]:
 
 def read_lob_overrides(path: Path) -> list[tuple[str, str]]:
     """``[(source_prefix, lob)]`` from a ``source_prefix,lob,reason`` CSV; empty when there is none."""
-    from common.scopes import known_lines
+    from common.lob import known_lines
 
     if not path.is_file():
         return []
@@ -1033,14 +1036,14 @@ def read_lob_overrides(path: Path) -> list[tuple[str, str]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from common.scopes import get_scope
+    from common.lob import LobError, parse_lines
 
     parser = argparse.ArgumentParser(description="Turn a synthetic-data delivery into import bundles")
     parser.add_argument("--input", required=True, type=Path, help="the delivery: Train/Val/Test + manifest.csv")
     parser.add_argument("--out", type=Path, default=None,
                         help=f"where the bundles go (default {DEFAULT_OUT}; required for real documents alone)")
-    parser.add_argument("--scope", default="personal_lines",
-                        help="keep only this scope's lines ('none' keeps every line)")
+    parser.add_argument("--lines", default=None,
+                        help="comma-separated lines to keep; every line by default")
     parser.add_argument("--mode", choices=("link", "copy", "move"), default="link",
                         help="link (default: instant, no second copy on the same drive), copy, or move")
     parser.add_argument("--exclude", type=Path, default=DEFAULT_EXCLUSIONS,
@@ -1061,8 +1064,8 @@ def main(argv: list[str] | None = None) -> int:
     if detach_module_if_needed("data_pipeline.ingestion.prepare_bundles", argv):
         return 0
 
-    lines = None if args.scope == "none" else get_scope(args.scope).lines or None
     try:
+        lines = parse_lines(args.lines)
         if (args.input / ORIGINAL_PDFS).is_dir() and (args.input / ORIGINAL_GOLDS).is_dir():
             if not args.lob:
                 print(f"{args.input} holds real documents alone ({ORIGINAL_PDFS}/, {ORIGINAL_GOLDS}/): "
@@ -1092,12 +1095,13 @@ def main(argv: list[str] | None = None) -> int:
             report = prepare_bundles(args.input, args.out, lines=lines, mode=args.mode,
                                      exclusions=read_exclusions(args.exclude),
                                      lob_overrides=read_lob_overrides(args.lob_overrides), dry_run=args.dry_run)
-    except BundleError as exc:
+    except (BundleError, LobError) as exc:
         print(exc, file=sys.stderr)
         return 1
     print(report.describe())
-    scope = "" if args.scope == "personal_lines" else f" --scope {args.scope}"
-    print(f"\nNext: python -m data_pipeline.audit --input \"{args.out}\"{scope}")
+    only = f" --lines {','.join(sorted(lines))}" if lines else ""
+    print(f"\nNext: python -m data_pipeline.audit --input \"{args.out}\"{only}")
+
     return 0
 
 

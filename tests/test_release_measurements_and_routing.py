@@ -9,16 +9,12 @@ import pytest
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient, InMemoryBackend
-from common.config import lob_to_layout_family
-from common.scopes import get_scope
+from common.lob import known_lines
+from common.schemas import SNAPSHOT_LINES
 from evaluation import release_measurements
 from evaluation.release_measurements import BASE_MODEL, latency_by_adapter, measurements, p95
-from serving.release_router import build_serving_plan
 from serving.routing_check import RoutingCheckError, plan_with_candidate, routing_table
-from tests.test_personal_lines_scope import _promote_personal
 from tests.test_registry import _bundle
-
-PERSONAL = get_scope("personal_lines")
 
 
 @pytest.fixture
@@ -36,14 +32,14 @@ def test_p95_is_the_nearest_rank():
 
 def test_latency_is_kept_per_adapter_one_entry_per_call():
     scored = [
-        ({}, {}, {"adapter": "personal_lines-v3", "window_latencies_ms": [100, 200, 300]}),
-        ({}, {}, {"adapter": "personal_lines-v3", "window_latencies_ms": [400]}),
+        ({}, {}, {"adapter": "policy-v3", "window_latencies_ms": [100, 200, 300]}),
+        ({}, {}, {"adapter": "policy-v3", "window_latencies_ms": [400]}),
         ({}, {}, {"adapter": None, "window_latencies_ms": [50]}),
         ({}, {}, {"adapter": "x", "error": "failed"}),
     ]
     assert latency_by_adapter(scored) == {
         BASE_MODEL: {"p95_ms": 50.0, "calls": 1},
-        "personal_lines-v3": {"p95_ms": 400.0, "calls": 4},
+        "policy-v3": {"p95_ms": 400.0, "calls": 4},
     }
 
 
@@ -81,8 +77,8 @@ def test_extract_records_one_latency_per_generation_round(client):
 
 def test_a_call_with_no_adapter_is_labelled_with_the_model_the_eval_loaded():
     scored = [({}, {}, {"adapter": None, "window_latencies_ms": [120.0]})]
-    assert latency_by_adapter(scored, served_as="personal_lines-v3") == {
-        "personal_lines-v3": {"p95_ms": 120.0, "calls": 1}}
+    assert latency_by_adapter(scored, served_as="policy-v3") == {
+        "policy-v3": {"p95_ms": 120.0, "calls": 1}}
 
 
 def test_memory_is_the_peak_sampled_while_the_eval_runs(monkeypatch):
@@ -118,74 +114,81 @@ def test_the_golden_eval_keeps_the_adapter_and_each_calls_latency(client, monkey
 # The routing check
 # --------------------------------------------------------------------------
 
-def _candidate(release_id="release-2026.11.1", **over):
+def _candidate(release_id="v3", **over):
+    """The policy adapter's release, trained on the personal lines."""
     from tests.test_release_router import BASE
 
-    bundle = _bundle(release_id=release_id, scope="personal_lines", doc_types=["policy"],
-                     lines=sorted(PERSONAL.lines), created_at="2026-11-01T00:00:00+00:00",
-                     adapter="personal_lines-v3", **{"base_model": BASE, **over})
-    return bundle
+    return _bundle(**{"release_id": release_id, "lines": list(SNAPSHOT_LINES),
+                      "created_at": "2026-11-01T00:00:00+00:00", "adapter": "policy-v3",
+                      "base_model": BASE, **over})
 
 
-def test_every_line_is_routed_and_the_releases_own_lines_reach_it(client):
+def test_every_line_is_routed_and_the_releases_own_lines_reach_it():
     bundle = _candidate()
-    plan = plan_with_candidate(build_serving_plan(client), bundle.model_dump(mode="json"))
+    plan = plan_with_candidate(bundle.model_dump(mode="json"))
     rows = routing_table(plan, bundle.release_id, bundle.lines)
-    assert [row["lob"] for row in rows] == sorted(lob_to_layout_family())
+    assert [row["lob"] for row in rows] == sorted(known_lines())
+    assert set(rows[0]) == {"lob", "release_id", "adapter", "lob_fallback_used"}
     by_line = {row["lob"]: row for row in rows}
     assert by_line["personal_auto"]["release_id"] == bundle.release_id
-    assert by_line["personal_auto"]["adapter"] == "personal_lines-v3"
+    assert by_line["personal_auto"]["adapter"] == "policy-v3"
+    assert not by_line["personal_auto"]["lob_fallback_used"]
     assert by_line["agriculture_farm"]["lob_fallback_used"] and by_line["agriculture_farm"]["release_id"] is None
 
 
-def test_a_line_the_release_was_trained_for_that_would_not_reach_it_fails_the_check(client):
-    # An already promoted release narrowed to homeowners alone takes homeowners
-    # first (narrowest lines win), so the candidate would never answer for it.
-    _promote_personal(client, "release-2026.10.9")
-    narrow = client.read_json(paths.release_bundle("release-2026.10.9"))
-    narrow["lines"] = ["homeowners"]
-    client.write_json(paths.release_bundle("release-2026.10.9"), narrow)
-    bundle = _candidate()
-    plan = plan_with_candidate(build_serving_plan(client), bundle.model_dump(mode="json"))
-    with pytest.raises(RoutingCheckError, match="homeowners is a line release-2026.11.1 was trained for"):
+def test_the_candidate_is_routed_in_the_format_asked_for():
+    bundle = _candidate(serving_formats={"bf16": "merged/bf16", "fp8": "merged/fp8"})
+    assert plan_with_candidate(bundle.model_dump(mode="json"), "fp8").release.merged_model == "merged/fp8"
+
+
+def test_a_release_recording_no_lines_takes_every_line():
+    bundle = _candidate(lines=[])
+    rows = routing_table(plan_with_candidate(bundle.model_dump(mode="json")), bundle.release_id, [])
+    assert {row["release_id"] for row in rows} == {"v3"} and not any(r["lob_fallback_used"] for r in rows)
+
+
+def test_a_line_the_release_was_trained_for_that_would_not_reach_it_fails_the_check():
+    # It records the personal lines but serves no policies, so none reaches it.
+    bundle = _candidate(doc_types=["acord"])
+    plan = plan_with_candidate(bundle.model_dump(mode="json"))
+    with pytest.raises(RoutingCheckError, match="homeowners is a line v3 was trained for, but routes to "
+                                                "the base model"):
         routing_table(plan, bundle.release_id, bundle.lines)
+
+
+def test_the_check_names_the_release_a_line_reaches_when_it_is_another():
+    bundle = _candidate()
+    plan = plan_with_candidate(bundle.model_dump(mode="json"))
+    with pytest.raises(RoutingCheckError, match="homeowners is a line v4 was trained for, but routes to v3"):
+        routing_table(plan, "v4", bundle.lines)
 
 
 def test_the_release_step_writes_the_measurements_and_the_table_or_stops(client):
     from orchestration.pipeline_dag import PipelineError, record_release_measurements
 
-    client.write_json(paths.eval_report("v3", scope="personal_lines"), {"release_measurements": {
-        "latency_p95_ms_by_adapter": {"personal_lines-v3": {"p95_ms": 812.5, "calls": 40}},
+    client.write_json(paths.eval_report("v3", scope="policy"), {"release_measurements": {
+        "latency_p95_ms_by_adapter": {"policy-v3": {"p95_ms": 812.5, "calls": 40}},
         "peak_gpu_memory_mb": 70100.0, "measured_with": "the golden eval"}})
-    ctx = SimpleNamespace(client=client, out_version="v3", scope=PERSONAL, tenant_id=None)
+    ctx = SimpleNamespace(client=client, out_version="v3", tenant_id=None)
     bundle = _candidate()
     record_release_measurements(ctx, bundle)
-    assert bundle.latency_p95_ms_by_adapter == {"personal_lines-v3": 812.5}
-    assert bundle.peak_gpu_memory_mb == 70100.0 and len(bundle.routing) == len(lob_to_layout_family())
+    assert bundle.latency_p95_ms_by_adapter == {"policy-v3": 812.5}
+    assert bundle.peak_gpu_memory_mb == 70100.0 and bundle.measured_with == "the golden eval"
+    assert len(bundle.routing) == len(known_lines())
 
-    _promote_personal(client, "release-2026.10.9")
-    narrow = client.read_json(paths.release_bundle("release-2026.10.9"))
-    narrow["lines"] = ["homeowners"]
-    client.write_json(paths.release_bundle("release-2026.10.9"), narrow)
     with pytest.raises(PipelineError, match="is not released: routing check failed"):
-        record_release_measurements(ctx, _candidate())
+        record_release_measurements(ctx, _candidate(doc_types=["acord"]))
 
 
-def test_a_release_on_another_base_than_the_promoted_ones_is_stopped(client):
-    from orchestration.pipeline_dag import PipelineError, record_release_measurements
-
-    _promote_personal(client, "release-2026.10.9")
-    ctx = SimpleNamespace(client=client, out_version="v3", scope=PERSONAL, tenant_id=None)
-    with pytest.raises(PipelineError, match="different base models"):
-        record_release_measurements(ctx, _candidate(base_model="Qwen/Qwen3-VL-8B-Instruct@other"))
-
-
-def test_the_check_routes_as_the_endpoint_will_with_its_rollback_pins(client, monkeypatch):
-    from orchestration.pipeline_dag import PipelineError, record_release_measurements
+def test_the_candidate_replaces_the_release_promoted_now(client):
+    """The table says where each line goes once the candidate is served: the
+    release promoted today - even one reading every line - takes none of it."""
+    from orchestration.pipeline_dag import record_release_measurements
     from tests.test_release_router import promote
 
-    promote(client, "release-2026.9.1", scope="unified")
-    monkeypatch.setattr("serving.vllm_entrypoint.release_pins", lambda: {"policy": "release-2026.9.1"})
-    ctx = SimpleNamespace(client=client, out_version="v3", scope=PERSONAL, tenant_id=None)
-    with pytest.raises(PipelineError, match="routes to release-2026.9.1"):
-        record_release_measurements(ctx, _candidate())
+    promote(client, "v2", lines=())                                     # every line
+    ctx = SimpleNamespace(client=client, out_version="v3", tenant_id=None)
+    bundle = _candidate()
+    record_release_measurements(ctx, bundle)
+    assert {row["release_id"] for row in bundle.routing} == {"v3", None}
+    assert {row["lob"] for row in bundle.routing if row["release_id"] == "v3"} == set(SNAPSHOT_LINES)

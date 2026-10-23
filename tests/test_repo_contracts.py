@@ -211,18 +211,15 @@ def test_there_is_exactly_one_launch_path_training_config():
     request, so a Foundation and a per-type adapter could never both be active
     (arch v2.1 §4.1)."""
     configs = {p.stem for p in (ROOT / "configs" / "training").glob("*.yaml")}
-    # An adapter's config (Fideon SPEC_09 amendment item 7: per-adapter data
-    # mix) is no second launch path: it extends unified and may name only its
-    # data, so it cannot drift from it on anything that trains.
-    adapters = {name for name in configs
-                if load_yaml(ROOT / "configs" / "training" / f"{name}.yaml").get("extends") == "unified"}
-    for name in adapters:
-        own = set(load_yaml(ROOT / "configs" / "training" / f"{name}.yaml")) - {"extends"}
-        assert own <= {"data_mix", "modality_mix"}, f"{name}.yaml overrides {sorted(own)} of unified"
-    assert configs - adapters <= {"unified", "per_type_adapter", "sweep"}, (
-        f"unexpected training configs: {sorted(configs - adapters - {'unified', 'per_type_adapter', 'sweep'})}"
+    assert configs <= {"unified", "per_type_adapter", "sweep"}, (
+        f"unexpected training configs: {sorted(configs - {'unified', 'per_type_adapter', 'sweep'})}"
     )
     assert "unified" in configs
+    # One adapter, one config (decision 2026-10-22): the data mix that
+    # personal_lines.yaml carried lives in unified.yaml, and nothing extends it.
+    assert not [name for name in configs
+                if load_yaml(ROOT / "configs" / "training" / f"{name}.yaml").get("extends")]
+    assert "data_mix" in load_yaml(ROOT / "configs" / "training" / "unified.yaml")
 
 
 def test_the_learning_rate_is_the_v2_1_value():
@@ -426,20 +423,6 @@ def test_the_sweep_refuses_to_run_at_pilot_volume():
 
     with pytest.raises(SweepError, match="below the"):
         assert_enough_data({"policy": 28})
-
-
-def test_quantization_thresholds_gate_package_when_metrics_exist():
-    """IMPL-13 §4 — the gate sits between quantize and push. It applies only when
-    per-format metrics were measured; scoring each GGUF needs a GPU, and a gate
-    that invented numbers to have something to judge would be worse than one
-    that says it has none."""
-    import inspect
-
-    from orchestration import pipeline_dag
-
-    source = inspect.getsource(pipeline_dag.stage_quantize)
-    assert "assert_servable" in source
-    assert "quant_threshold_results" in source
 
 
 # --------------------------------------------------------------------------

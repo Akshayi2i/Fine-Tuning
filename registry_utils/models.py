@@ -22,17 +22,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-#: ``unified`` is the arch v2.1 §4.1 default: one adapter across all document
-#: types and all tasks. ``foundation`` and ``per_type_adapter`` remain for the
-#: §4.2 graduation path — and so that manifests written under v1 still load,
-#: which is the whole point of a lineage record.
+#: ``scoped`` is what every run of the policy adapter writes (``common.adapter``):
+#: trained on the base, covering a named set of document types, and filed by
+#: its name (``registry/scope/policy/``) rather than by a doc_type.
 #:
-#: ``scoped`` is a run covering a NAMED SUBSET of document types — a policy-only
-#: or lossrun-only adapter (``common.scopes``). It is its own kind because it
-#: sits between the other two: trained on the base like a unified run, but
-#: covering part of the corpus like a per-type one, and addressed by its scope
-#: rather than by a doc_type. A unified-scope run keeps writing ``unified``, so
-#: ``extractor-v1`` and ``extractor-v2`` stay the same kind of thing.
+#: ``unified``, ``foundation`` and ``per_type_adapter`` are the kinds older runs
+#: wrote — one adapter over every type, v1's Foundation and its per-type
+#: adapters. They stay so those manifests still load, which is the whole point
+#: of a lineage record.
 RunType = Literal["unified", "foundation", "per_type_adapter", "scoped"]
 #: ``training`` exists because the manifest is written BEFORE ms-swift is
 #: launched — the run_id has to be reserved and the config recorded even if
@@ -174,11 +171,11 @@ class DataStats(_Base):
     #: what it came to).
     modality_mix_target: dict[str, float] = Field(default_factory=dict)
 
-    #: The scope's configured synthetic_fraction and scanned_share, and per line
+    #: The configured synthetic_fraction and scanned_share, and per line
     #: what its train documents came to (Fideon SPEC_09 amendment items 6, 7).
     data_mix: dict[str, Any] = Field(default_factory=dict)
 
-    #: split -> line -> documents, real, synthetic and rows, for a scoped run.
+    #: split -> line -> documents, real, synthetic and rows, of the run's view.
     examples_by_line: dict[str, dict[str, dict[str, int]]] = Field(default_factory=dict)
 
     #: Recorded, not enforced, while de-identification is blocked (IMPL-05 §1).
@@ -276,9 +273,9 @@ class RunManifest(_Base):
     #: `adapters_depending_on` keep meaning what they meant.
     doc_type: str | None = None
 
-    #: Which training scope produced this run (``common.scopes``). ``None`` reads
-    #: as ``unified``, which is correct for every manifest already in Blob —
-    #: that is why it is optional rather than required.
+    #: The adapter's name for a run of it (``common.adapter``: ``policy``), or
+    #: the training scope of an older run. ``None`` reads as ``unified``, which
+    #: is correct for every manifest written before scopes existed.
     scope: str | None = None
 
     #: The document types this run actually trained on. Empty reads as "the
@@ -297,10 +294,21 @@ class RunManifest(_Base):
     sweep_id: str | None = None
     sweep_phase: SweepPhase | None = None
 
-    #: Set when a Foundation run continued from a previous checkpoint rather than
-    #: retraining from base. The gate then demands cross-type regression evidence
-    #: before promotion, because continued training compounds drift (arch §12).
+    #: The adapter directory this run's weights started from, when it continued
+    #: training rather than starting from the base (``training.train
+    #: --continue-from``, or the parent's adapter a cycle continues).
     continued_from: str | None = None
+
+    #: The run whose adapter this one continued (``policy-v3``), when a cycle
+    #: trained incrementally (decision 2026-10-23). Its documents are this run's
+    #: too: the purge plan follows the chain, and the gate holds every line to
+    #: its parent's score.
+    parent_run_id: str | None = None
+
+    #: Why this cycle started from the base rather than continuing the promoted
+    #: adapter (``--fresh``, nothing promoted, another window plan ...). None
+    #: when it continued, or for a run written before cycles continued.
+    fresh_reason: str | None = None
 
     dependencies: Dependencies
     training_config: TrainingConfig
@@ -368,10 +376,15 @@ class RunManifest(_Base):
             "status": self.status,
             "artifact_status": self.artifacts.status,
             "created_at": self.created_at.isoformat(),
+            # Whose corpus trained it, and the gate's tier: the version table's columns.
+            "tenant_id": self.tenant_id,
+            "tier": self.promotion.tier,
             "corpus_version": self.dependencies.corpus_version,
             "foundation_version": self.dependencies.foundation_version,
             "code_git_commit": self.dependencies.code_git_commit,
             "is_sweep_run": self.is_sweep_run,
+            # Which version this one continued; None for a run from the base.
+            "parent_run_id": self.parent_run_id,
             "field_exact_match": self.eval_metrics.field_exact_match,
             "list_field_recall": self.eval_metrics.list_field_recall,
             "lob_detection_accuracy": self.eval_metrics.lob_detection_accuracy,
@@ -431,7 +444,8 @@ class ReleaseBundle(_Base):
     these are maps rather than single values.
     """
 
-    release_id: str = Field(..., description="e.g. release-2026.11.1")
+    release_id: str = Field(..., description="the cycle's version, e.g. v3")
+
     status: ReleaseStatus = "candidate"
     #: Fideon SPEC_09 §6: ``production`` when field match >= 0.92, ``interim`` when the
     #: release passed every floor below that (evaluation.gating.release_tier).
@@ -447,24 +461,31 @@ class ReleaseBundle(_Base):
     routing: list[dict[str, Any]] = Field(default_factory=list)
     tenant_scope: str
 
-    #: The training scope behind this release (``common.scopes``). Defaulted so
-    #: every bundle already in Blob loads unchanged.
+    #: The adapter behind this release (``common.adapter``: ``policy``), or the
+    #: training scope of an older one. Defaulted so every bundle already in Blob
+    #: loads unchanged; serving reads it to find the adapter's weights.
     scope: str = "unified"
 
     #: The document types this release may SERVE. **Empty means "every active
-    #: type"**, which is exactly what an existing unified bundle means — so no
-    #: backfill is needed. Serving routes each type to the narrowest promoted
-    #: release covering it, which is what lets a policy release take policies
-    #: while an older unified release keeps the rest.
+    #: type"**, which is what a bundle written before types were recorded means.
     doc_types: list[str] = Field(default_factory=list)
-    #: The lines of business this release may serve, for a scope narrowed by
-    #: line (``personal_lines``). Empty means every line — every bundle before.
+    #: The lines of business this release serves: the lines it trained on.
+    #: Serving sends a policy of any other line to the base model. Empty means
+    #: every line — every bundle written before lines were recorded.
     lines: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     base_model: str = Field(..., description="Qwen/Qwen3-VL-8B-Instruct@<hf_revision>")
-    adapter: str = Field(..., description="the unified extractor run, e.g. extractor-v1.0")
-    merged_model: str
+    adapter: str = Field(..., description="the run whose adapter this is, e.g. policy-v3")
+    #: The merged model's path, for a release served as one. Empty for a
+    #: ``lora_on_base`` release: nothing is merged (decision 2026-10-23).
+    merged_model: str = ""
+
+    #: How the release is served. ``lora_on_base``: the base model with this
+    #: release's adapter applied per request, never merged (every release since
+    #: 2026-10-23; ``serving_formats.bf16`` is then the adapter's directory).
+    #: ``merged``: one merged model (every bundle written before).
+    served_as: Literal["merged", "lora_on_base"] = "merged"
 
     #: format -> artifact path. bf16 is the reference and must always be present:
     #: every quantization threshold in §13b is an absolute margin against it, so
@@ -499,6 +520,13 @@ class ReleaseBundle(_Base):
                 "are absolute margins against it, so without it a quantized format has no "
                 "baseline to be measured against."
             )
+        if self.served_as == "lora_on_base" and set(self.serving_formats) != {"bf16"}:
+            raise ValueError(
+                f"a release served as a LoRA on the bf16 base serves bf16 only, not "
+                f"{sorted(self.serving_formats)}: nothing is merged, so there is no model to quantize"
+            )
+        if self.served_as == "merged" and not self.merged_model:
+            raise ValueError("a release served as a merged model must name it (merged_model)")
         unknown = set(self.calibrators) - set(self.serving_formats)
         if unknown:
             raise ValueError(

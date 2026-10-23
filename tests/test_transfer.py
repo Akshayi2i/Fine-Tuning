@@ -122,7 +122,7 @@ def test_a_published_adapter_is_its_weights_and_config_without_the_resume_state(
     resume needs; nothing that reads a published adapter opens it."""
     (artifact / "optimizer.pt").write_bytes(b"x" * 64)
     (artifact / "trainer_state.json").write_text("{}", encoding="utf-8")
-    prefix = transfer.push_scoped_adapter(artifact, "casualty_fleet", "v1", client=client)
+    prefix = transfer.push_scoped_adapter(artifact, "policy", "v1", client=client)
     assert sorted(k.rsplit("/", 1)[-1] for k in client.list(prefix)) == sorted(transfer.ADAPTER_FILES)
 
 
@@ -131,7 +131,7 @@ def test_a_folder_without_the_adapter_files_is_refused(client, tmp_path):
     folder.mkdir()
     (folder / "adapter_model.safetensors").write_bytes(b"weights")
     with pytest.raises(transfer.TransferError, match="adapter_config.json"):
-        transfer.push_scoped_adapter(folder, "casualty_fleet", "v1", client=client)
+        transfer.push_scoped_adapter(folder, "policy", "v1", client=client)
 
 
 def test_a_repush_sends_only_what_blob_does_not_already_hold(client, tmp_path):
@@ -142,13 +142,13 @@ def test_a_repush_sends_only_what_blob_does_not_already_hold(client, tmp_path):
     writes = []
     real = client._backend.write
     client._backend.write = lambda c, k, d: (writes.append(k), real(c, k, d))[1]
-    transfer.push_merged_model(merged, "v1", client=client, scope="casualty_fleet")
+    transfer.push_merged_model(merged, "v1", client=client, scope="policy")
     assert len(writes) == 2
     writes.clear()
-    transfer.push_merged_model(merged, "v1", client=client, scope="casualty_fleet")
+    transfer.push_merged_model(merged, "v1", client=client, scope="policy")
     assert writes == []                                                  # every byte already there
     (merged / "model-00001.safetensors").write_bytes(b"shard ONE")       # same size, other bytes
-    transfer.push_merged_model(merged, "v1", client=client, scope="casualty_fleet")
+    transfer.push_merged_model(merged, "v1", client=client, scope="policy")
     assert [k.rsplit("/", 1)[-1] for k in writes] == ["model-00001.safetensors"]
 
 

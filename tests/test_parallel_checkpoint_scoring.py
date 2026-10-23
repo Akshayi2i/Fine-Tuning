@@ -165,7 +165,6 @@ def test_a_worker_writes_each_checkpoints_score_or_why_it_has_none(monkeypatch, 
 
 @pytest.mark.parametrize("gpus,parallel", [(["0", "1", "2", "3"], True), (["0"], False)])
 def test_selection_scores_in_parallel_when_training_had_several_gpus(monkeypatch, gpus, parallel):
-    from common.scopes import get_scope
     from orchestration import pipeline_dag
     from training import train
 
@@ -174,12 +173,13 @@ def test_selection_scores_in_parallel_when_training_had_several_gpus(monkeypatch
     monkeypatch.setattr(train, "training_gpus", lambda distributed: 4)
     monkeypatch.setattr(C, "parallel_vllm_scorer", lambda **kw: built.append(("parallel", kw)) or "P")
     monkeypatch.setattr(C, "vllm_scorer", lambda **kw: built.append(("single", kw)) or "S")
-    ctx = SimpleNamespace(client=object(), corpus="v1", scope=get_scope("personal_lines"), tenant_id="smoke4x",
-                          out_version="v1")
+    ctx = SimpleNamespace(client=object(), corpus="v1", tenant_id="smoke4x", out_version="v1")
     assert pipeline_dag._checkpoint_scorer(ctx) == ("P" if parallel else "S")
     kind, kwargs = built[0]
     assert kind == ("parallel" if parallel else "single")
     assert kwargs["sample_rows"] == 400 and "smoke4x" in kwargs["val_path"]
+    # The policy adapter's own validation view.
+    assert "/scope/policy/" in kwargs["val_path"]
     assert kwargs["full_modes"] == ["ocr_plus_image"]
     if parallel:
         assert kwargs["gpus"] == gpus and kwargs["work_dir"].name == "checkpoint_scores"

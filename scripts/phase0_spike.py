@@ -371,11 +371,10 @@ def check_swift_image_budget(r: Result) -> None:
     import os
     import textwrap
 
-    from common.scopes import default_scope
     from training.length_check import image_tokens
     from training.train import _pixel_budget
 
-    env = _pixel_budget(default_scope())
+    env = _pixel_budget()
     code = textwrap.dedent(f'''
         import tempfile
         from pathlib import Path

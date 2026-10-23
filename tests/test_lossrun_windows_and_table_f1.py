@@ -10,7 +10,7 @@ import pytest
 
 from artifact_registry.blob_client import BlobClient, InMemoryBackend
 from calibration.fit_calibration import CalibrationParams
-from common.scopes import structural_not_applicable
+from common.adapter import not_applicable_metrics
 from evaluation.gating import CONDITIONAL_METRICS, GATING_METRICS, PILOT_FLOORS, promotion_gate
 from evaluation.metrics.lossrun_table import score_claims, table_f1
 from inference_core.model_runner import Generation, ModelBackend, load_model
@@ -169,7 +169,6 @@ def test_a_claim_counts_only_with_its_number_and_its_total_within_a_cent():
 
 
 def test_a_loss_run_evaluation_reports_table_f1_and_the_gate_floors_it_at_088(client):
-    from common.scopes import get_scope
     from evaluation.golden_eval import evaluate  # noqa: F401 - the path that carries reconciliation
     from evaluation.run_eval import build_report
 
@@ -180,17 +179,15 @@ def test_a_loss_run_evaluation_reports_table_f1_and_the_gate_floors_it_at_088(cl
     assert metrics["table_f1"] == 1.0
     assert "lossrun_totals_reconciliation_rate" not in metrics       # unverifiable: no evidence, no score
     assert GATING_METRICS["table_f1"] == "higher_is_better" and PILOT_FLOORS["table_f1"] == 0.88
-    # Conditional: an eval set with no Loss Run has none to report. Present, it
-    # faces the floor.
+    # Conditional: an eval set with no Loss Run has none to report, and the
+    # policy adapter reads no Loss Run. Present, it still faces the floor.
     assert "table_f1" in CONDITIONAL_METRICS
-    assert "table_f1" not in structural_not_applicable(get_scope("lossrun"))
-    assert "table_f1" in structural_not_applicable(get_scope("personal_lines"))
+    assert "table_f1" in not_applicable_metrics()
     passing = {name: 0.96 for name in GATING_METRICS}
     passing.update(schema_validity_rate=1.0, ece_confidence=0.04, confusable_misattribution_rate=0.02,
                    false_null_rate=0.03, auto_accept_error_rate=0.01)
-    lossrun = get_scope("lossrun")
-    assert "table_f1" in promotion_gate({**passing, "table_f1": 0.87}, None, scope=lossrun).failed_gates
-    assert "table_f1" not in promotion_gate({**passing, "table_f1": 0.89}, None, scope=lossrun).failed_gates
+    assert "table_f1" in promotion_gate({**passing, "table_f1": 0.87}, None).failed_gates
+    assert "table_f1" not in promotion_gate({**passing, "table_f1": 0.89}, None).failed_gates
 
 
 def test_the_reconciliation_report_reaches_the_evaluation(client, monkeypatch):

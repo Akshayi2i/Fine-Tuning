@@ -230,7 +230,6 @@ def test_an_unknown_selection_mode_is_refused(monkeypatch):
     from types import SimpleNamespace
 
     import common.config as config
-    from common.scopes import get_scope
     from orchestration import pipeline_dag
 
     real = config.training_config
@@ -242,7 +241,7 @@ def test_an_unknown_selection_mode_is_refused(monkeypatch):
 
     monkeypatch.setattr(config, "training_config", with_fax)
     with pytest.raises(pipeline_dag.PipelineError, match="fax"):
-        pipeline_dag._selection_settings(SimpleNamespace(scope=get_scope("casualty_fleet")))
+        pipeline_dag._selection_settings(SimpleNamespace())
 
 
 def test_the_configured_selection_judges_two_finalists_in_valid_modes():

@@ -119,8 +119,9 @@ def test_calibrate_collects_its_own_samples_per_format(client):
     stage has evidence without an operator hand-building feature vectors."""
     from orchestration.pipeline_dag import StageContext, collect_calibration_samples
 
+    # The policy adapter's own validation view, where the corpus view writes it.
     client.write_text(
-        paths.corpus_eval_split("v1", "val"),
+        paths.corpus_scope_eval_split("v1", "val", "policy"),
         "".join(json.dumps(r) + "\n" for r in _val_rows()),
     )
     loaded: list[str] = []

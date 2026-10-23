@@ -18,6 +18,19 @@ def test_all_invariants_hold_as_shipped():
     config.validate_all()
 
 
+def test_validate_all_checks_the_adapters_training_config(monkeypatch):
+    """There are no scopes to walk: the one config the adapter trains with is
+    the one whose batch arithmetic must hold at launch."""
+    from common.adapter import ADAPTER
+
+    good = config.training_config(ADAPTER.training_config)
+    broken = {**good, "batch": {**good["batch"], "effective_batch_size": 999}}
+    monkeypatch.setattr(config, "training_config",
+                        lambda name: broken if name == ADAPTER.training_config else good)
+    with pytest.raises(config.ConfigError, match="effective_batch_size is declared"):
+        config.validate_all()
+
+
 def test_resolution_cap_is_within_the_architecture_range():
     low, high = RESOLUTION_CAP_RANGE_PX
     assert low <= config.resolution_cap_px() <= high

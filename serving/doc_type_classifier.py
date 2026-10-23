@@ -80,8 +80,7 @@ class Classification:
     #: The L1/L2 line hint this was reconciled against, when there was one.
     lob_hypothesis: str | None = None
     lob_hypothesis_agreed: bool | None = None
-    #: "base" (every line, before an adapter is chosen) or "family" (the family
-    #: adapter choosing among its own lines).
+    #: "base": the base model read the line, among every known line.
     lob_stage: str | None = None
 
     @property
@@ -223,9 +222,9 @@ def known_line(value: Any) -> str | None:
     auto; workers' comp is ``wc``), and refused when it names no registered
     line - a guessed schema is worse than the fallback.
     """
-    from common.lob import merge_line
+    from common.lob import known_lines, merge_line
     from common.schemas import LOB_SCHEMA_ALIASES
-    from common.scopes import known_lines
+
 
     if not isinstance(value, str) or not value.strip():
         return None

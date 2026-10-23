@@ -122,7 +122,7 @@ def validate_golden_label(
         # that have a schema; absent is allowed, because the canonical fallback
         # exists for exactly that case.
         if lob:
-            from common.scopes import known_lines, lob_lines
+            from common.lob import known_lines, lob_lines
 
             unknown = sorted(lob_lines(lob) - known_lines())
             if not lob_lines(lob) or unknown:

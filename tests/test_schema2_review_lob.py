@@ -114,8 +114,8 @@ def test_a_value_that_cannot_be_located_gives_no_confidence(text):
 
 
 def test_a_wrapped_answer_with_the_callers_line_is_served(client):
-    from tests.test_serving_pipeline import CALIBRATION
     from serving.pipeline import extract
+    from tests.test_serving_pipeline import CALIBRATION
 
     model, _backend = _model(client)
     classifier = ZeroShotClassifier(SimpleNamespace(), _answering(WRAPPED["fenced"]))
@@ -130,8 +130,8 @@ def test_a_wrapped_answer_with_the_callers_line_is_served(client):
 def test_an_answer_that_is_no_json_leaves_the_line_undetected(client):
     """The caller named the type, so on main the classifier never ran; the extra
     read for the line raised ClassificationError out of extract()."""
-    from tests.test_serving_pipeline import CALIBRATION
     from serving.pipeline import extract
+    from tests.test_serving_pipeline import CALIBRATION
 
     model, _backend = _model(client)
     classifier = ZeroShotClassifier(SimpleNamespace(), _answering("I think this is a homeowners policy."))
@@ -155,15 +155,15 @@ def test_a_failed_read_applies_no_hint():
     route_ = Route("policy", None, None, "policy", None,
                    classification=StaticClassifier("policy").classify([], None))
     found = _resolve_lob(_request(known_doc_type="policy", lob_hypothesis="homeowners"), Broken(), route_,
-                         detect=True, line_threshold=0.9, family_threshold=0.6)
+                         detect=True, line_threshold=0.9, uncertain_threshold=0.6)
     assert (found.lob, found.source, found.flags, found.hypothesis_agreed) == (
         None, "undetected", ["lob:undetected"], None)
 
 
 def test_no_classifier_and_the_fallback_asked_for_reads_the_fallback_as_on_main(client):
     """cold_start wires no classifier by default; the read died with AttributeError."""
-    from tests.test_serving_pipeline import CALIBRATION
     from serving.pipeline import extract
+    from tests.test_serving_pipeline import CALIBRATION
 
     model, backend = _model(client)
     result = extract(_request(known_doc_type="policy", allow_lob_fallback=True), model, None, CALIBRATION,
@@ -174,11 +174,12 @@ def test_no_classifier_and_the_fallback_asked_for_reads_the_fallback_as_on_main(
 
 
 def test_no_classifier_and_a_plan_reads_the_fallback_or_refuses_cleanly(client):
+    from common.schemas import SNAPSHOT_LINES
     from serving.pipeline import LOB_FALLBACK_FLAG, PipelineError, extract
     from serving.release_router import build_serving_plan
-    from tests.test_personal_lines_scope import _promote_personal
+    from tests.test_release_router import promote
 
-    _promote_personal(client)
+    promote(client, "v3", lines=SNAPSHOT_LINES)
     plan = build_serving_plan(client)
     model, _backend = _model(client)
     with pytest.raises(PipelineError, match="allow_lob_fallback"):
@@ -197,7 +198,7 @@ def test_a_static_classifier_is_no_detection():
     static = StaticClassifier("policy")
     route_ = Route("policy", None, None, "policy", None, classification=static.classify([], None))
     found = _resolve_lob(_request(known_doc_type="policy"), static, route_, detect=True,
-                         line_threshold=0.9, family_threshold=0.6)
+                         line_threshold=0.9, uncertain_threshold=0.6)
     assert (found.lob, found.source, found.flags) == (None, None, [])
 
 
@@ -211,7 +212,7 @@ def test_a_classifier_that_never_asks_for_the_line_is_no_detection():
 
     classifier = TypeOnly()
     route_ = Route("policy", None, None, "policy", None, classification=classifier.classify([], None))
-    found = _resolve_lob(_request(), classifier, route_, detect=True, line_threshold=0.9, family_threshold=0.6)
+    found = _resolve_lob(_request(), classifier, route_, detect=True, line_threshold=0.9, uncertain_threshold=0.6)
     assert found.source is None
 
 
@@ -221,7 +222,7 @@ def test_a_line_reader_that_found_no_line_is_undetected():
 
     reader = ZeroShotClassifier(SimpleNamespace(), _answering(ANSWER.replace('"homeowners"', "null")))
     route_ = Route("policy", None, None, "policy", None, classification=reader.classify([], None))
-    found = _resolve_lob(_request(), reader, route_, detect=True, line_threshold=0.9, family_threshold=0.6)
+    found = _resolve_lob(_request(), reader, route_, detect=True, line_threshold=0.9, uncertain_threshold=0.6)
     assert (found.source, found.flags) == ("undetected", ["lob:undetected"])
     assert ZeroShotClassifier.reads_lob is True
 
@@ -231,10 +232,10 @@ def test_a_line_reader_that_found_no_line_is_undetected():
 # --------------------------------------------------------------------------
 
 def test_detection_ships_off_in_the_pipeline_and_the_endpoint_config(client):
-    from tests.test_lob_detection import _Reads
-    from tests.test_serving_pipeline import CALIBRATION
     from serving.pipeline import extract
     from serving.vllm_entrypoint import serving_thresholds
+    from tests.test_lob_detection import _Reads
+    from tests.test_serving_pipeline import CALIBRATION
 
     assert inspect.signature(extract).parameters["detect_lob"].default is False
     assert serving_thresholds()["detect_lob"] is False
@@ -278,14 +279,14 @@ def _cases(spec):
 def _measure(cases, reader, **kwargs):
     from evaluation.lob_detection_eval import measure_lob_detection
 
-    return measure_lob_detection(cases, reader, line_threshold=0.90, family_threshold=0.60, **kwargs)
+    return measure_lob_detection(cases, reader, line_threshold=0.90, uncertain_threshold=0.60, **kwargs)
 
 
 def test_the_measurement_resolves_as_serving_does_with_the_line_and_hint_withheld():
     cases = _cases([
         ("a", "homeowners", False, False),        # right, confident: detected
         ("b", "homeowners", True, False),         # wrong line, confident: routed with no flag
-        ("c", "personal_auto", True, True),       # right, uncertain: its family, flagged
+        ("c", "personal_auto", True, True),       # right, uncertain: its line, flagged
         ("d", "personal_auto", False, True),      # too unsure: the fallback
         ("e", "motorcycle", False, False),        # the read failed
         ("f", "homeowners", False, False),        # right at exactly the line threshold
@@ -299,10 +300,11 @@ def test_the_measurement_resolves_as_serving_does_with_the_line_and_hint_withhel
     assert body["confidently_wrong"] == 1 and math.isclose(body["confidently_wrong_rate"], round(1 / 6, 4))
     assert body["sources"] == {"detected": 3, "detected_uncertain": 1, "undetected": 2}
     assert body["read_failures"] == 1
-    assert body["by_line"]["homeowners"]["family_accuracy"] == 1.0      # dwelling fire is one family
+    assert body["by_line"]["homeowners"] == {"documents": 3, "accuracy": round(2 / 3, 4), "undetected": 0}
     assert set(body["below_floor"]) == {"homeowners", "personal_auto", "motorcycle"}
     assert body["clears_floor"] is False
-    assert (body["line_threshold"], body["family_threshold"], body["floor"]) == (0.90, 0.60, 0.85)
+    assert (body["line_threshold"], body["uncertain_threshold"], body["floor"]) == (0.90, 0.60, 0.85)
+    assert "family_threshold" not in body
     assert body["slices"]["scanned"]["documents"] == 2 and body["slices"]["native"]["documents"] == 4
     assert body["slices"]["held_out_carrier"]["confidently_wrong"] == 0
     assert body["slices"]["seen_carrier"]["confidently_wrong"] == 1
@@ -316,8 +318,8 @@ def test_the_sweep_replays_one_reading_per_document():
 
     assert reader.calls == 2                                             # once each, whatever the sweep
     assert body["slices"] == {}                                          # the metadata said nothing
-    by_thresholds = {(row["line_threshold"], row["family_threshold"]): row for row in body["sweep"]}
-    assert all(f <= line for line, f in by_thresholds)
+    by_thresholds = {(row["line_threshold"], row["uncertain_threshold"]): row for row in body["sweep"]}
+    assert all(uncertain <= line for line, uncertain in by_thresholds)
     assert by_thresholds[(0.90, 0.50)]["detected_share"] == 0.5
     assert by_thresholds[(0.90, 0.50)]["uncertain_share"] == 0.5
     assert by_thresholds[(0.95, 0.60)]["detected_share"] == 0.0
@@ -364,7 +366,8 @@ def test_the_measurement_uses_the_endpoints_thresholds():
     from serving.vllm_entrypoint import serving_thresholds
 
     tuning = serving_thresholds()
-    assert serving_lob_thresholds() == (tuning["lob_confidence_threshold"], tuning["lob_family_threshold"])
+    assert serving_lob_thresholds() == (tuning["lob_confidence_threshold"], tuning["lob_uncertain_threshold"])
+    assert "lob_family_threshold" not in tuning
 
 
 def test_the_measurement_script_answers_help_without_loading_a_model():
@@ -471,10 +474,10 @@ def test_a_hint_that_is_no_line_name_is_refused(hint):
 
 
 def test_an_endpoint_hint_that_agrees_lifts_an_uncertain_reading(client):
-    from tests.test_lob_detection import _Reads
-    from tests.test_serving_pipeline import CALIBRATION
     from serving.pipeline import extract
     from serving.vllm_entrypoint import build_request
+    from tests.test_lob_detection import _Reads
+    from tests.test_serving_pipeline import CALIBRATION
 
     request = build_request({"source_id": "p1", "image_paths": ["d/page_1.png"],
                              "page_texts": {"1": "Declarations"}, "lob_hypothesis": "homeowners"})
@@ -489,16 +492,17 @@ def test_an_endpoint_hint_that_agrees_lifts_an_uncertain_reading(client):
 # L7: the prompt hash covers what the classifier is shown
 # --------------------------------------------------------------------------
 
-def test_the_prompt_hash_covers_the_classifiers_line_meanings_and_families():
-    from common.config import CONFIG_DIR, LAYOUT_FAMILIES_CONFIG
+def test_the_prompt_hash_covers_the_classifiers_line_meanings():
+    from common.config import CONFIG_DIR
     from common.prompts import prompt_input_files
 
     files = prompt_input_files()
     sections = files.index(CONFIG_DIR / "schema_sections.yaml")
-    assert files[sections + 1:sections + 3] == [CONFIG_DIR / "lob_meanings.yaml", LAYOUT_FAMILIES_CONFIG]
+    assert files[sections + 1:] == [CONFIG_DIR / "lob_meanings.yaml"]
+    assert not any(path.name == "layout_families.yaml" for path in files)       # no families any more
 
 
-@pytest.mark.parametrize("name", ["lob_meanings.yaml", "layout_families.yaml"])
+@pytest.mark.parametrize("name", ["lob_meanings.yaml", "schema_sections.yaml"])
 def test_an_edit_to_a_classifier_config_moves_the_prompt_hash(name, monkeypatch):
     from common.config import CONFIG_DIR
     from common.prompts import prompt_hash

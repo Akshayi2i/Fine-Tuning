@@ -2,8 +2,8 @@
 
 A policy that reaches L3 with no line - a scan L1/L2 could not read - is
 classified for its line too, and routed by how sure that reading is: confidently
-to its line's adapter and schema, uncertainly to its family's (flagged), not at
-all to the base model and the fallback schema (flagged). A caller's line always
+to its line's schema, uncertainly to its line's schema too (flagged), not at all
+to the base model and the fallback schema (flagged). A caller's line always
 wins.
 """
 
@@ -24,8 +24,8 @@ from serving.doc_type_classifier import (
 
 
 def test_every_registered_line_has_a_meaning():
+    from common.lob import known_lines
     from common.prompts import lob_meanings
-    from common.scopes import known_lines
 
     assert set(lob_meanings()) == set(known_lines())
 
@@ -53,7 +53,7 @@ def test_the_classifier_is_asked_for_the_line_with_every_lines_meaning():
         assert f"`{line}` - {meaning}" in prompt
 
 
-def test_the_family_stage_asks_only_for_its_own_lines():
+def test_a_line_only_question_asks_only_for_the_lines_given():
     from common.prompts import render_classifier_prompt
 
     prompt = render_classifier_prompt(lines=["homeowners", "dwelling_fire"], line_only=True)
@@ -148,11 +148,12 @@ def test_a_confidently_read_line_is_routed_as_the_callers_would_be():
     assert not [f for f in result.review_flags if f.startswith("lob:")]
 
 
-def test_an_uncertain_line_keeps_its_family_and_is_flagged():
+def test_an_uncertain_line_is_kept_and_flagged():
     result, schemas = _extract(_Reads("homeowners", 0.7))
     assert result.route_info["lob_source"] == "detected_uncertain"
-    assert "lob:uncertain_within_family" in result.review_flags
-    assert any("CoverageCode" in s for s in schemas)
+    assert "lob:uncertain" in result.review_flags
+    assert "lob:uncertain_within_family" not in result.review_flags
+    assert any("CoverageCode" in s for s in schemas)                     # its line's schema
 
 
 def test_a_line_read_with_no_confidence_is_uncertain_not_detected():
@@ -205,7 +206,8 @@ def test_detection_can_be_turned_off():
 # --------------------------------------------------------------------------
 
 
-def test_a_classify_row_asks_the_family_its_own_lines():
+def test_a_classify_row_asks_for_the_line_among_every_known_line():
+    from common.lob import known_lines
     from data_pipeline.dataset_builder.build_jsonl import SourceDocument, classify_rows
 
     doc = SourceDocument(source_id="h1", doc_type="policy", golden_label={}, ocr_pages=["Declarations"],
@@ -214,14 +216,20 @@ def test_a_classify_row_asks_the_family_its_own_lines():
     assert [r["task"] for r in rows] == ["classify", "classify"]
     assert json.loads(rows[0]["messages"][-1]["content"]) == {"lob": "homeowners"}
     system = rows[0]["messages"][0]["content"]
-    assert '"dwelling_fire"' in system and '"gl"' not in system
+    assert all(f'"{line}"' in system for line in known_lines())          # gl as well as dwelling fire
     assert not any(b["type"] == "text" for b in rows[1]["messages"][1]["content"])   # image only
-    gl = SourceDocument(source_id="g", doc_type="lossrun", golden_label={}, ocr_pages=["x"],
-                        image_paths=["g/page_1.png"], lob="gl", tenant_id="default")
-    assert classify_rows(gl, "train", ("ocr_plus_image",)) == []
+
+    def other(**fields):
+        return SourceDocument(**{"source_id": "g", "doc_type": "policy", "golden_label": {},
+                                 "ocr_pages": ["x"], "image_paths": ["g/page_1.png"],
+                                 "tenant_id": "default", **fields})
+
+    assert classify_rows(other(doc_type="lossrun", lob="gl"), "train", ("ocr_plus_image",)) == []
+    assert classify_rows(other(lob="pet_insurance"), "train", ("ocr_plus_image",)) == []    # no schema
+    assert classify_rows(other(lob=["homeowners", "gl"]), "train", ("ocr_plus_image",)) == []  # a package
 
 
-def test_line_detection_is_scored_per_line_and_by_family():
+def test_line_detection_is_scored_per_line():
     from evaluation.metrics.lob_detection import score_lob_detection
 
     report = score_lob_detection(
@@ -230,6 +238,6 @@ def test_line_detection_is_scored_per_line_and_by_family():
     )
     assert math.isclose(report.overall, 18 / 24)
     lines = report.by_line()
-    assert lines["homeowners"] == {"documents": 20, "accuracy": 0.9, "family_accuracy": 1.0, "undetected": 0}
-    assert lines["personal_auto"]["family_accuracy"] == 0.0 and lines["personal_auto"]["undetected"] == 1
+    assert lines["homeowners"] == {"documents": 20, "accuracy": 0.9, "undetected": 0}
+    assert lines["personal_auto"] == {"documents": 4, "accuracy": 0.0, "undetected": 1}
     assert report.below_floor(0.95) == ["homeowners"]

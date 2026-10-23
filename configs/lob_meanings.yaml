@@ -8,7 +8,7 @@
 # carrier that words it differently. tests/test_lob_detection.py checks that no
 # recorded carrier label appears here, and that every registered line has one.
 #
-# Keyed by this repository's line names (configs/layout_families.yaml).
+# Keyed by this repository's line names (the canonical policy schema file names).
 
 lines:
   homeowners: A home its owner lives in - damage to the house, to detached buildings on the lot and to the household's belongings, the extra cost of living elsewhere after a loss, and what the household owes when it harms others.

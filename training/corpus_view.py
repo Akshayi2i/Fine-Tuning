@@ -1,21 +1,16 @@
-"""A scope's view of one corpus (arch v2.1 §4.1, §8.2).
+"""The adapter's view of one corpus (arch v2.1 §8.2).
 
-**The corpus is built once and filtered, never built per scope.** A per-scope
-build would draw its own group assignment, its own split and its own modality
-regimes, so a document could be *train* in the unified corpus and *test* in the
-policy one. Two releases built that way are not comparable, and the policy
-model's training documents could sit in the unified model's eval set — the exact
-leakage the group-aware split exists to prevent.
-
-So a scope reads a **filtered view**: the same rows, minus the document types it
-does not cover, written beside the corpus under ``train/scope/{name}/``. The
-unified scope reads the corpus files directly, so nothing is copied for it.
+The adapter trains on the corpus's **single-line policy rows** (a package and
+a policy with no line go to the base model at serving, so they do not train),
+written beside the corpus under ``train/scope/policy/`` with the data mix,
+render rotation and line balance applied. The split and the group assignment are the corpus's own, so
+two versions trained on one corpus stay comparable.
 
 Filtering rather than re-splitting also keeps the epoch structure: every epoch
-file holds each of the scope's train documents exactly once, in that epoch's
-sampled modality regime, which is what makes "3 epochs" mean three passes.
+file holds each train document exactly once, in that epoch's sampled modality
+regime, which is what makes "3 epochs" mean three passes.
 
-A scope's configured shares are applied here too: per line, its synthetic
+The configured shares are applied here: per line, its synthetic
 fraction and scanned share decide which synthetic documents train, the same
 ones in every epoch (:mod:`training.data_mix`, Fideon SPEC_09 amendment items 6
 and 7). Every real document trains.
@@ -40,7 +35,7 @@ from dataclasses import dataclass, field
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
-from common.scopes import Scope
+from common.adapter import ADAPTER
 
 log = logging.getLogger(__name__)
 
@@ -49,14 +44,14 @@ EPOCH_FILES = 4
 
 
 class CorpusViewError(RuntimeError):
-    """Raised when a scope's view cannot be built from the corpus."""
+    """Raised when the adapter's view cannot be built from the corpus."""
 
 
 @dataclass
 class CorpusView:
-    """Where a scope's training run reads from, and what it found."""
+    """Where a training run reads from, and what it found."""
 
-    scope: str
+    adapter: str = ADAPTER.name
     epoch_files: list[str] = field(default_factory=list)
     val_path: str = ""
     rows_by_epoch: dict[int, int] = field(default_factory=dict)
@@ -65,7 +60,7 @@ class CorpusView:
     dropped_rows: int = 0
     #: Line of business -> times its rows appear in each epoch file (line_balance).
     line_repeats: dict[str, int] = field(default_factory=dict)
-    #: The scope's configured shares, and per line what its train documents
+    #: The configured shares, and per line what its train documents
     #: came to (training.data_mix). Train documents the shares left out.
     mix_settings: dict = field(default_factory=dict)
     data_mix: dict[str, dict] = field(default_factory=dict)
@@ -83,14 +78,22 @@ class CorpusView:
 
     def describe(self) -> str:
         return (
-            f"{self.scope}: {self.train_rows} train row(s) across {len(self.epoch_files)} epoch "
-            f"file(s), {self.val_rows} val row(s), {self.dropped_rows} row(s) outside the scope"
+            f"{self.adapter}: {self.train_rows} train row(s) across {len(self.epoch_files)} epoch "
+            f"file(s), {self.val_rows} val row(s), {self.dropped_rows} row(s) of other types"
         )
 
 
-def _filter(text: str, scope: Scope) -> tuple[str, int, int]:
-    """Keep the rows this scope covers — its document types and, for a scope
-    narrowed by line of business, its lines. Returns ``(jsonl, kept, dropped)``."""
+def _filter(text: str) -> tuple[str, int, int]:
+    """Keep the rows the adapter trains on: policies of ONE known line.
+
+    A package (several lines) and a policy with no line are read against
+    ``_fallback.json``, a shape the adapter is not taught, and serving sends
+    them to the base model (``ServedRelease.covers_lob``); training on them
+    would teach inputs the adapter is never asked. Returns ``(jsonl, kept, dropped)``.
+    """
+    from common.lob import known_lines, single_line
+
+    lines = known_lines()
     kept: list[str] = []
     dropped = 0
     for line in text.splitlines():
@@ -100,7 +103,7 @@ def _filter(text: str, scope: Scope) -> tuple[str, int, int]:
             row = json.loads(line)
         except ValueError as exc:
             raise CorpusViewError(f"corpus row is not JSON: {exc}") from exc
-        if row.get("doc_type") in scope.doc_types and scope.covers_lob(row.get("lob")):
+        if row.get("doc_type") in ADAPTER.doc_types and single_line(row.get("lob")) in lines:
             kept.append(line)
         else:
             dropped += 1
@@ -108,18 +111,18 @@ def _filter(text: str, scope: Scope) -> tuple[str, int, int]:
 
 
 def _line_of(row: dict) -> str:
-    from common.lob import merge_line
+    """A row's line by its canonical schema name (``workers_comp`` is ``wc``,
+    ``classic_auto`` is ``personal_auto``), as the data mix's per-line settings
+    and the release's lines name it; a package's lines joined with ","."""
+    from common.lob import lob_lines
 
-    # Rows of a corpus built before classic auto became personal auto count
-    # with personal auto, as they train.
-    lob = merge_line(row.get("lob"))
-    return ",".join(sorted(map(str, lob))) if isinstance(lob, list) else str(lob or "unknown")
+    return ",".join(sorted(lob_lines(row.get("lob")))) or "unknown"
 
 
-def _balance_settings(scope: Scope) -> dict[str, int]:
+def _balance_settings() -> dict[str, int]:
     from common.config import training_config
 
-    settings = training_config(scope.training_config).get("line_balance") or {}
+    settings = training_config(ADAPTER.training_config).get("line_balance") or {}
     return {"min_documents": int(settings.get("min_documents") or 0),
             "max_repeat": int(settings.get("max_repeat") or 1)}
 
@@ -149,6 +152,16 @@ def line_repeats(rows: list[dict], *, min_documents: int, max_repeat: int,
     }
 
 
+def trained_lobs(view: CorpusView) -> list[object]:
+    """Each line the view's train documents are of, as ``assert_one_output_shape``
+    reads it. The view holds single-line policies only (:func:`_filter`); a
+    package's lines or None would be read as ``_fallback.json``."""
+    out: list[object] = []
+    for key in (view.examples_by_line.get("train") or {}):
+        out.append(None if key == "unknown" else key.split(",") if "," in key else key)
+    return out
+
+
 @dataclass
 class RenderRotation:
     """Which documents rest in which epoch, and what each line came to."""
@@ -164,10 +177,10 @@ class RenderRotation:
         return {"enabled": True, "balance_target": self.target, "lines": self.lines}
 
 
-def _rotation_enabled(scope: Scope) -> bool:
+def _rotation_enabled() -> bool:
     from common.config import training_config
 
-    return bool(training_config(scope.training_config).get("render_rotation"))
+    return bool(training_config(ADAPTER.training_config).get("render_rotation"))
 
 
 def plan_render_rotation(rows: list[dict], *, seed: int, epochs: int = EPOCH_FILES,
@@ -269,57 +282,22 @@ def _balance(body: str, repeats: dict[str, int]) -> tuple[str, int]:
 
 
 def materialize(
-    scope: Scope,
     corpus_version: str,
     client: BlobClient,
     *,
     tenant_id: str | None = None,
 ) -> CorpusView:
-    """Write this scope's filtered epoch and validation files, and report them.
-
-    A no-op for the unified scope: it covers every type, so the corpus files are
-    already its view and copying them would double the storage to say nothing.
-    """
-    view = CorpusView(scope=scope.name)
-
-    if scope.is_unified:
-        view.epoch_files = [
-            paths.corpus_epoch_file(corpus_version, epoch, tenant_id)
-            for epoch in range(1, EPOCH_FILES + 1)
-        ]
-        view.val_path = paths.corpus_eval_split(corpus_version, "val", tenant_id)
-        from training.data_mix import mix_settings
-
-        if mix_settings(scope).steers:
-            log.warning(
-                "data_mix is configured but is not applied to the unified scope: its epoch "
-                "files are the corpus's own. Run a scoped run to sample to the shares."
-            )
-        if _balance_settings(scope)["max_repeat"] > 1:
-            # Said, not silent: the corpus files are used as they are, so the
-            # small lines are NOT repeated here. Balance needs a scoped run.
-            log.warning(
-                "line_balance is configured but is not applied to the unified scope: its "
-                "epoch files are the corpus's own. Small lines train once per epoch; run a "
-                "line-scoped scope (e.g. personal_lines) to repeat them."
-            )
-        if _rotation_enabled(scope):
-            log.warning(
-                "render_rotation is configured but is not applied to the unified scope: its "
-                "epoch files are the corpus's own, so both renders of a twin train every epoch. "
-                "Run a line-scoped scope (e.g. personal_lines) to rotate them."
-            )
-        return view
-
+    """Write the adapter's epoch and validation files, and report them."""
+    view = CorpusView()
     rotation: RenderRotation | None = None
     for epoch in range(1, EPOCH_FILES + 1):
         source = paths.corpus_epoch_file(corpus_version, epoch, tenant_id)
         if not client.exists(source):
             raise CorpusViewError(
-                f"corpus {corpus_version} has no {source}. A scope filters the corpus that was "
-                "built; it does not build one of its own."
+                f"corpus {corpus_version} has no {source}. The view filters the corpus that "
+                "was built; it does not build one of its own."
             )
-        body, kept, dropped = _filter(client.read_text(source), scope)
+        body, kept, dropped = _filter(client.read_text(source))
         if epoch == 1:
             # One choice of documents and one set of repeat counts for every
             # epoch, from the documents of the first: every epoch file holds
@@ -328,8 +306,8 @@ def materialize(
             from common.config import training_config
             from training.data_mix import mix_settings, select_documents
 
-            settings = mix_settings(scope)
-            seed = int(training_config(scope.training_config).get("seed", 42))
+            settings = mix_settings()
+            seed = int(training_config(ADAPTER.training_config).get("seed", 42))
             keep, mix = select_documents(_rows_of(body), settings, seed=seed, line_of=_line_of)
             view.mix_settings = settings.as_dict()
             view.data_mix = {line: m.as_dict() for line, m in mix.items()}
@@ -338,8 +316,8 @@ def materialize(
             if settings.steers:
                 log.info("data mix: %s", {line: (m.real, m.synthetic_kept, m.synthetic_available)
                                           for line, m in mix.items()})
-            balance = _balance_settings(scope)
-            if _rotation_enabled(scope):
+            balance = _balance_settings()
+            if _rotation_enabled():
                 # After the shares (they choose documents, rotation chooses a
                 # render per epoch) and before balance, which counts one epoch.
                 rotation = plan_render_rotation(
@@ -361,7 +339,7 @@ def materialize(
         rested = rotation.rested.get(epoch, set()) if rotation else set()
         body, kept = _keep(body, keep - rested)
         body, kept = _balance(body, view.line_repeats)
-        target = paths.corpus_scope_epoch_file(corpus_version, epoch, scope.name, tenant_id)
+        target = paths.corpus_scope_epoch_file(corpus_version, epoch, ADAPTER.name, tenant_id)
         client.write_text(target, body)
         view.epoch_files.append(target)
         view.rows_by_epoch[epoch] = kept
@@ -369,23 +347,23 @@ def materialize(
 
     if not view.train_rows:
         raise CorpusViewError(
-            f"scope {scope.name!r} covers {list(scope.doc_types)}, and corpus {corpus_version} "
-            "holds no training rows for any of them. Training on nothing would produce an "
-            "adapter that reports success and learned nothing."
+            f"the adapter trains {list(ADAPTER.doc_types)}, and corpus {corpus_version} holds "
+            "no training rows of them. Training on nothing would produce an adapter that "
+            "reports success and learned nothing."
         )
 
     source = paths.corpus_eval_split(corpus_version, "val", tenant_id)
     if not client.exists(source):
         raise CorpusViewError(f"corpus {corpus_version} has no validation split at {source}")
-    body, kept, _ = _filter(client.read_text(source), scope)
-    view.val_path = paths.corpus_scope_eval_split(corpus_version, "val", scope.name, tenant_id)
+    body, kept, _ = _filter(client.read_text(source))
+    view.val_path = paths.corpus_scope_eval_split(corpus_version, "val", ADAPTER.name, tenant_id)
     client.write_text(view.val_path, body)
     view.val_rows = kept
     view.examples_by_line["val"] = examples_by_line(_rows_of(body))
 
     test = paths.corpus_eval_split(corpus_version, "test", tenant_id)
     if client.exists(test):
-        test_body, view.test_rows, _ = _filter(client.read_text(test), scope)
+        test_body, view.test_rows, _ = _filter(client.read_text(test))
         view.examples_by_line["test"] = examples_by_line(_rows_of(test_body))
 
     if not view.val_rows:
@@ -394,8 +372,9 @@ def materialize(
         # no validation has no early stopping and no checkpoint selection, and an
         # operator should learn that before the GPU bill, not after.
         log.warning(
-            "scope %s has no validation rows in corpus %s: early stopping and checkpoint "
-            "selection will have nothing to read.", scope.name, corpus_version,
+            "the adapter has no validation rows in corpus %s: early stopping and checkpoint "
+            "selection will have nothing to read.", corpus_version,
+
         )
 
     log.info("corpus view %s", view.describe())

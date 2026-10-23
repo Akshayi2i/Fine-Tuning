@@ -93,7 +93,7 @@ class ExtractionRequest:
     #: canonical output by the system, never asked of the model
     #: (common.canonical.SYSTEM_SUPPLIED_FIELDS), as is the page count.
     source_file_name: str | None = None
-    #: Read a policy whose line is missing or in no layout family with the base
+    #: Read a policy whose line is missing or has no schema with the base
     #: model against _fallback.json, rather than refusing it. Off unless the
     #: caller asks: such a policy is never routed silently.
     allow_lob_fallback: bool = False
@@ -790,7 +790,7 @@ class LobResolution:
 
     ``source``: ``caller`` (sent with the request, as L1/L2 do), ``detected``
     (the classifier, confidently), ``detected_uncertain`` (the classifier, below
-    the line threshold: its family's adapter and its line's schema, flagged), or
+    the line threshold: its line's schema, flagged), or
     ``undetected`` (no line found, or the read failed: the base model against
     the fallback schema, flagged). None for a document that is no policy, when
     detection is off, or when nothing wired reads lines - no detection at all.
@@ -812,7 +812,7 @@ class LobResolution:
 
 def _resolve_lob(
     request: ExtractionRequest, classifier: Classifier | None, route_: Route, *,
-    detect: bool, line_threshold: float, family_threshold: float,
+    detect: bool, line_threshold: float, uncertain_threshold: float,
 ) -> LobResolution:
     """The line a policy is read with: the caller's, or the classifier's.
 
@@ -872,14 +872,14 @@ def _resolve_lob(
         hypothesis_agreed=classification.lob_hypothesis_agreed,
     )
     confidence = classification.lob_confidence
-    if classification.lob is None or (confidence is not None and confidence < family_threshold):
+    if classification.lob is None or (confidence is not None and confidence < uncertain_threshold):
         found.lob, found.source, found.flags = None, "undetected", ["lob:undetected"]
     elif confidence is not None and confidence >= line_threshold:
         found.source = "detected"
     else:
-        # Below the line threshold, or no logprobs to measure it by: the family
-        # is likely right even when the line is not, and a person should check.
-        found.source, found.flags = "detected_uncertain", ["lob:uncertain_within_family"]
+        # Below the line threshold, or no logprobs to measure it by: the line is
+        # used, and a person should check it.
+        found.source, found.flags = "detected_uncertain", ["lob:uncertain"]
     return found
 
 #: Review flags a Loss Run's merge and reconciliation leave on the document.
@@ -1277,7 +1277,7 @@ def extract(
     detect_lob: bool = False,
     base_model_loaded: bool = True,
     lob_confidence_threshold: float = 0.90,
-    lob_family_threshold: float = 0.60,
+    lob_uncertain_threshold: float = 0.60,
 ) -> ExtractionResult:
     """Run one document through the full pipeline.
 
@@ -1306,14 +1306,13 @@ def extract(
     # The policy's line: the caller's, else the classifier's (or none).
     resolution = _resolve_lob(
         request, classifier, route_, detect=detect_lob,
-        line_threshold=lob_confidence_threshold, family_threshold=lob_family_threshold,
+        line_threshold=lob_confidence_threshold, uncertain_threshold=lob_uncertain_threshold,
     )
     if resolution.flags:
         route_ = replace(route_, review_flags=[*route_.review_flags, *resolution.flags])
 
     release = None
     lob_fallback_used = False
-    layout_family = None
     if plan is not None:
         from serving.release_router import UnservedDocType
 
@@ -1327,7 +1326,7 @@ def extract(
                                 or resolution.source == "undetected")
         except UnservedDocType as exc:
             raise PipelineError(str(exc)) from exc
-        release, layout_family = routed.release, routed.layout_family
+        release = routed.release
         if routed.lob_fallback_used:
             if not base_model_loaded:
                 # The engine is one release's merged model: reading with "no
@@ -1335,9 +1334,10 @@ def extract(
                 # trained on, reported as the base model.
                 raise PipelineError(
                     f"{request.source_id} would be read by the base model against the fallback "
-                    "schema, but this endpoint's engine is a release's merged model, not the base. "
-                    "Serve the releases as LoRAs on the base (load_release_runtimes) to read "
-                    "unrouted lines.")
+                    "schema, but this endpoint's engine is the release's merged model, not the base: "
+                    "the release covers every known line, so the engine holds no base model. A "
+                    "policy with no line, a package or an undetected line cannot be read here; send "
+                    "its single line of business.")
             # The base model, no LoRA, against the canonical _fallback.json:
             # no adapter trained on this line's layout is promoted.
             lob_fallback_used = True
@@ -1633,8 +1633,8 @@ def extract(
             "classifier_method": (
                 route_.classification.method if route_.classification else None
             ),
-            "layout_family": layout_family,
             "lob_fallback_used": lob_fallback_used,
+
             "lob_source": resolution.source,
         },
         latency_ms=latency,

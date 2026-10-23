@@ -1,21 +1,17 @@
-"""One render per twin per epoch in a scope's view of the corpus
+"""One render per twin per epoch in the adapter's view of the corpus
 (training.corpus_view.plan_render_rotation and materialize)."""
 
 from __future__ import annotations
 
 import json
-import logging
 from types import SimpleNamespace
 
 import pytest
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient, InMemoryBackend
-from common.scopes import get_scope
 from training import corpus_view
 from training.corpus_view import line_repeats, materialize, plan_render_rotation
-
-PERSONAL = get_scope("personal_lines")
 
 
 @pytest.fixture
@@ -115,11 +111,11 @@ def _epoch_ids(client, view):
             for f in view.epoch_files]
 
 
-def test_the_scoped_view_rotates_renders_and_keeps_every_render_for_validation(client):
+def test_the_view_rotates_renders_and_keeps_every_render_for_validation(client):
     train = _seed_rows("homeowners", "a", 4) + _seed_rows("homeowners", "b", 4)
     val = _seed_rows("homeowners", "v", 3)
     _seed_corpus(client, train, val)
-    view = materialize(PERSONAL, "v1", client)
+    view = materialize("v1", client)
     epochs = _epoch_ids(client, view)
     assert all(len(ids) == len(set(ids)) == 10 for ids in epochs)            # 2 originals + 8 twins, once each
     for t in range(1, 5):
@@ -133,23 +129,16 @@ def test_the_scoped_view_rotates_renders_and_keeps_every_render_for_validation(c
 
 
 def test_render_rotation_off_trains_both_renders_every_epoch(client, monkeypatch):
-    monkeypatch.setattr(corpus_view, "_rotation_enabled", lambda scope: False)
+    monkeypatch.setattr(corpus_view, "_rotation_enabled", lambda: False)
     train = _seed_rows("homeowners", "a", 4)
     _seed_corpus(client, train, _seed_rows("homeowners", "v", 1))
-    view = materialize(PERSONAL, "v1", client)
+    view = materialize("v1", client)
     assert all(len(ids) == 9 for ids in _epoch_ids(client, view))
     assert view.render_rotation == {}
 
 
-def test_personal_lines_rotates_renders():
-    assert corpus_view._rotation_enabled(PERSONAL)
-
-
-def test_the_unified_scope_says_it_does_not_rotate(client, monkeypatch, caplog):
-    monkeypatch.setattr(corpus_view, "_rotation_enabled", lambda scope: True)
-    with caplog.at_level(logging.WARNING, logger="training.corpus_view"):
-        materialize(get_scope("unified"), "v1", client)
-    assert "render_rotation is configured but is not applied" in caplog.text
+def test_the_adapter_rotates_renders():
+    assert corpus_view._rotation_enabled()
 
 
 def test_the_model_card_shows_the_rotation_per_line():

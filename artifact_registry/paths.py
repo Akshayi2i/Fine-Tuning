@@ -76,8 +76,8 @@ SHARED: Final[frozenset[str]] = frozenset(
 
 _VERSION_RE = re.compile(r"^v\d+(\.\d+)*$")
 _TENANT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
-#: Matches ``common.scopes`` — validated by shape here rather than by importing
-#: the scope registry, so a path never depends on config being loadable.
+#: The adapter's name as a path segment (``common.adapter``; older runs' names
+#: too, so the purge plan can still address them) — validated by shape here.
 _SCOPE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 #: Used where an artifact is not per-document-type (a Foundation-only merge).
@@ -221,8 +221,13 @@ def label_metadata(doc_type: str, source_id: str, tenant_id: str | None = None) 
     return _join(golden_label_dir(doc_type, source_id, tenant_id), "label_metadata.json")
 
 
+def corpus_root(tenant_id: str | None = None) -> str:
+    """``corpus/{tenant}`` — every corpus version this tenant has built."""
+    return _join("corpus", _tenant(tenant_id))
+
+
 def corpus_dir(version: str, tenant_id: str | None = None) -> str:
-    return _join("corpus", _tenant(tenant_id), _version(version))
+    return _join(corpus_root(tenant_id), _version(version))
 
 
 def corpus_split(version: str, doc_type: str, split: str, tenant_id: str | None = None) -> str:
@@ -481,17 +486,18 @@ def gate_decision(version: str, *, scope: str | None = None) -> str:
     return _join("eval-reports", _version(version), _scope_suffix(scope), "gate_decision.json")
 
 
-_RELEASE_RE = re.compile(r"^release-\d{4}\.\d{1,2}\.\d+$")
+#: A release is named by its version (``v3``): one number names the run, the
+#: adapter and the release of a cycle. ``release-YYYY.M.N`` is the form releases
+#: had before (decision 2026-10-22), still read so an older index loads.
+_RELEASE_RE = re.compile(r"^(v\d+(\.\d+)*|release-\d{4}\.\d{1,2}\.\d+)$")
 
 
 def _release(release_id: str) -> str:
-    """``release-YYYY.M.N``. Validated because a release id is what ``--model``
-    resolves and what the serving endpoint pulls — a typo there is a deploy that
-    silently serves the wrong weights, or nothing at all."""
+    """A version tag (``v3``). Validated because a release id is what serving
+    pulls — a typo there is a deploy that silently serves the wrong weights, or
+    nothing at all."""
     if not _RELEASE_RE.match(release_id):
-        raise PathError(
-            f"invalid release id {release_id!r}; expected release-YYYY.M.N (e.g. release-2026.11.1)"
-        )
+        raise PathError(f"invalid release id {release_id!r}; expected the cycle's version, e.g. v3")
     return release_id
 
 
@@ -504,19 +510,26 @@ def releases_root(tenant_id: str | None = None) -> str:
     return _join("releases", _tenant(tenant_id))
 
 
-def next_release_id(existing: Iterable[str], year: int, month: int) -> str:
-    """The next free ``release-YYYY.M.N`` for a month, given the ids already used.
+def version_number(version: str) -> int | None:
+    """The whole number of a version tag (``v3`` -> 3, ``v2.1`` -> 2); None for
+    anything that is not one."""
+    tag = str(version).strip().lower()
+    if not _VERSION_RE.match(tag):
+        return None
+    return int(tag[1:].split(".")[0])
 
-    A suggestion for the operator, never assigned silently: a derived id changes
-    between a failed run and its ``--from-stage`` resume whenever the first
-    attempt wrote anything, which would split one release across two ids.
+
+def next_version(used: Iterable[str]) -> str:
+    """The next cycle's version: one more than the highest whole number in
+    ``used`` (version tags; anything else is ignored), ``v1`` when there is none.
+
+    Only a fresh cycle takes it. A resume names its version (``--version``):
+    derived again after the first attempt wrote anything, it would be the next
+    number, and one cycle's corpus, run and release would split across two.
     """
-    prefix = f"release-{year}.{month}."
-    used = [
-        int(rid[len(prefix):]) for rid in existing
-        if rid.startswith(prefix) and rid[len(prefix):].isdigit()
-    ]
-    return f"{prefix}{max(used, default=0) + 1}"
+    numbers = [n for n in (version_number(v) for v in used) if n is not None]
+    return f"v{max(numbers, default=0) + 1}"
+
 
 
 def release_bundle(release_id: str, tenant_id: str | None = None) -> str:
@@ -645,6 +658,12 @@ def staging_adapter_dir(kind: AdapterKind, version: str, doc_type: str | None = 
 def scoped_staging_adapter_dir(scope: str | None, version: str) -> str:
     """The staging mirror of :func:`scoped_adapter_dir`."""
     return _under_staging(scoped_adapter_dir(scope, version))
+
+
+def staging_parent_adapter_dir(scope: str, version: str) -> str:
+    """Where cycle ``version`` keeps the adapter it continues (its parent's), on
+    the staging volume (decision 2026-10-23)."""
+    return _under_staging("parent-adapters", _scope(scope), _version(version))
 
 
 def staging_merged_model_dir(

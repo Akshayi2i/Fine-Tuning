@@ -97,17 +97,16 @@ class EndpointState:
     adapter_map: dict[str, Any] = field(default_factory=dict)
     corpus_manifest: dict[str, Any] = field(default_factory=dict)
     #: release_id -> what serving a document through that release needs: its
-    #: adapter (when releases share the engine as LoRAs) and its fitted
+    #: adapter (when the release is applied as a LoRA on the base) and its fitted
     #: calibrators and thresholds. Built at cold start from the serving plan.
     release_runtimes: dict[str, Any] = field(default_factory=dict)
-    #: The engine holds the base model (releases applied as LoRAs), so a policy
+    #: The engine holds the base model (the release applied as a LoRA), so a policy
     #: routed to no release can be read by the base model alone.
     base_model_loaded: bool = True
 
-    #: Which promoted release answers for each document type (arch v2.1 §12.3).
-    #: More than one can be promoted at a time — a policy release alongside an
-    #: older unified one — so this is what decides, and what refuses a type
-    #: nothing covers.
+    #: The tenant's promoted release and how a document is routed to it, or to
+    #: the base model (serving.release_router); it refuses a type the release
+    #: does not cover.
     plan: Any = None
     ready: bool = False
 
@@ -201,13 +200,6 @@ def _adapter_exists(adapter_path: str, client: BlobClient) -> bool:
         return False
 
 
-def release_pins() -> dict[str, str]:
-    """``{doc_type: release_id}`` overrides from the serving config."""
-    from common.config import serving_config
-
-    routing = serving_config().get("routing") or {}
-    return {str(k): str(v) for k, v in (routing.get("release_pins") or {}).items() if v}
-
 
 def build_adapter_map(model_version: str, client: BlobClient) -> dict[str, str]:
     """doc_type -> adapter path, resolved from the registry.
@@ -248,32 +240,33 @@ def build_adapter_map(model_version: str, client: BlobClient) -> dict[str, str]:
 
 @dataclass
 class ReleaseRuntime:
-    """One promoted release, as a request is served through it."""
+    """The promoted release, as a request is served through it."""
 
     release_id: str
     #: Local LoRA directory applied per request, or ``None`` for the engine's own
-    #: weights (a single served release: its merged model IS the engine).
+    #: weights (the release's merged model IS the engine).
     adapter: str | None = None
     calibrators: Any = None
     thresholds: Any = None
 
 
 def serves_base_with_loras(plan: Any) -> bool:
-    """Whether the engine loads the BASE with each release as its LoRA.
+    """Whether the engine loads the BASE with the release as its LoRA.
 
-    With several releases, always: one engine cannot hold several merged
-    models. With one, whenever a known line routes to no release: such a policy
-    is read by the base model with no LoRA (``lob_fallback_used``), and an
-    engine holding the release's merged model has no base to read it with.
+    Always for a release served as a LoRA on the base (every release since
+    2026-10-23: nothing is merged). For an older merged release, whenever a
+    known line routes to no release: such a policy is read by the base model
+    with no LoRA (``lob_fallback_used``), and an engine holding the merged model
+    has no base to read it with. Otherwise the engine is that merged model.
     """
-    from common.config import lob_to_layout_family
+    from common.lob import known_lines
 
     served = list(plan.served)
-    if len(served) > 1:
-        return True
     if not served:
         return False
-    return any(plan.route("policy", line).lob_fallback_used for line in lob_to_layout_family())
+    if any(getattr(release, "served_as", "merged") == "lora_on_base" for release in served):
+        return True
+    return any(plan.route("policy", line).lob_fallback_used for line in known_lines())
 
 
 def line_classifier(model: Any, plan: Any) -> Any:
@@ -322,20 +315,19 @@ def load_release_runtimes(
     *,
     adapter_root: str | Path,
 ) -> dict[str, ReleaseRuntime]:
-    """Each served release's adapter and calibration, ready for requests.
+    """The served release's adapter and calibration, ready for requests.
 
-    **One release covering every line:** the engine loads that release's merged
-    model, and no adapter is applied. **Several** (a unified release and a
-    personal-lines one), **or one that leaves lines to the base model**
-    (:func:`serves_base_with_loras`): the engine loads the BASE with LoRA
-    enabled and each release is its adapter, applied per request — vLLM's one
-    LoRA per request, the shape arch v2.1 §4 serves in. Adapters are copied from
-    Blob to ``adapter_root`` once, here.
+    **A release served as a LoRA on the base** (``lora_on_base``, every release
+    since 2026-10-23: nothing is merged): the engine loads the BASE with LoRA
+    enabled and the release is its adapter, applied per request. **An older
+    merged release**, as before: covering every known line, the engine loads its
+    merged model and no adapter is applied; leaving lines to the base model
+    (:func:`serves_base_with_loras`), the engine loads the base and the release
+    is applied as its LoRA. The adapter is copied from Blob to ``adapter_root``
+    once, here.
     """
-    from artifact_registry import paths
     from calibration.feature_calibrator import CalibratorSet
     from calibration.thresholds import ThresholdSet
-    from common.run_ids import version_of
 
     served = list(plan.served)
     as_lora = serves_base_with_loras(plan)
@@ -352,19 +344,18 @@ def load_release_runtimes(
                 release.release_id, release.calibrators,
             )
         if as_lora:
-            if not release.adapter:
+            if not release.adapter_dir:
                 raise ColdStartError(
                     f"release {release.release_id} records no adapter, so it cannot be served as a "
-                    "LoRA beside the other promoted releases"
+                    "LoRA on the base model beside the base-model fallback"
                 )
-            scope = None if release.scope == "unified" else release.scope
-            prefix = paths.scoped_adapter_dir(scope, version_of(release.adapter))
+            prefix = release.adapter_dir
             local = Path(adapter_root) / release.release_id
             client.download_dir(prefix, local)
             if not (local / "adapter_config.json").is_file():
                 raise ColdStartError(
                     f"release {release.release_id}: no adapter at {prefix} (no adapter_config.json). "
-                    "Serving it beside another release needs its LoRA; run `package` for it."
+                    "Serving it on the base model needs its LoRA; run `package` for it."
                 )
             runtime.adapter = str(local)
         runtimes[release.release_id] = runtime
@@ -407,12 +398,12 @@ def cold_start(
     from artifact_registry import paths
     from registry_utils.query_registry import resolve_model_version
 
-    plan = build_serving_plan(client, tenant_id=tenant_id, pins=release_pins())
+    plan = build_serving_plan(client, tenant_id=tenant_id)
     if not plan.served:
         # No release bundle promoted yet: the pre-release path, served by version.
         # Resolved for its side effect, so an unknown version fails the cold start
-        # here rather than on the first request. With promoted releases the plan
-        # decides — a scoped release (personal lines) has no unified run behind it.
+        # here rather than on the first request. With a promoted release the plan
+        # decides.
         resolve_model_version(model_version, client)
 
     manifest: dict[str, Any] = {}
@@ -428,6 +419,7 @@ def cold_start(
         assert_ocr_pin(manifest)
 
     config = serving_config()
+    assert_no_retired_settings(config)
     if model is None:
         raise ColdStartError(
             f"no model was supplied and the vLLM backend is not wired yet. Resolve it with "
@@ -438,15 +430,15 @@ def cold_start(
 
     assert_prompt_hash(plan)
     assert_window_plan_served(plan)
+    assert_base_model_served(plan)
     runtimes = load_release_runtimes(
         plan, client, adapter_root=adapter_root or Path(paths.staging_root()) / "serving-adapters",
     )
     base_loaded = serves_base_with_loras(plan)
     if base_loaded and not getattr(getattr(model, "config", None), "enable_lora", True):
         raise ColdStartError(
-            f"{len(runtimes)} release(s) are served as LoRAs on the base (several releases, or lines "
-            "left to the base model), but the model was loaded without LoRA support "
-            "(enable_lora: false)."
+            f"{len(runtimes)} release(s) are served as LoRAs on the base (lines left to the base "
+            "model), but the model was loaded without LoRA support (enable_lora: false)."
         )
     state = EndpointState(
         model_version=model_version,
@@ -470,6 +462,29 @@ def cold_start(
     return state
 
 
+#: Serving settings removed on 2026-10-22, and what replaced each.
+RETIRED_ROUTING_SETTINGS: dict[str, str] = {
+    "release_pins": "a rollback is `python -m orchestration.run promote --version vK --by NAME`",
+    "lob_family_threshold": "it is `lob_uncertain_threshold` now",
+}
+
+
+def assert_no_retired_settings(config: dict[str, Any]) -> None:
+    """Refuse a serving config that still carries a removed setting.
+
+    Read by nothing, it would be ignored without a word: a rollback pin that no
+    longer rolls back, a tuned threshold quietly back at its default.
+    """
+    routing = config.get("routing") or {}
+    found = {key: why for key, why in RETIRED_ROUTING_SETTINGS.items() if key in routing}
+    if found:
+        raise ColdStartError(
+            "configs/inference/vllm_serving.yaml routing holds removed setting(s) "
+            + "; ".join(f"{key} ({why})" for key, why in found.items())
+            + ". Remove them so the endpoint does what its config says."
+        )
+
+
 def assert_prompt_hash(plan: Any) -> None:
     """Refuse to serve a release trained on prompts this code does not render.
 
@@ -483,10 +498,7 @@ def assert_prompt_hash(plan: Any) -> None:
     from common.prompts import prompt_hash
 
     current = prompt_hash()
-    served = getattr(plan, "served", None)
-    releases = {r.release_id: r for r in (served if served is not None
-                                          else getattr(plan, "by_doc_type", {}).values())}
-    for release in releases.values():
+    for release in plan.served:
         if not release.prompt_hash:
             log.warning(
                 "%s records no prompt hash, so prompt drift since it was packaged cannot be "
@@ -512,11 +524,9 @@ def assert_window_plan_served(plan: Any) -> None:
     from data_pipeline.dataset_builder.policy_windows import window_plan_id
 
     current = window_plan_id()
-    served = getattr(plan, "served", None)
-    releases = {r.release_id: r for r in (served if served is not None
-                                          else getattr(plan, "by_doc_type", {}).values())}
-    for release in releases.values():
+    for release in plan.served:
         if release.doc_types and "policy" not in release.doc_types:
+
             continue
         if release.window_plan_version != current:
             raise ColdStartError(
@@ -525,6 +535,25 @@ def assert_window_plan_served(plan: Any) -> None:
                 f"{current}: serving it would show the model windows it never trained on. Serve the "
                 "code it was packaged from, or rebuild the corpus and retrain."
             )
+
+
+def assert_base_model_served(plan: Any) -> None:
+    """Refuse a release served as a LoRA on the base whose adapter trained on another base.
+
+    Checked at cold start with the prompt hash and the window plan, which cannot
+    tell: a bumped base revision pin (configs/base_model.yaml) changes the
+    weights under the adapter, not any prompt or window. The adapter would load
+    and answer with no error. A merged release carries its own base, so only
+    ``lora_on_base`` releases are checked (``query_registry.base_model_refusal``).
+    """
+    from registry_utils.query_registry import base_model_refusal
+
+    for release in plan.served:
+        if getattr(release, "served_as", "merged") != "lora_on_base":
+            continue
+        refusal = base_model_refusal(f"release {release.release_id}", release.base_model)
+        if refusal:
+            raise ColdStartError(refusal)
 
 
 def build_request(payload: dict[str, Any]) -> ExtractionRequest:
@@ -670,7 +699,7 @@ def serving_thresholds() -> dict[str, Any]:
         ("classifier_threshold", routing.get("classifier_confidence_threshold")),
         ("review_threshold", confidence.get("review_threshold")),
         ("lob_confidence_threshold", routing.get("lob_confidence_threshold")),
-        ("lob_family_threshold", routing.get("lob_family_threshold")),
+        ("lob_uncertain_threshold", routing.get("lob_uncertain_threshold")),
     ):
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             tuning[key] = value

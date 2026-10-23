@@ -2,7 +2,7 @@
 
     python -m orchestration.smoke_run                      # every step
     python -m orchestration.smoke_run --steps check,finetune
-    python -m orchestration.smoke_run --scope casualty_fleet --batch cgl-v1 --tenant smoke-cgl
+    python -m orchestration.smoke_run --batch cgl-v1 --tenant smoke-cgl
 
 It takes a handful of source documents from the uploaded batch — each with all
 of its synthetic twins, so the delivered split stays intact (``--train-sources``,
@@ -11,8 +11,8 @@ through import, OCR, the post-OCR check and ``finetune``, under their own
 tenant (``smoke``) and version (``v0``). Nothing it writes touches the real
 data: corpus, labels and OCR output are tenant-scoped, and the model versions
 start at ``v1``. It never freezes an eval set or packages a release: a smoke
-subset is no yardstick. ``--scope`` picks the adapter trained (personal_lines by
-default; casualty_fleet for the CGL documents).
+subset is no yardstick. It trains the policy adapter (``common.adapter``), as a
+real cycle does.
 
 What it proves: MinerU runs on the GPU, the labels survive import, the corpus
 builds with the delivered split, ms-swift trains, a checkpoint is chosen and
@@ -82,8 +82,7 @@ def select_sources(bundles: Path, *, train_sources: int = 4, val_sources: int = 
     return chosen
 
 
-def assert_fresh(client, tenant: str, version: str, steps: list[str],
-                 scope: str = "personal_lines") -> None:
+def assert_fresh(client, tenant: str, version: str, steps: list[str]) -> None:
     """Refuse a smoke run that would land on an earlier one's leftovers.
 
     Labels, OCR output and the corpus are kept per tenant, and the run registry
@@ -110,11 +109,11 @@ def assert_fresh(client, tenant: str, version: str, steps: list[str],
     if client.exists(paths.corpus_manifest(version, tenant)):
         problems.append(f"corpus {version} already exists for tenant {tenant!r}")
     if "finetune" in steps:
-        from common.scopes import load_scopes
+        from common.adapter import ADAPTER
         from registry_utils.query_registry import RegistryQueryError
         from registry_utils.query_registry import get as get_manifest
 
-        run_id = load_scopes()[scope].run_id(version)
+        run_id = ADAPTER.run_id(version)
         try:
             status = get_manifest(run_id, client).status
         except (RegistryQueryError, KeyError, FileNotFoundError):
@@ -146,8 +145,7 @@ def stage_subset(folders: list[Path], out: Path) -> int:
 
 
 def commands(*, batch_dir: Path, subset_dir: Path, tenant: str, version: str,
-             check_out: Path, scope: str = "personal_lines",
-             steps: tuple[str, ...] | list[str] = STEPS) -> dict[str, list[str]]:
+             check_out: Path, steps: tuple[str, ...] | list[str] = STEPS) -> dict[str, list[str]]:
     """The command each step runs, with the interpreter of its environment.
 
     When ``finetune`` runs too, preflight skips its in-memory corpus build:
@@ -166,12 +164,12 @@ def commands(*, batch_dir: Path, subset_dir: Path, tenant: str, version: str,
         # --min-labels-per-type 1: the 25-document floor is for a real run. A
         # smoke subset of sources WITHOUT synthetic twins is 6 documents, and
         # both steps refused it; it only ever passed on the twins' numbers.
-        "preflight": [py, "-m", "orchestration.preflight", "--scope", scope, "--tenant", tenant,
-                      "--corpus-version", version, "--out-version", version, "--ocr-check", str(check_out),
+        "preflight": [py, "-m", "orchestration.preflight", "--tenant", tenant,
+                      "--corpus-version", version, "--version", version, "--ocr-check", str(check_out),
                       "--out", str(check_out / "preflight.json"), "--min-labels-per-type", "1",
                       *(["--skip-corpus"] if "finetune" in steps else [])],
-        "finetune": [py, "-m", "orchestration.run", "finetune", "--scope", scope, "--skip-ingest",
-                     "--corpus-version", version, "--out-version", version, "--tenant", tenant,
+        "finetune": [py, "-m", "orchestration.run", "finetune", "--skip-ingest",
+                     "--corpus-version", version, "--version", version, "--tenant", tenant,
                      "--min-labels-per-type", "1"],
     }
 
@@ -180,8 +178,6 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     """The smoke run's arguments and its steps, refused when they cannot run."""
     parser = argparse.ArgumentParser(description="A small end-to-end run on the pod")
     parser.add_argument("--batch", default="personal-v1", help="the uploaded batch under intake/")
-    parser.add_argument("--scope", default="personal_lines",
-                        help="the adapter trained: personal_lines, or casualty_fleet for the CGL documents")
     parser.add_argument("--tenant", default=DEFAULT_TENANT)
     parser.add_argument("--version", default=DEFAULT_VERSION)
     parser.add_argument("--train-sources", type=int, default=4)
@@ -197,10 +193,6 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         parser.error(f"unknown step(s) {unknown}; choose from {STEPS}")
     if args.tenant in ("", "default"):
         parser.error("the smoke run needs its own tenant, never the real data's")
-    from common.scopes import load_scopes
-
-    if args.scope not in load_scopes():
-        parser.error(f"unknown scope {args.scope!r}; choose from {sorted(load_scopes())}")
     return args, steps
 
 
@@ -215,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
     from artifact_registry.blob_client import BlobClient
 
     try:
-        assert_fresh(BlobClient(), args.tenant, args.version, steps, args.scope)
+        assert_fresh(BlobClient(), args.tenant, args.version, steps)
     except SmokeError as exc:
         print(f"smoke: {exc}", flush=True)
         return 1
@@ -238,8 +230,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
         print(f"smoke subset: {stage_subset(folders, subset_dir)} document(s) in {subset_dir}", flush=True)
     env = {**os.environ, "FIDEON_DETACHED": "1"}          # already in tmux: steps run in place
     for step, command in commands(batch_dir=batch_dir, subset_dir=subset_dir, tenant=args.tenant,
-                                  version=args.version, check_out=check_out, scope=args.scope,
-                                  steps=steps).items():
+                                  version=args.version, check_out=check_out, steps=steps).items():
+
         if step not in steps:
             continue
         print(f"\n=== smoke: {step} ===\n{' '.join(command)}", flush=True)

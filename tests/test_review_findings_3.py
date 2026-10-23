@@ -214,18 +214,19 @@ def test_the_fingerprint_covers_the_training_settings_but_not_the_gpu_count(monk
                       "gradient_accumulation_steps": 8},
             "distributed": {"gpus": "auto"}}
     current = {"cfg": base}
-    monkeypatch.setattr(config, "training_config", lambda name: current["cfg"])
-    scope = SimpleNamespace(name="s", training_config="unified")
-    first = train._settings_hash(scope)
+    read: list[str] = []
+    monkeypatch.setattr(config, "training_config", lambda name: read.append(name) or current["cfg"])
+    first = train._settings_hash()
+    assert read == ["unified"]                                     # the adapter's training config
     current["cfg"] = {**base, "distributed": {"gpus": 4},
                       "batch": {**base["batch"], "gradient_accumulation_steps": 2}}
-    assert train._settings_hash(scope) == first                    # another pod, the same run
+    assert train._settings_hash() == first                         # another pod, the same run
     current["cfg"] = {**base, "line_balance": {"max_repeat": 1}}
-    assert train._settings_hash(scope) != first                    # a different training set
+    assert train._settings_hash() != first                         # a different training set
 
 
-# 10 - the flat-folder refusal names what works
-def test_the_flat_folder_message_names_a_scope_not_a_flag_that_is_ignored(tmp_path, client):
+# 10 - the flat-folder refusal names what works, and no flag that does not exist
+def test_the_flat_folder_message_names_the_folder_layout_not_a_flag(tmp_path, client):
     from orchestration.pipeline_dag import PipelineError, stage_ingestion
 
     (tmp_path / "a.pdf").write_bytes(b"%PDF-1.4")
@@ -233,7 +234,10 @@ def test_the_flat_folder_message_names_a_scope_not_a_flag_that_is_ignored(tmp_pa
                           doc_types=["acord", "policy", "lossrun"])
     with pytest.raises(PipelineError) as raised:
         stage_ingestion(ctx)
-    assert "--scope policy" in str(raised.value) and "--doc-types" not in str(raised.value)
+    message = str(raised.value)
+    assert f"({tmp_path.name}/policy/...)" in message
+    # --scope and --doc-types are gone from the CLI (decision 2026-10-22).
+    assert "--scope" not in message and "--doc-types" not in message
 
 
 def test_the_window_notes_report_orphaned_fragments():

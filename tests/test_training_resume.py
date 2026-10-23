@@ -34,7 +34,7 @@ def test_an_interrupted_run_resumes_from_its_latest_complete_checkpoint(tmp_path
 
 def test_a_finished_run_is_not_resumed(tmp_path):
     _checkpoint(tmp_path / "v0-x", 70)
-    T.mark_training_complete(tmp_path, "extractor-v1")
+    T.mark_training_complete(tmp_path, "policy-v1")
     assert T.training_completed(tmp_path)
     assert T.resume_point(tmp_path) is None
 
@@ -64,7 +64,7 @@ def test_completion_is_recorded_only_when_ms_swift_returns(tmp_path, monkeypatch
 
     written = []
     monkeypatch.setattr(T, "write_manifest", lambda manifest, client: written.append(manifest.status))
-    manifest = SimpleNamespace(status="training", run_id="extractor-v1",
+    manifest = SimpleNamespace(status="training", run_id="policy-v1",
                                artifacts=SimpleNamespace(staging_path=str(tmp_path)))
 
     monkeypatch.setattr(T, "launch", lambda config: (_ for _ in ()).throw(RuntimeError("GPU lost")))
@@ -95,11 +95,13 @@ def test_the_pipeline_treats_an_unfinished_run_on_the_mount_as_not_trained(tmp_p
     from artifact_registry import paths
     from orchestration import pipeline_dag as D
 
-    monkeypatch.setattr(paths, "scoped_staging_adapter_dir", lambda scope, version: str(tmp_path))
-    ctx = SimpleNamespace(scope=SimpleNamespace(name="personal_lines"), out_version="v1",
-                          volume=SimpleNamespace(exists=lambda path: True))
+    asked = []
+    monkeypatch.setattr(paths, "scoped_staging_adapter_dir",
+                        lambda scope, version: asked.append((scope, version)) or str(tmp_path))
+    ctx = SimpleNamespace(out_version="v1", volume=SimpleNamespace(exists=lambda path: True))
     _checkpoint(tmp_path / "v0-x", 70)
     assert D._is_trained(ctx) is False          # directory and checkpoints, but no marker
-    T.mark_training_complete(tmp_path, "personal_lines-v1")
+    T.mark_training_complete(tmp_path, "policy-v1")
     assert D._is_trained(ctx) is True
+    assert set(asked) == {("policy", "v1")}     # the policy adapter's staged run
 

@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from common import aliases, prompts, schemas
-from common.config import lobs_in_family, sequence_for_task
+from common.config import sequence_for_task
 from common.constants import ACORD_FORMS, ACTIVE_DOC_TYPES, MODALITY_MODES, canonical_key, canonical_model
 from common.lob import lob_values
 
@@ -266,7 +266,7 @@ def test_field_descriptions_reach_the_model(doc_type, acord_form):
         "strict=True so this FAILS once the sidecar lands, forcing the marker off."
     ),
 )
-@pytest.mark.parametrize("lob", lobs_in_family(schemas.CANONICAL_FAMILY))
+@pytest.mark.parametrize("lob", schemas.SNAPSHOT_LINES)
 def test_every_canonical_field_has_a_description(lob):
     schemas.assert_all_fields_described("policy", None, lob)
 
@@ -383,7 +383,7 @@ def test_the_prompt_leaves_room_for_the_document(doc_type, acord_form):
     )
 
 
-@pytest.mark.parametrize("lob", lobs_in_family(schemas.CANONICAL_FAMILY))
+@pytest.mark.parametrize("lob", schemas.SNAPSHOT_LINES)
 def test_each_canonical_line_leaves_room_for_the_document(lob):
     """The same arithmetic per line of business, which is where it actually bites.
 
@@ -630,24 +630,24 @@ def test_the_flat_schemas_are_not_moved_by_the_canonical_branch():
         assert got == want, f"{doc_type}/{form} schema text changed"
 
 
-def test_every_personal_lines_lob_has_a_registered_canonical_schema():
-    """One list of the family's LOBs, in configs/layout_families.yaml.
+def test_every_snapshot_line_has_a_registered_canonical_schema():
+    """The lines whose prompts are pinned (common.schemas.SNAPSHOT_LINES) each
+    have a canonical schema of their own.
 
-    A second hand-kept copy would drift, and the symptom is a document routed to
-    an adapter that never saw its layout — which reads as a bad extraction and
-    nothing else.
+    A pinned line without one would render the generic policy prompt, and the
+    snapshot would review a prompt no document of that line is ever given.
     """
-    from common.config import lobs_in_family
-    from common.schemas import CANONICAL_FAMILY, schema_key
+    from common.lob import known_lines
+    from common.schemas import SNAPSHOT_LINES, schema_key
 
-    lobs = lobs_in_family(CANONICAL_FAMILY)
     # Classic auto is personal auto (common.lob.MERGED_LINES).
-    assert len(lobs) == 7
-    for lob in lobs:
+    assert len(SNAPSHOT_LINES) == len(set(SNAPSHOT_LINES)) == 7
+    for lob in SNAPSHOT_LINES:
         assert schema_key("policy", None, lob) == f"policy:{lob}", (
-            f"{lob} is declared in the {CANONICAL_FAMILY} family but has no canonical schema, "
+            f"{lob} is a snapshot line but has no canonical schema, "
             "so it would silently fall back to the generic policy schema"
         )
+    assert set(SNAPSHOT_LINES) <= known_lines()
 
 
 def test_a_canonical_schema_is_not_ref_inlined():
@@ -676,10 +676,9 @@ def test_no_fideon_key_survives_into_the_schema_the_model_sees():
     this walks straight past — these aliases arrive inside the client's schema
     file, not through that module.
     """
-    from common.config import lobs_in_family
-    from common.schemas import CANONICAL_FAMILY, load_schema, schema_text
+    from common.schemas import SNAPSHOT_LINES, load_schema, schema_text
 
-    for lob in lobs_in_family(CANONICAL_FAMILY):
+    for lob in SNAPSHOT_LINES:
         assert "fideon:" not in schema_text("policy", None, lob), f"{lob} leaks fideon: keys"
         # …while the raw schema, which is what validation judges against, keeps them.
         assert "fideon:" in json.dumps(load_schema("policy", None, lob))

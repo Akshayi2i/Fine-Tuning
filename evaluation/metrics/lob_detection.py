@@ -1,10 +1,10 @@
 """How well a policy's line of business is read when no caller supplied it.
 
 Scored per line, with a confusion matrix, because the errors that matter are
-specific: a homeowners policy read as dwelling fire still reaches the right
-adapter (one family) with the wrong schema; a personal auto policy read as
-commercial auto reaches the wrong adapter altogether. An overall accuracy hides
-both behind the volume of the easy lines.
+specific: a homeowners policy read as dwelling fire is extracted against the
+wrong schema, and a personal auto policy read as commercial auto against a
+schema of another shape altogether. An overall accuracy hides both behind the
+volume of the easy lines.
 
 :data:`DETECTION_FLOOR` is what the measurement must clear before detection is
 switched on (``routing.detect_lob`` in configs/inference/vllm_serving.yaml):
@@ -47,22 +47,16 @@ class LobDetectionReport:
         return right / self.scored if self.scored else None
 
     def by_line(self) -> dict[str, dict[str, float | int]]:
-        """Per expected line: documents, accuracy, and how many reached the
-        right layout family even when the line was wrong."""
-        from common.config import lob_to_layout_family
-
-        family = lob_to_layout_family()
+        """Per expected line: documents, accuracy, and how many found no line."""
         out: dict[str, dict[str, float | int]] = {}
         for line in sorted({expected for expected, _ in self.confusion}):
             rows = {got: n for (expected, got), n in self.confusion.items() if expected == line}
             total = sum(rows.values())
             right = rows.get(line, 0)
-            same_family = sum(n for got, n in rows.items()
-                              if got is not None and family.get(got) == family.get(line))
             out[line] = {"documents": total, "accuracy": round(right / total, 4),
-                         "family_accuracy": round(same_family / total, 4),
                          "undetected": rows.get(None, 0)}
         return out
+
 
     def below_floor(self, floor: float, *, min_support: int = PER_LINE_MIN_SUPPORT) -> list[str]:
         return [line for line, row in self.by_line().items()

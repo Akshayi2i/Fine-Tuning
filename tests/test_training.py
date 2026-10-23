@@ -380,8 +380,8 @@ def test_improvement_resets_patience():
 # Training configuration (arch v2.1 §4.1, §9, §11.1)
 # --------------------------------------------------------------------------
 
-def test_training_is_one_unified_run_on_a_bf16_base():
-    """One adapter across every document type and every task. vLLM applies ONE
+def test_training_is_one_lora_run_on_a_bf16_base():
+    """One adapter, trained fresh on the base, across every task. vLLM applies ONE
     LoRA per request, so v1's Foundation + per-type stack could never both be
     active — it was unservable, not merely awkward."""
     swift, recorded = T.build_training_config(

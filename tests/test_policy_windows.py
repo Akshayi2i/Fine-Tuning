@@ -48,7 +48,7 @@ TEXTS = [PAGE_TEXT.get(page, "Standard conditions and definitions.") for page in
 #: The line these windows are read for: a self-contained one, the shape LABEL
 #: is written in. Not the fallback (no line) and not general liability: both
 #: compose common model 1.1.0, whose windows tests/test_schema2_*.py pin. Not
-#: a line of casualty_fleet either, whose other lines are moving too.
+#: auto, wc or umbrella either, which are moving to the common model too.
 LOB = "property"
 
 

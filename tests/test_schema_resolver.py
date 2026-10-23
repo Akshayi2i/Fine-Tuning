@@ -7,7 +7,6 @@ overlay at load time. These tests pin what the bundle is and what it refuses.
 """
 
 import json
-import logging
 import re
 
 import pytest
@@ -119,57 +118,15 @@ def test_a_code_without_a_meaning_is_refused(tmp_path):
         S._bundle(overlay, tmp_path / "personal_umbrella.json")
 
 
-def test_a_family_only_partly_on_the_common_model_still_loads(caplog):
-    """A family moves line by line: general liability is on the common model
-    while auto, workers' comp and umbrella are not yet. Every schema still loads,
-    so the other families' work goes on, and the load says which lines lag."""
-    with caplog.at_level(logging.WARNING, logger=S.__name__):
-        S._check_overlay_families(["homeowners", "personal_auto"])
-    assert "'personal_lines' is only partly on the common model" in caplog.text
-    assert "dwelling_fire" in caplog.text
-
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger=S.__name__):
-        S._sources.cache_clear()
-        sources = S._sources()
-    assert "'casualty_fleet' is only partly on the common model" in caplog.text
+def test_lines_on_the_common_model_and_lines_on_self_contained_files_load_together():
+    """Lines move to the common model one by one: general liability is on it
+    while auto, workers' comp and umbrella are not yet. Every schema still
+    loads; one corpus holding both kinds is refused where the adapter is
+    trained (common.adapter.assert_one_output_shape), not here."""
+    S._sources.cache_clear()
+    sources = S._sources()
     assert sources["policy:gl"].common_model
     assert not any(sources[f"policy:{lob}"].common_model for lob in ("auto", "wc", "umbrella"))
-
-
-def test_the_partly_migrated_families_name_the_lines_still_behind():
-    assert S.partly_migrated_families() == {"casualty_fleet": ("auto", "umbrella", "wc")}
-
-
-def test_a_scope_whose_corpus_holds_both_shapes_of_one_family_is_refused():
-    """One adapter cannot train on two output shapes: general liability on the
-    common model and auto on a self-contained file, in one corpus."""
-    from common.scopes import ScopeError, assert_one_output_shape, get_scope
-
-    with pytest.raises(ScopeError, match="'casualty_fleet' on two output shapes"):
-        assert_one_output_shape(get_scope("unified"), ["gl", "auto"])
-    with pytest.raises(ScopeError, match="two output shapes"):
-        assert_one_output_shape(get_scope("policy"), ["homeowners", "gl", "wc"])
-    # Without the corpus's lines, covering both kinds of line is enough.
-    with pytest.raises(ScopeError, match="two output shapes"):
-        assert_one_output_shape(get_scope("unified"))
-
-
-def test_a_scope_whose_corpus_holds_one_shape_of_each_family_trains():
-    from common.scopes import assert_one_output_shape, get_scope
-
-    assert_one_output_shape(get_scope("unified"), ["homeowners", "gl"])
-    assert_one_output_shape(get_scope("unified"), ["auto", "wc", "umbrella"])
-    assert_one_output_shape(get_scope("personal_lines"))
-    # A line-scoped scope trains only its own lines, whatever else the corpus holds.
-    assert_one_output_shape(get_scope("personal_lines"), ["homeowners", "gl", "auto"])
-    # A scope that trains no policy has no line to train two ways.
-    assert_one_output_shape(get_scope("lossrun"), ["gl", "auto"])
-
-
-def test_an_overlay_in_no_family_is_refused():
-    with pytest.raises(S.SchemaError, match="no layout family"):
-        S._check_overlay_families(["not_a_line"])
 
 
 def test_commercial_auto_reads_the_clients_auto_file():
@@ -193,5 +150,7 @@ def test_the_prompt_hash_covers_the_common_model_and_the_code_files():
 
     files = prompt_input_files()
     assert S.COMMON_MODEL in files
+    # No layout families any more (decision 2026-10-22), so no file of them to hash.
+    assert not any(path.name == "layout_families.yaml" for path in files)
     for lob in OVERLAY_LINES:
         assert S.CANONICAL_DIR / f"{lob}.coverage_codes.yaml" in files

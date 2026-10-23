@@ -108,12 +108,13 @@ def test_a_blank_page_gets_the_placeholder_in_training_and_serving():
 
 
 def test_training_and_serving_resize_to_the_same_budget():
+    from common.adapter import ADAPTER
     from common.config import pixel_budget
-    from common.scopes import get_scope
     from training.train import _pixel_budget
 
-    env = _pixel_budget(get_scope("unified"))
-    assert (int(env["MIN_PIXELS"]), int(env["MAX_PIXELS"])) == pixel_budget()
+    env = _pixel_budget()
+    assert (int(env["MIN_PIXELS"]), int(env["MAX_PIXELS"])) == pixel_budget(ADAPTER.tasks)
+    assert pixel_budget(ADAPTER.tasks) == pixel_budget()
 
 
 # --------------------------------------------------------------------------
@@ -186,15 +187,13 @@ def test_the_prompt_hash_covers_doc_type_templates_schemas_and_sections():
 
 
 def test_a_release_packaged_on_other_prompts_is_refused_at_cold_start():
-    from types import SimpleNamespace
-
     from common.prompts import prompt_hash
+    from serving.release_router import ServedRelease, ServingPlan
     from serving.vllm_entrypoint import ColdStartError, assert_prompt_hash
 
     def plan(h):
-        return SimpleNamespace(by_doc_type={
-            "policy": SimpleNamespace(release_id="release-2026.9.1", prompt_hash=h),
-        })
+        return ServingPlan(ServedRelease("v3", "base@abc1234", "merged", doc_types=("policy",),
+                                         prompt_hash=h))
 
     assert_prompt_hash(plan(prompt_hash()))
     assert_prompt_hash(plan(""))

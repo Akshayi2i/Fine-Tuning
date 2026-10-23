@@ -32,7 +32,7 @@ import copy
 import json
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -320,24 +320,42 @@ def evaluate_version(
     *,
     version: str,
     corpus_version: str,
-    scope: Any,
     tenant_id: str | None = None,
     calibrators: Any = None,
     thresholds: Any = None,
+    lines: Collection[str] | None = None,
+    adapter_checkpoint: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate on this tenant's frozen set, write the eval report where the gate
-    reads it, return its dict."""
+    reads it, return its dict.
+
+    ``adapter_checkpoint`` names the checkpoint ``model`` applies (the pipeline
+    passes it), recorded so the report is never reused for another one.
+
+    ``lines`` are the lines of business the release serves: only frozen policies
+    of one of them are scored, because serving sends every other policy (another
+    line, a package, no line) to the base model, not to this release. ``None``
+    scores every frozen document of the adapter's types (``run_eval``'s command
+    line). The report records them (``lines_scored``), so the gate reuses it, or
+    compares a baseline with it, only for the same lines.
+    """
+    from common.adapter import ADAPTER
+    from common.lob import single_line
     from evaluation.run_eval import assert_eval_set_disjoint, build_report
 
     _refuse_interrupted_freeze(client, tenant_id)
     # Before anything is evaluated: a leaked eval set makes every number meaningless.
     assert_eval_set_disjoint(client, corpus_version, tenant_id)
-    documents = [d for d in load_golden_set(client, scope.doc_types, tenant_id=tenant_id)
-                 if scope.covers_lob(d.lob)]
+    documents = load_golden_set(client, ADAPTER.doc_types, tenant_id=tenant_id)
+    if lines is not None:
+        served = set(lines)
+        documents = [d for d in documents if single_line(d.lob) in served]
     if not documents:
         raise GoldenEvalError(
             f"the frozen eval set at {paths.golden_eval_set_dir(tenant_id)}/ holds no "
-            f"{list(scope.doc_types)} documents, so there is nothing to gate on"
+            f"{list(ADAPTER.doc_types)} documents"
+            + (f" of the lines this release serves ({sorted(lines)})" if lines is not None else "")
+            + ", so there is nothing to gate on"
         )
     from evaluation.release_measurements import GpuMemorySampler
 
@@ -348,9 +366,12 @@ def evaluate_version(
             calibrators=calibrators, thresholds=thresholds,
         )
     failed = sum(1 for _e, _g, meta in triples if meta.get("error"))
-    report = build_report(version, triples, corpus_version=corpus_version, scope=scope)
+    report = build_report(version, triples, corpus_version=corpus_version)
     body = report.as_dict()
     body["documents_failed"] = failed
+    # Which lines were scored (None: every frozen document), so the gate reuses
+    # this report, or compares a baseline with it, only for the same lines.
+    body["lines_scored"] = sorted(lines) if lines is not None else None
     # Whether the documents were served through fitted calibrators. Without
     # them every field is flagged, and the gate must not reuse this report
     # once the release has calibrators (pipeline_dag.eval_report_metrics).
@@ -358,21 +379,25 @@ def evaluate_version(
     # Which frozen set of which tenant this was scored on, under which scoring
     # code, and how many of its documents: the gate compares two reports only
     # on one yardstick, and decides from the real documents' counts whether the
-    # scope was scored on enough to be production (synthetic twins do not count).
+    # release was scored on enough to be production (synthetic twins do not count).
     from evaluation.run_eval import eval_set_record
 
     body["eval_set"] = eval_set_record(client, tenant_id, documents)
-    body.update(real_only_section(version, triples, corpus_version=corpus_version, scope=scope))
+    body.update(real_only_section(version, triples, corpus_version=corpus_version))
     body["windowing_ceiling"] = windowing_ceiling(documents)
     # P95 latency per adapter and peak GPU memory, for the release bundle
     # (recorded, not gated; evaluation.release_measurements).
     from evaluation.release_measurements import measurements
 
-    # A call with no adapter here ran on the model this eval loaded: the
-    # release's merged model, named by its run.
-    body["release_measurements"] = measurements(triples, served_as=scope.run_id(version),
+    # A call with no adapter here ran on the model this eval loaded: the base
+    # with the release's adapter applied, named by its run.
+    body["release_measurements"] = measurements(triples, served_as=ADAPTER.run_id(version),
                                                 peak_mb=memory.peak_mb)
-    client.write_json(paths.eval_report(version, scope=scope.name), body)
+    # Which adapter checkpoint was scored: the gate reuses this report only for
+    # that checkpoint, never for another one selected since (decision 2026-10-23).
+    body["adapter_checkpoint"] = adapter_checkpoint
+    client.write_json(paths.eval_report(version, scope=ADAPTER.name), body)
+
     log.info("golden eval of %s: %d document-mode run(s), %d failed", version, len(triples), failed)
     return body
 

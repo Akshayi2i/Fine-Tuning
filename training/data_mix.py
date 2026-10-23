@@ -1,31 +1,31 @@
-"""Per-line synthetic fraction and scanned share of a scope's training set
+"""Per-line synthetic fraction and scanned share of the adapter's training set
 (Fideon SPEC_09 amendment items 6 and 7).
 
-The corpus is built once and every scope reads a view of it
-(:mod:`training.corpus_view`), so the shares are applied where a scope reads
-it: the view keeps, line by line, every real document and the synthetic ones
+The corpus is built once and the adapter reads a view of it
+(:mod:`training.corpus_view`), so the shares are applied where the view is
+written: it keeps, line by line, every real document and the synthetic ones
 that bring the line to its configured shares. Verified real golds always
 train. Validation and test are never sampled.
 
-Configured in the scope's training config::
+Configured in the training config::
 
     data_mix:
       synthetic_fraction: 0.8   # synthetic share of a line's train documents
       scanned_share: null       # scanned share of a line's train documents
-      lines:                    # per line, over the scope defaults above
+      lines:                    # per line, over the defaults above
         homeowners: {scanned_share: 0.4}
 
-A per-line ``null`` (or a share left out) takes the scope default; a scope
-default of ``null`` (or absent) leaves that share unsteered. With neither share set, every
+A per-line ``null`` (or a share left out) takes the default; a default of
+``null`` (or absent) leaves that share unsteered. With neither share set, every
 document trains, as before these settings existed. Counted in documents, as
 ``line_balance`` counts them: a long policy has many rows and is one example.
 
 The input-mode mix (50% OCR text and images, 20% corrupted OCR and images, 30%
 images only) is a separate setting: :data:`common.constants.MODALITY_MIX` is
-the global default, and a scope's config may override it with
+the global default, and the training config may override it with
 ``modality_mix:``. Modes are drawn when the corpus is built, so the corpus
-records the mix it was drawn with and a run whose scope wants another is
-refused (:func:`assert_corpus_mix`).
+records the mix it was drawn with and a run that wants another is refused
+(:func:`assert_corpus_mix`).
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ class DataMixError(RuntimeError):
 
 @dataclass(frozen=True)
 class MixSettings:
-    """A scope's configured shares: its defaults and its per-line values."""
+    """The configured shares: the defaults and the per-line values."""
 
     synthetic_fraction: float | None = None
     scanned_share: float | None = None
@@ -95,12 +95,12 @@ def parse_settings(raw: dict[str, Any] | None, *, lines: frozenset[str] = frozen
     per_line: dict[str, dict[str, float | None]] = {}
     for line, entry in (raw.get("lines") or {}).items():
         if lines and not set(str(line).split(",")) <= lines:
-            raise DataMixError(f"data_mix names line {line!r}, which the scope does not cover "
+            raise DataMixError(f"data_mix names line {line!r}, which is no known line "
                                f"({sorted(lines)})")
         entry = entry or {}
         if set(entry) - set(SHARES):
             raise DataMixError(f"data_mix.lines.{line} has unknown key(s) {sorted(set(entry) - set(SHARES))}")
-        # A null is "not set for this line": the scope default applies. And a
+        # A null is "not set for this line": the default applies. And a
         # package's lines in sorted order, as the view joins them (corpus_view._line_of).
         key = ",".join(sorted(part.strip() for part in str(line).split(",")))
         per_line[key] = {k: share for k, v in entry.items()
@@ -109,18 +109,21 @@ def parse_settings(raw: dict[str, Any] | None, *, lines: frozenset[str] = frozen
                        _share(raw.get("scanned_share"), "data_mix.scanned_share"), per_line)
 
 
-def mix_settings(scope: Any) -> MixSettings:
+def mix_settings() -> MixSettings:
+    from common.adapter import ADAPTER
+    from common.config import training_config
+    from common.lob import known_lines
+
+    return parse_settings(training_config(ADAPTER.training_config).get("data_mix"),
+                          lines=known_lines())
+
+
+def configured_modality_mix() -> dict[str, float]:
+    """The input-mode mix the adapter trains on: the config's ``modality_mix`` or the global default."""
+    from common.adapter import ADAPTER
     from common.config import training_config
 
-    return parse_settings(training_config(scope.training_config).get("data_mix"),
-                          lines=frozenset(scope.lines))
-
-
-def configured_modality_mix(scope: Any) -> dict[str, float]:
-    """The input-mode mix the scope trains on: its own ``modality_mix`` or the global default."""
-    from common.config import training_config
-
-    mix = training_config(scope.training_config).get("modality_mix")
+    mix = training_config(ADAPTER.training_config).get("modality_mix")
     if not mix:
         return dict(MODALITY_MIX)
     if set(mix) - set(MODALITY_MODES):
@@ -132,23 +135,23 @@ def configured_modality_mix(scope: Any) -> dict[str, float]:
     return full
 
 
-def assert_corpus_mix(scope: Any, corpus_manifest: dict[str, Any]) -> None:
-    """Refuse a run whose scope wants another input-mode mix than the corpus was drawn with.
+def assert_corpus_mix(corpus_manifest: dict[str, Any]) -> None:
+    """Refuse a run that wants another input-mode mix than the corpus was drawn with.
 
     A corpus built before the target was recorded is not checked: it was drawn
-    with the global default, which is all a scope could have configured then.
+    with the global default, which is all a run could have configured then.
     """
     recorded = corpus_manifest.get("modality_mix_target")
     if not recorded:
         return
-    wanted = configured_modality_mix(scope)
+    wanted = configured_modality_mix()
     if any(abs(float(recorded.get(m, 0.0)) - wanted[m]) > 1e-6 for m in MODALITY_MODES):
         raise DataMixError(
-            f"scope {scope.name!r} trains on input-mode mix {wanted}, but corpus "
+            f"the training config asks for input-mode mix {wanted}, but corpus "
             f"{corpus_manifest.get('corpus_version', '?')} was drawn with {recorded}. Modes are drawn "
-            "when the corpus is built: rebuild it with this scope (--scope "
-            f"{scope.name}) so the rows carry the mix the run records."
+            "when the corpus is built: rebuild it so the rows carry the mix the run records."
         )
+
 
 
 # --------------------------------------------------------------------------

@@ -29,19 +29,9 @@ def pipeline_config(path: Path | None = None) -> dict[str, Any]:
     return load_yaml(path or CONFIG_PATH)
 
 
-def gpu_class_for(stage: str, fallback: str = "H200-SXM", *, scope: str | None = None) -> str:
-    """The GPU class a stage runs on, optionally for one training scope.
-
-    A scope override wins over the stage default: whether a run fits on a card is
-    decided by its largest task cap, and that is a property of the scope (a
-    policy run at 32k against a lossrun run at 20480) rather than of the stage.
-    """
-    config = pipeline_config()
-    if scope:
-        by_scope = (config.get("gpu_class_by_scope") or {}).get(scope) or {}
-        if stage in by_scope:
-            return str(by_scope[stage])
-    return str(config.get("gpu_class_by_stage", {}).get(stage, fallback))
+def gpu_class_for(stage: str, fallback: str = "H200-SXM") -> str:
+    """The GPU class a stage runs on."""
+    return str(pipeline_config().get("gpu_class_by_stage", {}).get(stage, fallback))
 
 
 def retry_policy() -> dict[str, Any]:

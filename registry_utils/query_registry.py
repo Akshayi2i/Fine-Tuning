@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from collections.abc import Iterable
 from typing import Any
 
@@ -28,9 +29,38 @@ from common.constants import ACTIVE_DOC_TYPES
 from common.run_ids import is_valid_run_id, lineage_of, version_of
 from registry_utils.models import RunManifest, RunStatus, RunType
 
+log = logging.getLogger(__name__)
+
 
 class RegistryQueryError(RuntimeError):
     """Raised when a run or model version cannot be resolved."""
+
+
+def configured_base_model() -> str:
+    """The base this code loads, as runs and bundles record it: ``model_id@revision``."""
+    from common.config import base_model_config
+
+    model = base_model_config()["model"]
+    return f"{model['model_id']}@{model['revision']}"
+
+
+def base_model_refusal(what: str, trained_on: str | None) -> str | None:
+    """Why ``what``, an adapter trained on base ``trained_on``, cannot run on the
+    configured base; ``None`` when it can.
+
+    An adapter is a delta against the exact weights it was trained on. Once the
+    base revision pin (configs/base_model.yaml) moves, an older adapter still
+    loads on the new weights and answers with no error, at an accuracy nobody
+    measured. A release served as a merged model carries its own base and is
+    not checked: callers ask this of an adapter applied to the base only.
+    """
+    configured = configured_base_model()
+    if trained_on == configured:
+        return None
+    return (
+        f"{what} trained on base {trained_on or 'unrecorded'}, configured base is {configured}: "
+        "an adapter only works on the base it was trained on; retrain (--fresh) or pin the base back"
+    )
 
 
 class ResolvedModel(dict):
@@ -223,20 +253,27 @@ def resolve_model_version(
             from_staging=False,
         )
 
-    # BOTH run types. The trainer writes `run_type="unified"` (arch v2.1 §4.1)
-    # while this looked only for `"foundation"`, so no run produced by the
-    # current code was resolvable by tag at all — `extract --model v2` could not
-    # find the model it had just trained.
+    # The policy adapter's run of that version first (common.adapter): every
+    # cycle trains it. Looking only at the older unified/Foundation runs, no run
+    # the current code trains was resolvable by tag, so `extract --model v3`
+    # could not find the model it had just trained.
+    from common.adapter import ADAPTER
+
+    adapter_run = _find_run(client, "scoped", tag, scope=ADAPTER.name)
+    if adapter_run is not None:
+        return _resolve_adapter_run(adapter_run, tag, base_ref, client, quant_format=quant_format)
+
+    # An older unified or Foundation run (v1 wrote `foundation`, v2.1 `unified`).
     lineage_types: tuple[RunType, ...] = ("unified", "foundation")
     foundation_run = _find_run(client, lineage_types, tag)
     if foundation_run is None:
         known = sorted({
             str(r.get("run_id", ""))
-            for one in lineage_types
+            for one in ("scoped", *lineage_types)
             for r in list_runs(client, run_type=one)
         })
         raise RegistryQueryError(
-            f"no unified or Foundation run found for tag {tag!r}. Known versions: {known}"
+            f"no run of the policy adapter found for tag {tag!r}. Known runs: {known}"
         )
 
     manifest = get(foundation_run, client)
@@ -272,7 +309,73 @@ def resolve_model_version(
     return resolved
 
 
+def _resolve_adapter_run(
+    run_id: str, tag: str, base_ref: str, client: BlobClient, *, quant_format: str | None,
+) -> ResolvedModel:
+    """One version of the policy adapter, as it is served: the base model with
+    the version's adapter applied to every request, never merged (decision
+    2026-10-23) - staged or published.
+
+    Refused when the run trained on another base than the configured one
+    (:func:`base_model_refusal`): its adapter would load on weights it never saw.
+    """
+    from common.adapter import ADAPTER
+
+    if quant_format and quant_format != "bf16":
+        raise RegistryQueryError(
+            f"version {tag} is a LoRA on the bf16 base: nothing is merged, so there is no "
+            f"{quant_format} model."
+        )
+    manifest = get(run_id, client)
+    refusal = base_model_refusal(run_id, manifest.dependencies.base_model)
+    if refusal:
+        raise RegistryQueryError(f"version {tag} cannot be loaded: {refusal}")
+    staged = manifest.artifacts.status == "staged"
+    return ResolvedModel(
+        tag=tag,
+        kind="base_plus_adapter",
+        base_model=base_ref,
+        foundation_adapter=(_staged_adapter(tag, client) if staged
+                            else paths.scoped_adapter_dir(ADAPTER.name, tag)),
+        type_adapter=None,
+        merged_model=None,
+        quantized_model=None,
+        artifact_status=manifest.artifacts.status,
+        from_staging=staged,
+    )
+
+
+def _staged_adapter(tag: str, client: BlobClient) -> str:
+    """The adapter a staged version ships: the checkpoint its selection chose
+    (recorded in Blob by checkpoint_eval), else the latest checkpoint training
+    left on the staging volume.
+
+    Never the staging directory itself: that is the ms-swift output root, which
+    holds ``v0-<timestamp>/checkpoint-N/`` and no adapter of its own.
+    """
+    from common.adapter import ADAPTER
+    from evaluation.checkpoint_eval import discover_checkpoints
+
+    key = paths.checkpoint_selection(tag, scope=ADAPTER.name)
+    if client.exists(key):
+        selected = client.read_json(key).get("selected")
+        if selected:
+            return str(selected)
+    staged = paths.scoped_staging_adapter_dir(ADAPTER.name, tag)
+    checkpoints, _best_loss = discover_checkpoints(staged)
+    if checkpoints:
+        log.warning("%s has no checkpoint selection at %s; loading its latest checkpoint, %s",
+                    tag, key, checkpoints[-1])
+        return checkpoints[-1]
+    raise RegistryQueryError(
+        f"version {tag} is staged, but no checkpoint was selected for it ({key}) and none is on "
+        f"the staging volume under {staged}, so there is no adapter to load. Run finetune "
+        "through checkpoint_eval, or load a checkpoint with --model base --adapter DIR."
+    )
+
+
 def _tag_of(run_id: str) -> str:
+
     """The version tag inside a run_id: ``foundation-v2`` -> ``v2``.
 
     Parsed by :mod:`common.run_ids` rather than by ``rsplit("-", 1)``, which is

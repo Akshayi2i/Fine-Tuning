@@ -412,6 +412,7 @@ class DeliveryReport:
 
 def fill_delivery(delivery: Path, reviewed: Path, *, lines: frozenset[str] | None = None,
                   apply: bool = False) -> DeliveryReport:
+    from common.lob import within_lines
     from common.schemas import is_common_model, iter_validation_errors
     from data_pipeline.ingestion.prepare_bundles import seed_review_records, template_of
     from data_pipeline.labeling.export_golden_labels import review_problem
@@ -422,7 +423,7 @@ def fill_delivery(delivery: Path, reviewed: Path, *, lines: frozenset[str] | Non
     # Each seed's review record, from its own row: the record its twins inherit.
     reviews = seed_review_records(rows)
     for row in rows:
-        if row.get("kind") != "synthetic" or (lines is not None and row["lob"] not in lines):
+        if row.get("kind") != "synthetic" or not within_lines(row["lob"], lines):
             continue
         gold_path = delivery / row["gold"]
         if not gold_path.is_file():
@@ -481,13 +482,14 @@ def fill_delivery(delivery: Path, reviewed: Path, *, lines: frozenset[str] | Non
 
 
 def main(argv: list[str] | None = None) -> int:
-    from common.scopes import get_scope
+    from common.lob import LobError, parse_lines
 
     parser = argparse.ArgumentParser(description="Complete synthetic labels from their source's reviewed gold")
     parser.add_argument("--input", required=True, type=Path, help="the delivery: Train/Val/Test + manifest.csv")
     parser.add_argument("--reviewed", type=Path, default=DEFAULT_REVIEWED,
                         help="reviewed gold, as <carrier>/<lob>/<source>.json")
-    parser.add_argument("--scope", default="personal_lines")
+    parser.add_argument("--lines", default=None,
+                        help="comma-separated lines to fill; every line by default")
     parser.add_argument("--apply", action="store_true", help="write the labels (default: report only)")
     args = parser.parse_args(argv)
     # On the pod, run detached in tmux: a closed laptop must not stop this job.
@@ -495,7 +497,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if detach_module_if_needed("data_pipeline.ingestion.fill_synthetic_labels", argv):
         return 0
-    lines = None if args.scope == "none" else get_scope(args.scope).lines or None
+    try:
+        lines = parse_lines(args.lines)
+    except LobError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
     report = fill_delivery(args.input, args.reviewed, lines=lines, apply=args.apply)
     print(report.describe())
     print("\nwritten" if args.apply else "\ndry run: nothing written (add --apply)")

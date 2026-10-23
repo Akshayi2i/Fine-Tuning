@@ -65,11 +65,11 @@ def main(argv: list[str] | None = None) -> int:
         print("the frozen eval set holds no policy with one known line", file=sys.stderr)
         return 1
 
-    line_threshold, family_threshold = serving_lob_thresholds()
+    line_threshold, uncertain_threshold = serving_lob_thresholds()
     model = load_model("base", client, quant_format=args.quant_format)
     try:
         body = measure_lob_detection(cases, ZeroShotClassifier(model, generate),
-                                     line_threshold=line_threshold, family_threshold=family_threshold)
+                                     line_threshold=line_threshold, uncertain_threshold=uncertain_threshold)
     finally:
         release_model(model)
     body = {"mode": args.mode, "model": getattr(model, "tag", "base"), **body}

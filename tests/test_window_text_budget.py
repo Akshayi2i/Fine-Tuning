@@ -229,21 +229,19 @@ def test_the_window_plan_follows_the_budgets_the_planner_reads(monkeypatch):
 
 
 def test_serving_refuses_a_policy_release_cut_with_another_window_plan():
-    from types import SimpleNamespace
-
+    from serving.release_router import ServedRelease, ServingPlan
     from serving.vllm_entrypoint import ColdStartError, assert_window_plan_served
 
-    def plan(*releases):
-        return SimpleNamespace(served=list(releases))
+    def plan(doc_types, version):
+        return ServingPlan(ServedRelease("v3", "base@abc1234", "merged", doc_types=tuple(doc_types),
+                                         window_plan_version=version))
 
-    def release(doc_types, version):
-        return SimpleNamespace(release_id="release-1", doc_types=doc_types, window_plan_version=version)
-
-    assert_window_plan_served(plan(release(["policy"], window_plan_id())))
-    assert_window_plan_served(plan(release(["acord"], None)))          # serves no policy
-    for stale in (release(["policy"], "2"), release([], None)):        # [] is every type
+    assert_window_plan_served(plan(["policy"], window_plan_id()))
+    assert_window_plan_served(plan(["acord"], None))                   # serves no policy
+    assert_window_plan_served(ServingPlan())                           # nothing promoted
+    for stale in (plan(["policy"], "2"), plan([], None)):              # [] is every type
         with pytest.raises(ColdStartError, match="window plan"):
-            assert_window_plan_served(plan(stale))
+            assert_window_plan_served(stale)
 
 
 # --------------------------------------------------------------------------

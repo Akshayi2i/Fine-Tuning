@@ -79,6 +79,14 @@ optimization:
   weight_decay: 0.0
   max_grad_norm: 1.0
 
+# A cycle that continues the promoted adapter (decision 2026-10-23) trains with
+# these instead of the optimization values above; null keeps the value above.
+# Its documents already trained in the cycles before, so fewer passes or a lower
+# rate may be enough: set them from a measured continued run, not by guess.
+continued_training:
+  num_train_epochs: null
+  learning_rate: null
+
 batch:
   per_device_train_batch_size: 1
 
@@ -195,10 +203,41 @@ line_balance:
 # next epoch - every twin every epoch and both renders over the run, in about
 # 60% of the documents. Each epoch stays about half digital, half scanned. Real
 # documents always train; a line rotation would take under line_balance's floor
-# keeps both renders. Validation and test keep every render. Like line_balance,
-# applied in a line-scoped view (personal_lines), not to the unified scope.
+# keeps both renders. Validation and test keep every render. Applied in the
+# adapter's view of the corpus (training.corpus_view), as line_balance is.
 # false trains both renders every epoch.
 render_rotation: true
+
+# Per line of business: which share of the line's TRAIN documents is synthetic,
+# and which share is scanned (Fideon SPEC_09 amendment items 6 and 7).
+# training.data_mix applies them in the adapter's view of the corpus. Every real
+# document always trains; the view picks the synthetic ones, one twin of every
+# seed before a second of any. Validation and test are never sampled.
+#
+#   synthetic_fraction  synthetic / train documents of the line. 0.8 with 12
+#                       real documents keeps 48 synthetic ones.
+#   scanned_share       scanned / train documents of the line: the share of
+#                       scanned policies the line sees in production.
+#
+# The two values below are the defaults; null leaves the share unsteered (every
+# synthetic document trains). A line's own value, under `lines:`, overrides the
+# default, e.g.  lines: {homeowners: {scanned_share: 0.4}}
+#
+# Both are null until set: every document trains. The values used, and what
+# each line came to, are recorded on the run manifest (data_stats.data_mix) and
+# in the run's model card.
+data_mix:
+  synthetic_fraction: null
+  scanned_share: null
+
+# The input-mode mix (50% OCR text and images, 20% corrupted OCR and images, 30%
+# images only) is common.constants.MODALITY_MIX unless set here:
+#
+#   modality_mix: {ocr_plus_image: 0.5, noisy_ocr_image: 0.2, image_only: 0.3}
+#
+# Modes are drawn when the corpus is built, so a run on a corpus drawn with
+# another mix is refused.
+
 
 distributed:
   # One H200 SXM 141GB in this deployment (sized originally for an A100 80GB). If a task cap does not fit, ms-swift SEQUENCE

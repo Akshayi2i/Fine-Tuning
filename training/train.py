@@ -38,17 +38,17 @@ from typing import Any
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
+from common.adapter import ADAPTER
 from common.config import (
     base_model_config,
     base_model_dir,
     base_model_source,
+    continued_training_problem,
     sequence_for_task,
     training_config,
     validate_all,
 )
 from common.run_ids import is_valid_run_id
-from common.scopes import Scope, default_scope, get_scope
-from common.tasks import Task
 from registry_utils.models import (
     Artifacts,
     DataStats,
@@ -240,8 +240,18 @@ _FINGERPRINT_SETTINGS = ("lora_rank", "lora_alpha", "learning_rate", "lr_schedul
                          "effective_batch_size", "target_modules")
 
 
-def run_fingerprint(corpus_version: str, corpus_manifest: Any, recorded: Any, scope: Any) -> dict:
-    """The corpus and the settings a run trains with - what a checkpoint is OF."""
+def run_fingerprint(corpus_version: str, corpus_manifest: Any, recorded: Any,
+                    parent_run_id: str | None = None, continue_from: str | None = None) -> dict:
+    """The corpus, the settings and the starting weights a run trains with -
+    what a checkpoint is OF. A run continued from v3 and one from the base are
+    not one run, so neither resumes the other's checkpoints.
+
+    The starting weights are named by :func:`starting_weights`, not by the
+    parent alone: a run continued by hand (``--continue-from``) has no parent
+    run, and recorded only that, it looked like a run from the base - so
+    ``--fresh`` resumed its checkpoint, the weights of an adapter it had meant
+    to leave behind, and recorded no parent.
+    """
     import hashlib
     import json
 
@@ -249,13 +259,40 @@ def run_fingerprint(corpus_version: str, corpus_manifest: Any, recorded: Any, sc
     return {
         "corpus_version": corpus_version,
         "corpus_manifest_sha256": hashlib.sha256(corpus.encode()).hexdigest(),
-        "scope": getattr(scope, "name", None),
+        "adapter": ADAPTER.name,
+        "parent_run_id": parent_run_id,
+        "starting_weights": starting_weights(continue_from),
         **{name: getattr(recorded, name, None) for name in _FINGERPRINT_SETTINGS},
-        "settings_sha256": _settings_hash(scope),
+        "settings_sha256": _settings_hash(),
     }
 
 
-def _settings_hash(scope: Any) -> str | None:
+def starting_weights(continue_from: str | None) -> str | None:
+    """The weights a run starts from: None for the base; for an adapter, the
+    sha256 of its ``adapter_model.safetensors``, else (not there yet) its
+    normalised directory.
+
+    The weights' hash rather than the directory: the pipeline stages a cycle's
+    parent at one path whichever release it is, and a by-hand run can point
+    anywhere, so the path alone cannot tell two adapters apart.
+    """
+    if not continue_from:
+        return None
+    directory = Path(os.path.normpath(continue_from.strip()))
+    weights = directory / "adapter_model.safetensors"
+    if not weights.is_file():
+        return directory.as_posix()
+    import hashlib
+
+    digest = hashlib.sha256()
+    with weights.open("rb") as fh:
+        # In chunks: a rank-64 adapter is a few hundred MB.
+        for chunk in iter(lambda: fh.read(1 << 23), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _settings_hash() -> str | None:
     """Every setting that shapes what is trained on, as one hash.
 
     The training file (line balance, dropout, validation sample ...), the pixel
@@ -268,9 +305,7 @@ def _settings_hash(scope: Any) -> str | None:
     import hashlib
     import json
 
-    name = getattr(scope, "training_config", None)
-    if not name:
-        return None
+    name = ADAPTER.training_config
     try:
         import yaml
 
@@ -307,6 +342,9 @@ def assert_resumable(output_dir: str | Path, fingerprint: dict) -> None:
     the OLD run's weights, optimizer and step and train a few more steps on
     data it never saw the start of, while the manifest recorded the new corpus.
     A run started before fingerprints were written has none: it resumes, said.
+    One whose fingerprint lacks a key this one has is refused: it cannot be
+    shown to be this run (written before ``starting_weights``, a run from the
+    base and one continued by hand look the same).
     """
     import json
 
@@ -317,13 +355,25 @@ def assert_resumable(output_dir: str | Path, fingerprint: dict) -> None:
         return
     stored = json.loads(path.read_text(encoding="utf-8"))
     current = json.loads(json.dumps(fingerprint, default=str))
+    unrecorded = sorted(k for k in current if k not in stored)
+    if unrecorded:
+        start = (" - above all, whether they started from the base or from an adapter, and which"
+                 if "starting_weights" in unrecorded else "")
+        raise TrainingError(
+            f"{output_dir} holds checkpoints whose {RUN_FINGERPRINT} was written before "
+            f"{unrecorded} were recorded, so they cannot be shown to be of this run{start}. "
+            "Resuming could continue weights this run does not start from. Train under a new "
+            "out-version, or remove that directory to start this one again."
+        )
     changed = sorted(k for k in {*stored, *current} if stored.get(k) != current.get(k))
     if changed:
+        start = ("; a run from the base and one continued from an adapter, or from another "
+                 "adapter, are not one run" if {"parent_run_id", "starting_weights"} & {*changed} else "")
         raise TrainingError(
             f"{output_dir} holds checkpoints of a different run: {changed} changed since they "
-            "were written. Resuming would continue the old weights and optimizer on a corpus "
-            "or configuration they were not trained with. Train under a new out-version, or "
-            "remove that directory to start this one again."
+            f"were written{start}. Resuming would continue the old weights and optimizer on a "
+            "corpus, configuration or start they were not trained with. Train under a new "
+            "out-version, or remove that directory to start this one again."
         )
 
 
@@ -353,7 +403,7 @@ def resume_point(output_dir: str | Path) -> Path | None:
     return max(candidates)[1] if candidates else None
 
 
-def corpus_max_length(scope: Scope | None = None) -> int:
+def corpus_max_length() -> int:
     """The single ``max_length`` for a mixed-task corpus.
 
     ms-swift takes one value and the corpus interleaves every task, so this is
@@ -364,17 +414,16 @@ def corpus_max_length(scope: Scope | None = None) -> int:
     It is the cap that decides whether a run fits on one 80GB card, which is why
     ``use_logits_to_keep`` and padding-free batching are not optional here.
 
-    **Scoped to what the run actually carries.** Taking the maximum over every
-    task and every document type gives 32768 — the policy extraction override —
-    to a lossrun-only run whose largest cap is 20480, and that cap is what
-    decides the card. A scope narrows both dimensions: its own tasks, and only
-    the per-doc-type overrides for types it trains.
+    **Narrowed to what the run actually carries:** the adapter's own tasks, and
+    only the per-doc-type overrides for the types it trains. The maximum over
+    every task and type could give a run a cap none of its rows needs, and that
+    cap is what decides the card.
     """
     from common.config import shared_sequence_config
 
     declared = shared_sequence_config().get("tasks", {})
-    tasks = tuple(scope.tasks) if scope else tuple(Task)
-    doc_types = set(scope.doc_types) if scope else None
+    tasks = tuple(ADAPTER.tasks)
+    doc_types = set(ADAPTER.doc_types)
 
     caps: list[int] = []
     for task in tasks:
@@ -385,7 +434,7 @@ def corpus_max_length(scope: Scope | None = None) -> int:
         # override is 32768, so every routed policy would have been TRUNCATED —
         # which is the exact failure the §7a caps exist to prevent.
         for doc_type in (declared.get(name, {}).get("by_doc_type") or {}):
-            if doc_types is not None and doc_type not in doc_types:
+            if doc_type not in doc_types:
                 continue
             caps.append(int(sequence_for_task(name, doc_type)["max_seq_len"]))
     return max(caps)
@@ -400,7 +449,6 @@ def build_training_config(
     deepspeed: str | None = None,
     resume_from: str | None = None,
     config_name: str | None = None,
-    scope: Scope | None = None,
     train_rows: int | None = None,
 ) -> tuple[SwiftConfig, TrainingConfig]:
     """Assemble the ms-swift arguments and the manifest's record of them.
@@ -413,9 +461,11 @@ def build_training_config(
     below for why ms-swift is told one epoch.
     """
     base = base_model_config()
-    scope = scope or default_scope()
-    cfg = training_config(config_name or scope.training_config)
-    lora, opt, batch = cfg["lora"], cfg["optimization"], cfg["batch"]
+    cfg = training_config(config_name or ADAPTER.training_config)
+    lora, batch = cfg["lora"], cfg["batch"]
+    # A run continuing an adapter trains with the config's continued_training
+    # values where it sets them (fewer passes, a lower rate), else as a fresh run.
+    opt = optimization_for(cfg, continuing=resume_from is not None)
     evaluation, memory = cfg["evaluation"], cfg.get("memory", {})
 
     epochs = int(opt["num_train_epochs"])
@@ -433,7 +483,7 @@ def build_training_config(
         # hot-swapped — tower/connector LoRA in vLLM is experimental.
         target_modules.append("merger")
 
-    max_length = corpus_max_length(scope)
+    max_length = corpus_max_length()
     gpus = training_gpus(cfg.get("distributed", {}))
     accumulation = _accumulation_steps(batch, gpus)
     interval = _eval_interval(
@@ -605,7 +655,7 @@ def build_training_config(
         max_seq_len=max_length,
         seed=cfg["seed"],
     )
-    env = _pixel_budget(scope)
+    env = _pixel_budget()
     recorded.pixel_budget = {key: int(value) for key, value in env.items()}
     if gpus > 1:
         # ms-swift starts one training process per GPU (torchrun) when this is set.
@@ -617,7 +667,7 @@ def build_training_config(
     return SwiftConfig(args, env=env), recorded
 
 
-def _pixel_budget(scope: Scope) -> dict[str, str]:
+def _pixel_budget() -> dict[str, str]:
     """The image resize budget ms-swift's Qwen-VL processor reads from the env.
 
     The same per-task ``max_pixels`` the corpus was sized against (cap_check) and
@@ -635,9 +685,9 @@ def _pixel_budget(scope: Scope) -> dict[str, str]:
     # carries rows of a task with a different budget (the thumbnail tasks),
     # training.stage_data refuses such rows rather than train them wrongly.
     try:
-        min_pixels, max_pixels = pixel_budget(scope.tasks)
+        min_pixels, max_pixels = pixel_budget(ADAPTER.tasks)
     except ConfigError as exc:
-        raise TrainingError(f"scope {scope.name!r}: {exc}") from exc
+        raise TrainingError(f"the adapter's tasks: {exc}") from exc
     per_token = PIXELS_PER_VISUAL_TOKEN
     # Both forms. Qwen2/2.5-VL read MAX_PIXELS/MIN_PIXELS; ms-swift's Qwen3-VL
     # template reads a token budget. Whichever this ms-swift reads, it reads the
@@ -650,6 +700,30 @@ def _pixel_budget(scope: Scope) -> dict[str, str]:
     }
 
 
+def optimization_for(cfg: dict[str, Any], *, continuing: bool) -> dict[str, Any]:
+    """The ``optimization`` block a run trains with.
+
+    A run continuing an adapter (decision 2026-10-23) takes the training
+    config's ``continued_training`` values where they are set - its documents
+    already trained in the cycles before, so fewer passes or a lower rate may do
+    - and the ``optimization`` values everywhere else. Null keeps the fresh
+    run's value: set them from a measured continued run, not by guess.
+
+    Raises ValueError on a block that would not do what it says: a key the
+    ``optimization`` block does not have (``epochs:``, silently unused), or an
+    epoch count or learning rate that is not positive.
+    """
+    problem = continued_training_problem(cfg)
+    if problem:
+        raise ValueError(problem)
+    opt = dict(cfg["optimization"])
+    if continuing:
+        for key, value in (cfg.get("continued_training") or {}).items():
+            if value is not None:
+                opt[key] = value
+    return opt
+
+
 def build_manifest(
     *,
     run_id: str,
@@ -659,7 +733,8 @@ def build_manifest(
     data_stats: DataStats,
     staging_path: str,
     continued_from: str | None = None,
-    scope: Scope | None = None,
+    parent_run_id: str | None = None,
+    fresh_reason: str | None = None,
     tenant_id: str | None = None,
 ) -> RunManifest:
     """Build the run manifest. Written to Blob even while weights are staged."""
@@ -670,19 +745,19 @@ def build_manifest(
             "describe what ran — this run is not exactly reproducible."
         )
 
-    scope = scope or default_scope()
     return RunManifest(
         run_id=run_id,
-        # A unified-scope run keeps writing "unified", so extractor-v1 and
-        # extractor-v2 remain the same kind of thing in the registry. Anything
-        # narrower is "scoped" and says what it covers.
-        run_type="unified" if scope.is_unified else "scoped",
-        scope=None if scope.is_unified else scope.name,
-        doc_types=[] if scope.is_unified else list(scope.doc_types),
+        # Filed where the policy runs always were (registry/scope/policy/), and
+        # recording what the run covers.
+        run_type="scoped",
+        scope=ADAPTER.name,
+        doc_types=list(ADAPTER.doc_types),
         # Whose corpus trained it. The field existed and nothing set it, so a
         # manifest could not say which tenant's documents its weights came from.
         tenant_id=paths._tenant(tenant_id),
         continued_from=continued_from,
+        parent_run_id=parent_run_id,
+        fresh_reason=fresh_reason,
         dependencies=Dependencies(
             base_model=f"{base['model_id']}@{base['revision']}",
             corpus_version=corpus_version,
@@ -755,23 +830,27 @@ def train(
     continue_from: str | None = None,
     dry_run: bool = False,
     tenant_id: str | None = None,
-    scope: Scope | None = None,
+    parent_run_id: str | None = None,
+    fresh_reason: str | None = None,
 ) -> tuple[SwiftConfig, RunManifest]:
     """Configure and launch one training run.
 
     Args:
-        continue_from: **a filesystem checkpoint path**, not a registry run-id.
-            It goes straight to ms-swift's ``resume_from_checkpoint``, which reads
-            a directory — passing a run-id like ``extractor-v3`` produced a run
-            that silently trained from base while its manifest recorded a lineage
-            that never happened. ``assert_checkpoint_path`` refuses the run-id
-            shape rather than letting it through.
+        continue_from: **a filesystem adapter directory**, not a registry
+            run-id: the weights a NEW run starts from (ms-swift ``adapters``,
+            with a fresh optimizer and schedule) - the parent's adapter when a
+            cycle continues (decision 2026-10-23). A run-id like
+            ``extractor-v3`` once produced a run that silently trained from base
+            while its manifest recorded a lineage that never happened;
+            ``assert_checkpoint_path`` refuses that shape. An adapter saved with
+            other LoRA settings than the config's is refused too
+            (``assert_adapter_matches_config``).
+        parent_run_id: the run whose adapter ``continue_from`` is, recorded on
+            the manifest and in the run fingerprint.
+        fresh_reason: why a cycle started from the base, recorded on the manifest.
         dry_run: assemble and record everything without launching.
         tenant_id: whose corpus to read. Omitting it reads the default tenant's
             files, which for any other tenant do not exist — or worse, do.
-        scope: what this run covers (``common.scopes``). Defaults to the unified
-            scope, which trains every document type and writes exactly the run
-            id, staging path and manifest shape it always did.
     """
     validate_all(require_pinned_revision=not dry_run)
     if not dry_run:
@@ -793,47 +872,50 @@ def train(
     # treat the validation split as training data and then carve its own eval
     # split out of the union, so the selected checkpoint was chosen on documents
     # the model had memorised — and the promotion gate read that number.
-    scope = scope or default_scope()
     from training.data_mix import DataMixError, assert_corpus_mix
 
     try:
-        assert_corpus_mix(scope, corpus_manifest)
+        assert_corpus_mix(corpus_manifest)
     except DataMixError as exc:
         raise TrainingError(str(exc)) from exc
-    # The corpus is built once for every type; a narrower scope reads a filtered
-    # VIEW of it rather than a corpus of its own, so the split and the group
-    # assignment are shared and the two runs stay comparable.
-    view = materialize(scope, corpus_version, client, tenant_id=tenant_id)
+    # The run reads a VIEW of the corpus (training.corpus_view): its policy rows,
+    # with line balance and render rotation applied.
+    view = materialize(corpus_version, client, tenant_id=tenant_id)
+    from common.adapter import AdapterError, assert_one_output_shape
+    from training.corpus_view import trained_lobs
+
+    try:
+        # On the documents the view really trains, before anything is staged.
+        assert_one_output_shape(trained_lobs(view))
+    except AdapterError as exc:
+        raise TrainingError(str(exc)) from exc
     corpus_paths = list(view.epoch_files)
     val_paths = [view.val_path]
-    staging = paths.scoped_staging_adapter_dir(scope.name, out_version)
+    staging = paths.scoped_staging_adapter_dir(ADAPTER.name, out_version)
 
     # The rows the run actually trains on: the first N epoch files, not all four
     # that are materialized. Counting all four overstated the data by a third,
     # and the same count sizes the evaluation interval.
-    epochs = int(training_config(scope.training_config)["optimization"]["num_train_epochs"])
-    train_rows = (
-        sum(view.rows_by_epoch.get(e, 0) for e in range(1, epochs + 1)) if not scope.is_unified
-        else sum(_count_rows(client, key) for key in view.epoch_files[:epochs])
-    )
-    update: dict[str, Any] = {"train_examples": train_rows}
-    if not scope.is_unified:
-        # The caller counts the whole corpus. A scoped run trains on its view,
-        # and its manifest has to say so: a lossrun run recording every policy
-        # row as its training data describes a run that did not happen.
-        update |= {"val_examples": view.val_rows, "test_examples": view.test_rows,
-                   # The shares configured and reached, per line, for the
-                   # manifest and the model card.
-                   "data_mix": {"settings": view.mix_settings, "lines": view.data_mix,
-                                "rested_documents": view.rested_documents,
-                                "render_rotation": view.render_rotation},
-                   "examples_by_line": view.examples_by_line}
+    epochs = int(optimization_for(training_config(ADAPTER.training_config),
+                                  continuing=continue_from is not None)["num_train_epochs"])
+    train_rows = sum(view.rows_by_epoch.get(e, 0) for e in range(1, epochs + 1))
+    # The caller counts the whole corpus. The run trains on its view, and its
+    # manifest has to say so.
+    update: dict[str, Any] = {
+        "train_examples": train_rows, "val_examples": view.val_rows, "test_examples": view.test_rows,
+        # The shares configured and reached, per line, for the manifest and the
+        # model card.
+        "data_mix": {"settings": view.mix_settings, "lines": view.data_mix,
+                     "rested_documents": view.rested_documents,
+                     "render_rotation": view.render_rotation},
+        "examples_by_line": view.examples_by_line,
+    }
     data_stats = data_stats.model_copy(update=update)
 
     # A version already trained or promoted is never overwritten — not by a
     # re-run, and not by a dry run, which used to replace a promoted manifest
     # with a fresh "training" one and leave that row in the index for good.
-    _refuse_existing_run(scope.run_id(out_version), client)
+    _refuse_existing_run(ADAPTER.run_id(out_version), client)
 
     # Every check that costs nothing runs before staging, which downloads every
     # page image the run reads. A run that is going to be refused should be
@@ -842,20 +924,20 @@ def train(
         # Existence is checked on a real run only: the directory is on the pod's
         # volume, which a dry run on an operator machine cannot see.
         assert_checkpoint_path(continue_from, must_exist=not dry_run)
+        if not dry_run:
+            assert_adapter_matches_config(continue_from)
     # Counted only for a real run, where it decides anything; a dry run launches
     # nothing and would read the unified validation file for no reason.
-    if not dry_run and not (
-        view.val_rows if not scope.is_unified else _count_rows(client, view.val_path)
-    ):
+    if not dry_run and not view.val_rows:
         # The config asks for evaluation, early stopping and
         # load_best_model_at_end, and checkpoint selection generates on
         # validation: with no rows the run fails after the GPU is paid for, or
         # trains with nothing to choose its checkpoint by.
         raise TrainingError(
-            f"scope {scope.name!r} has no validation rows in corpus {corpus_version}. "
+            f"corpus {corpus_version} has no validation rows for the adapter. "
             "Checkpoint selection and early stopping both read validation, so the run "
             "cannot choose what to ship. Rebuild the corpus with enough documents of "
-            f"{list(scope.doc_types)} to fill a validation split."
+            f"{list(ADAPTER.doc_types)} to fill a validation split."
         )
 
     # Built against the Blob keys first: this is where the epoch count and every
@@ -867,16 +949,22 @@ def train(
         train_vit=train_vit,
         deepspeed=deepspeed,
         resume_from=continue_from,
-        scope=scope,
         train_rows=train_rows,
     )
 
     # Before the manifest is rewritten and every page image is staged: a resume
     # that will be refused should be refused in seconds, having changed nothing.
-    fingerprint = run_fingerprint(corpus_version, corpus_manifest, recorded, scope)
-    resumed = None if (continue_from or dry_run) else resume_point(staging)
-    if resumed is not None:
-        assert_resumable(staging, fingerprint)
+    # A continued run that stopped part-way resumes its OWN checkpoint, which
+    # already started from the parent's weights; the fingerprint, which names the
+    # weights it starts from, refuses a checkpoint of another start. A dry run
+    # neither resumes nor records one, so it hashes no adapter.
+    resumed = None
+    if not dry_run:
+        fingerprint = run_fingerprint(corpus_version, corpus_manifest, recorded, parent_run_id,
+                                      continue_from)
+        resumed = resume_point(staging)
+        if resumed is not None:
+            assert_resumable(staging, fingerprint)
 
     if not dry_run:
         # ms-swift reads LOCAL files in ITS row format. The view is Blob keys in
@@ -889,10 +977,10 @@ def train(
         prune_image_caches(paths.staging_train_images_dir(corpus_version, tenant_id))
         from evaluation.validation_sample import validation_sample
 
-        sample_rows = loss_sample_rows(training_config(scope.training_config)["evaluation"])
+        sample_rows = loss_sample_rows(training_config(ADAPTER.training_config)["evaluation"])
         staged = stage_training_data(
             view.epoch_files[:epochs], view.val_path, client,
-            paths.staging_train_data_dir(scope.name, out_version),
+            paths.staging_train_data_dir(ADAPTER.name, out_version),
             images_root=paths.staging_train_images_dir(corpus_version, tenant_id),
             max_pixels=int(swift.env["MAX_PIXELS"]),
             # The in-training checks read a fixed stratified validation sample,
@@ -908,14 +996,15 @@ def train(
     # the §11a sweep tests up to four passes (§6.1), and a sweep that regenerates
     # its own data is not comparing what it thinks it is.
     manifest = build_manifest(
-        run_id=scope.run_id(out_version),
+        run_id=ADAPTER.run_id(out_version),
         corpus_version=corpus_version,
         corpus_manifest=corpus_manifest,
         training_cfg=recorded,
         data_stats=data_stats,
         staging_path=staging,
         continued_from=continue_from,
-        scope=scope,
+        parent_run_id=parent_run_id,
+        fresh_reason=fresh_reason,
         tenant_id=tenant_id,
     )
     write_manifest(manifest, client)
@@ -934,7 +1023,11 @@ def train(
         swift.args["resume_from_checkpoint"] = str(resumed)
         swift.args["output_dir"] = str(resumed.parent)
         swift.args["add_version"] = False
+        # The checkpoint holds the weights; loading the parent's adapter as well
+        # would start the resumed run from two places.
+        swift.args.pop("adapters", None)
         log.info("resuming the unfinished run from %s", resumed)
+
 
     manifest = launch_and_record(swift, manifest, client)
     return swift, manifest
@@ -1047,15 +1140,8 @@ def _refuse_existing_run(run_id: str, client: BlobClient) -> None:
     if existing.status not in _REPLACEABLE:
         raise TrainingError(
             f"{run_id} already exists with status {existing.status!r}. A trained, evaluated or "
-            "promoted run is never overwritten — choose a new --out-version."
+            "promoted run is never overwritten — train the next version instead."
         )
-
-
-def _count_rows(client: BlobClient, key: str) -> int:
-    """Rows in a Blob JSONL file, without staging it. Zero when it is absent."""
-    if not client.exists(key):
-        return 0
-    return sum(1 for line in client.read_text(key).splitlines() if line.strip())
 
 
 def assert_checkpoint_path(continue_from: str, *, must_exist: bool = False) -> None:
@@ -1065,10 +1151,10 @@ def assert_checkpoint_path(continue_from: str, *, must_exist: bool = False) -> N
     finds nothing, trains from base, and the manifest records a lineage that
     never happened — a run that claims to continue v2 while being v1 again.
 
-    The shape comes from :mod:`common.run_ids`, so a scoped id (``policy-v2``) is
-    refused for the same reason ``extractor-v2`` is. The three-alternative regex
-    this replaced listed the lineages v1 happened to mint, and would have waved
-    every scoped id straight through.
+    The shape comes from :mod:`common.run_ids`, so ``policy-v2`` is refused for
+    the same reason ``extractor-v2`` is. The three-alternative regex this
+    replaced listed the lineages v1 happened to mint, and would have waved every
+    other id straight through.
     """
     stripped = continue_from.strip().rstrip("/\\")
     # A bare run-id, with or without a trailing slash or a "./" prefix, is still
@@ -1091,6 +1177,82 @@ def assert_checkpoint_path(continue_from: str, *, must_exist: bool = False) -> N
                 "adapter_config.json there). Pass the checkpoint directory itself, e.g. "
                 ".../checkpoint-150."
             )
+
+
+def adapter_config_mismatch(adapter_config: dict[str, Any], lora: dict[str, Any]) -> str | None:
+    """The first LoRA setting an adapter was saved with that the config does not
+    give it, or None when they agree.
+
+    A continued run trains with the ADAPTER's settings: ms-swift (3.12) loads
+    ``adapters[0]`` with ``from_pretrained(..., is_trainable=True)``, which takes
+    its rank, alpha, dropout, rsLoRA, bias and targets from the adapter's own
+    ``adapter_config.json`` and ignores the ``lora_*`` arguments. Once the
+    config moved dropout from 0.10 to 0.05, every continued cycle would train
+    at 0.10 and record 0.05.
+
+    ``adapter_config`` is the parsed ``adapter_config.json`` (PEFT's names);
+    ``lora`` is the training config's ``lora`` block.
+    """
+    import math
+
+    def number(value: Any) -> float | None:
+        return None if isinstance(value, bool) or not isinstance(value, (int, float)) else float(value)
+
+    for key, wanted in (("r", lora["rank"]), ("lora_alpha", lora["alpha"]),
+                        ("lora_dropout", lora["dropout"])):
+        if adapter_config.get(key) is None:
+            return f"{key} is missing from the adapter, {wanted} in the config"
+        have, want = number(adapter_config[key]), number(wanted)
+        if have is None or want is None or not math.isclose(have, want, rel_tol=1e-9, abs_tol=1e-9):
+            return f"{key} is {adapter_config[key]} in the adapter, {wanted} in the config"
+    # Missing means PEFT's default, which is what from_pretrained would train with.
+    for key, wanted, default in (("use_rslora", bool(lora.get("use_rslora", False)), False),
+                                 ("bias", lora.get("bias", "none"), "none")):
+        have = adapter_config.get(key)
+        have = default if have is None else have
+        # Strictly: an adapter's 1 is not the config's True.
+        if have != wanted or type(have) is not type(wanted):
+            return f"{key} is {have} in the adapter, {wanted} in the config"
+    modules = set(lora["target_modules"]) | ({"merger"} if lora.get("include_vision_projector") else set())
+    saved = adapter_config.get("target_modules")
+    if isinstance(saved, str):
+        # The regex ms-swift builds for a multimodal model: it must name every
+        # module the config targets.
+        absent = sorted(m for m in modules if m not in saved)
+        if absent:
+            return f"target_modules in the adapter is the pattern {saved!r}, which does not name {absent}"
+    elif isinstance(saved, (list, tuple)):
+        if set(map(str, saved)) != modules:
+            return (f"target_modules are {sorted(map(str, saved))} in the adapter, "
+                    f"{sorted(modules)} in the config")
+    else:
+        return f"target_modules is missing from the adapter, {sorted(modules)} in the config"
+    return None
+
+
+def assert_adapter_matches_config(continue_from: str) -> None:
+    """Refuse to continue an adapter saved with other LoRA settings than the
+    config's (:func:`adapter_config_mismatch`): ms-swift would train with the
+    adapter's, while the manifest recorded the config's."""
+    import json
+
+    path = Path(continue_from.strip().rstrip("/\\")) / "adapter_config.json"
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise TrainingError(f"--continue-from {continue_from!r}: {path} cannot be read ({exc})") from exc
+    name = ADAPTER.training_config
+    reason = (adapter_config_mismatch(saved, training_config(name)["lora"]) if isinstance(saved, dict)
+              else f"{path.name} is not a JSON object")
+    if reason:
+        raise TrainingError(
+            f"--continue-from {continue_from!r} does not have the LoRA settings of "
+            f"configs/training/{name}.yaml: {reason}. ms-swift trains a continued run with the "
+            "adapter's own settings (its adapter_config.json) and ignores the config's, while the "
+            "manifest would record the config's. Start this cycle from the base instead (finetune "
+            "--fresh; by hand, leave out --continue-from), or set the config's lora block back to "
+            "the adapter's values."
+        )
 
 
 def count_examples(bucket: Any) -> int:
@@ -1184,7 +1346,7 @@ def trainer_environment(environ: Any) -> dict[str, str]:
 
 
 def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin CLI
-    parser = argparse.ArgumentParser(description="Train the unified extractor LoRA")
+    parser = argparse.ArgumentParser(description="Train the policy adapter LoRA")
     parser.add_argument("--corpus", required=True)
     parser.add_argument("--out-version", required=True)
     parser.add_argument("--deepspeed", default=None, choices=[None, "zero2", "zero3"])
@@ -1192,8 +1354,6 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     parser.add_argument("--continue-from", default=None, help="a checkpoint DIRECTORY, not a run-id")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--tenant", default=None, help="whose corpus to read; defaults from env")
-    parser.add_argument("--scope", default=None,
-                        help="what this run covers (configs/scopes.yaml); defaults to unified")
     args = parser.parse_args(list(argv) if argv is not None else None)
     # On the pod, run detached in tmux: a closed laptop must not stop this job.
     from orchestration.detach import detach_module_if_needed
@@ -1220,8 +1380,8 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
         continue_from=args.continue_from,
         dry_run=args.dry_run,
         tenant_id=args.tenant,
-        scope=get_scope(args.scope) if args.scope else None,
     )
+
     return 0
 
 

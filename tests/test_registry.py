@@ -297,8 +297,10 @@ def test_quantized_artifact_refused_while_staged(client):
 
 
 def test_unknown_version_fails_loudly(client):
-    with pytest.raises(Q.RegistryQueryError, match="no unified or Foundation run"):
+    W.write_manifest(_scoped("policy-v3", "policy", ["policy"]), client)
+    with pytest.raises(Q.RegistryQueryError, match="no run of the policy adapter found") as refused:
         Q.resolve_model_version("v99", client)
+    assert "policy-v3" in str(refused.value)            # it names the runs it knows
 
 
 def test_a_unified_run_resolves_by_tag(client):
@@ -387,15 +389,18 @@ def test_latest_promoted_finds_the_serving_version(client):
 # --------------------------------------------------------------------------
 
 def _bundle(**over):
+    """A release of the policy adapter's v3, as `package` writes it."""
     from registry_utils.models import ReleaseBundle
 
     base = dict(
-        release_id="release-2026.11.1",
+        release_id="v3",
         tenant_scope="tenant_default",
+        scope="policy",
+        doc_types=["policy"],
         base_model="Qwen/Qwen3-VL-8B-Instruct@abc1234",
-        adapter="extractor-v1.0",
-        merged_model="models/tenant_default/merged/release-2026.11.1/",
-        serving_formats={"bf16": "models/.../bf16/"},
+        adapter="policy-v3",
+        merged_model=paths.merged_model_dir("v3", scope="policy"),
+        serving_formats={"bf16": paths.merged_model_dir("v3", scope="policy")},
         prompt_hash="sha256:aaa",
         vision_config_hash="sha256:bbb",
         vllm_config_hash="sha256:ccc",
@@ -483,26 +488,60 @@ def test_an_overridden_release_records_who_approved_it_in_the_index():
 def test_release_paths_are_tenant_scoped_and_per_format():
     """A model trained on a tenant's documents IS that tenant's data, so the
     deletion cascade has to reach the release too (arch v2.1 §8b)."""
-    bundle = paths.release_bundle("release-2026.11.1", "acme")
+    bundle = paths.release_bundle("v3", "acme")
     assert paths.is_tenant_scoped(bundle) and paths.tenant_of(bundle) == "acme"
 
-    bf16 = paths.release_gate_decision("release-2026.11.1", "bf16", "acme")
-    fp8 = paths.release_gate_decision("release-2026.11.1", "fp8", "acme")
+    bf16 = paths.release_gate_decision("v3", "bf16", "acme")
+    fp8 = paths.release_gate_decision("v3", "fp8", "acme")
     assert bf16 != fp8, "each serving format needs its own gate decision"
 
 
 def test_a_malformed_release_id_is_refused():
     """A release id is what --model resolves and what the endpoint pulls; a typo
     is a deploy that serves the wrong weights or nothing at all."""
-    with pytest.raises(paths.PathError, match="invalid release id"):
-        paths.release_bundle("v2")
+    for bad in ("release-v2", "2026.11.1", "v", "v3a", "V3", "release-2026.11", "policy-v3"):
+        with pytest.raises(paths.PathError, match="invalid release id"):
+            paths.release_bundle(bad)
+
+
+def test_a_release_is_named_by_its_cycles_version():
+    """One number names a cycle's run, adapter and release; the older
+    release-YYYY.M.N form still reads, so an index written before loads."""
+    assert paths.release_bundle("v3") == f"releases/{paths.default_tenant()}/v3/bundle.json"
+    assert paths.release_bundle("v2.1", "acme") == "releases/acme/v2.1/bundle.json"
+    assert paths.release_bundle("release-2026.11.1").endswith("/release-2026.11.1/bundle.json")
+    assert not hasattr(paths, "next_release_id")
+
+
+@pytest.mark.parametrize("tag,number", [
+    ("v3", 3), ("v10", 10), ("v2.1", 2), (" v4 ", 4),
+    ("release-2026.11.1", None), ("policy-v3", None), ("3", None), ("", None),
+])
+def test_a_version_number_is_the_whole_number_of_a_version_tag(tag, number):
+    assert paths.version_number(tag) == number
+
+
+def test_the_next_version_is_one_more_than_the_highest_used():
+    assert paths.next_version([]) == "v1"
+    assert paths.next_version(["v1", "v2"]) == "v3"
+    # By number, not by string: v10 is after v9.
+    assert paths.next_version(["v9", "v10", "v2"]) == "v11"
+    # A minor version counts as its whole number; anything else is ignored.
+    assert paths.next_version(["v2.1", "release-2026.11.1", "extractor-v7", "corpus"]) == "v3"
+    assert paths.next_version(iter(["v4"])) == "v5"
+
+
+def test_every_corpus_of_a_tenant_sits_under_one_root():
+    assert paths.corpus_root() == f"corpus/{paths.default_tenant()}"
+    assert paths.corpus_dir("v3", "acme").startswith(paths.corpus_root("acme") + "/")
+    assert paths.is_tenant_scoped(paths.corpus_root("acme"))
 
 
 def test_gguf_formats_are_not_serving_formats():
     """GGUF targets llama.cpp, not vLLM. Asking for a GGUF format on the serving
     path is a category error, not a preference (arch v2.1 §13a)."""
     with pytest.raises(paths.PathError, match="unknown quantization format"):
-        paths.release_gate_decision("release-2026.11.1", "q4_k_m")
+        paths.release_gate_decision("v3", "q4_k_m")
 
 
 def test_the_corpus_materializes_exactly_four_epoch_files():
@@ -518,11 +557,11 @@ def test_everything_a_release_owns_sits_under_one_tenant_prefix():
     """A tenant deletion has to remove the calibrators fitted on that tenant's
     fields as well as the bundle. One prefix makes that one delete instead of a
     checklist (arch v2.1 §8b)."""
-    root = paths.release_dir("release-2026.11.1", "acme")
+    root = paths.release_dir("v3", "acme")
     for path in (
-        paths.release_bundle("release-2026.11.1", "acme"),
-        paths.release_calibrators("release-2026.11.1", "fp8", "acme"),
-        paths.release_gate_decision("release-2026.11.1", "bf16", "acme"),
+        paths.release_bundle("v3", "acme"),
+        paths.release_calibrators("v3", "fp8", "acme"),
+        paths.release_gate_decision("v3", "bf16", "acme"),
     ):
         assert path.startswith(root), f"{path} escapes the release prefix"
         assert paths.tenant_of(path) == "acme"
@@ -543,9 +582,11 @@ def test_the_v1_unscoped_trees_are_not_misread_as_tenant_scoped():
 
 
 def _scoped(run_id: str, scope: str, doc_types: list[str], **over) -> RunManifest:
+    # On the configured base, as training records it: a version resolves only on
+    # the base it trained on (query_registry.base_model_refusal).
     body = dict(
         run_id=run_id, run_type="scoped", scope=scope, doc_types=doc_types,
-        dependencies=_deps(), training_config=_tc(), data_stats=_DS,
+        dependencies=_deps(base_model=Q.configured_base_model()), training_config=_tc(), data_stats=_DS,
     )
     body.update(over)
     return RunManifest(**body)
@@ -631,6 +672,85 @@ def test_listing_by_scope_reads_an_absent_scope_as_unified(client):
 
     assert [r["run_id"] for r in Q.list_runs(client, scope="unified")] == ["extractor-v1"]
     assert [r["run_id"] for r in Q.list_runs(client, scope="policy")] == ["policy-v1"]
+
+
+# --------------------------------------------------------------------------
+# A version tag resolves to the policy adapter's run (common.adapter)
+# --------------------------------------------------------------------------
+
+
+def test_a_version_resolves_to_the_policy_adapters_run(client):
+    """Every cycle trains the policy adapter, as run_type "scoped". Looking only
+    for unified and Foundation runs, `extract --model v3` could not find the
+    model the cycle had just trained."""
+    W.write_manifest(_scoped("policy-v3", "policy", ["policy"]), client)
+    # Staged, it is the checkpoint its selection chose, not the ms-swift output root.
+    chosen = f"{paths.scoped_staging_adapter_dir('policy', 'v3')}/v0-1/checkpoint-150"
+    client.write_json(paths.checkpoint_selection("v3", scope="policy"), {"selected": chosen})
+
+    # Served as it is released: the base with the version's adapter on every
+    # request, never merged (decision 2026-10-23).
+    resolved = Q.resolve_model_version("v3", client)
+    assert resolved["tag"] == "v3" and resolved["kind"] == "base_plus_adapter"
+    assert resolved["from_staging"] is True and resolved["artifact_status"] == "staged"
+    assert resolved["foundation_adapter"] == chosen
+    assert resolved["merged_model"] is None and resolved["quantized_model"] is None
+    assert resolved["type_adapter"] is None
+
+
+def test_a_published_version_of_the_adapter_resolves_to_blob(client):
+    W.write_manifest(_scoped("policy-v3", "policy", ["policy"], artifacts=Artifacts(
+        status="published", adapter_weights=paths.scoped_adapter_dir("policy", "v3"))), client)
+
+    resolved = Q.resolve_model_version("v3", client)
+    assert resolved["kind"] == "base_plus_adapter" and resolved["from_staging"] is False
+    assert resolved["foundation_adapter"] == paths.scoped_adapter_dir("policy", "v3")
+    assert resolved["merged_model"] is None
+    assert Q.resolve_model_version("v3", client, quant_format="bf16") == resolved
+
+
+@pytest.mark.parametrize("status", ["staged", "published"])
+def test_a_version_of_the_adapter_has_no_quantized_format(client, status):
+    """Nothing is merged, so nothing is quantized: asking for fp8 is refused,
+    staged or published, rather than pointed at a model that does not exist."""
+    W.write_manifest(_scoped("policy-v3", "policy", ["policy"], artifacts=Artifacts(
+        status=status, adapter_weights=paths.scoped_adapter_dir("policy", "v3"),
+        staging_path=paths.scoped_staging_adapter_dir("policy", "v3") if status == "staged" else None,
+    )), client)
+    with pytest.raises(Q.RegistryQueryError, match="LoRA on the bf16 base: nothing is merged"):
+        Q.resolve_model_version("v3", client, quant_format="fp8")
+
+
+def test_the_adapter_answers_for_its_version_before_an_older_unified_run(client):
+    W.write_manifest(
+        RunManifest(run_id="extractor-v3", run_type="unified",
+                    dependencies=_deps(), training_config=_tc(), data_stats=_DS),
+        client,
+    )
+    W.write_manifest(_scoped("policy-v3", "policy", ["policy"]), client)
+    client.write_json(paths.checkpoint_selection("v3", scope="policy"), {
+        "selected": f"{paths.scoped_staging_adapter_dir('policy', 'v3')}/v0-1/checkpoint-150"})
+    assert "/scope/policy/" in Q.resolve_model_version("v3", client)["foundation_adapter"]
+    # Another scope's run of the same version is not the adapter.
+    W.write_manifest(_scoped("lossrun-v4", "lossrun", ["lossrun"]), client)
+    with pytest.raises(Q.RegistryQueryError, match="no run of the policy adapter"):
+        Q.resolve_model_version("v4", client)
+
+
+def test_the_index_row_records_whose_corpus_trained_it_and_its_tier():
+    """The version table's columns (registry_utils.releases.version_table)."""
+    manifest = _scoped("policy-v3", "policy", ["policy"], tenant_id="acme",
+                       promotion=Promotion(tier="interim"))
+    row = manifest.index_row()
+    assert (row["tenant_id"], row["tier"]) == ("acme", "interim")
+    assert _scoped("policy-v4", "policy", ["policy"]).index_row()["tier"] is None
+
+
+def test_a_release_bundle_records_the_lines_it_trained_on():
+    from registry_utils.models import ReleaseBundle
+
+    assert ReleaseBundle.model_fields["lines"].default_factory() == []
+    assert _bundle(lines=["homeowners"]).lines == ["homeowners"]
 
 
 # --------------------------------------------------------------------------

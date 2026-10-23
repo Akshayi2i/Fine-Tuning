@@ -294,35 +294,6 @@ def test_the_first_version_has_nothing_to_regress_against():
     assert result.passed and result.is_first_version
 
 
-def test_a_continued_foundation_needs_cross_type_evidence():
-    """Continued training compounds drift, and a patch aimed at one type can
-    quietly degrade the others (arch §12)."""
-    result = promotion_gate(_metrics(), _metrics(), continued_from="foundation-v1")
-    assert not result.passed
-    assert "cross_type_regression_evidence" in result.failed_gates
-
-
-def test_a_continued_foundation_passes_with_evidence():
-    result = promotion_gate(
-        _metrics(), _metrics(), continued_from="foundation-v1",
-        cross_type_evidence={
-            "acord": {"candidate": _metrics(), "current": _metrics()},
-            "lossrun": {"candidate": _metrics(), "current": _metrics()},
-        },
-    )
-    assert result.passed
-
-
-def test_cross_type_regression_blocks_a_continued_foundation():
-    result = promotion_gate(
-        _metrics(), _metrics(), continued_from="foundation-v1",
-        cross_type_evidence={"acord": {"candidate": _metrics(field_exact_match=0.70),
-                                       "current": _metrics()}},
-    )
-    assert not result.passed
-    assert any("acord" in gate for gate in result.failed_gates)
-
-
 def test_the_gate_has_no_silent_bypass():
     """An override EXISTS under arch v2.1 §15.5 — but there is no parameter that
     forces a pass without attribution. v1 had no override at all, reasoning that
@@ -385,22 +356,29 @@ def test_an_override_lifts_only_the_gates_it_names():
 
 
 def test_an_override_clears_gates_whose_reasons_do_not_start_with_their_name():
-    """The waiver matched reasons by their opening words. The cross-type reason
-    starts "cross-type evidence ..." / "the continued run ...", never with its gate
-    name, so waiving it recorded the waiver and left the release blocked."""
-    from evaluation.gating import GateOverrideRecord
+    """The waiver matched reasons by their opening words. A continued run's
+    reasons start "this run continued ..." / "<line> is not non-inferior ...", never with
+    their gate's name, so waiving one recorded the waiver and left the release
+    blocked."""
+    from evaluation.gating import GateOverrideRecord, LineComparison, LineEvidence
 
+    reason = "the parent's report is on the set frozen before FID-120 relabelled it"
     result = promotion_gate(
-        _metrics(), _metrics(), continued_from="foundation-v1",
-        override=GateOverrideRecord(
-            "A. Reviewer",
-            "cross-type slices are being relabelled under FID-120; this patch is acord-only",
-            ["cross_type_regression_evidence"],
-        ),
+        _metrics(), _metrics(), continued_from="policy-v1",
+        line_evidence_missing="policy-v1's report is on another yardstick",
+        override=GateOverrideRecord("A. Reviewer", reason, ["line_regression_evidence"]),
     )
-    assert result.waived == ["cross_type_regression_evidence"]
+    assert result.waived == ["line_regression_evidence"]
     assert result.passed, result.report()
     assert not result.blocking_reasons
+
+    fell = promotion_gate(
+        _metrics(), _metrics(), continued_from="policy-v1",
+        line_evidence=LineEvidence(compared=[LineComparison(
+            "homeowners", "policy-v1", reference_scores=[0.95] * 6, candidate_scores=[0.90] * 6)]),
+        override=GateOverrideRecord("A. Reviewer", reason, ["line:homeowners"]),
+    )
+    assert fell.waived == ["line:homeowners"] and fell.passed, fell.report()
 
 
 def test_a_waived_pass_is_not_recorded_as_a_clean_pass():
@@ -1047,9 +1025,11 @@ def test_an_override_must_name_real_gates_and_says_what_it_did_not_waive():
     reason = "classifier retrain tracked in FID-118, shipping the extractor gain now"
     with pytest.raises(GateError, match="not a gate"):
         GateOverrideRecord("A. Reviewer", reason, ["doc_type_classifier"]).validate()
-    assert all(is_gate(g) for g in [*GATING_METRICS, "improvement", "cross_type_regression_evidence",
-                                    "cross_type:acord"])
-    assert not is_gate("cross_type:invoice") and not is_gate("alias_accuracy")
+    assert all(is_gate(g) for g in [*GATING_METRICS, "improvement", "line_regression_evidence",
+                                    "line:homeowners"])
+    assert not is_gate("line:invoice") and not is_gate("alias_accuracy")
+    # Gone with continued Foundations (decision 2026-10-23).
+    assert not is_gate("cross_type_regression_evidence") and not is_gate("cross_type:acord")
 
     result = promotion_gate(
         {**_passing(), "doc_type_classifier_accuracy": 0.90}, None,
@@ -1475,7 +1455,7 @@ def test_scanned_accuracy_still_may_not_regress_when_measured():
 
 
 # --------------------------------------------------------------------------
-# Scope-aware gating (arch v2.1 §4.1, §15.2)
+# What the policy adapter cannot produce (arch v2.1 §15.2)
 # --------------------------------------------------------------------------
 
 
@@ -1483,14 +1463,12 @@ def _without(metrics: dict, *names: str) -> dict:
     return {k: v for k, v in metrics.items() if k not in names}
 
 
-def test_a_policy_only_run_is_not_blocked_on_loss_run_reconciliation():
-    """THE test for this phase. Nothing a policy scope covers prints Loss Run
-    totals, so blocking on their absence would make the gate a statement about
-    corpus composition — and no policy release could ever pass."""
-    from common.scopes import get_scope
-
+def test_a_policy_run_is_not_blocked_on_loss_run_reconciliation():
+    """Nothing the policy adapter trains prints Loss Run totals, so blocking on
+    their absence would make the gate a statement about corpus composition -
+    and no policy release could ever pass."""
     metrics = _without(_passing(), "lossrun_totals_reconciliation_rate")
-    result = promotion_gate(metrics, None, scope=get_scope("policy"))
+    result = promotion_gate(metrics, None)
 
     assert result.passed, result.report()
     verdict = next(v for v in result.verdicts if v.name == "lossrun_totals_reconciliation_rate")
@@ -1502,15 +1480,13 @@ def test_not_applicable_is_reported_apart_from_unmeasured():
     """They are different statements: one is about coverage, the other is a
     missing result. Collapsing them hides which metrics a release actually
     failed to produce."""
-    from common.scopes import get_scope
-
     metrics = _without(
         _passing(), "lossrun_totals_reconciliation_rate", "lob_detection_accuracy",
         "false_null_rate",
     )
-    result = promotion_gate(metrics, None, scope=get_scope("policy"))
+    result = promotion_gate(metrics, None)
 
-    assert not result.passed, "a metric the scope CAN produce and did not must block"
+    assert not result.passed, "a metric the adapter CAN produce and did not must block"
     assert "false_null_rate" in result.failed_gates
     assert "lossrun_totals_reconciliation_rate" not in result.failed_gates
     # A canonical policy has no line of business for the model to detect.
@@ -1524,91 +1500,36 @@ def test_not_applicable_is_reported_apart_from_unmeasured():
     }
 
 
-def test_a_unified_run_still_blocks_on_the_same_missing_metric():
-    """The scope is what changes the verdict, not the metric. A unified run
-    covers Loss Runs, so their reconciliation is a result it owes."""
-    metrics = _without(_passing(), "lossrun_totals_reconciliation_rate")
-    unscoped = promotion_gate(metrics, None)
+def test_a_metric_the_adapter_can_produce_still_blocks_when_missing():
+    """The exemption is derived from what the adapter trains
+    (common.adapter.not_applicable_metrics), never declared: field accuracy is
+    something a policy run owes."""
+    from common.adapter import not_applicable_metrics
+    from evaluation.gating import CONDITIONAL_METRICS, not_applicable_for
 
-    # Still exempt as a CONDITIONAL metric (a statement about the eval set), but
-    # a metric outside that set is not.
-    assert unscoped.passed
+    assert not_applicable_for() == CONDITIONAL_METRICS | not_applicable_metrics()
+    assert {"lossrun_totals_reconciliation_rate", "table_f1", "lob_detection_accuracy"} <= not_applicable_for()
+    assert "field_exact_match" not in not_applicable_for()
     assert not promotion_gate(_without(_passing(), "field_exact_match"), None).passed
 
 
-def test_a_scope_cannot_waive_a_metric_it_can_produce():
-    """The scope's SHAPE decides; its declaration is documentation. This scope is
-    built in code, so it never passed the config-load check — and is still not
-    excused from a metric it can produce."""
-    from dataclasses import replace
-
-    from common.scopes import get_scope
-    from evaluation.gating import not_applicable_for
-
-    lying = replace(
-        get_scope("unified"),
-        not_applicable_metrics=frozenset({"field_exact_match", "lossrun_totals_reconciliation_rate"}),
-    )
-    assert "field_exact_match" not in not_applicable_for(lying)
-    assert not promotion_gate(_without(_passing(), "field_exact_match"), None, scope=lying).passed
-
-
-def test_a_scope_can_raise_its_own_floors():
-    """Floors are per scope because the same number means different things to
-    different coverage."""
-    from dataclasses import replace
-
-    from common.scopes import get_scope
-    from evaluation.gating import floors_for
-
-    strict = replace(get_scope("policy"), floors={"field_exact_match": 0.99})
-
-    assert floors_for(strict)["field_exact_match"] == 0.99
-    assert floors_for(get_scope("policy"))["field_exact_match"] == 0.85
+def test_floors_given_to_the_gate_replace_the_pilot_table():
+    from evaluation.gating import PILOT_FLOORS
 
     metrics = _without(_passing(field_exact_match=0.97), "lossrun_totals_reconciliation_rate")
-    assert promotion_gate(metrics, None, scope=get_scope("policy")).passed
-    assert not promotion_gate(metrics, None, scope=strict).passed
+    assert PILOT_FLOORS["field_exact_match"] == 0.85
+    assert promotion_gate(metrics, None).passed
+    strict = {**PILOT_FLOORS, "field_exact_match": 0.99}
+    assert "field_exact_match" in promotion_gate(metrics, None, floors=strict).failed_gates
 
 
-def test_the_gate_decision_says_which_scope_it_judged():
-    """"v2 passed" means nothing when two scopes share a version."""
-    from common.scopes import get_scope
+def test_an_eval_set_is_expected_to_hold_every_subset():
+    """The adapter reads policies, so `long_policy` applies; the modality
+    subsets are required of every corpus (§6)."""
+    from evaluation.run_eval import EVAL_SUBSETS, expected_subsets
 
-    metrics = _without(_passing(), "lossrun_totals_reconciliation_rate")
-    result = promotion_gate(metrics, None, scope=get_scope("policy"))
-
-    assert result.scope == "policy"
-    assert result.as_dict()["scope"] == "policy"
-
-
-def test_an_eval_set_warns_only_about_subsets_its_scope_could_contain():
-    """A Loss Run scope has no policies, so `long_policy` is a gap that cannot be
-    filled — warning about it teaches everyone to ignore the warning."""
-    from common.scopes import get_scope
-    from evaluation.run_eval import expected_subsets
-
-    assert "long_policy" in expected_subsets(get_scope("unified"))
-    assert "long_policy" in expected_subsets(get_scope("policy"))
-    assert "long_policy" not in expected_subsets(get_scope("lossrun"))
-    # The modality subsets are required of every corpus (§6), whatever it covers.
-    for scope_name in ("unified", "policy", "lossrun"):
-        assert {"image_only", "scanned", "noisy_ocr"} <= expected_subsets(get_scope(scope_name))
-
-
-def test_a_scope_that_forgot_to_declare_a_metric_is_still_not_blocked_by_it():
-    """The derivation is what excuses a metric, so a scope that structurally
-    cannot produce one is not blocked for ever because nobody wrote it down."""
-    from dataclasses import replace
-
-    from common.scopes import get_scope
-    from evaluation.gating import not_applicable_for
-
-    forgetful = replace(get_scope("policy"), not_applicable_metrics=frozenset())
-    metrics = _without(_passing(), "lossrun_totals_reconciliation_rate")
-
-    assert "lossrun_totals_reconciliation_rate" in not_applicable_for(forgetful)
-    assert promotion_gate(metrics, None, scope=forgetful).passed
+    assert expected_subsets() == set(EVAL_SUBSETS)
+    assert {"long_policy", "image_only", "scanned", "noisy_ocr"} <= expected_subsets()
 
 
 def test_the_calibrate_stage_reports_how_far_confidence_is_from_accuracy():

@@ -433,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI
     if report.ok and not args.validate_only:
         print(
             "\nNext: OCR runs on the GPU pod — "
-            f"python -m orchestration.run finetune --doc-types {args.doc_type} --out-version vN"
+            "python -m orchestration.run finetune (the cycle takes the next version)"
         )
     return 1 if report.failed else 0
 

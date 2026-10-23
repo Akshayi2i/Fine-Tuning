@@ -159,7 +159,7 @@ def freeze_eval_set(
     frozen set is the size of the build it came from, permanently, so freezing a
     pilot build fixes a pilot-sized yardstick for every later version. Synthetic
     twins do not count (decision 2026-10-22), as the gate's minimum does not
-    (``pipeline_dag.scope_eval_set_size``).
+    (``pipeline_dag.eval_set_size``).
 
     Refused, before anything is copied, when any gold has no review record
     (``export_golden_labels.review_problem``, decision 2026-10-22): a gold
@@ -311,9 +311,9 @@ def freeze_eval_set(
         # not measured by the gate at all. Every document recording the line.
         "documents_by_line": dict(sorted(by_line.items())),
         # What the gate's production minimum reads (MIN_FROZEN_DOCS_PER_TYPE,
-        # pipeline_dag.scope_eval_set_size): real documents per type, and real
-        # policies per line. A manifest written before these has neither, and
-        # the gate then counts its scope's documents as unknown.
+        # pipeline_dag.eval_set_size): real documents per type; and real
+        # policies per line, for a reader. A manifest written before these has
+        # neither, and the gate then counts the candidate's documents as unknown.
         "real_documents_by_doc_type": dict(sorted(real_by_type.items())),
         "real_policies_by_line": dict(sorted(real_policies_by_line.items())),
         "small_set_accepted": bool(small),

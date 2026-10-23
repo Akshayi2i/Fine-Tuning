@@ -72,7 +72,7 @@ def corpus_source_ids(
     *, include_test: bool = False,
 ) -> set[str]:
     """Every ``source_id`` a model built from this corpus LEARNED from or was
-    SELECTED on — its train and val splits (and their scope views).
+    SELECTED on — its train and val splits (and the adapter's views of them).
 
     The test split is excluded unless ``include_test``: no model trains or
     selects on it, and it is exactly what the golden eval set is frozen FROM
@@ -144,7 +144,7 @@ def eval_set_record(
     against one gold; and a frozen gold is read under the label rules of the
     code that scores it (:func:`scoring_fingerprint`).
 
-    ``real_documents_by_doc_type`` is what the scope was scored on, which
+    ``real_documents_by_doc_type`` is what the release was scored on, which
     decides whether it was scored on too few documents to be called production:
     real documents only, because a synthetic twin does not count toward the
     minimum (decision 2026-10-22). ``documents_by_doc_type`` counts every
@@ -368,6 +368,12 @@ class SubsetReport:
     #: the others. The subset's metric is the mean over items, so this is how
     #: much each document counts in it (:meth:`EvalReport.per_document_weights`).
     per_document_items: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: ``{source_id: line}``: each REAL document's one line
+    #: (``common.lob.single_line``), so a continued run's gate can pair its
+    #: per-document scores line by line with the runs before it. Synthetic twins
+    #: are left out: they count toward no minimum (decision 2026-10-22). Kept
+    #: out of :meth:`as_dict`, like the scores.
+    per_document_line: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -485,6 +491,14 @@ class EvalReport:
                     {source: n * scale for source, n in items.items()})
         return {name: by_source for name, by_source in weights.items() if by_source}
 
+    def per_document_lines(self) -> dict[str, str]:
+        """``{source_id: line}`` over the full set: each real document's line
+        (:attr:`SubsetReport.per_document_line`)."""
+        lines: dict[str, str] = {}
+        for report in self.full_set():
+            lines.update(report.per_document_line)
+        return lines
+
     def _per_document_sources(self) -> list[tuple[SubsetReport, str, str]]:
         """``(subset report, gate metric, its per-document metric)``: the full
         set's own metrics, and the subset accuracies from their subsets' field
@@ -525,6 +539,9 @@ class EvalReport:
                 name: {source: round(weight, 6) for source, weight in sorted(by_source.items())}
                 for name, by_source in sorted(self.per_document_weights().items())
             },
+            # Read with per_document: which line each real document is of, for
+            # a continued run's line-by-line gate (decision 2026-10-23).
+            "per_document_lines": dict(sorted(self.per_document_lines().items())),
         }
 
 
@@ -601,7 +618,7 @@ def score_subset(
     scored: Sequence[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]],
 ) -> SubsetReport:
     """Score one doc type × subset from ``(expected, got, metadata)`` triples."""
-    from common.lob import merge_line
+    from common.lob import merge_line, single_line
     from evaluation.metrics.auto_accept import AutoAcceptTally, score_auto_accept
     from evaluation.metrics.common_model import CommonModelTally, core_for_scoring, without_overflow
     from evaluation.metrics.confusable import aggregate_misattribution, score_misattribution
@@ -685,6 +702,10 @@ def score_subset(
         else:
             accuracy = score_fields(expected, got)
         key = (metadata.get("source_id") or f"#{index}", metadata.get("modality_mode"))
+        if metadata.get("source_id") and not metadata.get("synthetic"):
+            document_line = single_line(metadata.get("lob"))
+            if document_line:
+                report.per_document_line[str(metadata["source_id"])] = document_line
         tally = pooled.setdefault(key, [0, 0, 0])
         tally[0] += sum(r.correct for r in accuracy.results)
         tally[1] += sum(r.exact for r in accuracy.results)
@@ -847,6 +868,11 @@ def score_subset(
         "field_accuracy_by_lob": {
             line: round(correct / total, 4) for line, (correct, total) in sorted(by_lob.items())
             if total
+        } or None,
+        # How many values each line's accuracy is over, so a reader can tell a
+        # line's number from noise.
+        "field_scored_by_lob": {
+            line: total for line, (_correct, total) in sorted(by_lob.items()) if total
         } or None,
         # The fields with at least 3 scorings, lowest accuracy first.
         "weakest_fields": [
@@ -1018,20 +1044,31 @@ def _worst_line(by_lob: dict[str, list[int]], lines: Sequence[Any], common_model
     return round(min(rates), 4) if rates else None
 
 
-def expected_subsets(scope: Any = None) -> set[str]:
-    """Which eval subsets this run should contain documents for.
+def line_document_scores(report: dict[str, Any]) -> dict[str, dict[str, tuple[float, float]]] | None:
+    """``{line: {source_id: (field match, weight)}}`` over a report's full set:
+    each real document's ``field_normalized_match`` and its weight in it
+    (``per_document_weights``; 1 when the report holds none), grouped by the
+    document's line (``per_document_lines``). What a continued run's gate pairs
+    line by line (decision 2026-10-23). ``None`` for a report written before it
+    recorded documents' lines."""
+    lines = report.get("per_document_lines")
+    if lines is None:
+        return None
+    scores = (report.get("per_document") or {}).get("field_normalized_match") or {}
+    weights = (report.get("per_document_weights") or {}).get("field_normalized_match") or {}
+    grouped: dict[str, dict[str, tuple[float, float]]] = {}
+    for source, line in lines.items():
+        if source in scores:
+            grouped.setdefault(str(line), {})[source] = (float(scores[source]),
+                                                         float(weights.get(source) or 1.0))
+    return grouped
 
-    ``long_policy`` only exists where policies do, so warning about its absence
-    on a Loss Run scope reports a gap that cannot be filled. The modality subsets
-    are NOT scope-dependent: §6 requires every corpus to cover all three regimes,
-    so their absence is a real defect whatever the scope covers.
-    """
-    if scope is None:
-        return set(EVAL_SUBSETS)
-    covered = set(EVAL_SUBSETS)
-    if "policy" not in getattr(scope, "doc_types", ()):
-        covered.discard("long_policy")
-    return covered
+
+def expected_subsets() -> set[str]:
+    """Which eval subsets a run should contain documents for: every one. The
+    adapter reads policies, so ``long_policy`` applies, and §6 requires every
+    corpus to cover all three modality regimes."""
+    return set(EVAL_SUBSETS)
 
 
 def build_report(
@@ -1040,7 +1077,6 @@ def build_report(
     *,
     corpus_version: str = "",
     classifier_scored: bool = False,
-    scope: Any = None,
 ) -> EvalReport:
     """Score every doc type × subset from one flat list of results.
 
@@ -1097,7 +1133,7 @@ def build_report(
     for (doc_type, subset), rows in sorted(buckets.items()):
         report.subsets.append(score_subset(doc_type, subset, rows))
 
-    missing = expected_subsets(scope) - {s.subset for s in report.subsets}
+    missing = expected_subsets() - {s.subset for s in report.subsets}
     if missing:
         # Reported rather than raised: an eval set with no scanned documents is
         # a coverage gap in the eval set, and pretending it scored 100% would be
@@ -1150,7 +1186,6 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     parser.add_argument("--doc-types", nargs="+", default=list(ACTIVE_DOC_TYPES),
                         choices=list(ACTIVE_DOC_TYPES))
     parser.add_argument("--tenant", default=None)
-    parser.add_argument("--scope", default=None, help="configs/scopes.yaml; defaults to unified")
     args = parser.parse_args(list(argv) if argv is not None else None)
     # On the pod, run detached in tmux: a closed laptop must not stop this job.
     from orchestration.detach import detach_module_if_needed
@@ -1167,16 +1202,14 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
 
     # Through serving.pipeline, never a bespoke inference path (IMPL-08): the
     # report measures what production serves.
-    from common.scopes import default_scope, get_scope
     from evaluation.golden_eval import dumps, evaluate_version
     from inference_core.model_runner import load_model
 
-    scope = get_scope(args.scope) if args.scope else default_scope()
     body = evaluate_version(
         client, load_model(args.model, client),
-        version=args.model, corpus_version=args.corpus_version, scope=scope,
-        tenant_id=args.tenant,
+        version=args.model, corpus_version=args.corpus_version, tenant_id=args.tenant,
     )
+
     print(dumps(body.get("gate_metrics") or {}))
     return 0
 
