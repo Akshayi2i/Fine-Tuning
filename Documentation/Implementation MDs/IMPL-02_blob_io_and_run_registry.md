@@ -1,10 +1,10 @@
 # SPEC 02 — Azure Blob I/O + Training Run Registry
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01. This is the ONLY module that talks to the Azure SDK directly. Everything else goes through it.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §8b (tenant isolation per Fideon SPEC_12), §12 (versioning + training run registry), §13b (quantization thresholds recorded), §15 (metrics recorded), §18/§18a (Blob layout, raw-document access control).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §8b (tenant isolation per Fideon SPEC_12), §12 (versioning + training run registry), §13b (quantization thresholds recorded), §15 (metrics recorded), §18/§18a (Blob layout, raw-document access control).
 
 ## Goal
 
@@ -234,3 +234,7 @@ into the per-corpus cache atomically (unique `.part` names, renamed into place).
 - Incremental training (decision 2026-10-23): the run manifest records `parent_run_id` and `fresh_reason`, the registry index row `parent_run_id` (§4, §5, Current implementation); the staging path `parent-adapters/policy/v{n}/` holds the adapter a cycle continues.
 - Nothing is merged or quantized: `resolve_model_version("vN")` gives kind `base_plus_adapter` and refuses a non-bf16 format (§6, acceptance); `package` pushes the adapter only; the release bundle's `served_as` is `lora_on_base`, its bf16 format the adapter's directory (Current implementation).
 - Code review of the incremental training: `resolve_model_version("vN")` refuses a version trained on another base than the configured one, and a staged version loads its selected checkpoint, else its latest, else it is refused (§6); `serving_refusal` checks the base too (§7); `--push-adapters` pushes at the end of checkpoint selection, and every push records `pushed` in the checkpoint selection (Current implementation). New acceptance item.
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

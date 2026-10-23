@@ -1,10 +1,10 @@
 # SPEC 09 — Confidence Calibration
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-07, IMPL-08. Uses the inference core (IMPL-07) for logprobs/spans and the evaluation normalizer (IMPL-08) for the correctness signal. No forward dependency on serving/testing.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §5 (**confidence flow, calibration, list-field second signal**), §0b (LoB carries confidence too), §15 (ECE as a gating metric).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §5 (**confidence flow, calibration, list-field second signal**), §0b (LoB carries confidence too), §15 (ECE as a gating metric).
 
 ## Goal
 
@@ -215,3 +215,7 @@ back to the default target.
 
 - *Where the samples come from*: calibration loads the base with the selected adapter applied, as served, in bf16 only; the merged and quantized models are gone, and `--skip-quantize` with them (decision 2026-10-23).
 - Code review of the incremental training: the calibrators record `adapter_checkpoint`, and calibrators fitted on another checkpoint are refused (*Current implementation*, item 4 and *Where the samples come from*; new acceptance item).
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

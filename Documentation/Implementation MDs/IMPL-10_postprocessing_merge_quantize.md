@@ -1,10 +1,10 @@
 # SPEC 10 — Postprocessing (Merge + Serving-Format Quantization)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-02, IMPL-06.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §13 steps 7–8, §13a (**vLLM-native serving formats**), §13b (quantization quality thresholds, absolute percentage points), §18 (artifact paths).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §13 (no merge or quantize stage since 2026-10-23), §13a (**serving format: the adapter on the bf16 base**), §13b (quantization quality thresholds, not applied), §18 (artifact paths).
 
 ## Goal
 
@@ -204,3 +204,7 @@ manifest's `quantized_model` points at the first quantized format — never bf16
 ## Changes of 2026-10-23 (incremental training)
 
 - The pipeline no longer merges or quantizes (decision 2026-10-23): the release is the adapter, served as a LoRA on the bf16 base (`served_as: lora_on_base`); the `merge` and `quantize` stages, `--formats`, `--skip-quantize`, `--dtype` and the `formats`/`dtype` defaults are gone. Goal, §1, §2 and §4 mark `merge.py`, `quantize.py` and the threshold check as kept but not used; §5: `package` is calibrate → gate → push (stages 7–9), and the gate scores the base with the selected adapter applied; *Current implementation*: the adapter is the only push. Acceptance items updated.
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

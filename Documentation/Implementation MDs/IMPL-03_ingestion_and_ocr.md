@@ -1,10 +1,10 @@
 # SPEC 03 — Ingestion + MinerU OCR (GPU, with Version + Device Pinning)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0e (decisions of 2026-10-19: GPU only, reviewed golds), §7 (page images, multi-page), §7c (delivered golds), §8a (**MinerU version pinning**), §11 (resolution cap), §13 steps 1–2, §18a (raw-document storage, dedup, retention, access pattern), §18.2–18.3 (storage tiers, purge cascade).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0e (decisions of 2026-10-19: GPU only, reviewed golds), §7 (page images, multi-page), §7c (delivered golds), §8a (**MinerU version pinning**), §11 (resolution cap), §13 steps 1–2, §18a (raw-document storage, dedup, retention, access pattern), §18.2–18.3 (storage tiers, purge cascade).
 
 ## Goal
 
@@ -401,3 +401,7 @@ corrected at bundling instead.
 
 - Purge plans (§1, acceptance): a cycle now continues the promoted adapter (decision 2026-10-23), so a run that continued a listed run (`parent_run_id`) is listed with it, down the chain — "continued <parent>, listed here: needs retrain or delete"; retraining after a deletion is a `--fresh` cycle without the document.
 - Code review of the incremental training (§1, acceptance): a run whose chain of parents never reaches a run read as clean (a parent not in the registry, another tenant's run, a loop) is listed "check by hand" with every run continued from it, and so is a per-type adapter whose Foundation is missing; both plans name the staged parent adapters (`<staging>/parent-adapters/*/*/`) and the serving cold start's adapters (`<staging>/serving-adapters/`); each run entry names `parent_run_id` and `continued_from`. Known limit: another tenant's run that continued this tenant's run is not listed.
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

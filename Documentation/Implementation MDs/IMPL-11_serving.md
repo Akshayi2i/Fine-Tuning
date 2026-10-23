@@ -1,12 +1,12 @@
 # SPEC 11 — Serving (vLLM Endpoint + Classifier + Routing)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-07 (inference core), IMPL-09 (calibration), IMPL-10 (postprocessing).
 >
 > **Naming hazard (master §0.1):** the architecture's "**Fideon SPEC_11**" is the external Presidio de-identification spec (implemented in our IMPL-05). This file is our serving layer. Different documents.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0a (audit gate contract), §0b (LoB output), §0e (decisions of 2026-10-19: every page read), §4a (**classifier as a load-bearing component**), §4b (ACORD two-level), §4c (day-zero classifier), §5 (confidence), §7 (long documents: every page, read in windows), §14 (**RunPod split: what runs where**).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0a (audit gate contract), §0b (LoB output), §0e (decisions of 2026-10-19: every page read), §4a (**classifier as a load-bearing component**), §4b (ACORD two-level), §4c (day-zero classifier), §5 (confidence), §7 (long documents: every page, read in windows), §14 (**RunPod split: what runs where**).
 
 ## Goal
 
@@ -326,3 +326,7 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 
 - Nothing is merged (decision 2026-10-23): a release is its adapter (`served_as: lora_on_base`), so the engine always holds the bf16 base and applies the release's adapter per request (`serves_base_with_loras` is True for it); an older merged release is served as before (§1, acceptance, *Current implementation*: serving through the release, the engine).
 - Code review of the incremental training: cold start refuses a `lora_on_base` release whose adapter trained on another base than the configured one (`assert_base_model_served`), and `promote` runs the same check (*Current implementation*, cold start; acceptance).
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

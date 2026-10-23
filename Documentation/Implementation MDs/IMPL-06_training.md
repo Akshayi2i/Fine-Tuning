@@ -1,10 +1,10 @@
 # SPEC 06 — Training (ms-swift LoRA: ONE Adapter, for Policies)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-05.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §3 (ViT escalation gate — **LoRA, never full FT**), §4.1 (**one unified adapter**), §4.2 (graduation gate for per-type adapters), §6.1 (per-epoch modality sampling), §7b (policy windows over every page), §8b (tenancy per Fideon SPEC_12; de-identification per Fideon SPEC_11 — Option A, none, see IMPL-05 §1), **§9.2 (bf16 base vs 4-bit)**, §9.3 (memory settings), §9.4 / §9a (frozen ViT and mergers; LoRA targets), §10 (**locked three-layer trainer stack**; §10.1 fallback, §10.2 parity tests), §11 (hyperparameters), §11.2 (checkpoint selection), §11a (**sweep methodology**), §12 (versioning + run registry).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §3 (ViT escalation gate — **LoRA, never full FT**), §4.1 (**one policy adapter**), §4.2 (**incremental training**: each cycle continues the promoted adapter), §6.1 (per-epoch modality sampling), §7b (policy windows over every page), §8b (tenancy per Fideon SPEC_12; de-identification per Fideon SPEC_11 — Option A, none, see IMPL-05 §1), **§9.2 (bf16 base vs 4-bit)**, §9.3 (memory settings), §9.4 / §9a (frozen ViT and mergers; LoRA targets), §10 (**locked three-layer trainer stack**; §10.1 fallback, §10.2 parity tests), §11 (hyperparameters), §11.2 (checkpoint selection), §11a (**sweep methodology**), §12 (versioning + run registry).
 
 ## Goal
 
@@ -365,3 +365,7 @@ reviewed before it trains again.
 - The cross-type regression rule is gone: a continued run is held line by line to the runs before it (IMPL-08), and one continued by hand from a directory is blocked. What the operator should know: memorisation of old documents, wrong labels carried forward, the chain of parents, when to start fresh.
 - §2 and §3: `training/merge.py` is no longer called by the pipeline; checkpoint selection is followed by calibration. Acceptance items updated.
 - Code review of the incremental training: a cycle also starts from the base when the parent's adapter files are not in Blob, its `adapter_config.json` cannot be read or holds other LoRA settings, or its release has no bundle, and a release with an old-style name is continued; `train()` checks the adapter it continues (`assert_adapter_matches_config`); the fingerprint names the starting weights; `continued_training` is validated; `--push-adapters` pushes the selected checkpoint at the end of checkpoint selection; LoRA `bias` is not passed to ms-swift. Acceptance items updated.
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

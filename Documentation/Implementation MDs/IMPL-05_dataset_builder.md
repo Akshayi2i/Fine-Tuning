@@ -1,10 +1,10 @@
 # SPEC 05 — Dataset Builder (JSONL, Modality, Split)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-04.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0e (decisions of 2026-10-19), §6 (modality dropout), §7 (dataset format, schema registry, prompt template versioning, long documents), §8 (corpus versioning, split strategy), §8a (MinerU pin in the manifest), §8b (tenant isolation per Fideon SPEC_12; **de-identification per Fideon SPEC_11 — Option A, none, see §1**), §0b (LoB coverage).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0e (decisions of 2026-10-19), §6 (modality dropout), §7 (dataset format, schema registry, prompt template versioning, long documents), §8 (corpus versioning, split strategy), §8a (MinerU pin in the manifest), §8b (tenant isolation per Fideon SPEC_12; **de-identification per Fideon SPEC_11 — Option A, none, see §1**), §0b (LoB coverage).
 
 ## Goal
 
@@ -451,3 +451,7 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 ## Changes of 2026-10-23 (forms job)
 
 - The forms list is a job of its own on the common-model lines: group `forms` (`forms_and_endorsements`; task `policy_schedule`, page rule `every`, as `lineblk` had). `lineblk` keeps the remainder: general liability's claims_made_terms and countersignature, and nothing on the other lines, which are therefore read in three groups (`decl`, `arrays`, `forms`) with the windows and prompt text they had. General liability is read in four. The self-contained lines are unchanged (forms in `arrays`). The section map is part of the window plan's fingerprint: rebuild the corpus and retrain.
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

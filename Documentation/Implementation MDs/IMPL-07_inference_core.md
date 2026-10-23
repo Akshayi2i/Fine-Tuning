@@ -1,12 +1,12 @@
 # SPEC 07 — Inference Core (Shared Model-Runner Primitive)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02. **This module exists to break the cycle between evaluation, calibration, serving, and testing** — they all need one shared way to run a model version over a document. Build it here, once; everything downstream imports it.
 >
 > **Naming hazard (master §0.1):** in this folder `IMPL-07` is the inference core. The architecture's "**Fideon SPEC_07 Stage 3**" is the external production **audit gate** — a different document. They are unrelated.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §5 (logprobs → field spans), §6 (modality modes), §7 (prompt template identity, multi-page inputs; §7b windows over every page), §11 (resolution cap).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §5 (logprobs → field spans), §6 (modality modes), §7 (prompt template identity, multi-page inputs; §7b windows over every page), §11 (resolution cap).
 
 ## Why this module exists
 
@@ -142,3 +142,7 @@ A clean, low-level inference engine: given a resolved model version + a prepared
 
 - Nothing is merged (decision 2026-10-23): `load_model("vN")` resolves to kind `base_plus_adapter` and applies the version's adapter as the default adapter, refusing a non-bf16 format (§1, acceptance); calibration and the gate are base + adapter callers too.
 - Code review of the incremental training: the HF backend runs `--model vN`, with the version's local adapter bound at load and the base alone for a request with no adapter (`disable_adapter`) (§1, acceptance, *Current implementation*).
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

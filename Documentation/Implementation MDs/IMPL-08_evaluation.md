@@ -1,10 +1,10 @@
 # SPEC 08 — Evaluation (Metrics + Promotion Gating)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-06, IMPL-07. Uses the shared inference core (IMPL-07) for all model runs — no forward dependency on serving or testing.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §15 (**metric definitions + LoB metric**), §0b (LoB gating), §3 (ViT gate inputs), §5 (list-field recall), §13 step 6 (the gate is a hard stop), §12 (gate result recorded in the manifest).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §15 (**metric definitions + LoB metric**), §0b (LoB gating), §3 (ViT gate inputs), §5 (list-field recall), §13 step 6 (the gate is a hard stop), §12 (gate result recorded in the manifest).
 
 ## Goal
 
@@ -365,3 +365,7 @@ extra.
 - §4: the cross-type regression rule, `cross_type_evidence` and the `cross_type:<doc_type>` gates are gone; a continued run (decision 2026-10-23) is held line by line to the runs before it — `line:<line>` blocks a line that lost ground, `line_regression_evidence` blocks when no comparable parent report exists (the rule as built: the code review bullet below). `promotion_gate` takes `line_evidence` and `line_evidence_missing`; override gate names follow.
 - §3 and *Current implementation*: a version is scored as served, the base with its adapter applied; the full-set report records `field_scored_by_lob`. Acceptance item updated.
 - Code review of the incremental training (§3, §4, acceptance, *Current implementation*): each line is held to the best run on it since the last run from the base, by a paired bootstrap on at least 5 shared real documents (`LINE_MIN_DOCUMENTS`), where it was compared with the parent alone on 200 values (`LINE_MIN_VALUES` is gone); a dropped line blocks; the report records `per_document_lines` and `adapter_checkpoint`, and a report of another checkpoint is scored again; the gate result has `line_verdicts`, and the decision `line_comparison` and `blocking_reasons`.
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

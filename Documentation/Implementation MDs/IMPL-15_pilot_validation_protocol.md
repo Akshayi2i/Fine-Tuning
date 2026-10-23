@@ -1,12 +1,12 @@
 # SPEC 15 — Pilot Validation Protocol (De-Risking Before Full Annotation)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01–IMPL-14 built.
 >
 > **This spec is executed, not imported.** It is an operational runbook, not a library — nothing else in the repo depends on it. It exists because architecture v1 added §16, which has no home in the module specs.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §16 (**pilot validation protocol**: 16.1 zero-shot baseline, 16.2 smoke test, 16.3 pilot run, 16.4 exit decision), §0d (the floors the pilot targets come from), §0e (decisions of 2026-10-19), §8 (pilot split ratios), §8b (de-identification), §4c (day-zero bootstrap), §15 (metrics).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §16 (**pilot validation protocol**: 16.1 zero-shot baseline, 16.2 smoke test, 16.3 pilot run, 16.4 exit decision), §0d (the floors the pilot targets come from), §0e (decisions of 2026-10-19), §8 (pilot split ratios), §8b (de-identification), §4c (day-zero bootstrap), §15 (metrics).
 
 ## Goal
 
@@ -230,3 +230,7 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 
 - Experiment C and *Current implementation*: a pilot's first cycle starts from the base; a later one continues the promoted adapter unless `--fresh`, and is gated line by line against it; the release is the adapter, nothing merged (decision 2026-10-23).
 - Code review of the incremental training: a continued pilot cycle is gated, line by line, against the best run on each line since the last run from the base (IMPL-08).
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

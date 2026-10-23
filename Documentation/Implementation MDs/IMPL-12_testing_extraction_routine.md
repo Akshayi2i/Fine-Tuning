@@ -1,12 +1,12 @@
 # SPEC 12 — Testing / Extraction Routine (CLI Harness)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-03 (OCR), IMPL-07 (inference core), IMPL-08 (metrics), IMPL-09 (calibration), IMPL-11 (serving pipeline).
 >
 > **Naming hazard (master §0.1):** the architecture's "**Fideon SPEC_12**" is the external multi-tenant deployment spec. This file is our testing harness. Different documents.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §17 (**extraction/testing routine**), §19 (folder placement), §13a (quantized-format validation consumer), §5 (confidence without ground truth).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §17 (**extraction/testing routine**), §19 (folder placement), §13a (serving format: the adapter on the bf16 base), §5 (confidence without ground truth).
 
 ## Goal
 
@@ -284,3 +284,7 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 
 - Nothing is merged (decision 2026-10-23): `--model vN` is the base with that version's adapter applied per request (`query_registry` kind `base_plus_adapter`), and a non-bf16 `--format` is refused for it (§3 table, the registry example, acceptance).
 - Code review of the incremental training: `--model vN` refuses a version trained on another base than the configured one, and a staged version loads its selected checkpoint, else its latest with a warning, else it is refused (§3 table, acceptance).
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

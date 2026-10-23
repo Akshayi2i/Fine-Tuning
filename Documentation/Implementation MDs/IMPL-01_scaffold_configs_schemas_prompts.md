@@ -1,10 +1,10 @@
 # SPEC 01 — Project Scaffold, Configs, Schemas, Prompts
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: none. This spec creates the repo skeleton and all static configuration that later modules read.
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0a (schema contract), §0b (LoB), §6 (modality instructions), §7 (dataset format, schema registry, prompt template), §9/§9a (LoRA targets), §11 (full hyperparameter spec), §11a (sweeps), §13a/§13b (quantization), §19 (repo structure).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0a (schema contract), §0b (LoB), §6 (modality instructions), §7 (dataset format, schema registry, prompt template), §9/§9a (LoRA targets), §11 (full hyperparameter spec), §11a (sweeps), §13a/§13b (quantization), §19 (repo structure).
 
 ## Goal
 
@@ -316,3 +316,7 @@ not yet read by the model view).
 ## Changes of 2026-10-23 (incremental training)
 
 - §2 `unified.yaml`: the `continued_training` block (`num_train_epochs`, `learning_rate`, both null) a continued cycle trains with where set (decision 2026-10-23, IMPL-06).
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

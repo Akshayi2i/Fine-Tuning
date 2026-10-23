@@ -1,25 +1,35 @@
 # SPEC 00 — Master Context (Read First)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > **Purpose of this file.** This is the shared context every other spec assumes. When you run any individual spec (IMPL-01 … IMPL-15) in Claude Code, that spec references this file for global conventions. Read this once; each module spec then adds only what's specific to it.
 >
-> **Source of truth.** This spec set and the architecture document **`Documentation/finetuning-architecture-v2.5.docx`** are **in sync** as of this revision (v2.4, v2.3, v2.1 and v1 are kept for history only). Where a spec cites a section like "(arch §4)", it refers to that document.
+> **Source of truth.** This spec set and the architecture document **`Documentation/finetuning-architecture-v2.6.docx`** are **in sync** as of this revision (v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only). Where a spec cites a section like "(arch §4)", it refers to that document.
 >
 > **Precedence.** The architecture carries the *why* — design rationale, trade-offs, the reasoning behind each decision. These specs carry the *how* — module boundaries, file paths, function signatures, acceptance criteria. Neither outranks the other: they describe the same system at different altitudes. **If they disagree, that is a bug in one of them.** Fix the disagreement rather than picking a winner, and say which one you changed.
 >
 > Anything genuinely build-level — a CLI flag, a module name, a test — lives here and is not expected to appear in the architecture.
 >
-> **Revision:** aligned to **`finetuning-architecture-v2.5.docx`** (its Revision v2.5, 2026-10-22), which records the decisions of 2026-10-19 and 2026-10-22 below. The section numbers are unchanged from v2.1. One later decision of 2026-10-22, **one adapter** (below), and one of 2026-10-23, **incremental training**, are not in v2.5 yet: the architecture still describes training scopes and layout families, a fresh LoRA every cycle and the merge and quantize stages, and these specs follow the code.
+> **Revision:** aligned to **`finetuning-architecture-v2.6.docx`** (its Revision v2.6, 2026-10-23), which records the decisions of 2026-10-19, 2026-10-22 and 2026-10-23 below. The section numbers are unchanged from v2.1; §4 is now the one policy adapter (§4.1) trained incrementally (§4.2), §13a the serving format (the adapter on the bf16 base), and §13b is not applied.
 >
 > **Current target.** **One adapter, for policy documents, one version per cycle** (decisions 2026-10-22). Each fine-tuning cycle trains one LoRA (`common/adapter.py`) over all the policy data so far, new and existing. It **continues the tenant's promoted adapter**, on the original bf16 base, unless it has to start from the base (decision 2026-10-23, §12). Nothing is merged or quantized: the release is the adapter, and serving loads the base and applies it. The cycle takes the next version number (`v1`, `v2`, …), and that number names its run (`policy-v3`), its adapter and its release. There are no training scopes and no layout families. The code for ACORD and Loss Run documents is kept, unchanged, but not trained. A new training set and canonical schema are to be delivered, and the corpus, the frozen eval set and the adapter are rebuilt from them.
+>
+> What v2.6 records (the decisions of late 2026-10-22 and of 2026-10-23, and two code reviews of their implementation), and what it means for these specs:
+>
+> | Change | Why | Specs affected |
+> |---|---|---|
+> | **One adapter, one version per cycle** (2026-10-22): see the v2.5 table below, where it was first listed | The user's decision | all but 07 |
+> | **Incremental training** (2026-10-23): each cycle continues the tenant's promoted adapter on new and existing data, on the original base; `--fresh`, nothing promoted, or a parent that cannot be continued starts from the base (`fresh_reason`) | The user's decision | 00, 01, 02, 03, 06, 08, 13, 14, 15 |
+> | **No merge, no quantization** (2026-10-23): the release is the adapter, served as a LoRA on the bf16 base; calibration and the gate score it as served | The user's decision: inference loads the base and applies the adapter | 02, 06, 07, 09, 10, 11, 12, 13, 14 |
+> | **The line rule**: each line of a continued cycle is held to the best run on it since the last run from the base (paired bootstrap, at least 5 real documents); a dropped line blocks | Code review of 2026-10-23 | 08, 13 |
+> | **The full text served and the forms job** (2026-10-23): `text_sections` built at serving by Fideon's section builder; the forms list a window group of its own; up to 96 windows per vLLM call | The user's decisions: every word of the PDF in the JSON, and faster serving | 01, 05, 11, 12 |
 >
 > What v2.5 changed (decisions 2026-10-22, after a code review of v2.4), and what it means for these specs:
 >
 > | Change | Why | Specs affected |
 > |---|---|---|
 > | **Policy documents only, for now.** Only policies are trained and gated; the ACORD and Loss Run code stays as it is | The current target | 00, 06, 13, 15 |
-> | **One adapter** (after v2.5). No training scopes (`configs/scopes.yaml` and `common/scopes.py` are gone) and no layout families (`configs/layout_families.yaml` is gone). Each cycle trains the one policy adapter (fresh on the base then; since 2026-10-23 it continues the promoted adapter) and takes the next version; `package` promotes a release that passes its gate and archives the one it replaces; `promote` rolls back | The user's decision. Fideon SPEC_09's five policy adapter groups by layout family are knowingly not followed | all but 07 |
+> | **One adapter** (after v2.5; recorded in v2.6). No training scopes (`configs/scopes.yaml` and `common/scopes.py` are gone) and no layout families (`configs/layout_families.yaml` is gone). Each cycle trains the one policy adapter (fresh on the base then; since 2026-10-23 it continues the promoted adapter) and takes the next version; `package` promotes a release that passes its gate and archives the one it replaces; `promote` rolls back | The user's decision. Fideon SPEC_09's five policy adapter groups by layout family are knowingly not followed | all but 07 |
 > | **Every gold needs a review record** (`reviewer_id`, `review_date`), read from its metadata alone; a twin carries its seed's | Only a person's name shows a person checked a gold; notes can be read either way | 00, 03, 04, 05, 08, 12, 13 |
 > | **Policy windows sized by their pages' own text**; the corpus pins `window_plan_version` | Dense wording overflowed the sequence cap and set whole documents aside | 04, 05, 11, 13 |
 > | **A new training set and canonical schema are to be delivered** | Counts and schema details in these specs describe the older data and the current schema; they change when the new ones arrive | all |
@@ -976,3 +986,8 @@ What the build does now that the sections above did not describe. Each module sp
 - No merge and no quantize (§2, §4, §5, §6, §12, §13.3, §13.4): stages are now 1–6 in `finetune` and 7–9 in `package`, 10 serving and 11 the feedback loop; the release is the adapter (`served_as: lora_on_base`), served on the bf16 base; `--formats` is gone from the examples; `merge.py` and `quantize.py` are kept but not called.
 - The gate holds a continued run line by line to its parent (§12, §13.5); serving always applies a `lora_on_base` release to the base (§13.5); purge plans follow `parent_run_id` down the chain, and retraining after a deletion is a `--fresh` cycle (§13.2).
 - Code review of the incremental training (§12): each line is held to the best run on it since the last run from the base, not to the parent alone, by a paired bootstrap over at least 5 real documents (not 200 values); a dropped line blocks.
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+- Header: a table of what v2.6 records; the Revision line no longer lists decisions missing from the architecture.

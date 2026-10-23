@@ -1,10 +1,10 @@
 # SPEC 14 — Unit Tests + CI Fixtures
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: all prior specs (01–13).
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0a/§0b (schema + LoB contracts), §5 (list-field recall), §7 (prompt identity, split leakage), §8a/§8b (MinerU pin, tenancy), §10 (collator masking, §10.2 parity tests), §15 (gating).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0a/§0b (schema + LoB contracts), §5 (list-field recall), §7 (prompt identity, split leakage), §8a/§8b (MinerU pin, tenancy), §10 (collator masking, §10.2 parity tests), §15 (gating).
 
 ## Goal
 
@@ -265,3 +265,7 @@ real vLLM engines (the tests fake the engine), and a real upload.
 
 - Incremental training and no merge (decision 2026-10-23): the `test_orchestration.py` row says `finetune` ends at checkpoint selection, `package` is calibrate → gate → push, no stage merges or quantizes, the bundle is served as `lora_on_base`, and override gate names are `line_regression_evidence` and `line:<line>` (no `cross_type`); the `test_release_weights.py` row notes `merge.py` is not called by the pipeline; the gate row's cross-type item is replaced by the line-gate waiver; a new table of the tests changed for it (`test_orchestration.py`, the waivable line gates in `test_evaluation_calibration.py`, base + adapter resolution in `test_extract_with_adapter.py`).
 - Code review of the incremental training: rows for the new `test_incremental_review.py`, `test_release_base_and_cli.py`, `test_purge_chain.py` and `test_training_continuation.py` in the incremental-training table, and for `test_incremental_training.py`; 3,335 tests in 135 modules.
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

@@ -1,10 +1,10 @@
 # SPEC 04 — Labeling, Golden JSON, and the Day-Zero Bootstrap
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01 (schemas, alias registry, `common.normalize`, `common.aliases`), IMPL-02, IMPL-03 (MinerU output — `derive_aliases` reads it).
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0a (schema contract), §0b (LoB in every label), §0e (decisions of 2026-10-19: **no frontier model**, reviewed golds only), §4c (**day-zero bootstrap**), §7c "Golden Label Generation", §13 step 11 (feedback loop).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0a (schema contract), §0b (LoB in every label), §0e (decisions of 2026-10-19: **no frontier model**, reviewed golds only), §4c (**day-zero bootstrap**), §7c "Golden Label Generation", §13 step 11 (feedback loop).
 
 ## Goal
 
@@ -367,3 +367,7 @@ row per value. Page text is normalised once per page.
 
 - No training scopes (decision 2026-10-22): the audit takes `--lines a,b` (every line by default) instead of `--scope`; a policy's line is checked against `common.lob.known_lines`.
 - Code review of 2026-10-23: the audit blocks a folder whose single-line policies would teach two output shapes (`output shape`), before import, pointing to `prepare_bundles --lines`.
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.

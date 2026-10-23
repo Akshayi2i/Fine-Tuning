@@ -1,10 +1,10 @@
 # SPEC 13 — Orchestration (Command Surface + RunPod Controller + Pipeline DAG)
 
-> Aligned with the code of 2026-10-22.
+> Aligned with the code of 2026-10-23.
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: all prior specs (01–12).
 >
-> **Architecture refs:** `finetuning-architecture-v2.5.docx` §0e (decisions of 2026-10-19), §13 (**end-to-end pipeline, 13 stages, idempotency, the gate**), §13c (**operator command surface**), §14 (**RunPod: ephemeral training pods vs. persistent serving endpoint**), §12 (every cycle recorded), §17 (extraction routine), §11a (sweep orchestration — deferred).
+> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0e (decisions of 2026-10-19), §13 (**end-to-end pipeline, 11 stages, idempotency, the gate**), §13c (**operator command surface**), §14 (**RunPod: ephemeral training pods vs. persistent serving endpoint**), §12 (every cycle recorded), §17 (extraction routine), §11a (sweep orchestration — deferred).
 
 ## Goal
 
@@ -531,3 +531,7 @@ resumes from the failed step. It never freezes an eval set or packages a release
 - No merge and no quantize (§1, §2, §4, §5, §7, §8): 11 stages — `finetune` 1–6, `package` 7–9 (calibrate, gate, push), serving 10, feedback 11; the release is the adapter (`served_as: lora_on_base`), calibrated and gated as served; `--formats`, `--skip-quantize`, `--dtype` and the `formats`/`dtype` defaults gone; `extract --model vN` is the base plus that version's adapter.
 - The gate holds a continued run line by line to the runs before it (`line:<line>`, `line_regression_evidence`), replacing the cross-type evidence item (§2, acceptance, *Current implementation*).
 - Code review of the incremental training: each line is held to the best run on it since the last run from the base, by a paired bootstrap on at least 5 real documents, and a dropped line blocks (§2, §8, acceptance); the decision records `line_comparison` and `blocking_reasons` (§4); an eval report or calibrators of another checkpoint are not reused (§2, §4); `continuation` also starts from the base on missing or unreadable adapter files, other saved LoRA settings or a missing bundle, and continues a release with an old-style name (§2); `--push-adapters` pushes the selected checkpoint at the end of checkpoint selection, every push records `pushed`, and `package --from-blob` releases the adapter in Blob (§3, §4); `promote` and `extract --model vN` refuse an adapter trained on another base, and a staged `vN` is its selected checkpoint (§4, §5); `--from-stage` and `--fresh` are checked before the detach (§2). New acceptance items.
+
+## Changes of 2026-10-23 (architecture v2.6)
+
+- Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
