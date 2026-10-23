@@ -110,6 +110,9 @@ filterwarnings = ["ignore::DeprecationWarning:pytest_asyncio.*"]
 [tool.ruff]
 line-length = 110
 target-version = "py311"
+# Copies of FideonSLM's files, byte for byte (common/section_builder/SOURCE.json):
+# never reformatted here.
+extend-exclude = ["common/section_builder/sections.py", "common/section_builder/pdf_text.py"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]

@@ -153,7 +153,9 @@ def test_serving_sizes_dense_windows_as_training_did(client):
     rows, _ = expand_document(_document("policy_0001", texts), "train", modes=("ocr_plus_image",))
     trained = [r["window_pages"] for r in rows]
     assert len(trained) > len(plan_windows(LOB, *pages_to_read(texts, TOTAL)))
-    assert _served_windows(client, texts) == trained
+    # Sent longest answers first (serving.pipeline._send_order): the same
+    # windows, in another order (tests/test_window_send_order.py).
+    assert sorted(_served_windows(client, texts)) == sorted(trained)
 
 
 def test_a_long_policy_goes_to_the_model_in_bounded_batches(client, monkeypatch):

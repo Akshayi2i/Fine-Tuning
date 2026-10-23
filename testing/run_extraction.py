@@ -27,11 +27,17 @@ from pathlib import Path
 from typing import Any
 
 from calibration.fit_calibration import CalibrationParams
-from serving.pipeline import ExtractionRequest, ExtractionResult, extract
+from serving.pipeline import NO_FULL_TEXT_FLAG, ExtractionRequest, ExtractionResult, extract
 
 log = logging.getLogger(__name__)
 
 TESTING_ROOT = Path(__file__).resolve().parent
+
+#: A document whose served JSON holds less than this share of its page text's
+#: words is listed in the summary. The section builder places every line it is
+#: given, so a shortfall means text was lost between the page and the JSON.
+#: Chosen, not measured: revise on the first real run.
+FULL_TEXT_COVERAGE = 0.99
 
 
 class HarnessError(RuntimeError):
@@ -187,6 +193,8 @@ def run_document(
         "overall_confidence": result.overall_confidence,
         "pages_used": result.pages_used,
         "review_flags": result.review_flags,
+        # SPEC_21's every-word rule on the served JSON (common.full_text).
+        "text_coverage": result.text_coverage,
         "fields": {
             path: {**value, "correct": None}
             for path, value in result.fields.items()
@@ -314,6 +322,18 @@ def summarise(results: list[tuple[ExtractionResult, dict[str, Any]]], model_vers
 
     summary.mean_confidence = sum(confidences) / len(confidences)
     summary.mean_latency_ms = sum(latencies) / len(latencies) if latencies else 0.0
+
+    # The every-word rule (common.full_text): how much of the page text reached
+    # the JSON, and which documents fall short of it - or had no text to measure.
+    coverages = {r.source_id: r.text_coverage for r, _m in results if r.text_coverage is not None}
+    if coverages:
+        summary.metrics["mean_text_coverage"] = round(sum(coverages.values()) / len(coverages), 4)
+        summary.metrics["min_text_coverage"] = min(coverages.values())
+        summary.metrics["documents_below_full_text"] = sorted(
+            source for source, value in coverages.items() if value < FULL_TEXT_COVERAGE)
+    without_text = sorted(r.source_id for r, _m in results if NO_FULL_TEXT_FLAG in r.review_flags)
+    if without_text:
+        summary.metrics["documents_without_full_text"] = without_text
 
     scored = [m for _r, m in results if "field_normalized_match_rate" in m]
     if scored:

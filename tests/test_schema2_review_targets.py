@@ -112,9 +112,9 @@ def test_an_endorsement_on_one_vehicle_is_taught_without_its_vehicle():
     _client_valid(gold)
     targets, report = _targets(gold)
     _assert_writable(targets)
-    forms = [f for p, t in targets if p.group == "lineblk" for f in t.get("forms_and_endorsements") or []]
+    forms = [f for p, t in targets if p.group == "forms" for f in t.get("forms_and_endorsements") or []]
     assert forms and all("applies_to" not in f for f in forms)
-    assert "lineblk:forms_and_endorsements[0].applies_to=veh_2" in report.dangling
+    assert "forms:forms_and_endorsements[0].applies_to=veh_2" in report.dangling
 
 
 # T2 - the view encodes no rule a window cannot satisfy ---------------------

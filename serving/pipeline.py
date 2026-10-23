@@ -47,6 +47,7 @@ from common.canonical import (
     without_bare_values,
 )
 from common.constants import DEFAULT_REVIEW_CONFIDENCE_THRESHOLD
+from common.full_text import build_text_sections, text_coverage
 from common.schemas import (
     is_canonical,
     is_common_model,
@@ -128,6 +129,15 @@ class ExtractionResult:
     #: MAX_WINDOWS_PER_BATCH, a Loss Run's one batch per round), or one for a
     #: document read in one call (release measurements).
     window_latencies_ms: list[float] = field(default_factory=list)
+    #: The share of the page text's words found in the served JSON (SPEC_21's
+    #: every-word rule, common.full_text.text_coverage). Common-model policies
+    #: only; None for every other type and for a request with no page text.
+    text_coverage: float | None = None
+    #: A policy's windows, one entry each time one was read
+    #: (``_window_stat``): its group, pages, attempt, prompt and answer
+    #: tokens, seconds and outcome - where the time went. Not in the served
+    #: JSON; the test runners record it.
+    window_stats: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def needs_review(self) -> bool:
@@ -151,6 +161,7 @@ class ExtractionResult:
             "pages_used": self.pages_used,
             "review_flags": sorted(self.review_flags),
             "route": self.route_info,
+            "text_coverage": self.text_coverage,
             # Loss Runs only, so every other type's output is unchanged.
             **({"reconciliation": self.reconciliation} if self.reconciliation is not None else {}),
         }
@@ -367,13 +378,18 @@ def _generate_once(
 WINDOW_FAILED_FLAG = "window_failed"
 
 
-#: The most windows sent to the model in one batch. A 200-page policy is some
-#: 190 windows and 800 page images, every one decoded before the engine starts
-#: on any: in one batch that is gigabytes of images held at once, and one prompt
-#: the engine refuses fails all of them. A batch of this many still fills the
-#: engine's continuous batching. Chosen, not measured: record a pod measurement
-#: here when one is taken.
-MAX_WINDOWS_PER_BATCH = 32
+#: The most windows sent to the model in one call. Within a call vLLM runs as
+#: many windows as its memory holds and starts the next the moment one ends; a
+#: call ends with its longest answer, and the next call cannot start before it,
+#: so every call boundary leaves the GPU waiting on one long window. At 32 a
+#: call, about one call in four of the CGL checkpoint selection waited ~140 s on
+#: one long schedule with the GPU nearly idle, ~25% of its time; 96 (the
+#: validation's `validation_batch_rows`) reads a 69-page policy, 81 windows, in
+#: one call. Bounded, not the whole document: every window's page images are
+#: decoded before the engine starts on any, and a 200-page policy is some 230
+#: windows and 800 page images. Not yet measured in serving: record a pod
+#: measurement here when one is taken.
+MAX_WINDOWS_PER_BATCH = 96
 
 
 def _extract_policy_windows(
@@ -383,35 +399,47 @@ def _extract_policy_windows(
     lob: str | list[str] | None,
     *,
     latencies: list[float] | None = None,
+    stats: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], float | None, list[int], list[str]]:
     """Read a canonical policy window by window, then merge.
 
     Returns ``(extraction, spans, latency_ms, pages_used, flags)`` — the merged
     model-form document and its spans, in the shape the single-call path
     returns, so confidence, completeness and the envelope run on it unchanged.
+    ``stats`` receives one entry per window read (:func:`_window_stat`): its
+    pages, tokens, seconds and what came of it.
 
-    **Concurrent.** The windows of a round go to the model in batches of up to
-    :data:`MAX_WINDOWS_PER_BATCH`; vLLM schedules a batch together, so a
+    **Concurrent.** Every window goes to the model at once, the longest expected
+    answers first (:func:`_send_order`), and vLLM schedules them together, so a
     17-window policy costs roughly the time of its slowest window rather than
-    the sum of all of them. ``latency_ms`` is the wall time actually spent.
+    the sum of all of them. A backend that answers each window as it finishes
+    (a served model, :func:`inference_core.model_runner.can_submit`) is read
+    that way (:func:`_read_as_answered`): a failed window's halves go out the
+    moment it fails, not after the slowest window of its round. The in-process
+    engine runs a call to its end, so with it the windows go in rounds of calls
+    of up to :data:`MAX_WINDOWS_PER_BATCH` (:func:`_read_in_rounds`). Either way
+    only the sending is reordered: the answers are merged in planned order,
+    round by round, so the merge sees the same windows in the same order
+    whichever finished first. ``latency_ms`` is the wall time actually spent.
 
-    **One refused prompt does not fail its batch.** vLLM fails every prompt of a
-    batch when it refuses one - a page too large for the context window, say -
-    so a batch whose windows all failed with one error is read again window by
-    window, and only the window that caused it fails.
+    **One refused prompt does not fail its call.** vLLM fails every prompt of a
+    call when it refuses one - a page too large for the context window, say -
+    so a call whose windows all failed with one error is read again in halves
+    (:func:`_batch_in_halves`), and only the window that caused it fails.
 
     **One bad window does not lose the document.** A window whose output is not
-    parseable JSON, or was cut off at the token limit — the usual cause on a
-    dense schedule page — is split in half and retried in the next round, since
-    fewer pages means less to write. Retrying it unchanged would be pointless:
-    decoding is greedy, so it would write the same thing again. A window that
-    still fails at a single page is dropped and flagged ``window_failed``, so the
-    document comes back with everything else and a person is told which pages
-    it could not read. Only when no window at all succeeds is the request an
-    error.
+    parseable JSON, or was cut off - at the token limit, the usual cause on a
+    dense schedule page, or stopped repeating itself - is split in half and
+    retried, since fewer pages means less to write. Retrying it unchanged would
+    be pointless: decoding is greedy, so it would write the same thing again. A
+    window that still fails at a single page is dropped and flagged
+    ``window_failed``, so the document comes back with everything else and a
+    person is told which pages it could not read. Only when no window at all
+    succeeds is the request an error.
     """
     from data_pipeline.dataset_builder.policy_windows import pages_to_read, plan_windows
-    from serving.policy_merge import PolicyWindow, merge_policy_windows
+    from inference_core.model_runner import can_submit
+    from serving.policy_merge import merge_policy_windows
 
     image_only = request.modality_mode == "image_only"
     page_count = len(request.page_texts) or len(request.image_paths)
@@ -422,89 +450,243 @@ def _extract_policy_windows(
     # Every page, with the declarations found, and each window sized, from the
     # same text by the same rule as the training rows were.
     every_page, declarations_page = pages_to_read(texts or None, page_count)
-    pending: list[tuple[str, list[int]]] = [
-        (plan.group, list(plan.pages))
-        for plan in plan_windows(lob, every_page, declarations_page, None if image_only else texts)
+    plan: list[tuple[str, list[int]]] = [
+        (window.group, list(window.pages))
+        for window in plan_windows(lob, every_page, declarations_page, None if image_only else texts)
     ]
 
-    windows: list[PolicyWindow] = []
-    failed: list[str] = []
+    def window_request(group: str, pages: list[int]) -> tuple[Any, ...]:
+        return (*_build_request(
+            model, route_,
+            [_image_for(request, page) for page in pages],
+            None if image_only else [texts.get(page) or _EMPTY_PAGE for page in pages],
+            request.modality_mode,
+            page_numbers=pages, total_pages=page_count,
+            lob=lob, sections=group,
+        ), _window_answer_cap(group, route_.schema_doc_type))
+
+    read_with = _read_as_answered if can_submit(model) else _read_in_rounds
+    read = read_with(request, model, route_, plan, window_request)
+    if latencies is not None:
+        latencies.extend(read.calls_ms)
+    if stats is not None:
+        stats.extend(read.stats)
+
+    if not read.windows:
+        raise PipelineError(
+            f"no window of {request.source_id} could be read ({len(read.failed)} failed: "
+            f"{', '.join(read.failed[:6])}). The first failure: {read.first_cause}"
+        )
+
+    merged = merge_policy_windows(read.windows, lob=lob)
+    flags = merged.review_flags + [f"{WINDOW_FAILED_FLAG}:{entry}" for entry in read.failed]
+    log.info(
+        "%s read in %d window(s) over %d page(s) in %d round(s); %d duplicate row(s) "
+        "collapsed, %d conflict(s), %d window(s) unreadable", request.source_id, len(read.windows),
+        len(every_page), read.rounds, merged.duplicates_collapsed, len(merged.conflicts), len(read.failed),
+    )
+    return merged.extraction, merged.spans, round(read.wall_ms, 1), sorted(every_page), flags
+
+
+@dataclass
+class _WindowsRead:
+    """What reading a policy's windows came to, in merge order."""
+
+    windows: list[Any] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
     first_cause: str | None = None
-    wall_ms = 0.0
-    rounds = 0
+    rounds: int = 0
+    wall_ms: float = 0.0
+    #: One entry per call to the model; one for the whole reading when the
+    #: windows were answered one by one (``window_latencies_ms``).
+    calls_ms: list[float] = field(default_factory=list)
+    stats: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class _Settled:
+    """One window's answer: read, split into two smaller windows, or failed."""
+
+    stat: dict[str, Any]
+    window: Any = None
+    retry: list[tuple[str, list[int]]] = field(default_factory=list)
+    failed: str | None = None
+    cause: str | None = None
+
+
+def _settle(source_id: str, route_: Route, group: str, pages: list[int], result: Any,
+            attempt: int) -> _Settled:
+    """What one window's answer comes to (see :func:`_extract_policy_windows`)."""
+    from serving.policy_merge import PolicyWindow
+
+    try:
+        if isinstance(result, Exception):
+            raise PipelineError(str(result))
+        extraction, spans = _parse_generation(result, route_, refuse_truncated=True)
+    except PipelineError as exc:
+        if len(pages) > 1:
+            half = len(pages) // 2
+            log.warning("%s: %s window over pages %s failed (%s); retrying as two smaller windows",
+                        source_id, group, pages, exc)
+            return _Settled(_window_stat(group, pages, attempt, result, "split", str(exc)),
+                            retry=[(group, pages[:half]), (group, pages[half:])], cause=str(exc))
+        log.warning("%s: %s window over page %s failed even alone (%s); dropped and flagged for review",
+                    source_id, group, pages[0], exc)
+        return _Settled(_window_stat(group, pages, attempt, result, "failed", str(exc)),
+                        failed=f"{group}:p{pages[0]}", cause=str(exc))
+    return _Settled(_window_stat(group, pages, attempt, result, "read"),
+                    window=PolicyWindow(group, pages, extraction, spans, result.latency_ms))
+
+
+def _window_stat(group: str, pages: list[int], attempt: int, result: Any, outcome: str,
+                 error: str | None = None) -> dict[str, Any]:
+    """One window read, for the record: where the time went and what came of it.
+
+    ``seconds`` is the window's own time where the backend answers it alone, and
+    its call's where a call's windows run to one end (the in-process engine).
+    ``first_token_s`` is the time to its first answer token - queued, then
+    reading the prompt - and the rest is writing.
+    """
+    generation = result if isinstance(result, Generation) else None
+
+    def seconds(ms: float | None) -> float | None:
+        return round(ms / 1000, 2) if ms is not None else None
+
+    return {
+        "group": group,
+        "pages": list(pages),
+        "attempt": attempt,
+        "outcome": outcome,
+        "seconds": seconds(generation.latency_ms) if generation else None,
+        "first_token_s": seconds(generation.first_token_ms) if generation else None,
+        "prompt_tokens": generation.prompt_tokens if generation else None,
+        "answer_tokens": len(generation.tokens) if generation else None,
+        "finish": generation.finish_reason if generation else None,
+        **({"error": error[:200]} if error else {}),
+    }
+
+
+def _read_in_rounds(request: ExtractionRequest, model: LoadedModel, route_: Route,
+                    plan: list[tuple[str, list[int]]], window_request: Any) -> _WindowsRead:
+    """Every window in calls of up to :data:`MAX_WINDOWS_PER_BATCH`; the failed
+    ones' halves in the next round, once the whole round has finished."""
+    read = _WindowsRead()
+    pending = plan
     while pending:
-        rounds += 1
-        results: list[Any] = []
-        for start in range(0, len(pending), MAX_WINDOWS_PER_BATCH):
-            requests = [
-                (*_build_request(
-                    model, route_,
-                    [_image_for(request, page) for page in pages],
-                    None if image_only else [texts.get(page) or _EMPTY_PAGE for page in pages],
-                    request.modality_mode,
-                    page_numbers=pages, total_pages=page_count,
-                    lob=lob, sections=group,
-                ), _window_answer_cap(group, route_.schema_doc_type))
-                for group, pages in pending[start:start + MAX_WINDOWS_PER_BATCH]
-            ]
-            batch, batch_ms = _timed_batch(model, requests, route_.adapter)
-            batches = [batch_ms]
-            if len(requests) > 1 and _whole_batch_failed(batch):
-                log.warning(
-                    "%s: every window of a batch of %d failed with one error (%s); reading them "
-                    "one by one", request.source_id, len(requests), batch[0],
-                )
-                batch = []
-                for one in requests:
-                    single, single_ms = _timed_batch(model, [one], route_.adapter)
-                    batch += single
-                    batches.append(single_ms)
-            results += batch
-            wall_ms += sum(batches)
-            if latencies is not None:
-                # One entry per batch: its windows run together, and vLLM gives
-                # each the batch's wall time, so one per window would count it n times.
-                latencies.extend(round(ms, 1) for ms in batches)
+        read.rounds += 1
+        # Indexed by planned position: sent in another order, read back in this one.
+        results: list[Any] = [None] * len(pending)
+        order = _send_order(pending, route_.schema_doc_type)
+        for start in range(0, len(order), MAX_WINDOWS_PER_BATCH):
+            positions = order[start:start + MAX_WINDOWS_PER_BATCH]
+            requests = [window_request(*pending[position]) for position in positions]
+            batch, batches = _batch_in_halves(model, requests, route_.adapter, request.source_id)
+            for position, result in zip(positions, batch, strict=True):
+                results[position] = result
+            read.wall_ms += sum(batches)
+            # One entry per call: its windows run together, and vLLM gives
+            # each the call's wall time, so one per window would count it n times.
+            read.calls_ms.extend(round(ms, 1) for ms in batches)
 
         retry: list[tuple[str, list[int]]] = []
         for (group, pages), result in zip(pending, results, strict=True):
-            try:
-                if isinstance(result, Exception):
-                    raise PipelineError(str(result))
-                extraction, spans = _parse_generation(result, route_, refuse_truncated=True)
-            except PipelineError as exc:
-                first_cause = first_cause or str(exc)
-                if len(pages) > 1:
-                    half = len(pages) // 2
-                    retry += [(group, pages[:half]), (group, pages[half:])]
-                    log.warning(
-                        "%s: %s window over pages %s failed (%s); retrying as two smaller "
-                        "windows", request.source_id, group, pages, exc,
-                    )
-                else:
-                    failed.append(f"{group}:p{pages[0]}")
-                    log.warning(
-                        "%s: %s window over page %s failed even alone (%s); dropped and "
-                        "flagged for review", request.source_id, group, pages[0], exc,
-                    )
-                continue
-            windows.append(PolicyWindow(group, pages, extraction, spans, result.latency_ms))
+            settled = _settle(request.source_id, route_, group, pages, result, read.rounds)
+            read.stats.append(settled.stat)
+            read.first_cause = read.first_cause or settled.cause
+            if settled.window is not None:
+                read.windows.append(settled.window)
+            if settled.failed:
+                read.failed.append(settled.failed)
+            retry += settled.retry
         pending = retry
+    return read
 
-    if not windows:
-        raise PipelineError(
-            f"no window of {request.source_id} could be read ({len(failed)} failed: "
-            f"{', '.join(failed[:6])}). The first failure: {first_cause}"
-        )
 
-    merged = merge_policy_windows(windows, lob=lob)
-    flags = merged.review_flags + [f"{WINDOW_FAILED_FLAG}:{entry}" for entry in failed]
-    log.info(
-        "%s read in %d window(s) over %d page(s) in %d round(s); %d duplicate row(s) "
-        "collapsed, %d conflict(s), %d window(s) unreadable", request.source_id, len(windows),
-        len(every_page), rounds, merged.duplicates_collapsed, len(merged.conflicts), len(failed),
+def _read_as_answered(request: ExtractionRequest, model: LoadedModel, route_: Route,
+                      plan: list[tuple[str, list[int]]], window_request: Any) -> _WindowsRead:
+    """Every window sent at once and taken as it is answered; a failed window's
+    halves sent the moment it fails.
+
+    The answers are put back in the order :func:`_read_in_rounds` reads them -
+    by round, then by planned position, a half after the other - so the merge
+    is the same whichever window finished first. A window's place is its path:
+    its planned position, then 0 or 1 for each halving.
+    """
+    from concurrent.futures import FIRST_COMPLETED, wait
+
+    from inference_core.model_runner import submit_generation
+
+    started = time.perf_counter()
+    running: dict[Any, tuple[tuple[int, ...], str, list[int]]] = {}
+
+    def send(path: tuple[int, ...], group: str, pages: list[int]) -> None:
+        future = submit_generation(model, window_request(group, pages), adapter=route_.adapter)
+        running[future] = (path, group, pages)
+
+    for position in _send_order(plan, route_.schema_doc_type):
+        send((position,), *plan[position])
+
+    settled_at: list[tuple[tuple[int, tuple[int, ...]], _Settled]] = []
+    while running:
+        finished, _ = wait(list(running), return_when=FIRST_COMPLETED)
+        for future in finished:
+            path, group, pages = running.pop(future)
+            settled = _settle(request.source_id, route_, group, pages, future.result(), len(path))
+            settled_at.append(((len(path), path), settled))
+            for half, (retry_group, retry_pages) in enumerate(settled.retry):
+                send((*path, half), retry_group, retry_pages)
+
+    settled_at.sort(key=lambda item: item[0])
+    wall_ms = (time.perf_counter() - started) * 1000
+    read = _WindowsRead(rounds=max(place[0] for place, _ in settled_at) if settled_at else 0,
+                        wall_ms=wall_ms, calls_ms=[round(wall_ms, 1)])
+    for _place, settled in settled_at:
+        read.stats.append(settled.stat)
+        read.first_cause = read.first_cause or settled.cause
+        if settled.window is not None:
+            read.windows.append(settled.window)
+        if settled.failed:
+            read.failed.append(settled.failed)
+    return read
+
+
+def _send_order(pending: list[tuple[str, list[int]]], doc_type: str | None) -> list[int]:
+    """The positions of ``pending``, in the order they go to the model.
+
+    The windows expected to write the longest answers first: the larger answer
+    reservation (a schedule's), then more pages; otherwise as planned. A call
+    ends when its longest answer does, so started first that answer runs beside
+    the short ones instead of after them. The validation orders its calls the
+    same way (evaluation.validation_generation), by the gold answer's length,
+    which serving does not have. A wrong guess costs speed, never an answer.
+    """
+    caps = {group: _window_answer_cap(group, doc_type) for group, _pages in pending}
+    return sorted(range(len(pending)),
+                  key=lambda position: (-caps[pending[position][0]], -len(pending[position][1])))
+
+
+def _batch_in_halves(
+    model: LoadedModel, requests: list[Any], adapter: Any, source_id: str,
+) -> tuple[list[Any], list[float]]:
+    """``requests`` in one call: the results in order, and each call's wall time
+    in milliseconds.
+
+    A call the engine refused whole (:func:`_whole_batch_failed`) is read again
+    in halves until the window that caused it is alone, so only that window
+    fails, in about 2 log2(n) calls. Window by window, a call of
+    :data:`MAX_WINDOWS_PER_BATCH` was as many calls again, one after another.
+    """
+    results, ms = _timed_batch(model, requests, adapter)
+    if len(requests) == 1 or not _whole_batch_failed(results):
+        return results, [ms]
+    log.warning(
+        "%s: every window of a call of %d failed with one error (%s); reading them again "
+        "in halves", source_id, len(requests), results[0],
     )
-    return merged.extraction, merged.spans, round(wall_ms, 1), sorted(every_page), flags
+    middle = len(requests) // 2
+    first, first_ms = _batch_in_halves(model, requests[:middle], adapter, source_id)
+    second, second_ms = _batch_in_halves(model, requests[middle:], adapter, source_id)
+    return first + second, [ms, *first_ms, *second_ms]
 
 
 def _timed_batch(model: LoadedModel, requests: list[Any], adapter: Any) -> tuple[list[Any], float]:
@@ -584,6 +766,22 @@ def _without_empty(node: Any, keep: frozenset[str] = frozenset()) -> Any:
 
 #: A policy read by the base model against _fallback.json (Fideon SPEC_06 §9a).
 LOB_FALLBACK_FLAG = "route:lob_fallback_used"
+
+#: A common-model policy served with no page text - an image-only request - so
+#: with no full-text tier: its wording is in no part of the JSON.
+NO_FULL_TEXT_FLAG = "text_sections:no_page_text"
+
+
+def _full_text_pages(request: ExtractionRequest) -> list[str]:
+    """The page text the full-text tier is built from: one string per page, in
+    page order, as the request carried it (no placeholder for a blank page).
+    Empty for a request with none - an image-only one, or a multi-page request
+    with only a joined ``ocr_text``, which cannot be split back into pages."""
+    if request.page_texts:
+        return [request.page_texts.get(page) or "" for page in sorted(request.page_texts)]
+    if len(request.image_paths) == 1 and request.ocr_text:
+        return [request.ocr_text]
+    return []
 
 
 @dataclass
@@ -1198,6 +1396,7 @@ def extract(
     merge_flags: list[str] = []
     reconciliation: dict[str, Any] | None = None
     window_latencies: list[float] = []
+    window_stats: list[dict[str, Any]] = []
     windows = lossrun_windows(request) if route_.schema_doc_type == "lossrun" else []
 
     if canonical and route_.schema_doc_type == "policy":
@@ -1207,7 +1406,7 @@ def extract(
         # Always, whatever the length: a threshold computed from prompt length
         # would move between corpus builds and re-shape documents silently.
         extraction, all_spans, latency, pages_used, merge_flags = _extract_policy_windows(
-            request, model, route_, lob, latencies=window_latencies,
+            request, model, route_, lob, latencies=window_latencies, stats=window_stats,
         )
         if common_model:
             # The conventions the training labels follow, applied to the merged
@@ -1332,6 +1531,8 @@ def extract(
         + ([LOB_FALLBACK_FLAG] if lob_fallback_used else [])
     )
 
+    full_text_pages = _full_text_pages(request)
+
     # --- the client's canonical envelope -----------------------------------
     # confidence and flagged are filled here, from the calibrated fields, never
     # by the model. A list whose row count disagrees with the document is
@@ -1357,6 +1558,16 @@ def extract(
             source_file_name=request.source_file_name,
             lob=lob, modality=(request.ocr_meta or {}).get("modality"),
         )
+        if common_model:
+            # The full-text tier: every printed word by form and section, built
+            # from the page text by Fideon's section builder, never by the model
+            # (SPEC_21 §4.6, common.full_text). Before validation, so the client's
+            # schema judges it too.
+            text_sections = build_text_sections(full_text_pages)
+            if text_sections:
+                output["text_sections"] = text_sections
+            else:
+                flags.append(NO_FULL_TEXT_FLAG)
     else:
         output = extraction
 
@@ -1388,6 +1599,9 @@ def extract(
         # common-model line, the filled answer with its sections checked as
         # written, above), and after confidence, so the nulls carry none of it.
         output = filled if filled is not None else _with_every_key(output, route_, lob)
+
+    # SPEC_21's every-word rule, measured on what is served.
+    coverage = text_coverage(full_text_pages, output) if canonical and common_model else None
 
     result = ExtractionResult(
         source_id=request.source_id,
@@ -1427,6 +1641,8 @@ def extract(
         validation_errors=validation_errors,
         reconciliation=reconciliation,
         window_latencies_ms=window_latencies,
+        text_coverage=coverage,
+        window_stats=window_stats,
     )
 
     log.info(

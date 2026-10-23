@@ -333,11 +333,15 @@ def test_a_flat_document_type_also_returns_mm_dd_yyyy(client):
     assert result.extraction["claims"][0]["loss_date"] == "01/01/2024"
 
 
-def test_a_known_lob_selects_its_canonical_schema(client):
+def test_a_known_lob_selects_its_canonical_schema(client, monkeypatch):
     """The line is the caller's to give. It selects the schema the model is
     shown, constrained to and validated against."""
+    import serving.pipeline as pipeline
     from common.schemas import resolved_schema, with_page_bounds
     from inference_core.input_builder import page_total
+
+    # Sent in planned (group) order, so each call pairs with its group below.
+    monkeypatch.setattr(pipeline, "_send_order", lambda pending, doc_type: list(range(len(pending))))
 
     # A line other than the default request's, so it is the caller's line that
     # selects the schema; self-contained like LINE, so GOLDEN is valid for it.
@@ -855,13 +859,17 @@ def test_without_a_calibrator_set_the_v1_path_is_a_knowing_downgrade(model, capl
     assert any("length-biased" in r.getMessage() for r in caplog.records), caplog.text
 
 
-def test_serving_generation_is_constrained_to_the_routed_schema(client):
+def test_serving_generation_is_constrained_to_the_routed_schema(client, monkeypatch):
     """structured_outputs and logprobs_mode sat in vllm_serving.yaml and reached
     nothing: generation ran unconstrained, so the §13b 100% schema-validity floor
     measured a model with no guarantee behind it."""
+    import serving.pipeline as pipeline
     from common.schemas import resolved_schema, with_page_bounds
     from inference_core.input_builder import page_total
     from inference_core.runner_config import load_runner_config
+
+    # Sent in planned (group) order, so each call pairs with its group below.
+    monkeypatch.setattr(pipeline, "_send_order", lambda pending, doc_type: list(range(len(pending))))
 
     config = load_runner_config()
     assert config.structured_outputs is True

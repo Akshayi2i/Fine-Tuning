@@ -22,6 +22,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,11 @@ class Generation:
     finish_reason: str = "stop"
     generation_fingerprint: str = ""
     latency_ms: float | None = None
+    #: The prompt's length in tokens, page images included, when the backend says.
+    prompt_tokens: int | None = None
+    #: Milliseconds until the first answer token arrived - time queued plus time
+    #: reading the prompt - when the backend streams; the rest is writing.
+    first_token_ms: float | None = None
 
     @property
     def has_logprobs(self) -> bool:
@@ -67,13 +73,21 @@ class Generation:
             )
 
     def truncated(self) -> bool:
-        """Whether generation hit the token limit.
+        """Whether the answer was cut off: at the token limit, or stopped by the
+        backend because it had started repeating itself (:data:`STOPPED_REPEATING`).
 
         Worth surfacing: on a long Loss Run, truncation silently drops claim rows
         — a recall failure that per-field confidence cannot see, because the
         missing rows produced no tokens.
         """
-        return self.finish_reason in ("length", "max_tokens")
+        return self.finish_reason in ("length", "max_tokens", STOPPED_REPEATING)
+
+
+#: The finish reason of an answer a backend stopped because its end had become
+#: one passage over and over (``inference_core.openai_backend.repeating_tail``).
+#: Left to run, such an answer writes to the token limit - minutes for one
+#: window - and is then refused as cut off anyway.
+STOPPED_REPEATING = "repetition"
 
 
 # --------------------------------------------------------------------------
@@ -129,6 +143,18 @@ class ModelBackend(ABC):
     def close(self) -> None:
         """Release whatever the backend holds (GPU memory). Default: nothing."""
         return None
+
+    def supports_submit(self) -> bool:
+        """Whether :meth:`submit` sends one request on its own, to be answered
+        while others run. A backend that can only run a batch to its end (the
+        in-process engine) cannot: a caller then waits for the whole batch."""
+        return False
+
+    def submit(self, messages: list[dict[str, Any]], config: RunnerConfig,
+               adapter: str | None = None) -> Future:
+        """One request, sent now: a future of its :class:`Generation`, or of the
+        exception that failed it (returned, never raised)."""
+        raise NotImplementedError(f"{type(self).__name__} runs batches only")
 
     def generate_batch(
         self,
@@ -447,6 +473,7 @@ class VLLMBackend(ModelBackend):
         if tokens:
             assert_tokens_reconstruct(text, tokens, "vLLM")
 
+        prompt_ids = getattr(output, "prompt_token_ids", None)
         return Generation(
             text=text,
             tokens=tokens,
@@ -454,6 +481,7 @@ class VLLMBackend(ModelBackend):
             finish_reason=completion.finish_reason or "stop",
             generation_fingerprint=config.fingerprint(),
             latency_ms=round(latency_ms, 1),
+            prompt_tokens=len(prompt_ids) if prompt_ids is not None else None,
         )
 
     def generate(self, messages, config, adapter=None) -> Generation:
@@ -868,9 +896,9 @@ def generate(
         result.assert_logprobs()
     if result.truncated():
         log.warning(
-            "generation for %s hit the token limit — output may be incomplete. On a long "
+            "generation for %s was cut off (%s) — output may be incomplete. On a long "
             "Loss Run this silently drops claim rows, which per-field confidence cannot detect.",
-            model.tag,
+            model.tag, result.finish_reason,
         )
     return result
 
@@ -924,22 +952,59 @@ def generate_batch(
     raw = model.backend.generate_batch(
         [request[0] for request in requests], configs, adapter=_adapter_for(model, adapter)
     )
+    return [_checked(model, result, want_logprobs) for result in raw]
 
-    out: list[Generation | ModelRunnerError] = []
-    for result in raw:
-        if isinstance(result, Exception):
-            out.append(
-                result if isinstance(result, ModelRunnerError)
-                else ModelRunnerError(f"generation failed for {model.tag}: {result}")
-            )
-            continue
-        if not result.generation_fingerprint:
-            result.generation_fingerprint = model.config.fingerprint()
-        if want_logprobs and not result.has_logprobs:
-            try:
-                result.assert_logprobs()
-            except ModelRunnerError as exc:
-                out.append(exc)
-                continue
-        out.append(result)
-    return out
+
+def can_submit(model: LoadedModel) -> bool:
+    """Whether ``model``'s backend answers requests one by one as they finish
+    (:func:`submit_generation`), rather than only a whole batch at a time."""
+    return model.backend.supports_submit()
+
+
+def submit_generation(
+    model: LoadedModel,
+    request: tuple[Any, ...],
+    *,
+    adapter: str | None = None,
+    want_logprobs: bool = True,
+) -> Future:
+    """One request of :func:`generate_batch`'s form, sent now.
+
+    A future of its :class:`Generation` or of the :class:`ModelRunnerError`
+    that failed it, checked as :func:`generate_batch` checks each result. Only
+    for a backend that :func:`can_submit`.
+    """
+    import time
+
+    config = _request_config(model.config, request[1], request[2] if len(request) > 2 else None)
+    started = time.perf_counter()
+    sent = model.backend.submit(request[0], config, adapter=_adapter_for(model, adapter))
+    checked: Future = Future()
+
+    def finish(done: Future) -> None:
+        try:
+            result = done.result()
+        except Exception as exc:  # noqa: BLE001 - a failed request is its own result
+            result = exc
+        if isinstance(result, Generation) and result.latency_ms is None:
+            result.latency_ms = round((time.perf_counter() - started) * 1000, 1)
+        checked.set_result(_checked(model, result, want_logprobs))
+
+    sent.add_done_callback(finish)
+    return checked
+
+
+def _checked(model: LoadedModel, result: Any, want_logprobs: bool) -> Generation | ModelRunnerError:
+    """One backend result as the pipeline takes it: an error as a
+    :class:`ModelRunnerError`, a generation fingerprinted, with its logprobs."""
+    if isinstance(result, Exception):
+        return (result if isinstance(result, ModelRunnerError)
+                else ModelRunnerError(f"generation failed for {model.tag}: {result}"))
+    if not result.generation_fingerprint:
+        result.generation_fingerprint = model.config.fingerprint()
+    if want_logprobs and not result.has_logprobs:
+        try:
+            result.assert_logprobs()
+        except ModelRunnerError as exc:
+            return exc
+    return result

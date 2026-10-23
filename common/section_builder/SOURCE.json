@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/Ideas-To-Impacts/FideonSLM",
+  "path": "synth_core/fideon/synth_core",
+  "commit": "3d40d7702e093243d629da04f5104ef1084872cb",
+  "commit_date": "2026-10-21",
+  "copied": "2026-10-23",
+  "sha256_of": "the file with CRLF line endings read as LF",
+  "files": {
+    "sections.py": "921176d0bb4f352e2d692e9b228caa99d64163a1a5cc742875c00f2aa739d8d8",
+    "pdf_text.py": "351418fe90d3ab69f0cbe3fd48fbbcd1a2722e56d30fe5c5db771b2089863dd8"
+  }
+}

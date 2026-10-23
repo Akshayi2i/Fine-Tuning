@@ -647,7 +647,7 @@ What the build does now that the sections above did not describe. Each module sp
 - **Dates are `MM/DD/YYYY`** in every output (`common/canonical.py::with_output_dates`), for any field with
   the word `date`/`dates`/`dated`/`dob` in its name — a test runs over all LOB schemas.
 - **Policies are read as windows over every page**: section group (`configs/schema_sections.yaml`: decl,
-  arrays, lineblk, dtd for self-contained lines; a `common_model` profile with decl, arrays, lineblk) × page
+  arrays, lineblk, dtd for self-contained lines; a `common_model` profile with decl, arrays, forms, lineblk) × page
   window, planned by ONE function shared by training and serving
   (`data_pipeline/dataset_builder/policy_windows.py`) and merged at serving (`serving/policy_merge.py`:
   units joined on their own keys — VIN, number, then year/make/model — references rewritten, rows read
@@ -701,7 +701,8 @@ What the build does now that the sections above did not describe. Each module sp
   window cannot see left out (counted as dangling); a coverage row is taught only on windows that show its
   **home** — its name, a limit's or deductible's amount or percentage, or its premium (`HOME_FIELDS`) — so
   windows of policy wording that print only a caption are not taught the row; a coverage's form numbers only
-  where its pages print them; `text_sections` never.
+  where its pages print them; `text_sections` never (serving attaches it with Fideon's section builder,
+  `common/full_text.py`, from the page text).
 - **Splits**: group-level, band per type, placement per line; lines under 5 documents train whole (§10). A
   drawn split holds one carrier out per line naming 10 or more carriers (lines under the minimum are recorded
   as `lines_below_carrier_minimum`; on a policy only real carriers count — a placeholder such as "N/A" is no
@@ -1177,13 +1178,15 @@ is imported.
 different budgets). `common.config.pixel_budget()` is the one source for the trainer's env and the vLLM
 engine's `mm_processor_kwargs`, and refuses a non-multiple.
 
-**Section map** (`configs/schema_sections.yaml`): the policy section groups (decl, arrays, lineblk, dtd),
+**Section map** (`configs/schema_sections.yaml`): the policy section groups (decl, arrays, forms, lineblk, dtd),
 their page rules and identifying keys, read by the window planner in training and serving. Common-model lines
 read the `common_model` profile instead (decl: the policy-level objects, `lob_parts`, premium, billing; arrays:
-every unit table and everything that refers to a unit, plus `additional_fields`; lineblk: the remainder, today
-the forms list), with each table's id field and prefix, the reference fields, identifying keys, unit keys and
-`run_overlap_pages: 1`. Every group reads every page (decision 2026-10-19). The page rules are `every`
-(arrays, lineblk) and `declarations` (decl, dtd): `pages.declarations_leading: 5` makes the declarations
+every unit table and everything that refers to a unit, plus `additional_fields`; forms: the forms list, a job of
+its own since 2026-10-23; lineblk: the remainder, today general liability's claims-made terms and
+countersignature, and nothing on the other lines), with each table's id field and prefix, the reference fields,
+identifying keys, unit keys and `run_overlap_pages: 1`. The self-contained lines keep their forms in `arrays`, so
+`forms` is empty on them. Every group reads every page (decision 2026-10-19). The page rules are `every`
+(arrays, forms, lineblk) and `declarations` (decl, dtd): `pages.declarations_leading: 5` makes the declarations
 group's first window the first five pages plus a declarations page found later, read together, and every page
 after them follows in windows.
 
@@ -1216,6 +1219,11 @@ not yet read by the model view).
 
 - `.env.example`: `AZURE_RAW_SAS_TOKEN`, and the account-SAS note for a single token.
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
+
+## Changes of 2026-10-23 (forms job)
+
+- `configs/schema_sections.yaml` declares a `forms` group (Forms and endorsements; `policy_schedule`, `every`), empty in the default map and `[forms_and_endorsements]` in the `common_model` profile, ahead of `lineblk`. Reference prompts `policy_<line>.forms.prompt.txt` replace the `lineblk` ones (same text).
+- `common/section_builder/` holds FideonSLM's `sections.py` and `pdf_text.py` byte for byte (commit 3d40d77, SHA-256 in `SOURCE.json`; left out of ruff), used only through `common/full_text.py`; `scripts/check_section_builder.py --fideon-slm <clone>` reports a copy edited here or moved on there.
 
 ---
 
@@ -2342,12 +2350,15 @@ row. The groups are `common.schema_sections.groups_for(lob)` over `configs/schem
   named_insured, policy, lob_parts, premium, billing), `arrays` (every unit table and every table that refers
   to a unit — coverages, deductibles, interested_parties, locations, buildings, vehicles, drivers, watercraft,
   scheduled_items, rating_exposures, rating_modifiers, underlying_insurance — plus `additional_fields`),
-  `lineblk` (the remainder). `text_sections` is asked of no group.
+  `forms` (forms_and_endorsements, a job of its own: decision 2026-10-23) and `lineblk` (the remainder:
+  general liability's claims_made_terms and countersignature; empty, so not planned, on the other lines).
+  `text_sections` is asked of no group. The self-contained lines keep their forms in `arrays` (their prompts
+  are frozen), so `forms` is empty on them.
 
 A group with no sections on the line is not planned at all.
 
 Every group reads every page (`common.schema_sections.pages_for(group, pages)`); the page rule — `every`
-for `arrays` and `lineblk`, `declarations` for `decl` and `dtd` — says only how the first window is formed.
+for `arrays`, `forms` and `lineblk`, `declarations` for `decl` and `dtd` — says only how the first window is formed.
 For `decl` and `dtd`, `schema_sections.leading_pages(group, pages, declarations_page=)` gives the first
 `pages.declarations_leading` = **5** pages plus the detected declarations page when it falls later; they are
 read together in the group's first window (split evenly only if they exceed one window), and every page after
@@ -2629,6 +2640,10 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 - `window_plan_version` is `window_plan_id()` (version `"3"` plus a fingerprint of the planner's inputs); the manifest also pins `review_rule_version`.
 - `normalize_carrier` reads an underscore as a space and keeps a name word where dropping it would leave a placeholder; `is_placeholder_carrier` moved to `common.normalize` with more variants.
 - The frozen-carrier warning covers carriers the delivery held out, several per line, compared as keys.
+
+## Changes of 2026-10-23 (forms job)
+
+- The forms list is a job of its own on the common-model lines: group `forms` (`forms_and_endorsements`; task `policy_schedule`, page rule `every`, as `lineblk` had). `lineblk` keeps the remainder: general liability's claims_made_terms and countersignature, and nothing on the other lines, which are therefore read in three groups (`decl`, `arrays`, `forms`) with the windows and prompt text they had. General liability is read in four. The self-contained lines are unchanged (forms in `arrays`). The section map is part of the window plan's fingerprint: rebuild the corpus and retrain.
 
 ---
 
@@ -3951,6 +3966,7 @@ The page numbers in the markers are the document's real numbers, so a window's n
 - Applies IMPL-09 calibration to raw logprob confidence (the release's per-field-type calibrators and thresholds when it has them; otherwise the v1 transform, with every field flagged `:uncalibrated`), adds the **list-completeness** signal, shapes the final output contract (master §9), and flags sub-threshold fields for review.
 - Emits `line_of_business`: for a policy, the line resolution `{lines, source, confidence, candidates, hypothesis_agreed}` (`source` ∈ `caller`, `detected`, `detected_uncertain`, `undetected`); otherwise the standard `{value, confidence}` shape (arch §0b) collapsed from the line spans, `null` when undetermined.
 - **Validates the final JSON against the doc_type schema before returning** — this mirrors the Fideon SPEC_07 Stage 3 audit gate (arch §0a). A schema-invalid response is an error, not a returned result. On a common-model line the served JSON (every key filled) is what is judged, and a required section no window wrote, or an object written empty (`minProperties`), still fails. The judgement is one function, `serving.pipeline.schema_verdict` (a `SchemaVerdict`: the answer as judged, the filled answer, `valid`, `errors`), shared with evaluation: `served_schema_verdict` envelopes a merged common-model answer and fills its system fields first, then judges it the same way, so checkpoint selection (`evaluation/metrics/coverage_metrics.score_schema_validity`) judges a whole common-model document as serving would return it. Checked as written, the merged answer lacked what the pipeline adds and `document_schema_validity_rate` read a false 0%.
+- **Attaches the full-text tier** on a common-model policy (`common.full_text.build_text_sections`): `text_sections` — every printed word, by form and section — built from the request's page text by Fideon's deterministic section builder (`common/section_builder`, FideonSLM's `sections.py` and `pdf_text.py` copied byte for byte, recorded in `SOURCE.json`; `scripts/check_section_builder.py` reports drift), never by the model (SPEC_21 §4.6). Before validation, so the client's schema judges it. A request with no page text (image-only) gets none and is flagged `text_sections:no_page_text`. Each result carries `text_coverage`, the share of the page text's words found in the served JSON (SPEC_21's every-word rule, check C4; `None` with no page text). Our wrapper anchors each MinerU table so the builder writes it: the copied builder drops a markdown table otherwise (to be fixed in FideonSLM).
 - **Fills every key of the line's schema** (`common.canonical.with_all_keys`, without the client's `fideon:` annotation properties) after validation and confidence: a value not extracted is `null`, not absent, so every served policy JSON — base model or trained — has the same keys. A post-process, never trained.
 - Never returns raw (uncalibrated) confidence as if calibrated — IMPL-09 raises when calibration is missing.
 
@@ -3980,6 +3996,7 @@ Per request: classify (or take the caller's `doc_type`) → route adapter/prompt
 - [ ] Nothing in serving's config or a release's scope selects pages: there is no page threshold and no `long_doc_types`.
 - [ ] A window that fails (unparseable, or cut at the token limit) is split in half and retried; one that still fails alone is dropped and flagged `window_failed:<group>:p<page>`, and the rest of the document is returned.
 - [ ] A served policy JSON carries every key of its line's schema, `null` where nothing was extracted.
+- [ ] A served common-model policy with page text carries `text_sections` from the section builder, valid against the client's schema, with every word of its page text somewhere in the JSON (`text_coverage` 1.0 on the test fixtures); one with none is flagged `text_sections:no_page_text`. The copied builder matches `SOURCE.json`.
 - [ ] A policy with no line, detection off, is refused unless the caller sends `allow_lob_fallback`; a known line no promoted release covers is read by the base model against `_fallback.json`, flagged `route:lob_fallback_used`.
 - [ ] A schema-invalid generation is rejected, not returned.
 - [ ] Checkpoint selection judges a merged common-model answer with serving's verdict (`served_schema_verdict`), not a stricter copy of it.
@@ -3998,8 +4015,8 @@ every section group × page window planned by `data_pipeline/dataset_builder/pol
 over every page (`pages_to_read`: every page, and the declarations page `serving.page_router.plan_pages`
 finds in the same text the training rows were planned on), whatever the document's length. The routed
 single-call branch, the page threshold and `long_doc_types` are gone from `extract`. Each round's windows
-go to vLLM in **batches of at most 32** (`MAX_WINDOWS_PER_BATCH`, chosen, not measured; `generate_batch`), so a
-200-page policy's page images are not all decoded at once. vLLM fails every prompt of a batch when it refuses one, so a batch whose windows all failed with one error is read again window by window, and only the window that caused it fails. Each window's answer limit is its section task's reserved budget
+go to vLLM in **calls of at most 96** (`MAX_WINDOWS_PER_BATCH`, the validation's `validation_batch_rows`; not yet measured in serving; `generate_batch`), the longest expected answers first (`_send_order`: the larger answer reservation, then more pages) and read back in planned order, so a
+69-page policy's 81 windows are one call and a 200-page policy's page images are not all decoded at once. vLLM fails every prompt of a call when it refuses one, so a call whose windows all failed with one error is read again in halves (`_batch_in_halves`) until the window that caused it is alone, and only that window fails. Each window's answer limit is its section task's reserved budget
 (`common.config.answer_cap(task_for(group))`), its page references are bounded to its own pages
 (`common.schemas.with_page_bounds`), and an answer cut at the token limit is refused even if it parses. A
 window that fails is **split in half and retried** in the next round (decoding is greedy, so an unchanged
@@ -4141,6 +4158,21 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - A batch whose windows all failed with one error is read again window by window; latency is one entry per batch.
 - Cold start refuses a policy release whose recorded window plan is not this code's (`assert_window_plan_served`).
 
+## Changes of 2026-10-23 (window calls, forms job, full text)
+
+- A round's windows go to vLLM in calls of at most 96 (`MAX_WINDOWS_PER_BATCH`, was 32): at 32 a call, about one call in four of the CGL checkpoint selection waited ~140 s on one long window with the GPU nearly idle. A 69-page policy (81 windows) is one call. Not yet measured in serving.
+- Sent longest expected answer first (`_send_order`), read back in planned order: the windows, the prompts and what the merge is given are unchanged.
+- A call refused whole is read again in halves (`_batch_in_halves`), not window by window; latency is one entry per call.
+- The forms list is read by a `forms` group of its own on the common-model lines (configs/schema_sections.yaml): the same windows as before on the personal lines, one more group (the claims-made terms and countersignature) on general liability; merged after `arrays`.
+- The full-text tier is served (decision 2026-10-23): `text_sections` from the page text by Fideon's section builder (`common/full_text.py` over `common/section_builder`, FideonSLM 3d40d77 copied byte for byte), before validation; `text_sections:no_page_text` without page text; `text_coverage` on every common-model result. The copied builder dropped every MinerU table; the wrapper anchors them.
+
+## Changes of 2026-10-23 (served model speed)
+
+- A backend that answers each request on its own (`ModelBackend.supports_submit`; the served model, `inference_core/openai_backend.py`) has a policy's windows read as they are answered (`_read_as_answered`): every window sent at once, longest first, and a failed window's halves sent the moment it fails rather than after the slowest window of its round. The answers are merged in the rounds' order (by round, then planned position), so the merge is the same whichever window finished first; the in-process engine still reads in rounds of calls (`_read_in_rounds`). One `window_latencies_ms` entry for the whole reading.
+- A streamed answer whose last 3,000 characters are one passage of at most 500 repeated (`repeating_tail`) is stopped and its connection closed, finish reason `repetition` (`STOPPED_REPEATING`), which counts as cut off: the window is split as at the token limit, instead of writing to 12,288 tokens.
+- Every window read is recorded in `ExtractionResult.window_stats` (group, pages, attempt, outcome, seconds, time to first token, prompt and answer tokens, finish reason), not in the served JSON; `Generation` carries `prompt_tokens` and `first_token_ms`.
+- Page images can go to a served model by path (`images="file"`, a `file://` URL; vLLM needs `--allowed-local-media-path`) instead of as base64.
+
 ---
 
 # IMPL-12_testing_extraction_routine
@@ -4172,7 +4204,7 @@ testing/
 │   ├── acord_25.prompt.txt, acord_125.prompt.txt, acord_140.prompt.txt
 │   ├── lossrun.prompt.txt
 │   ├── policy.prompt.txt, policy_<line>.prompt.txt               # + *.image_only.prompt.txt
-│   └── policy_<line>.{decl,arrays,lineblk}.prompt.txt            # window prompts, common-model lines
+│   └── policy_<line>.{decl,arrays,forms}.prompt.txt              # window prompts, common-model lines
 ├── ocr_cache/                   # page images fetched from processed/ in Blob, kept between runs
 ├── results/{version}/           # OUTPUT: canonical JSON per document, organized BY MODEL VERSION
 │   └── v2/policy_0001.json
@@ -4410,6 +4442,18 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 - §6: `compare_models --reviewer-id --review-date` give a PDF's `--gold` its review record; without one the answers are compared with no gold.
 - Acceptance checklist: scoring needs a reviewed gold.
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
+
+## Changes of 2026-10-23 (full text)
+
+- Each document's metrics carry `text_coverage` (the share of its page text's words found in the served JSON, SPEC_21's every-word rule); `summary.json` adds `mean_text_coverage`, `min_text_coverage`, `documents_below_full_text` (under `FULL_TEXT_COVERAGE` = 0.99, chosen, not measured) and `documents_without_full_text` (flagged `text_sections:no_page_text`). The full-text tier is never scored: scoring narrows the answer to the model view, which has no `text_sections`.
+- `testing/extract_server.py` (pod) and `testing/extract_client.py` (laptop): a PDF posted through the pod's RunPod proxy URL is OCR'd by MinerU in the OCR environment (`data_pipeline/ocr/ocr_worker.py`, kept loaded) and read by `serving.pipeline.extract` with the base model or `--adapter`; jobs answered at once and polled (the proxy's ~100 s limit), one at a time, token-guarded; each reports pages, windows planned, model calls, OCR/model/total seconds, schema validity, review flags by kind and `text_coverage`. `EXTRACT_SERVER_TOKEN` in `.env.example`.
+- `testing/latency_check.py`: times the extraction routine on PDFs against a model already served (`vllm serve`, `inference_core/openai_backend.py`: one chat request per window, run concurrently; page images as base64 data URLs; the schema slice as `response_format`; the end-of-turn token dropped from the scored tokens) and a served MinerU 4 API (`data_pipeline/ocr/mineru_api.py`: `/v1/tasks`, `structured_content` written per page as the OCR stage writes it). Reports render, OCR (and the server's own OCR seconds), model and total seconds, model calls and MB sent per document; run it next to the servers, since page images go with every window. `FIDEON_REMOTE_TOKEN` in `.env.example`. A served MinerU 4 is not the corpus pin (3.4.5): for timing and checking, not training data.
+
+## Changes of 2026-10-23 (served model speed)
+
+- `data_pipeline/ocr/served_ocr.py` (`ServedOcr`): renders a PDF's pages in several processes (`render_pdf_pages(..., workers=)`, the same bytes as one process) while a served MinerU reads it, optionally as several runs of pages at once (`ocr_via_api(..., parts=)`, `split_pdf`); writes `page_NNN.png`/`.md`; also the job server's OCR call.
+- `testing/latency_check.py` reads through it, sends each window as it can (`--concurrency`, default 128), stops repeating answers (`--no-repeat-stop` to compare), can send images by path (`--images file`) or ask for a served adapter (`--served-model`), and scores each document against its gold JSON when one is found (`--gold-dir`, or `Gold_json` beside the PDF's folder; `testing.run_extraction.score_against_ground_truth`). Each document's JSON carries `window_stats` and a `windows` summary (rounds, splits, failures, cut off, stopped repeating, prompt and answer tokens, the slowest window); the table adds pages-and-text seconds, rounds, splits, answer tokens, the slowest window and exact match.
+- `testing/extract_server.py` can use the pod's own servers (`--model-url`, `--mineru-url`, `--remote-token`, `--images`, `--tier`, `--ocr-parts`, `--served-model`): it then loads neither vLLM nor MinerU, and only the PDF crosses the proxy. Its summary adds `windows` and the rendering/OCR timings; the result JSON adds `window_stats`.
 
 ---
 

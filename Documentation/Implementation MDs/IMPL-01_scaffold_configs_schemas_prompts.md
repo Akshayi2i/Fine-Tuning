@@ -261,13 +261,15 @@ is imported.
 different budgets). `common.config.pixel_budget()` is the one source for the trainer's env and the vLLM
 engine's `mm_processor_kwargs`, and refuses a non-multiple.
 
-**Section map** (`configs/schema_sections.yaml`): the policy section groups (decl, arrays, lineblk, dtd),
+**Section map** (`configs/schema_sections.yaml`): the policy section groups (decl, arrays, forms, lineblk, dtd),
 their page rules and identifying keys, read by the window planner in training and serving. Common-model lines
 read the `common_model` profile instead (decl: the policy-level objects, `lob_parts`, premium, billing; arrays:
-every unit table and everything that refers to a unit, plus `additional_fields`; lineblk: the remainder, today
-the forms list), with each table's id field and prefix, the reference fields, identifying keys, unit keys and
-`run_overlap_pages: 1`. Every group reads every page (decision 2026-10-19). The page rules are `every`
-(arrays, lineblk) and `declarations` (decl, dtd): `pages.declarations_leading: 5` makes the declarations
+every unit table and everything that refers to a unit, plus `additional_fields`; forms: the forms list, a job of
+its own since 2026-10-23; lineblk: the remainder, today general liability's claims-made terms and
+countersignature, and nothing on the other lines), with each table's id field and prefix, the reference fields,
+identifying keys, unit keys and `run_overlap_pages: 1`. The self-contained lines keep their forms in `arrays`, so
+`forms` is empty on them. Every group reads every page (decision 2026-10-19). The page rules are `every`
+(arrays, forms, lineblk) and `declarations` (decl, dtd): `pages.declarations_leading: 5` makes the declarations
 group's first window the first five pages plus a declarations page found later, read together, and every page
 after them follows in windows.
 
@@ -300,3 +302,8 @@ not yet read by the model view).
 
 - `.env.example`: `AZURE_RAW_SAS_TOKEN`, and the account-SAS note for a single token.
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
+
+## Changes of 2026-10-23 (forms job)
+
+- `configs/schema_sections.yaml` declares a `forms` group (Forms and endorsements; `policy_schedule`, `every`), empty in the default map and `[forms_and_endorsements]` in the `common_model` profile, ahead of `lineblk`. Reference prompts `policy_<line>.forms.prompt.txt` replace the `lineblk` ones (same text).
+- `common/section_builder/` holds FideonSLM's `sections.py` and `pdf_text.py` byte for byte (commit 3d40d77, SHA-256 in `SOURCE.json`; left out of ruff), used only through `common/full_text.py`; `scripts/check_section_builder.py --fideon-slm <clone>` reports a copy edited here or moved on there.

@@ -25,7 +25,7 @@ testing/
 │   ├── acord_25.prompt.txt, acord_125.prompt.txt, acord_140.prompt.txt
 │   ├── lossrun.prompt.txt
 │   ├── policy.prompt.txt, policy_<line>.prompt.txt               # + *.image_only.prompt.txt
-│   └── policy_<line>.{decl,arrays,lineblk}.prompt.txt            # window prompts, common-model lines
+│   └── policy_<line>.{decl,arrays,forms}.prompt.txt              # window prompts, common-model lines
 ├── ocr_cache/                   # page images fetched from processed/ in Blob, kept between runs
 ├── results/{version}/           # OUTPUT: canonical JSON per document, organized BY MODEL VERSION
 │   └── v2/policy_0001.json
@@ -263,3 +263,15 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 - §6: `compare_models --reviewer-id --review-date` give a PDF's `--gold` its review record; without one the answers are compared with no gold.
 - Acceptance checklist: scoring needs a reviewed gold.
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
+
+## Changes of 2026-10-23 (full text)
+
+- Each document's metrics carry `text_coverage` (the share of its page text's words found in the served JSON, SPEC_21's every-word rule); `summary.json` adds `mean_text_coverage`, `min_text_coverage`, `documents_below_full_text` (under `FULL_TEXT_COVERAGE` = 0.99, chosen, not measured) and `documents_without_full_text` (flagged `text_sections:no_page_text`). The full-text tier is never scored: scoring narrows the answer to the model view, which has no `text_sections`.
+- `testing/extract_server.py` (pod) and `testing/extract_client.py` (laptop): a PDF posted through the pod's RunPod proxy URL is OCR'd by MinerU in the OCR environment (`data_pipeline/ocr/ocr_worker.py`, kept loaded) and read by `serving.pipeline.extract` with the base model or `--adapter`; jobs answered at once and polled (the proxy's ~100 s limit), one at a time, token-guarded; each reports pages, windows planned, model calls, OCR/model/total seconds, schema validity, review flags by kind and `text_coverage`. `EXTRACT_SERVER_TOKEN` in `.env.example`.
+- `testing/latency_check.py`: times the extraction routine on PDFs against a model already served (`vllm serve`, `inference_core/openai_backend.py`: one chat request per window, run concurrently; page images as base64 data URLs; the schema slice as `response_format`; the end-of-turn token dropped from the scored tokens) and a served MinerU 4 API (`data_pipeline/ocr/mineru_api.py`: `/v1/tasks`, `structured_content` written per page as the OCR stage writes it). Reports render, OCR (and the server's own OCR seconds), model and total seconds, model calls and MB sent per document; run it next to the servers, since page images go with every window. `FIDEON_REMOTE_TOKEN` in `.env.example`. A served MinerU 4 is not the corpus pin (3.4.5): for timing and checking, not training data.
+
+## Changes of 2026-10-23 (served model speed)
+
+- `data_pipeline/ocr/served_ocr.py` (`ServedOcr`): renders a PDF's pages in several processes (`render_pdf_pages(..., workers=)`, the same bytes as one process) while a served MinerU reads it, optionally as several runs of pages at once (`ocr_via_api(..., parts=)`, `split_pdf`); writes `page_NNN.png`/`.md`; also the job server's OCR call.
+- `testing/latency_check.py` reads through it, sends each window as it can (`--concurrency`, default 128), stops repeating answers (`--no-repeat-stop` to compare), can send images by path (`--images file`) or ask for a served adapter (`--served-model`), and scores each document against its gold JSON when one is found (`--gold-dir`, or `Gold_json` beside the PDF's folder; `testing.run_extraction.score_against_ground_truth`). Each document's JSON carries `window_stats` and a `windows` summary (rounds, splits, failures, cut off, stopped repeating, prompt and answer tokens, the slowest window); the table adds pages-and-text seconds, rounds, splits, answer tokens, the slowest window and exact match.
+- `testing/extract_server.py` can use the pod's own servers (`--model-url`, `--mineru-url`, `--remote-token`, `--images`, `--tier`, `--ocr-parts`, `--served-model`): it then loads neither vLLM nor MinerU, and only the PDF crosses the proxy. Its summary adds `windows` and the rendering/OCR timings; the result JSON adds `window_stats`.

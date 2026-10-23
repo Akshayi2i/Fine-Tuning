@@ -107,7 +107,7 @@ def test_a_short_policy_is_windowed_too():
     move between corpus builds and silently re-shape documents."""
     pages, declarations = pages_to_read(["Declarations"], 1)
     groups = {plan.group for plan in plan_windows("homeowners", pages, declarations)}
-    assert groups == {"decl", "arrays", "lineblk"}
+    assert groups == {"decl", "arrays", "forms"}
 
 
 def test_image_only_reads_every_page():
@@ -269,9 +269,14 @@ def _decl_response():
     }
 
 
-def test_serving_asks_the_windows_training_built(client):
+def test_serving_asks_the_windows_training_built(client, monkeypatch):
     """The one property the whole design rests on. A served window that no
     training row had is a shape the model was never taught."""
+    import serving.pipeline as pipeline
+
+    # Sent in planned order, so each call pairs with its training row; the
+    # order windows are sent in has tests of its own (test_window_send_order).
+    monkeypatch.setattr(pipeline, "_send_order", lambda pending, doc_type: list(range(len(pending))))
     rows, _ = expand_document(_document(lob="wc"), "train", modes=("ocr_plus_image",))
     trained = [(r["sections"], r["window_pages"]) for r in rows]
 

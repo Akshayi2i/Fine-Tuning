@@ -152,12 +152,15 @@ row. The groups are `common.schema_sections.groups_for(lob)` over `configs/schem
   named_insured, policy, lob_parts, premium, billing), `arrays` (every unit table and every table that refers
   to a unit — coverages, deductibles, interested_parties, locations, buildings, vehicles, drivers, watercraft,
   scheduled_items, rating_exposures, rating_modifiers, underlying_insurance — plus `additional_fields`),
-  `lineblk` (the remainder). `text_sections` is asked of no group.
+  `forms` (forms_and_endorsements, a job of its own: decision 2026-10-23) and `lineblk` (the remainder:
+  general liability's claims_made_terms and countersignature; empty, so not planned, on the other lines).
+  `text_sections` is asked of no group. The self-contained lines keep their forms in `arrays` (their prompts
+  are frozen), so `forms` is empty on them.
 
 A group with no sections on the line is not planned at all.
 
 Every group reads every page (`common.schema_sections.pages_for(group, pages)`); the page rule — `every`
-for `arrays` and `lineblk`, `declarations` for `decl` and `dtd` — says only how the first window is formed.
+for `arrays`, `forms` and `lineblk`, `declarations` for `decl` and `dtd` — says only how the first window is formed.
 For `decl` and `dtd`, `schema_sections.leading_pages(group, pages, declarations_page=)` gives the first
 `pages.declarations_leading` = **5** pages plus the detected declarations page when it falls later; they are
 read together in the group's first window (split evenly only if they exceed one window), and every page after
@@ -439,3 +442,7 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 - `window_plan_version` is `window_plan_id()` (version `"3"` plus a fingerprint of the planner's inputs); the manifest also pins `review_rule_version`.
 - `normalize_carrier` reads an underscore as a space and keeps a name word where dropping it would leave a placeholder; `is_placeholder_carrier` moved to `common.normalize` with more variants.
 - The frozen-carrier warning covers carriers the delivery held out, several per line, compared as keys.
+
+## Changes of 2026-10-23 (forms job)
+
+- The forms list is a job of its own on the common-model lines: group `forms` (`forms_and_endorsements`; task `policy_schedule`, page rule `every`, as `lineblk` had). `lineblk` keeps the remainder: general liability's claims_made_terms and countersignature, and nothing on the other lines, which are therefore read in three groups (`decl`, `arrays`, `forms`) with the windows and prompt text they had. General liability is read in four. The self-contained lines are unchanged (forms in `arrays`). The section map is part of the window plan's fingerprint: rebuild the corpus and retrain.

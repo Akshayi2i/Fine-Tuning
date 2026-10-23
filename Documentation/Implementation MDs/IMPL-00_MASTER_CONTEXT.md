@@ -638,7 +638,7 @@ What the build does now that the sections above did not describe. Each module sp
 - **Dates are `MM/DD/YYYY`** in every output (`common/canonical.py::with_output_dates`), for any field with
   the word `date`/`dates`/`dated`/`dob` in its name — a test runs over all LOB schemas.
 - **Policies are read as windows over every page**: section group (`configs/schema_sections.yaml`: decl,
-  arrays, lineblk, dtd for self-contained lines; a `common_model` profile with decl, arrays, lineblk) × page
+  arrays, lineblk, dtd for self-contained lines; a `common_model` profile with decl, arrays, forms, lineblk) × page
   window, planned by ONE function shared by training and serving
   (`data_pipeline/dataset_builder/policy_windows.py`) and merged at serving (`serving/policy_merge.py`:
   units joined on their own keys — VIN, number, then year/make/model — references rewritten, rows read
@@ -692,7 +692,8 @@ What the build does now that the sections above did not describe. Each module sp
   window cannot see left out (counted as dangling); a coverage row is taught only on windows that show its
   **home** — its name, a limit's or deductible's amount or percentage, or its premium (`HOME_FIELDS`) — so
   windows of policy wording that print only a caption are not taught the row; a coverage's form numbers only
-  where its pages print them; `text_sections` never.
+  where its pages print them; `text_sections` never (serving attaches it with Fideon's section builder,
+  `common/full_text.py`, from the page text).
 - **Splits**: group-level, band per type, placement per line; lines under 5 documents train whole (§10). A
   drawn split holds one carrier out per line naming 10 or more carriers (lines under the minimum are recorded
   as `lines_below_carrier_minimum`; on a policy only real carriers count — a placeholder such as "N/A" is no

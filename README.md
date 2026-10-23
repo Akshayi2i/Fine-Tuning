@@ -354,6 +354,57 @@ It takes 4 train, 1 val and 1 test source document with all their twins (split i
 untouched. Read the corpus build's rejected-row count and the
 post-OCR report before the full `finetune`.
 
+## Extracting a PDF through the pod's proxy URL
+
+To check the extraction routine on real PDFs and time it, run the test server on a pod and post PDFs to it
+from the laptop. Expose an HTTP port (8000) in the pod's settings; the server runs MinerU (in `venv-ocr`) and
+`serving.pipeline.extract` with the base model (or `--adapter`), one document at a time:
+
+```bash
+# pod, in /workspace/venv: starts in tmux, prints the URL and the token (also in /workspace/extract_server/token.txt)
+python -m testing.extract_server
+```
+
+```powershell
+# laptop: each --doc is <pdf>=<line of business>; results and a timing table in testing/results/proxy_check/
+python -m testing.extract_client --url https://<pod id>-8000.proxy.runpod.net --token <token> `
+    --doc "D:\path\a__scan.pdf=personal_auto" --doc "D:\path\b__scan.pdf=homeowners"
+```
+
+A PDF is answered at once with a job id and polled (the proxy closes a request after about 100 s). The
+table gives each document's pages, windows, model calls, OCR and model seconds, schema validity, review
+flags and `text_coverage`. Every call but `/health` needs the token; a job's PDF and pages are deleted after it
+runs unless `--keep-files`.
+
+### With the pod's own vLLM and MinerU
+
+When the pod already serves the model (`vllm serve`, port 8000) and a MinerU 4 API (port 8001), run the test
+server on a third port with `--model-url` and `--mineru-url`. It then loads nothing itself and only the PDF
+crosses the proxy; page images stay on the pod. Expose the port (8002) in the pod's settings.
+
+```bash
+# pod: vLLM started with these, among its own flags (--allowed-local-media-path only for --images file)
+#   --gpu-memory-utilization 0.80 --max-model-len 32768 --max-num-batched-tokens 16384 \
+#   --structured-outputs-config '{"backend":"xgrammar","disable_any_whitespace":true}' \
+#   --logprobs-mode raw_logprobs --allowed-local-media-path /workspace
+FIDEON_REMOTE_TOKEN=<their token> python -m testing.extract_server --port 8002 \
+    --model-url http://localhost:8000 --mineru-url http://localhost:8001 --images file
+```
+
+Post PDFs from the laptop with `testing.extract_client --url https://<pod id>-8002.proxy.runpod.net` as above.
+To measure, run `testing.latency_check` on the pod against the same servers; it also scores each document
+against its gold JSON (`--gold-dir`, or the `Gold_json` folder beside the PDF's) and records every window's
+tokens and seconds:
+
+```bash
+python -m testing.latency_check --model-url http://localhost:8000 --mineru-url http://localhost:8001 \
+    --images file --out /workspace/latency_check --doc /workspace/pdfs/a__scan.pdf=personal_auto
+```
+
+Windows are taken as each is answered: a window cut off or stopped for repeating itself is split and resent at
+once, not after the slowest window. `--ocr-parts N` sends a PDF to MinerU as N runs of pages at once (faster only
+if one task leaves the GPU idle: measure it); `--tier` picks MinerU's tier.
+
 ## Scopes
 
 A training run covers a **scope** (`configs/scopes.yaml`): `unified` (every type), `policy`, `lossrun`, and

@@ -68,6 +68,19 @@ groups:
       - loss_history
       - state_notices
 
+  forms:
+    title: Forms and endorsements
+    task: policy_schedule
+    pages: every
+    # The forms list as a job of its own on the common-model lines (decision
+    # 2026-10-23), where it was the whole of `lineblk` on every line but
+    # general liability: the same task and page rule, so their windows are the
+    # ones they were. Empty here: the self-contained lines keep their forms in
+    # `arrays`, because their prompts are frozen
+    # (tests/test_old_style_prompts_frozen.py), and a group with no sections
+    # is never asked (common.schema_sections.groups_for).
+    sections: []
+
   lineblk:
     title: Line-specific coverages
     task: policy_schedule
@@ -151,13 +164,17 @@ array_keys:
 # where the coverage table is read, and so where a printed value with no field
 # (additional_fields) is decided. The declarations keep the policy-level
 # objects; the premium stays with them, so the declarations value still wins a
-# conflict, and its per-unit items keep only their description and code.
+# conflict, and its per-unit items keep only their description and code. The
+# forms list is a job of its own (decision 2026-10-23), and `lineblk` takes what
+# is left: general liability's claims-made terms and countersignature today, and
+# nothing - so no call - on the other lines.
 common_model:
   groups:
     decl: [document, carrier, producer, named_insured, policy, lob_parts, premium, billing]
     arrays: [coverages, deductibles, interested_parties, locations, buildings, vehicles,
              drivers, watercraft, scheduled_items, rating_exposures, rating_modifiers,
              underlying_insurance, additional_fields]
+    forms: [forms_and_endorsements]
     lineblk: remainder
 
   # Never asked for: the full-text tier is the text path's, not the model's.

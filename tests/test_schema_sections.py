@@ -73,9 +73,13 @@ def test_a_group_with_nothing_to_ask_for_is_not_a_window():
     assert "dtd" in group_names("property")
     assert "dtd" in groups_for("flood")
     assert "dtd" not in groups_for("property")
-    # The fallback composes the common model (1.1.0) and has no line block: its
-    # remainder window reads only the forms list, as a personal line's does.
-    assert sections_for("lineblk", None) == ("forms_and_endorsements",)
+    # The fallback composes the common model (1.1.0) and has no line block: the
+    # forms list has a job of its own, so nothing is left for the remainder and
+    # it is never called, as on a personal line.
+    assert sections_for("forms", None) == ("forms_and_endorsements",)
+    assert sections_for("lineblk", None) == () and "lineblk" not in groups_for(None)
+    # The self-contained lines keep their forms in `arrays` (their prompts are frozen).
+    assert "forms" in group_names("property") and "forms" not in groups_for("property")
 
 
 def test_the_remainder_group_claims_a_section_the_map_never_names():
@@ -154,7 +158,7 @@ def test_every_group_reads_every_page():
     A location schedule can be printed anywhere in a 200-page policy, and a
     declarations block past page 5 is still the declarations."""
     pages = list(range(1, 42))
-    for group in ("decl", "arrays", "lineblk", "dtd"):
+    for group in ("decl", "arrays", "forms", "lineblk", "dtd"):
         assert pages_for(group, pages) == pages, group
 
 
@@ -241,10 +245,12 @@ COMMON_MODEL_LINES = (
 
 @pytest.mark.parametrize("lob", COMMON_MODEL_LINES)
 def test_a_common_model_line_is_read_in_three_groups(lob):
-    assert groups_for(lob) == ("decl", "arrays", "lineblk")
-    # The remainder is the forms list: no line block, and never an annotation
-    # or the full-text tier.
-    assert sections_for("lineblk", lob) == ("forms_and_endorsements",)
+    # Declarations, schedules, and the forms list as a job of its own (decision
+    # 2026-10-23). No line block, so the remainder holds nothing and is never
+    # called; never an annotation or the full-text tier.
+    assert groups_for(lob) == ("decl", "arrays", "forms")
+    assert sections_for("forms", lob) == ("forms_and_endorsements",)
+    assert sections_for("lineblk", lob) == ()
     for group in groups_for(lob):
         for section in sections_for(group, lob):
             assert not section.startswith("fideon:") and section != "text_sections"
@@ -308,10 +314,19 @@ def test_a_common_model_group_keeps_its_task_and_page_rule():
 
     assert task_for("decl") == "policy_declarations" and reads_declarations("decl")
     assert task_for("arrays") == "policy_schedule" and not reads_declarations("arrays")
-    assert group_names("homeowners") == ("decl", "arrays", "lineblk")
+    assert task_for("forms") == "policy_schedule" and not reads_declarations("forms")
+    assert group_names("homeowners") == ("decl", "arrays", "forms", "lineblk")
     # No line is the fallback, which composes the common model since 1.1.0.
     assert group_names() == group_names("homeowners")
-    assert group_names("property") == ("decl", "arrays", "lineblk", "dtd")
+    assert group_names("property") == ("decl", "arrays", "forms", "lineblk", "dtd")
+
+
+def test_general_liability_reads_its_forms_and_its_own_blocks_apart():
+    """The forms list is a job of its own; what is left of general liability's
+    schema - its claims-made terms and countersignature - is the remainder's."""
+    assert groups_for("gl") == ("decl", "arrays", "forms", "lineblk")
+    assert sections_for("forms", "gl") == ("forms_and_endorsements",)
+    assert set(sections_for("lineblk", "gl")) == {"claims_made_terms", "countersignature"}
 
 
 def test_a_group_off_the_common_model_profile_keeps_its_task_and_page_rule():
