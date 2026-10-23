@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -146,6 +147,118 @@ def test_page_images_can_go_by_their_path_on_the_server(tmp_path):
         OpenAIChatBackend("http://127.0.0.1:9", model="served", images="ftp")
 
 
+def _page(path, color=False):
+    """A rendered page: RGB, gray unless ``color`` (a red stamp in one corner)."""
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (120, 160), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((10, 10), "Policy Number PA-1", fill=(40, 40, 40))
+    draw.rectangle((20, 40, 100, 60), fill=(128, 128, 128))
+    if color:
+        draw.rectangle((100, 140, 119, 159), fill=(200, 0, 0))
+    image.save(path)
+    return path
+
+
+def _decoded(url):
+    import base64
+    import io
+
+    from PIL import Image
+
+    return Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1])))
+
+
+def test_a_gray_page_goes_as_a_grayscale_png_with_the_same_pixels(tmp_path):
+    from PIL import Image, ImageChops
+
+    from inference_core.page_links import sent_png
+
+    gray, color = _page(tmp_path / "page_001.png"), _page(tmp_path / "page_002.png", color=True)
+    messages = [{"role": "user", "content": [{"type": "image", "image": str(gray)},
+                                             {"type": "image", "image": str(color)}]}]
+    first, second = (part["image_url"]["url"] for part in chat_messages(messages)[0]["content"])
+    sent = _decoded(first)
+    assert sent.mode == "L"
+    # What the model reads: the server makes every image RGB - the same pixels as rendered.
+    assert ImageChops.difference(sent.convert("RGB"), Image.open(gray).convert("RGB")).getbbox() is None
+    # A page with any colour goes as it is on disk; so does every page with gray off.
+    assert _decoded(second).mode == "RGB" and sent_png(color) == color.read_bytes()
+    plain = chat_messages(messages, gray=False)[0]["content"][0]["image_url"]["url"]
+    assert _decoded(plain).mode == "RGB"
+
+
+def test_pages_go_once_as_read_only_links_and_are_deleted_after(vllm, tmp_path):
+    from artifact_registry.blob_client import BlobClient, InMemoryBackend
+    from inference_core.page_links import PageLinks
+
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    links = PageLinks(client, "transient/page-links/run-1", workers=2)
+    pages = [str(_page(tmp_path / f"page_00{n}.png")) for n in (1, 2)]
+    published = links.publish(pages, folder="a__scan")
+    assert published["pages"] == 2 and published["mb"] >= 0
+    held = client.list("transient/page-links/run-1")
+    assert held == ["transient/page-links/run-1/a__scan/page_001.png", "transient/page-links/run-1/a__scan/page_002.png"]
+    assert client.read_bytes(held[0]).startswith(b"\x89PNG")                # the grayscale page, uploaded once
+
+    backend = OpenAIChatBackend(vllm, "tok", images="link", links=links)
+    messages = [{"role": "user", "content": [{"type": "image", "image": pages[1]},
+                                             {"type": "image", "image": str(_page(tmp_path / "page_003.png"))},
+                                             {"type": "text", "text": "<page 2 of 3>"}]}]
+    backend.generate(messages, RunnerConfig(max_new_tokens=100))
+    urls = [part["image_url"]["url"] for part in _Vllm.seen[-1][1]["messages"][0]["content"][:2]]
+    assert urls[0] == "memory://main/transient/page-links/run-1/a__scan/page_002.png"
+    assert urls[1].startswith("data:image/png;base64,")                     # a page with no link goes inline
+
+    links.discard()
+    assert client.list("transient/page-links/run-1") == [] and links.url(pages[0]) is None
+    with pytest.raises(ValueError, match="needs links"):
+        OpenAIChatBackend(vllm, model="served", images="link")
+
+
+def test_a_link_carries_a_read_only_token_and_never_reaches_raw_documents():
+    from artifact_registry.blob_client import (
+        AccessDeniedError,
+        BlobClient,
+        BlobError,
+        InMemoryBackend,
+        read_only_sas,
+    )
+
+    assert read_only_sas("?sv=2024-11-04&sp=r&se=2026-10-24&sig=abc") == "sv=2024-11-04&sp=r&se=2026-10-24&sig=abc"
+    for token in ("sv=2024&sp=rw&sig=abc", "sv=2024&sp=racwdl&sig=abc", "sv=2024&sig=abc"):
+        with pytest.raises(BlobError, match="read only"):
+            read_only_sas(token)
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    with pytest.raises(BlobError, match="read only"):
+        client.read_link("transient/page-links/x/page_001.png", read_token="sp=rw&sig=abc")
+    with pytest.raises(AccessDeniedError, match="never handed out"):
+        client.read_link("raw-documents/t/s/original.pdf")
+
+
+def test_azure_signs_a_read_only_link_with_the_account_key_and_never_reuses_a_sas_login():
+    pytest.importorskip("azure.storage.blob")
+    import base64
+    from urllib.parse import parse_qs, urlsplit
+
+    from artifact_registry.blob_client import AzureBackend, BlobError
+
+    key = base64.b64encode(b"k" * 64).decode()
+    keyed = AzureBackend(f"DefaultEndpointsProtocol=https;AccountName=acct;AccountKey={key};"
+                         "EndpointSuffix=core.windows.net")                    # signs offline: no request made
+    link = urlsplit(keyed.read_link("main", "transient/page-links/r/a/page_001.png", expiry_s=600))
+    assert (link.netloc, link.path) == ("acct.blob.core.windows.net", "/main/transient/page-links/r/a/page_001.png")
+    query = parse_qs(link.query)
+    assert query["sp"] == ["r"] and query["sr"] == ["b"] and "sig" in query       # this blob alone, read only
+
+    login = AzureBackend(account_url="https://acct.blob.core.windows.net", credential="sv=2024&sp=racwdl&sig=LOGIN")
+    with pytest.raises(BlobError, match="cannot sign"):
+        login.read_link("main", "transient/page-links/r/a/page_001.png", expiry_s=600)
+    given = login.read_link("main", "transient/page-links/r/a/page_001.png", expiry_s=600, read_token="sp=r&sig=RO")
+    assert given.endswith("/main/transient/page-links/r/a/page_001.png?sp=r&sig=RO") and "LOGIN" not in given
+
+
 def test_a_batch_runs_together_and_one_refused_window_keeps_its_own_slot(vllm, tmp_path):
     backend = OpenAIChatBackend(vllm, "tok", max_concurrency=4)
     configs = [RunnerConfig(max_new_tokens=n) for n in (100, 13, 100)]
@@ -249,17 +362,54 @@ def test_a_pdf_can_be_read_as_runs_of_pages_at_once_and_joined_in_order():
         httpd.shutdown()
 
 
+class _SlowUploadMinerU(_MinerU):
+    """Takes a while to receive each PDF, as a laptop's upload does; records when."""
+
+    events: list = []
+
+    def do_POST(self):  # noqa: N802
+        started = time.perf_counter()
+        time.sleep(0.3)
+        _SlowUploadMinerU.events.append(("post", started, time.perf_counter()))
+        super().do_POST()
+
+    def do_GET(self):  # noqa: N802
+        _SlowUploadMinerU.events.append(("get", time.perf_counter(), None))
+        super().do_GET()
+
+
+def test_runs_of_pages_upload_one_after_another_and_each_is_read_while_the_next_uploads():
+    _SlowUploadMinerU.events, _MinerU.polls = [], 0
+    httpd, url = _serve(_SlowUploadMinerU)
+    uploaded = threading.Event()
+    try:
+        pages, info = ocr_via_api(_pdf(6), url, "tok", filename="a.pdf", poll_s=0.01, parts=3, uploaded=uploaded)
+    finally:
+        httpd.shutdown()
+    assert len(pages) == 6 and info["parts"] == 3 and uploaded.is_set()
+    posts = [(start, end) for kind, start, end in _SlowUploadMinerU.events if kind == "post"]
+    gets = [start for kind, start, _ in _SlowUploadMinerU.events if kind == "get"]
+    # One upload at a time (each has the whole connection) ...
+    assert all(later[0] >= earlier[1] for earlier, later in zip(posts, posts[1:], strict=False))
+    # ... and the first run is polled while the last is still uploading.
+    assert min(gets) < posts[-1][0]
+
+
 def test_pages_are_rendered_while_minerU_reads_them_and_land_where_the_pipeline_looks(tmp_path):
     from data_pipeline.ocr.served_ocr import ServedOcr
 
     httpd, url = _serve(_MinerU)
+    published = []
     try:
         reader = ServedOcr(url, "tok", render_workers=1)
-        read = reader.read(_pdf(2), tmp_path / "pages", name="a.pdf")
+        read = reader.read(_pdf(2), tmp_path / "pages", name="a.pdf",
+                           publish_pages=lambda paths: published.append(paths) or {"seconds": 0.5, "mb": 0.1})
         assert [p.rsplit("page_", 1)[1] for p in read["images"]] == ["001.png", "002.png"]
         assert (tmp_path / "pages" / "page_002.md").read_text(encoding="utf-8").startswith("## Conditions")
         assert read["texts"][1].startswith("Plymouth Rock")
-        assert set(read["timings_s"]) == {"render", "ocr", "ocr_server", "pages_and_text"}
+        assert set(read["timings_s"]) == {"render", "ocr", "ocr_server", "links", "pages_and_text"}
+        # The rendered pages, published once the PDF was at MinerU.
+        assert published == [read["images"]] and read["links"]["mb"] == 0.1 and read["timings_s"]["links"] == 0.5
         # As the job server's OcrCall: a PDF whose page count MinerU disagrees with fails the job.
         (tmp_path / "three.pdf").write_bytes(_pdf(3))
         refused = reader(tmp_path / "three.pdf", tmp_path / "three")

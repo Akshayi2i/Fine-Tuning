@@ -7,11 +7,16 @@ pod, behind its RunPod proxy URL or on localhost - so the extraction routine
 schema slices, answer limits and merge. Only the transport differs:
 
 * every page image travels with every window that reads it, about four times a
-  page: as a base64 PNG data URL (``images="inline"``, the default), or - next
-  to the server, which must then be started with ``--allowed-local-media-path``
-  - as a ``file://`` path the server reads from its own disk (``images="file"``),
-  which sends a few bytes instead of megabytes. From a laptop the inline upload
-  is most of the time; ``sent_bytes`` counts what went out;
+  page: as a base64 PNG data URL (``images="inline"``, the default); as a
+  read-only link to the page put in Blob once (``images="link"``, with
+  :class:`inference_core.page_links.PageLinks`), which the server fetches
+  itself; or - next to the server, which must then be started with
+  ``--allowed-local-media-path`` - as a ``file://`` path the server reads from
+  its own disk (``images="file"``). A gray page goes as a grayscale PNG
+  (``gray_pages``, on by default): the same pixels once the server makes it
+  RGB, about 60% of the bytes (``inference_core.page_links.sent_png``). From a
+  laptop the inline upload is most of the time; ``sent_bytes`` counts what went
+  out;
 * each window is its own request (:meth:`OpenAIChatBackend.submit`), up to
   ``max_concurrency`` in flight, which vLLM schedules together as the engine's
   continuous batching does. The pipeline reads each answer as it arrives and
@@ -53,33 +58,44 @@ log = logging.getLogger(__name__)
 #: Content types for page images sent as data URLs.
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
-#: How a page image reaches the server: in the request, or by its path on the
-#: server's own disk.
-IMAGE_TRANSPORTS = ("inline", "file")
+#: How a page image reaches the server: in the request, by a link to its copy
+#: in Blob, or by its path on the server's own disk.
+IMAGE_TRANSPORTS = ("inline", "link", "file")
 
 #: An answer is checked for a loop each time it has grown by this many characters.
 REPEAT_CHECK_CHARS = 1000
 
 
-def image_data_url(image: Any) -> str:
-    """A page image - a path or bytes - as a data URL (PNG unless the path says otherwise)."""
+def image_data_url(image: Any, *, gray: bool = True) -> str:
+    """A page image - a path or bytes - as a data URL (PNG unless the path says
+    otherwise); a gray page as a grayscale PNG (:func:`inference_core.page_links.sent_png`)."""
+    from inference_core.page_links import sent_png
+
     if isinstance(image, bytes):
         data, kind = image, "image/png"
     else:
         path = Path(image)
-        data, kind = path.read_bytes(), IMAGE_TYPES.get(path.suffix.lower(), "image/png")
+        data, kind = sent_png(path, gray=gray), IMAGE_TYPES.get(path.suffix.lower(), "image/png")
     return f"data:{kind};base64,{base64.b64encode(data).decode('ascii')}"
 
 
-def image_url(image: Any, transport: str = "inline") -> str:
-    """The URL a page image is sent as: a data URL, or under ``file`` the
-    ``file://`` URL of its path (bytes have no path, so they always go inline)."""
-    if transport == "file" and not isinstance(image, bytes):
-        return Path(image).resolve().as_uri()
-    return image_data_url(image)
+def image_url(image: Any, transport: str = "inline", *, links: Any = None, gray: bool = True) -> str:
+    """The URL a page image is sent as: a data URL; under ``link`` its link in
+    ``links`` (a page with none goes inline); under ``file`` the ``file://`` URL
+    of its path. Bytes have no path, so they always go inline."""
+    if not isinstance(image, bytes):
+        if transport == "file":
+            return Path(image).resolve().as_uri()
+        if transport == "link":
+            link = links.url(image) if links is not None else None
+            if link:
+                return link
+            log.warning("%s has no link; sent in the request", Path(image).name)
+    return image_data_url(image, gray=gray)
 
 
-def chat_messages(messages: list[dict[str, Any]], images: str = "inline") -> list[dict[str, Any]]:
+def chat_messages(messages: list[dict[str, Any]], images: str = "inline", *, links: Any = None,
+                  gray: bool = True) -> list[dict[str, Any]]:
     """The pipeline's messages (``inference_core.input_builder``) as chat-completions messages."""
     out: list[dict[str, Any]] = []
     for message in messages:
@@ -90,7 +106,8 @@ def chat_messages(messages: list[dict[str, Any]], images: str = "inline") -> lis
         parts = []
         for block in content:
             if block.get("type") == "image":
-                parts.append({"type": "image_url", "image_url": {"url": image_url(block["image"], images)}})
+                url = image_url(block["image"], images, links=links, gray=gray)
+                parts.append({"type": "image_url", "image_url": {"url": url}})
             elif block.get("type") == "text":
                 parts.append({"type": "text", "text": block["text"]})
             else:
@@ -173,15 +190,21 @@ class OpenAIChatBackend(ModelBackend):
 
     def __init__(self, base_url: str, token: str | None = None, model: str | None = None, *,
                  timeout: float = 1800, max_concurrency: int = 96, stream: bool = True,
-                 images: str = "inline", stop_repeats: bool = True) -> None:
+                 images: str = "inline", stop_repeats: bool = True, links: Any = None,
+                 gray_pages: bool = True) -> None:
         if images not in IMAGE_TRANSPORTS:
             raise ValueError(f"images must be one of {IMAGE_TRANSPORTS}, got {images!r}")
+        if images == "link" and links is None:
+            raise ValueError("images='link' needs links (inference_core.page_links.PageLinks)")
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
         self.max_concurrency = max_concurrency
         self.stream = stream
         self.images = images
+        #: Where a page's link is looked up (``images="link"``).
+        self.links = links
+        self.gray_pages = gray_pages
         self.stop_repeats = stop_repeats
         self.sent_bytes = 0
         self._lock = threading.Lock()
@@ -239,7 +262,7 @@ class OpenAIChatBackend(ModelBackend):
         min_pixels, max_pixels = pixel_budget()
         body: dict[str, Any] = {
             "model": self.model,
-            "messages": chat_messages(messages, self.images),
+            "messages": chat_messages(messages, self.images, links=self.links, gray=self.gray_pages),
             "temperature": config.temperature,
             "top_p": config.top_p,
             "max_tokens": config.max_new_tokens,

@@ -422,8 +422,32 @@ python -m testing.latency_check --model-url http://localhost:8000 --mineru-url h
 ```
 
 Windows are taken as each is answered: a window cut off or stopped for repeating itself is split and resent at
-once, not after the slowest window. `--ocr-parts N` sends a PDF to MinerU as N runs of pages at once (faster only
-if one task leaves the GPU idle: measure it); `--tier` picks MinerU's tier.
+once, not after the slowest window. `--ocr-parts N` sends a PDF to MinerU as N runs of pages, one after another,
+so it reads the first while the rest upload (measure it against one task); `--tier` picks MinerU's tier.
+
+### From a laptop, through the proxy
+
+Off the pod, the bytes are the cost: a page image goes with every window that reads it, about four times a page,
+and a laptop uploads about 1 MB/s (a 114-page scan sent 871 MB of requests: about 15 of its 19 minutes). Three
+things cut them without changing what the model sees:
+
+- **Gray pages go as grayscale PNGs**, always: vLLM makes every image RGB, so the model gets the same pixels, at
+  66% of the bytes (all 114 pages of that scan checked). `--color-pages` sends them as rendered.
+- **`--images link`** uploads each page once to Blob while MinerU reads the PDF, and sends vLLM a read-only link it
+  fetches itself: about 105 MB of pages instead of 871 MB of requests. It needs the storage login in `.env` and a
+  read-only SAS for the links (`PAGE_LINK_SAS_TOKEN`, `sp=r`; refused if it may write), unless the login is a
+  connection string holding the account key. The pages are deleted after each document.
+- **`--ocr-parts 4`** starts MinerU on the first pages while the rest of the PDF uploads.
+
+```powershell
+python -m testing.latency_check --model-url https://<pod id>-8000.proxy.runpod.net `
+    --mineru-url https://<pod id>-8001.proxy.runpod.net --images link --ocr-parts 4 --concurrency 32 `
+    --doc "Test Data\personal_auto__foremost_insurance_company__foremost_autop__twin_015__scan.pdf=personal_auto"
+```
+
+A RunPod serverless vLLM endpoint is a `--model-url` too (`https://api.runpod.ai/v2/<endpoint id>/openai`, not yet
+tried): `--token` is then the RunPod API key, `--mineru-token` the pod's, and `--images link` is needed, since
+the serverless API caps a request's size.
 
 ## Versions and the registry
 

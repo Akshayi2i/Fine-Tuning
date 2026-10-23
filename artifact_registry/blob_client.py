@@ -94,6 +94,28 @@ class BlobBackend(ABC):
         none. A backend that cannot tell says ``None``: then nothing is skipped."""
         return None
 
+    def read_link(self, container: str, key: str, *, expiry_s: int, read_token: str | None = None) -> str:
+        """A URL anyone holding it can read the blob by, and nothing else."""
+        raise BlobError(f"{type(self).__name__} cannot give a link to a blob")
+
+
+def read_only_sas(token: str) -> str:
+    """``token`` without its leading ``?``, once it is seen to grant reading only.
+
+    A link carries its token to whoever is sent it - a served model, its logs -
+    so a token that may also write, delete or list is refused, not trimmed.
+    """
+    from urllib.parse import parse_qs
+
+    token = token.strip().lstrip("?")
+    permissions = (parse_qs(token).get("sp") or [""])[0]
+    if permissions != "r":
+        raise BlobError(
+            f"a link's SAS token must grant read only (sp=r), this one grants sp={permissions or '(none)'}: "
+            "the link hands it to the model server. Make a read-only SAS for the container."
+        )
+    return token
+
 
 class InMemoryBackend(BlobBackend):
     """Dict-backed backend for tests. Same rules as the real one."""
@@ -125,6 +147,9 @@ class InMemoryBackend(BlobBackend):
     def md5(self, container: str, key: str) -> bytes | None:
         data = self._store.get((container, key))
         return None if data is None else hashlib.md5(data).digest()
+
+    def read_link(self, container: str, key: str, *, expiry_s: int, read_token: str | None = None) -> str:
+        return f"memory://{container}/{key}"
 
 
 class AzureBackend(BlobBackend):
@@ -222,6 +247,33 @@ class AzureBackend(BlobBackend):
             self._client(container, key).delete_blob()
         except Exception as exc:
             raise BlobError(f"failed deleting {container}/{key}: {exc}") from exc
+
+    def read_link(self, container: str, key: str, *, expiry_s: int, read_token: str | None = None) -> str:
+        """The blob's URL with a read-only SAS: ``read_token`` when given (already
+        checked read-only), else one signed here for this blob alone, which needs
+        the account key (a connection-string login). A SAS login cannot sign one."""
+        from datetime import UTC, datetime, timedelta
+
+        client = self._client(container, key)
+        base = client.url.split("?", 1)[0]               # a SAS login's URL carries its own token
+        if read_token:
+            return f"{base}?{read_token}"
+        account_key = getattr(getattr(self._service_for(container), "credential", None), "account_key", None)
+        if not account_key:
+            raise BlobError(
+                "a link to a blob needs a read-only SAS token (PAGE_LINK_SAS_TOKEN) or a login holding the "
+                "account key (AZURE_STORAGE_CONNECTION_STRING): this login is a SAS token, which cannot sign "
+                "a narrower one"
+            )
+        from azure.storage.blob import BlobSasPermissions, generate_blob_sas
+
+        now = datetime.now(UTC)
+        sas = generate_blob_sas(
+            account_name=client.account_name, container_name=container, blob_name=key,
+            account_key=account_key, permission=BlobSasPermissions(read=True),
+            start=now - timedelta(minutes=5), expiry=now + timedelta(seconds=expiry_s),
+        )
+        return f"{base}?{sas}"
 
 
 # --------------------------------------------------------------------------
@@ -342,6 +394,15 @@ class BlobClient:
                 "golden-labels/ and any corpus entries derived from it (arch §18a)."
             )
         self._retry(self._backend.delete, self._container_for(key), key)
+
+    def read_link(self, key: str, *, expiry_s: int = 7200, read_token: str | None = None) -> str:
+        """A read-only URL to ``key`` for someone with no login of ours (a served
+        model fetching a page image). Never to the raw container: its blobs
+        leave our storage only through ingestion and OCR."""
+        if requires_raw_container(key):
+            raise AccessDeniedError(f"no link is given to {key!r}: raw documents are never handed out (arch §18a)")
+        token = read_only_sas(read_token) if read_token else None
+        return self._backend.read_link(self._container_for(key), key, expiry_s=expiry_s, read_token=token)
 
     # -- file and directory transfer ---------------------------------------
 

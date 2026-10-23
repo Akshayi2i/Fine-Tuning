@@ -238,3 +238,7 @@ into the per-corpus cache atomically (unique `.part` names, renamed into place).
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-23 (page links)
+
+- `BlobClient.read_link(key, expiry_s=, read_token=)`: a URL anyone holding it can read one blob by - for a served model fetching a page image (IMPL-11, `inference_core.page_links`). The token is a given SAS, refused unless it grants read only (`read_only_sas`: `sp=r`, since the link hands it to the model server), or one signed for that blob alone from the account key (a connection-string login; a SAS login cannot sign a narrower one and is never reused). Never to the raw container (`AccessDeniedError`). `InMemoryBackend` gives `memory://` links.

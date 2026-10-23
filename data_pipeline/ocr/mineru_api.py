@@ -18,6 +18,7 @@ pieces differently - ``structured_content`` pages of blocks with ``content`` and
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -113,7 +114,7 @@ def split_pdf(pdf: bytes, parts: int) -> list[tuple[int, bytes]]:
 def ocr_via_api(
     pdf: bytes, base_url: str, token: str | None = None, *, filename: str = "document.pdf",
     tier: str = "basic", ocr_mode: str = "auto", poll_s: float = 2.0, timeout_s: float = 3600,
-    parts: int = 1,
+    parts: int = 1, uploaded: threading.Event | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """``(one markdown string per page, what the server reports)`` for ``pdf``.
 
@@ -121,31 +122,47 @@ def ocr_via_api(
     lightweight models, the nearest to the pipeline backend the corpus used);
     ``ocr_mode`` ``auto`` reads a scan by OCR and a digital page from its text.
 
-    ``parts`` above 1 sends the PDF as that many runs of consecutive pages, as
-    tasks of their own at once, and joins their pages in order. Faster only
-    where one task leaves the server's GPU idle part of the time (its layout
-    and OCR steps take turns with work on the CPU): measure before relying on it.
+    ``parts`` above 1 sends the PDF as that many runs of consecutive pages, each
+    a task of its own, and joins their pages in order. The runs are uploaded
+    one after another, in page order, and each is polled from the moment it is
+    in: the server reads the first pages while the rest are still on their way.
+    Through a slow upload (a laptop behind the proxy: an 88 MB scan is 1.5
+    minutes of it) the reading then starts that much sooner; on a fast one the
+    gain is only where the server reads several tasks at once. Pages are read
+    a run at a time, so a table running across a run's last page is not joined
+    to the next run's: measure against one task before relying on it.
+
+    ``uploaded``, when given, is set once the whole PDF is at the server (the
+    caller can start sending something else then without slowing this upload).
     """
     pieces = split_pdf(pdf, parts) if parts > 1 else []
     if len(pieces) <= 1:
         return _ocr_task(pdf, base_url, token, filename=filename, tier=tier, ocr_mode=ocr_mode,
-                         poll_s=poll_s, timeout_s=timeout_s)
+                         poll_s=poll_s, timeout_s=timeout_s, uploaded=uploaded)
     from concurrent.futures import ThreadPoolExecutor
 
     stem = filename.rsplit(".", 1)[0]
-
-    def read(index: int) -> tuple[list[str], dict[str, Any]]:
-        count, piece = pieces[index]
-        return _ocr_task(piece, base_url, token, filename=f"{stem}.part{index + 1}.pdf", tier=tier,
-                         ocr_mode=ocr_mode, poll_s=poll_s, timeout_s=timeout_s, page_count=count)
-
-    with ThreadPoolExecutor(max_workers=len(pieces)) as pool:
-        done = list(pool.map(read, range(len(pieces))))
+    stop = threading.Event()
+    with ThreadPoolExecutor(max_workers=len(pieces), thread_name_prefix="mineru-run") as pool:
+        try:
+            futures = []
+            for index, (count, piece) in enumerate(pieces):
+                # Here, one at a time: each run's upload has the whole connection.
+                task_id = _submit(piece, base_url, token, filename=f"{stem}.part{index + 1}.pdf", tier=tier,
+                                  ocr_mode=ocr_mode)
+                futures.append(pool.submit(_finish, task_id, base_url, token, poll_s=poll_s,
+                                           timeout_s=timeout_s, page_count=count, stop=stop))
+            if uploaded is not None:
+                uploaded.set()
+            done = [future.result() for future in futures]
+        except BaseException:
+            stop.set()                                    # the other runs stop polling: the PDF has failed
+            raise
     pages = [page for part_pages, _info in done for page in part_pages]
     infos = [info for _pages, info in done]
     return pages, {
         "task_id": [info["task_id"] for info in infos], "pages": len(pages), "parts": len(pieces),
-        # The parts ran at once: the slowest is how long the server took.
+        # The runs overlap: the slowest is the nearest to how long the server took.
         "server_seconds": max(info["server_seconds"] for info in infos),
         "server_seconds_parts": [info["server_seconds"] for info in infos],
         "version": infos[0]["version"], "tier": infos[0]["tier"],
@@ -154,17 +171,35 @@ def ocr_via_api(
 
 def _ocr_task(
     pdf: bytes, base_url: str, token: str | None, *, filename: str, tier: str, ocr_mode: str,
-    poll_s: float, timeout_s: float, page_count: int | None = None,
+    poll_s: float, timeout_s: float, page_count: int | None = None, uploaded: threading.Event | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """One MinerU task: ``pdf`` posted, polled to its end, and its pages read."""
-    base = base_url.rstrip("/")
+    task_id = _submit(pdf, base_url, token, filename=filename, tier=tier, ocr_mode=ocr_mode)
+    if uploaded is not None:
+        uploaded.set()
+    return _finish(task_id, base_url, token, poll_s=poll_s, timeout_s=timeout_s, page_count=page_count)
+
+
+def _submit(pdf: bytes, base_url: str, token: str | None, *, filename: str, tier: str, ocr_mode: str) -> str:
+    """``pdf`` posted as a task; its id once the server has the whole file."""
     query = urllib.parse.urlencode({"tier": tier, "ocr_mode": ocr_mode, "filename": filename,
                                     "output_formats": "structured_content"})
-    task = _call(f"{base}/v1/tasks?{query}", token, data=pdf, timeout=900,
+    task = _call(f"{base_url.rstrip('/')}/v1/tasks?{query}", token, data=pdf, timeout=900,
                  content_type="application/octet-stream")
-    task_id = task["task_id"]
+    return str(task["task_id"])
+
+
+def _finish(
+    task_id: str, base_url: str, token: str | None, *, poll_s: float, timeout_s: float,
+    page_count: int | None = None, stop: threading.Event | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Task ``task_id`` polled to its end, and its pages read."""
+    base = base_url.rstrip("/")
+    task: dict[str, Any] = {"task_id": task_id}
     deadline = time.monotonic() + timeout_s
     while task.get("status") not in FINISHED:
+        if stop is not None and stop.is_set():
+            raise MinerUApiError(f"task {task_id} abandoned: another run of the PDF's pages failed")
         if time.monotonic() > deadline:
             raise MinerUApiError(f"task {task_id} not finished after {timeout_s:.0f} s")
         time.sleep(poll_s)

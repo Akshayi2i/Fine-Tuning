@@ -322,6 +322,11 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - Every window read is recorded in `ExtractionResult.window_stats` (group, pages, attempt, outcome, seconds, time to first token, prompt and answer tokens, finish reason), not in the served JSON; `Generation` carries `prompt_tokens` and `first_token_ms`.
 - Page images can go to a served model by path (`images="file"`, a `file://` URL; vLLM needs `--allowed-local-media-path`) instead of as base64.
 
+## Changes of 2026-10-23 (page bytes)
+
+- A served model is sent a gray page (an RGB render whose channels are equal everywhere) as an 8-bit grayscale PNG (`inference_core.page_links.sent_png`, `OpenAIChatBackend(gray_pages=True)`, the default): vLLM converts every image to RGB, so the model reads the same pixels, at 66% of the bytes (all 114 pages of a scan checked); a page with any colour, or one PIL cannot read, goes as it is on disk. Each page is encoded once however many windows send it.
+- `images="link"` (`inference_core.page_links.PageLinks`): each page is uploaded once to Blob (`transient/page-links/<run>/<document>/`) and every window's request carries a read-only link the server fetches itself, instead of the image about four times a page; a page with no link goes inline. The link's token is a read-only SAS given (`PAGE_LINK_SAS_TOKEN`, refused unless `sp=r`) or one signed for the blob alone from the account key (`BlobClient.read_link`, IMPL-02). The pages are deleted after the document; the links expire (2 hours when signed here).
+
 ## Changes of 2026-10-23 (incremental training)
 
 - Nothing is merged (decision 2026-10-23): a release is its adapter (`served_as: lora_on_base`), so the engine always holds the bf16 base and applies the release's adapter per request (`serves_base_with_loras` is True for it); an older merged release is served as before (§1, acceptance, *Current implementation*: serving through the release, the engine).
