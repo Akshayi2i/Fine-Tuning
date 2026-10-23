@@ -37,7 +37,7 @@ testing/
 results and metrics are written; a document that failed writes no entry.
 
 ### 2. `testing/prompts/*.prompt.txt`
-One per ACORD form (25, 125, 140), one for Loss Runs, one for the bare `policy` (a package policy, an unclassified line) and one per policy line of business registered in the canonical family — each in `ocr_plus_image` and `image_only` — plus, for every common-model line, one per section group (`decl`, `arrays`, `lineblk`): the window prompts serving actually sends. Each contains the role framing, the **injected JSON schema for that selection pulled from the IMPL-01 registry** (so it stays in sync), the extraction rules (null-handling, date formats, repeating table rows), and the modality-mode instruction line. They are generated (`python -m testing.render_prompts --write`), never hand-edited.
+One per ACORD form (25, 125, 140), one for Loss Runs, one for the bare `policy` (a package policy, an unclassified line) and one per snapshot line (`common.schemas.SNAPSHOT_LINES`: the seven personal lines) — each in `ocr_plus_image` and `image_only` — plus, for every common-model line, one per section group (`decl`, `arrays`, `lineblk`): the window prompts serving actually sends. Each contains the role framing, the **injected JSON schema for that selection pulled from the IMPL-01 registry** (so it stays in sync), the extraction rules (null-handling, date formats, repeating table rows), and the modality-mode instruction line. They are generated (`python -m testing.render_prompts --write`), never hand-edited.
 
 **Why one file per type, form and line (arch §17):** each has a different schema, different field semantics (a Loss Run's "valuation date" vs. an ACORD's "policy effective date"), and different edge cases. Separate files let a reviewer read exactly what each is asked, and one prompt can be tuned without risk to the others.
 
@@ -54,7 +54,7 @@ python -m testing.run_extraction --model base --tenant T --split test --corpus v
 
 # The base model with a training checkpoint applied per request, not merged
 python -m testing.run_extraction --model base \
-       --adapter /workspace/staging/adapters/scope/personal_lines/v1/<run>/checkpoint-280 \
+       --adapter /workspace/staging/adapters/scope/policy/v1/<run>/checkpoint-280 \
        --tenant T --split val --corpus v1
 
 # Or through the operator command surface (IMPL-13), which wraps this:
@@ -73,8 +73,8 @@ python -m testing.run_extraction --model v2 --tenant T --split test --corpus v1 
   |---|---|
   | `base` | Untuned `Qwen/Qwen3-VL-8B-Instruct` at the pinned revision, **no adapter** |
   | `base` + `--adapter <folder>` | The base with that LoRA applied on every request, **not merged** — a `checkpoint-N` folder or a run's adapter folder, local or a Blob prefix (copied once to `/workspace/adapters`). Refused with any other `--model`, without `adapter_config.json`, above the engine's `max_lora_rank`, or with `enable_lora: false` |
-  | `v1`, `v2`, … | The merged model, plus a graduated per-type adapter where the routed type has one |
-  | `v2` + `--format fp8` | That version's FP8 serving weights (refused while the version is still staged). A GGUF format here is a category error: llama.cpp loads those, and the endpoint runs vLLM |
+  | `v1`, `v2`, … | The policy adapter's run of that version (`policy-v2`): the base with that version's adapter applied per request, staged or published — nothing is merged (decision 2026-10-23). A staged version loads the checkpoint its selection chose, else its latest checkpoint on the staging volume (with a warning), else it is refused. A version trained on another base than the configured `model_id@revision` is refused. For an older unified or Foundation run, its merged model plus a graduated per-type adapter where the routed type has one |
+  | `v2` + `--format fp8` | Refused for a version of the policy adapter: it is a LoRA on the bf16 base, so there is no FP8 model. For an older run, that version's FP8 serving weights (refused while the version is still staged). A GGUF format here is a category error: llama.cpp loads those, and the endpoint runs vLLM |
 
   **`base` is not a curiosity** — it is the zero-shot baseline of the pilot protocol (IMPL-15) and the day-zero pre-annotation path (IMPL-04). Supporting it here means those two have one implementation, not three.
 - **Which documents:** `--source-ids …` or `--split train|val|test` with `--corpus vN` (that corpus manifest's `source_ids_by_split`) — mutually exclusive; with neither, every labelled document of `--doc-type` (default `policy`) for `--tenant`. `--limit N` keeps the first N.
@@ -152,7 +152,7 @@ One entry per extraction, so an output JSON is never ambiguous about its origin 
       "document": "policy_0001",
       "doc_type": "policy",
       "model_version": "v2",
-      "quant_format": "fp8",
+      "quant_format": null,
       "mode": "ocr_plus_image",
       "result_path": "results/v2/policy_0001.json",
       "metrics_path": "metrics/v2/policy_0001.metrics.json",
@@ -194,7 +194,7 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 - [ ] `line_of_business` present in every result, with confidence, `null` when undetermined.
 - [ ] With a gold label that has a review record, per-doc + summary metrics computed, including list-field recall; `--no-score` skips them; a gold with no review record is not scored, and the metrics file and `summary.json` (`not_scored`) say why.
 - [ ] Every result carries `all_fields`: every field of its schema, with its value and, against gold, its result.
-- [ ] `--format fp8` runs that version's FP8 serving weights once packaged (a GGUF format is a category error here: the harness runs vLLM).
+- [ ] `--model vN` loads the base with that version's adapter applied, not merged; a non-bf16 `--format` is refused for it (a GGUF format is a category error here: the harness runs vLLM). A staged version loads its selected checkpoint, else its latest one with a warning, else it is refused; a version trained on another base than the configured one is refused.
 - [ ] `extraction_registry.json` links result → model version → run manifest.
 - [ ] `testing/prompts/*.prompt.txt` render identically to `common.prompts` for the same inputs (asserted, not assumed).
 - [ ] **Output equals the serving pipeline's output on the same input** (parity test).
@@ -264,6 +264,10 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 - Acceptance checklist: scoring needs a reviewed gold.
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
 
+## Changes of 2026-10-22 (one adapter)
+
+- One adapter (decision 2026-10-22): `--model vN` resolves the policy adapter's run (before, only unified/Foundation runs were found); the adapter path example is `scope/policy/`; the line prompts snapshotted are those of `SNAPSHOT_LINES`.
+
 ## Changes of 2026-10-23 (full text)
 
 - Each document's metrics carry `text_coverage` (the share of its page text's words found in the served JSON, SPEC_21's every-word rule); `summary.json` adds `mean_text_coverage`, `min_text_coverage`, `documents_below_full_text` (under `FULL_TEXT_COVERAGE` = 0.99, chosen, not measured) and `documents_without_full_text` (flagged `text_sections:no_page_text`). The full-text tier is never scored: scoring narrows the answer to the model view, which has no `text_sections`.
@@ -275,3 +279,8 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 - `data_pipeline/ocr/served_ocr.py` (`ServedOcr`): renders a PDF's pages in several processes (`render_pdf_pages(..., workers=)`, the same bytes as one process) while a served MinerU reads it, optionally as several runs of pages at once (`ocr_via_api(..., parts=)`, `split_pdf`); writes `page_NNN.png`/`.md`; also the job server's OCR call.
 - `testing/latency_check.py` reads through it, sends each window as it can (`--concurrency`, default 128), stops repeating answers (`--no-repeat-stop` to compare), can send images by path (`--images file`) or ask for a served adapter (`--served-model`), and scores each document against its gold JSON when one is found (`--gold-dir`, or `Gold_json` beside the PDF's folder; `testing.run_extraction.score_against_ground_truth`). Each document's JSON carries `window_stats` and a `windows` summary (rounds, splits, failures, cut off, stopped repeating, prompt and answer tokens, the slowest window); the table adds pages-and-text seconds, rounds, splits, answer tokens, the slowest window and exact match.
 - `testing/extract_server.py` can use the pod's own servers (`--model-url`, `--mineru-url`, `--remote-token`, `--images`, `--tier`, `--ocr-parts`, `--served-model`): it then loads neither vLLM nor MinerU, and only the PDF crosses the proxy. Its summary adds `windows` and the rendering/OCR timings; the result JSON adds `window_stats`.
+
+## Changes of 2026-10-23 (incremental training)
+
+- Nothing is merged (decision 2026-10-23): `--model vN` is the base with that version's adapter applied per request (`query_registry` kind `base_plus_adapter`), and a non-bf16 `--format` is refused for it (§3 table, the registry example, acceptance).
+- Code review of the incremental training: `--model vN` refuses a version trained on another base than the configured one, and a staged version loads its selected checkpoint, else its latest with a warning, else it is refused (§3 table, acceptance).

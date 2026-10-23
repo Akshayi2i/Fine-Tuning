@@ -304,16 +304,18 @@ A gold still outside its line's schema afterwards, or a package policy (two part
 filed under one common-model line, is not bundled; the reason is listed.
 
 **A policy's line** (`label_metadata.lob`) is validated against the lines that have a canonical schema
-(`common.scopes.known_lines`, schema spellings and enum spellings both accepted) — not against the 13-value
+(`common.lob.known_lines`, schema spellings and enum spellings both accepted) — not against the 13-value
 LOB enum, which rejected `flood`, `cyber`, `professional_eo`, `gl`, `wc` and failed real labels.
 
-**Pre-upload data audit** (`python -m data_pipeline.audit [--input <folder>] [--scope personal_lines]`, default
-input `data/bundles`, the `prepare_bundles` output; `--scope casualty_fleet` for the CGL bundles): read-only, on
+**Pre-upload data audit** (`python -m data_pipeline.audit [--input <folder>] [--lines a,b]`, default
+input `data/bundles`, the `prepare_bundles` output; every line unless `--lines` names some): read-only, on
 the laptop, before anything is uploaded. Five layers — structure
 (one PDF + `golden.json` + `metadata.json` per folder, PDF opens, no duplicate PDFs), label shape (the
 importer's own `check_bundle` (so a form's edition left in its number on a common-model line and a gold with
-no review record block here too), `lob` has a schema and is in scope, `page_ref` inside the PDF, a delivered
-split that keeps each source in one split), values against
+no review record block here too), `lob` has a schema (and is one of `--lines` when given), `page_ref` inside the PDF, a delivered
+split that keeps each source in one split, and one output shape: single-line policies of common-model lines beside
+self-contained lines are the blocker `output shape` (`audit.output_shape_findings`), to be left out with
+`prepare_bundles --lines` before import, since training would refuse the tenant afterwards), values against
 the PDF (each `raw` found on the page its `page_ref` names, with the `common.grounding` matcher the label rules
 and the evaluation also use; wrong page / not found / needs OCR for scans),
 formats (readable dates — the build rewrites them MM/DD/YYYY — amounts agreeing with `raw`, period order) and
@@ -360,3 +362,8 @@ row per value. Page text is normalised once per page.
 - Label metadata records `imported_from_history` beside `imported_from`.
 - `reviewer_id` must name a person, in any script; a model, system or generator name is refused.
 - A relabel (`export_golden_label`) keeps the delivery's keys (`DELIVERY_KEYS`), so a re-reviewed gold keeps its split, held-out mark and import folders.
+
+## Changes of 2026-10-22 (one adapter)
+
+- No training scopes (decision 2026-10-22): the audit takes `--lines a,b` (every line by default) instead of `--scope`; a policy's line is checked against `common.lob.known_lines`.
+- Code review of 2026-10-23: the audit blocks a folder whose single-line policies would teach two output shapes (`output shape`), before import, pointing to `prepare_bundles --lines`.

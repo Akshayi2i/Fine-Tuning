@@ -51,7 +51,7 @@ Under Option A the corpus manifest records `deidentified: false` and `image_reda
 - **Splitting is tenant-scoped** — never build a split spanning tenants.
 
 ### 3. Modality expansion — `data_pipeline/dataset_builder/build_jsonl.py`
-- **Train: one row per document per epoch** (arch v2.1 §6.1) — for a windowed policy, one row per window per epoch, all in that epoch's mode. `sample_modes` draws each train document's regime for each of the 4 epochs (`EPOCH_FILES`), seeded, against the target mix: the building scope's `modality_mix` when its training config sets one, else `common.constants.MODALITY_MIX` (**50 / 20 / 30**). The target is recorded as `modality_mix_target` in the manifest, and a training run whose scope wants another mix is refused (`training.data_mix.assert_corpus_mix`). It is the only sampling step: v1's `sample_to_target_mix` down-sampler is gone, because running it over epoch rows would drop documents from epochs. Twins over the per-seed cap are dropped before the draw (`cap_twins`), so the mix check measures what trains.
+- **Train: one row per document per epoch** (arch v2.1 §6.1) — for a windowed policy, one row per window per epoch, all in that epoch's mode. `sample_modes` draws each train document's regime for each of the 4 epochs (`EPOCH_FILES`), seeded, against the target mix: the `modality_mix` of the adapter's training config (`configs/training/unified.yaml`) when it sets one, else `common.constants.MODALITY_MIX` (**50 / 20 / 30**). The target is recorded as `modality_mix_target` in the manifest, and a training run whose config wants another mix is refused (`training.data_mix.assert_corpus_mix`). It is the only sampling step: v1's `sample_to_target_mix` down-sampler is gone, because running it over epoch rows would drop documents from epochs. Twins over the per-seed cap are dropped before the draw (`cap_twins`), so the mix check measures what trains.
 - **Val / test: all 3 variants** per document, so image-only and noisy-OCR accuracy are measured on the full eval population.
 - The mix check (`assert_mix_is_close`, 5-point tolerance) is enforced from **900 draws**; below that it warns. At pilot volume (30 train docs × 4 epochs = 120 draws) one regime's share has a ~4.6-point standard deviation, so an enforced check would fail correct corpora.
 - `image_only` rows omit the OCR text block entirely and use the image-only system prompt — the explicit "no OCR provided" declaration, not a silently missing field (arch §6).
@@ -67,8 +67,8 @@ Orchestrates: for each tenant, split, and doc_type, assemble chat-format rows us
 - `system` = rendered prompt (schema + modality instruction) via **`common.prompts`** — the same renderer serving and testing use. **Never hand-type the schema per example**; inject it from the registry at build time so a schema change is a one-file edit that regenerates the whole corpus consistently (arch §7).
 - `user` = image block(s) (+ OCR text unless `image_only`). **Multi-page documents produce multiple ordered `image` blocks, each followed by that page's own markdown, in one example** (see *Page pairing* below).
 - `assistant` = for a flat type (ACORD, Loss Run), the golden JSON via `common.canonical.training_target` (dates written MM/DD/YYYY), including `line_of_business`; for a canonical policy, the window's target (see *Current implementation*).
-- Carry `doc_type`, `acord_form`, `lob`, `modality_mode`, `source_id`, `tenant_id`, `split`, `deidentified` on every row, plus `group_id`, `synthetic`, `carrier`, `twin_index`, `render_mode`, `is_scanned` (what a scope's data mix and render rotation read, IMPL-06), `val_half` on validation rows, `epoch` on train rows, and `sections`, `task`, `window_index`, `window_pages` on a policy window row.
-- Write `corpus/{tenant_id}/v{n}/train/epoch_{1..4}.jsonl` and `corpus/{tenant_id}/v{n}/{val,test}/{val,test}.jsonl` to Blob — all doc types together, because one adapter trains on every type (§8.1). These are exactly the paths `training/train.py` reads; `tests/test_orchestration.py` asserts that on a real build. Every epoch file holds every train document exactly once (`train_rows_by_epoch` refuses otherwise; a policy's windows may differ between epochs, its documents may not). Rows are written sorted by `(source_id, modality_mode, sections, window_index)` (`write_jsonl`). A line-scoped training run reads a filtered view of these files (`training/corpus_view.py`, IMPL-06), never a corpus of its own.
+- Carry `doc_type`, `acord_form`, `lob`, `modality_mode`, `source_id`, `tenant_id`, `split`, `deidentified` on every row, plus `group_id`, `synthetic`, `carrier`, `twin_index`, `render_mode`, `is_scanned` (what the adapter's data mix and render rotation read, IMPL-06), `val_half` on validation rows, `epoch` on train rows, and `sections`, `task`, `window_index`, `window_pages` on a policy window row.
+- Write `corpus/{tenant_id}/v{n}/train/epoch_{1..4}.jsonl` and `corpus/{tenant_id}/v{n}/{val,test}/{val,test}.jsonl` to Blob — all doc types the build was given together, in one file (§8.1); the pipeline gives it the adapter's types, today policies only. These are exactly the paths `training/train.py` reads; `tests/test_orchestration.py` asserts that on a real build. Every epoch file holds every train document exactly once (`train_rows_by_epoch` refuses otherwise; a policy's windows may differ between epochs, its documents may not). Rows are written sorted by `(source_id, modality_mode, sections, window_index)` (`write_jsonl`). The adapter's training run reads a filtered view of these files (`training/corpus_view.py`, `train/scope/policy/` and `val/scope/policy/`: policies of one known line only — a package and a policy with no line are left out, IMPL-06), never a corpus of its own. The corpus itself still holds them; its `policy_line_counts` counts a package once for each of its lines.
 - Reference images/OCR by Blob URI or a training-time-resolvable path (document the choice; it must resolve identically inside a RunPod pod).
 
 **Required edge cases the corpus must actually contain (arch §7)** — assert coverage and report counts in the manifest:
@@ -111,7 +111,7 @@ Writes `manifest.json` per corpus version — this is what training and eval rea
 ## Acceptance checklist
 - [ ] No `source_id` crosses splits (automated assertion).
 - [ ] No corpus file contains rows from more than one `tenant_id`.
-- [ ] Each train document appears once per epoch file with the drawn modality (the scope's mix, default 50/20/30, across draws); val/test documents carry all three modes.
+- [ ] Each train document appears once per epoch file with the drawn modality (the training config's mix, default 50/20/30, across draws); val/test documents carry all three modes.
 - [ ] `noisy_ocr_image` rows have corrupted OCR but **correct** golden JSON targets, tagged with corruption types.
 - [ ] `image_only` rows contain no OCR text and use the image-only prompt; `noisy_ocr_image` renders the same prompt as `ocr_plus_image`.
 - [ ] Corpus rows interleave each page image with that page's own markdown; no two pages' markdown are joined.
@@ -272,8 +272,8 @@ count, the verification counts — is kept per document on `BuildResult.window_n
 
 **Expansion failures.** A document that fails to expand is set aside (`set_aside["expansion"]`), except on a
 common-model line, where more than `max_expansion_failures` (default 0) such documents fail the build.
-`classify_rows` (the family adapter's line question) exists, but `build_corpus(with_classify_rows=True)` is
-refused until serving asks that question.
+`classify_rows` (the adapter's line question, among every known line) exists, but
+`build_corpus(with_classify_rows=True)` is refused until serving asks that question.
 
 **Loss Runs** train as one whole-document `extract` row. `expand_tasks.expand_lossrun` (header, row windows,
 totals; arch §7b) has no production caller yet, and its `lossrun_totals` example is built only when the Loss
@@ -442,6 +442,11 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 - `window_plan_version` is `window_plan_id()` (version `"3"` plus a fingerprint of the planner's inputs); the manifest also pins `review_rule_version`.
 - `normalize_carrier` reads an underscore as a space and keeps a name word where dropping it would leave a placeholder; `is_placeholder_carrier` moved to `common.normalize` with more variants.
 - The frozen-carrier warning covers carriers the delivery held out, several per line, compared as keys.
+
+## Changes of 2026-10-22 (one adapter)
+
+- No training scopes or layout families (decision 2026-10-22): the modality target is the adapter's training config's; the adapter's view (`train/scope/policy/`, policy rows) is what trains; `classify_rows` asks among every known line, not a family's.
+- Code review of 2026-10-23: the adapter's view keeps policies of one known line only; a package and a policy with no line stay in the corpus and out of the view (§5).
 
 ## Changes of 2026-10-23 (forms job)
 

@@ -93,6 +93,7 @@ This matters most for **Loss Runs**, where a missed claim row is both easy to ma
 - [ ] A flagged list is routed to review even when every per-value confidence is high.
 - [ ] Calibrated confidence is available with **no ground truth** — the inference-time case that makes production review routing possible.
 - [ ] Fitting on data overlapping the training split fails the assertion.
+- [ ] The calibrators record the checkpoint they were fitted on, and calibrators of another checkpoint than the one selected now are refused when read back.
 
 ---
 
@@ -146,18 +147,22 @@ This spec's §1–§3 describe v1's single-number calibration. What runs now (ar
 4. **Per serving format**: each format gets its own calibrators from its own generations (quantization
    moves the logprob distribution), stored at
    `releases/{tenant}/{release}/calibration/{format}/calibrators.json` (`paths.release_calibrators`; the
-   calibrators and the thresholds together).
+   calibrators and the thresholds together, with `adapter_checkpoint`: the checkpoint whose generations they
+   were fitted on, the selected one, else the staged adapter directory).
 5. **Loss Run reconciliation** (`calibration/reconciliation.py`) per policy period, alongside row
    completeness.
 
-**Where the samples come from.** `orchestration.pipeline_dag.collect_calibration_samples` reads the scope's
-validation split, localises its page images, and for each serving format in turn (`bf16` alone with
-`--skip-quantize`) loads the staged merged or quantized model, generates **every validation row** with
+**Where the samples come from.** `orchestration.pipeline_dag.collect_calibration_samples` reads the adapter's
+validation split (`val/scope/policy/val.jsonl`), localises its page images, and for each serving format in turn
+(`bf16` only since 2026-10-23: nothing is merged or quantized) loads the model as it is served — the base with
+the selected adapter applied (`load_model("base", adapter=...)`) — generates **every validation row** with
 `evaluation.validation_generation.generate_validation` (constrained as serving is, `page_ref` bounded to each
 row's pages, the row's task answer cap, `validation_batch_rows` rows per call — IMPL-08), releases the engine
 before the next format loads, and logs what the pass cost: rows, seconds, calls, rows per call and the slowest
 call. A pass with too many failed rows is refused (`assert_generations_usable`); a format with no evidence gets
-no entry. A resumed `package` finds the calibrators in Blob.
+no entry. A resumed `package` finds the calibrators in Blob (`pipeline_dag.release_calibration`), and refuses
+those fitted on another checkpoint than the one selected now, with "Run package again from calibrate":
+confidence from one checkpoint's logprobs says nothing about another's.
 
 **How a sample is labelled** (`validation_generation.calibration_samples`), by the `val_half` the dataset build
 stamped on each row (a row without one is left out, with a warning):
@@ -201,3 +206,12 @@ back to the default target.
 ## Changes of 2026-10-22 (code review)
 
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
+
+## Changes of 2026-10-22 (one adapter)
+
+- No training scopes (decision 2026-10-22): calibration samples come from the policy adapter's validation view.
+
+## Changes of 2026-10-23 (incremental training)
+
+- *Where the samples come from*: calibration loads the base with the selected adapter applied, as served, in bf16 only; the merged and quantized models are gone, and `--skip-quantize` with them (decision 2026-10-23).
+- Code review of the incremental training: the calibrators record `adapter_checkpoint`, and calibrators fitted on another checkpoint are refused (*Current implementation*, item 4 and *Where the samples come from*; new acceptance item).

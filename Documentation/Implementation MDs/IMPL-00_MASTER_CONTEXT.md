@@ -10,15 +10,16 @@
 >
 > Anything genuinely build-level — a CLI flag, a module name, a test — lives here and is not expected to appear in the architecture.
 >
-> **Revision:** aligned to **`finetuning-architecture-v2.5.docx`** (its Revision v2.5, 2026-10-22), which records the decisions of 2026-10-19 and 2026-10-22 below. The section numbers are unchanged from v2.1.
+> **Revision:** aligned to **`finetuning-architecture-v2.5.docx`** (its Revision v2.5, 2026-10-22), which records the decisions of 2026-10-19 and 2026-10-22 below. The section numbers are unchanged from v2.1. One later decision of 2026-10-22, **one adapter** (below), and one of 2026-10-23, **incremental training**, are not in v2.5 yet: the architecture still describes training scopes and layout families, a fresh LoRA every cycle and the merge and quantize stages, and these specs follow the code.
 >
-> **Current target.** **Policy documents only, for now** (decision 2026-10-22): train and gate a policy scope (`--scope policy`, or a line scope such as `personal_lines`); the ACORD and Loss Run code is kept, unchanged, but not targeted. A new training set and canonical schema are to be delivered, and the corpus, the frozen eval set and the adapters are rebuilt from them.
+> **Current target.** **One adapter, for policy documents, one version per cycle** (decisions 2026-10-22). Each fine-tuning cycle trains one LoRA (`common/adapter.py`) over all the policy data so far, new and existing. It **continues the tenant's promoted adapter**, on the original bf16 base, unless it has to start from the base (decision 2026-10-23, §12). Nothing is merged or quantized: the release is the adapter, and serving loads the base and applies it. The cycle takes the next version number (`v1`, `v2`, …), and that number names its run (`policy-v3`), its adapter and its release. There are no training scopes and no layout families. The code for ACORD and Loss Run documents is kept, unchanged, but not trained. A new training set and canonical schema are to be delivered, and the corpus, the frozen eval set and the adapter are rebuilt from them.
 >
 > What v2.5 changed (decisions 2026-10-22, after a code review of v2.4), and what it means for these specs:
 >
 > | Change | Why | Specs affected |
 > |---|---|---|
-> | **Policy documents only, for now.** A policy scope is trained and gated; the ACORD and Loss Run code stays as it is | The current target. A unified release scored on no ACORD or Loss Run documents is capped at interim, since its scope covers types it was not scored on | 00, 06, 13, 15 |
+> | **Policy documents only, for now.** Only policies are trained and gated; the ACORD and Loss Run code stays as it is | The current target | 00, 06, 13, 15 |
+> | **One adapter** (after v2.5). No training scopes (`configs/scopes.yaml` and `common/scopes.py` are gone) and no layout families (`configs/layout_families.yaml` is gone). Each cycle trains the one policy adapter (fresh on the base then; since 2026-10-23 it continues the promoted adapter) and takes the next version; `package` promotes a release that passes its gate and archives the one it replaces; `promote` rolls back | The user's decision. Fideon SPEC_09's five policy adapter groups by layout family are knowingly not followed | all but 07 |
 > | **Every gold needs a review record** (`reviewer_id`, `review_date`), read from its metadata alone; a twin carries its seed's | Only a person's name shows a person checked a gold; notes can be read either way | 00, 03, 04, 05, 08, 12, 13 |
 > | **Policy windows sized by their pages' own text**; the corpus pins `window_plan_version` | Dense wording overflowed the sequence cap and set whole documents aside | 04, 05, 11, 13 |
 > | **A new training set and canonical schema are to be delivered** | Counts and schema details in these specs describe the older data and the current schema; they change when the new ones arrive | all |
@@ -75,7 +76,7 @@ The architecture document references **Fideon pipeline specs** that are *externa
 | **Fideon SPEC_11** | Presidio **de-identification** step | **Not used**: the architecture records Option A (no de-identification) as the current state — see IMPL-05 §1 and §8 below |
 | **Fideon SPEC_12** | **Multi-tenant deployment** model | Implemented for corpus, eval sets and releases in our IMPL-02/05/06/08 |
 | **Fideon SPEC_05** §4, §4.1, §9 | OCR: modality, `force_ocr` for drawn figures, time budgets | `data_pipeline/ocr/modality.py`, `data_pipeline/ocr/mineru_runner.py` (IMPL-03) |
-| **Fideon SPEC_06** §9a / **SPEC_09** §2.1a | Line of business → layout family | `configs/layout_families.yaml`, read by training and serving (IMPL-05/11) |
+| **Fideon SPEC_06** §9a / **SPEC_09** §2.1a | Line of business → layout family | **Not followed** (decision 2026-10-22): there are no layout families. One adapter trains every policy line, and serving routes by the lines a release trained on (IMPL-06/11) |
 | **Fideon SPEC_09** | Fine-tuning requirements (amendment and handoff items: carrier hold-out, twin cap, data mix, model card, release tier, latency/routing on releases) | IMPL-05, 08, 13 |
 | **Fideon SPEC_21** | The canonical schema set: `common_model.json` plus thin per-line overlays | `configs/canonical schema/`, loaded by `common/schemas.py` (IMPL-01) |
 
@@ -164,9 +165,9 @@ L1 (carrier registry) and L2 (structural inference) both attempt LoB detection f
 - **Corpus coverage target: ≥20% of training examples per LoB value** in the real document population (IMPL-05 reports actual coverage in the manifest; under-coverage is a loud warning, not a silent pass).
 - **Reported as its own metric, per LoB value, and it is a gating metric** (IMPL-08). It is never averaged into overall field accuracy — a rare class must not hide inside a healthy aggregate.
 
-**Policies are different.** A policy's line arrives with the request (`lob`, from L1/L2) and selects the line's canonical schema; a canonical policy label carries no `line_of_business` for the model to detect (its line is the label metadata's `lob`), so `lob_detection_accuracy` is structurally not applicable to policy-only scopes (`common.scopes.structural_not_applicable`). A policy's line is a canonical schema name (`gl`, `auto`, `wc`, `homeowners` …): `general_liability`/`cgl` read as `gl`, `workers_comp` as `wc`, `commercial_auto` as `auto` (`common.schemas.LOB_SCHEMA_ALIASES`), and two lines are merged everywhere a line is read — `classic_auto` is `personal_auto` and `watercraft` is `ocean_marine` (`common.lob.MERGED_LINES`).
+**Policies are different.** A policy's line arrives with the request (`lob`, from L1/L2) and selects the line's canonical schema; a canonical policy label carries no `line_of_business` for the model to detect (its line is the label metadata's `lob`), so `lob_detection_accuracy` is structurally not applicable to the policy adapter (`common.adapter.not_applicable_metrics`). A policy's line is a canonical schema name (`gl`, `auto`, `wc`, `homeowners` …): `general_liability`/`cgl` read as `gl`, `workers_comp` as `wc`, `commercial_auto` as `auto` (`common.schemas.LOB_SCHEMA_ALIASES`), and two lines are merged everywhere a line is read — `classic_auto` is `personal_auto` and `watercraft` is `ocean_marine` (`common.lob.MERGED_LINES`).
 
-**Reading a policy's line when no caller sent one exists but ships OFF.** The classifier prompt can ask for the line from every registered line, each described by its role (`configs/lob_meanings.yaml`), with the line's own token probability as its confidence (`serving/doc_type_classifier.py`). `routing.detect_lob` in `configs/inference/vllm_serving.yaml` is `false` until `scripts/measure_lob_detection.py` has measured it on held-out policies against the 0.85 floor and its thresholds (`lob_confidence_threshold` 0.90, `lob_family_threshold` 0.60) are fitted. Off, a policy with no line is refused, or read by the base model against `_fallback.json` when the caller sends `allow_lob_fallback`.
+**Reading a policy's line when no caller sent one exists but ships OFF.** The classifier prompt can ask for the line from every registered line, each described by its role (`configs/lob_meanings.yaml`), with the line's own token probability as its confidence (`serving/doc_type_classifier.py`). `routing.detect_lob` in `configs/inference/vllm_serving.yaml` is `false` until `scripts/measure_lob_detection.py` has measured it on held-out policies against the 0.85 floor and its thresholds (`lob_confidence_threshold` 0.90, `lob_uncertain_threshold` 0.60) are fitted. Off, a policy with no line is refused, or read by the base model against `_fallback.json` when the caller sends `allow_lob_fallback`.
 
 ### 1.4 Canonical field mapping — the model does the semantic work
 
@@ -200,21 +201,21 @@ The same real-world field appears under many surface labels across documents. Th
 
 | Decision | Value |
 |---|---|
-| Base model | `Qwen/Qwen3-VL-8B-Instruct`, pinned HF revision (`configs/base_model.yaml`). **Loaded from the pod's local copy** under `model.local_dir` (default `/workspace/models`) by training, the tokenizer, the merge and vLLM — never from the Hub at run time (§13) |
-| Fine-tuning technique | **LoRA on a bf16 base** — bf16 frozen base weights, LoRA adapters in bf16. Both serving paths hold the base in bf16/fp16 (merged model per IMPL-10, vLLM LoRA hot-swap per IMPL-11), so training in bf16 means the adapter is applied to exactly the weights it trained against. **4-bit NF4 QLoRA remains a live flag** (`quantization.load_in_4bit`) for VRAM-constrained pods — arch §9.2 |
+| Base model | `Qwen/Qwen3-VL-8B-Instruct`, pinned HF revision (`configs/base_model.yaml`). **Loaded from the pod's local copy** under `model.local_dir` (default `/workspace/models`) by training, the tokenizer and vLLM — never from the Hub at run time (§13) |
+| Fine-tuning technique | **LoRA on a bf16 base** — bf16 frozen base weights, LoRA adapters in bf16. Serving holds the base in bf16 and applies the adapter per request (IMPL-11; nothing is merged since 2026-10-23), so training in bf16 means the adapter is applied to exactly the weights it trained against. **4-bit NF4 QLoRA remains a live flag** (`quantization.load_in_4bit`) for VRAM-constrained pods — arch §9.2 |
 | Trainable components | **LLM decoder** via LoRA. The vision-language mergers are **not** targeted (`lora.include_vision_projector: false`, arch v2.1 §9a). **Vision Encoder (ViT) frozen by default** — escalated only via the eval gate (arch §3). **When the ViT is trained it gets a LoRA — never a full fine-tune** (arch §3). |
-| Adapter strategy | **One LoRA per training scope** (`configs/scopes.yaml`; rank 64, alpha 128), each an independent adapter on the bf16 base with its own run, merge, calibration, gate and release. The `unified` scope trains across all document types, all tasks and all modality regimes; the line-scoped `personal_lines` and `casualty_fleet` scopes are layout-family adapters (`configs/layout_families.yaml`). The task, type and schema are always in the prompt, so cross-type interference is controlled by conditioning rather than by separate weights. Per-type adapters return only through the §4.2 **graduation gate** (≥500 labeled docs of that type AND a measured >2pp win outside the bootstrap CI), trained on the merged foundation, decoder-only, **never stacked** — vLLM applies one LoRA per request, so the v1 Foundation-plus-per-type stack was unservable. |
+| Adapter strategy | **One LoRA, for policy documents** (`common/adapter.py`, `ADAPTER`; rank 64, alpha 128; decision 2026-10-22). Every cycle trains it over all the policy data so far, new and existing, across every line and all modality regimes, with its own run, calibration, gate and release, all named by the cycle's version (`policy-v3`). **A cycle continues the tenant's promoted adapter** (decision 2026-10-23): its weights, trained further on the original bf16 base, never on a merged model; it starts from the base instead with `--fresh` or when the promoted one cannot be continued (§12), and the run it continued is recorded as `parent_run_id`. Nothing is merged: the release is the adapter. There are no training scopes and no layout families: Fideon SPEC_09's five policy adapter groups by layout family are knowingly not followed. The code for ACORD and Loss Run documents is kept and not trained. The task, type, line and schema are always in the prompt, so cross-line interference is controlled by conditioning rather than by separate weights. Per-type adapters return only through the §4.2 **graduation gate** (≥500 labeled docs of that type AND a measured >2pp win outside the bootstrap CI), trained on the merged foundation, decoder-only, **never stacked** — vLLM applies one LoRA per request, so the v1 Foundation-plus-per-type stack was unservable. |
 | Trainer stack | **Layer 3 ms-swift** (what you invoke) → **Layer 2 ms-swift's `Seq2SeqTrainer`** (the real loop) → **Layer 1 PyTorch/Transformers/PEFT/bitsandbytes/Accelerate+DeepSpeed**. Locked, one option per layer (arch §10). **Pinned:** ms-swift `>=3.9,<4` (locked 3.12.6), transformers `>=4.57,<4.58` (locked 4.57.6), torch 2.8.0 (§13). |
 | Trainer fallback | Migrating to TRL `SFTTrainer` is a **contingency**, permitted only if ms-swift lacks a required Qwen3-VL capability at implementation time — a framework migration (template, collator and masking re-implemented against the parity tests), not a parallel option (arch §10.1, IMPL-06). |
 | Collator | ms-swift provides multimodal collation and `-100` masking; `training/data_collator.py` is an **override hook only** (arch §10). |
 | LoRA target modules | `q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj` in every language-model decoder layer; the mergers are not targeted (justified per-module in arch v2.1 §9a). |
 | Attention impl | `flash_attention_2`. |
 | Confidence | Per-token logprobs of the **printed value's own tokens** (`raw`'s span, without its quotes) → **per-field feature vectors** (min/mean/first-token logprob, token count, OCR agreement of the value *as printed* on the page it cites, rule checks) → **per-field-type calibrators**, fitted on windowed policies merged as they are served → **risk-controlled review thresholds** chosen on a separate validation half (arch v2.1 §5). Min-token-prob alone was length-biased and a fixed 0.7 was tied to no measured error rate; both are gone. List fields also get a **row-completeness** signal. |
-| Quantization | **vLLM-native serving formats**: bf16 merged (reference, and cycle 1's serving format) then **FP8 W8A8** via llm-compressor from cycle 2; AWQ INT4 only under VRAM constraint. The vision tower, mergers and `lm_head` stay bf16 in every format. GGUF is an on-request **edge** export, validated in llama.cpp, never the serving path — it is llama.cpp's format and the endpoint runs vLLM. Thresholds are absolute percentage points against bf16, per field class (arch v2.1 §13a-b). |
+| Quantization | **Not run by the pipeline** (decision 2026-10-23): the release is its adapter, served on the bf16 base, so bf16 is the only serving format. The quantization code is kept, not used (IMPL-10): **vLLM-native serving formats**, bf16 merged then **FP8 W8A8** via llm-compressor; AWQ INT4 only under VRAM constraint. The vision tower, mergers and `lm_head` stay bf16 in every format. GGUF is an on-request **edge** export, validated in llama.cpp, never the serving path — it is llama.cpp's format and the endpoint runs vLLM. Thresholds are absolute percentage points against bf16, per field class (arch v2.1 §13a-b). |
 | Artifact storage | **Azure Blob** — all weights/corpus/PDFs. Repo holds code only. |
 | Compute | **RunPod** — ephemeral training pods + a persistent Serverless vLLM inference endpoint. Business logic lives outside RunPod. **GPU only** (decision 2026-10-19): every step that runs a model refuses to start without CUDA rather than fall back to the CPU (§13); GGUF stays an optional edge export, not a deployment target. **On the pod every long job runs detached in tmux**, so a closed laptop or dropped Wi-Fi cannot stop it (§13). |
 | Schema contract | Target JSON = Fideon SPEC_00 canonical schema; for policies the client's per-line canonical schemas, nine of which (the seven personal lines, `gl` and `_fallback`) compose the Fideon SPEC_21 common model 1.1.0; audit gate Fideon SPEC_07 Stage 3 validates every inference call (§1.1, §13.1). |
-| LoB detection | VLM outputs `line_of_business` (a list over the 12-value enum) for ACORD and Loss Runs; ≥20% corpus coverage per value; own gating metric (§1.3). For a **policy**, the line is supplied by the caller (`lob` on the request) and selects the line's canonical schema; the LoB metric is not applicable to policy scopes. Reading a policy's line in serving exists but **ships off** (`routing.detect_lob: false`). |
+| LoB detection | VLM outputs `line_of_business` (a list over the 12-value enum) for ACORD and Loss Runs; ≥20% corpus coverage per value; own gating metric (§1.3). For a **policy**, the line is supplied by the caller (`lob` on the request) and selects the line's canonical schema; the LoB metric is not applicable to the policy adapter. Reading a policy's line in serving exists but **ships off** (`routing.detect_lob: false`). |
 | Tenant isolation | `tenant_id` path prefix per Fideon SPEC_12. Tenants keep corpora apart (the CGL data, the smoke run and comparisons each run under their own); each tenant has its own corpus, frozen golden eval set and releases. No cross-tenant mixing in a corpus file (§8 below). |
 | De-identification | **Option A — none.** Arch §8b rejects text-only de-identification (it corrupts the training signal) and records Option A — real values, protected by tenancy, RBAC and encryption — as the current state for every tenant's build; `deidentified: false` and `image_redaction: unresolved` are recorded. See §8 and IMPL-05 §1. |
 | MinerU | **MinerU 3.4.5, pipeline backend** (layout, PP-OCRv6 OCR and table models, no VLM), on the GPU, on pipeline weights pinned to a fixed PDF-Extract-Kit-1.0 revision. Version **pinned per corpus version**; inference must use the same version as the corpus, and a corpus holding documents read by two MinerU versions is refused (§7 below, arch §8a). |
@@ -222,7 +223,8 @@ The same real-world field appears under many surface labels across documents. Th
 | Page reading | **Every page, chunk by chunk, never selected pages** (decision 2026-10-19). A policy is read as section group × page window over all its pages, planned by one function in training and serving; the declarations group's first window is pages 1–5 plus the detected declarations page, read together (§13.1). |
 | Gold and training data | **No frontier model, ever** (decision 2026-10-19): drafts come from the self-hosted Qwen3-VL only, and every gold needs a review record to train, be frozen or score — `reviewer_id` and `review_date` in its metadata, a twin's inherited from its seed (decision 2026-10-22; IMPL-04). |
 | Latency | Recorded per release (P95 per adapter, peak GPU memory), **not gated**: no latency SLA is agreed (decision 2026-10-19). |
-| Release tier | **production** at field match ≥ 0.92 (kept, decision 2026-10-19), **interim** below that or when the scope was scored on fewer than 150 real frozen documents of a type it covers, twins not counted (IMPL-08). A baseline on another yardstick (frozen set, tenant or scoring code) is judged on floors alone. |
+| Release tier | **production** at field match ≥ 0.92 (kept, decision 2026-10-19), **interim** below that or when the release was scored on fewer than 150 real frozen policies, twins not counted (IMPL-08). A baseline on another yardstick (frozen set, tenant or scoring code) is judged on floors alone. |
+| Versions and promotion | A fresh cycle takes the **next version**: one more than the highest used by the adapter's runs or by any tenant's corpora and releases (`registry_utils.releases.next_cycle_version`): one sequence for every tenant, because runs, weights and eval reports are not kept per tenant. The release is named by it (`releases/{tenant}/v3/`). **One promoted release per tenant** (decision 2026-10-22): `package` promotes a release whose gate passed and archives the one it replaces, and refuses a version already released; `promote --version vK` rolls back. Serving reads the promoted release and the gate compares the next candidate with it (IMPL-08, 11, 13). |
 
 ---
 
@@ -258,43 +260,45 @@ azure-blob://insurance-extraction/
   processed/{tenant_id}/{doc_type}/{source_id}/page_*.png, page_*.md, ocr_meta.json
   golden-labels/{tenant_id}/{doc_type}/{source_id}/golden.json, label_metadata.json
   corpus/{tenant_id}/v{n}/train/epoch_{1..4}.jsonl                # one modality draw per epoch
-  corpus/{tenant_id}/v{n}/train/scope/{scope}/epoch_{1..4}.jsonl    # a scope's view (scoped runs)
+  corpus/{tenant_id}/v{n}/train/scope/policy/epoch_{1..4}.jsonl    # the adapter's view (policy rows)
   corpus/{tenant_id}/v{n}/{val,test}/{val,test}.jsonl               # all doc types together
-  corpus/{tenant_id}/v{n}/{val,test}/scope/{scope}/{val,test}.jsonl # a scope's view (scoped runs)
+  corpus/{tenant_id}/v{n}/val/scope/policy/val.jsonl                # the adapter's view (policy rows)
   corpus/{tenant_id}/v{n}/manifest.json
   golden-eval-set/{tenant_id}/{source_id}/golden.json, metadata.json, page_N.png, page_N.md
   golden-eval-set/{tenant_id}/manifest.json                          # frozen ONCE per tenant (§13)
-  releases/{tenant_id}/{release_id}/bundle.json                      # the unit of promotion
-  releases/{tenant_id}/{release_id}/calibration/{format}/calibrators.json
-  releases/{tenant_id}/{release_id}/gate/{format}/gate_decision.json
-  releases/{tenant_id}/release_index.json
+  releases/{tenant_id}/v{n}/bundle.json                              # the unit of promotion; named by the cycle's version
+  releases/{tenant_id}/v{n}/calibration/{format}/calibrators.json
+  releases/{tenant_id}/v{n}/gate/{format}/gate_decision.json
+  releases/{tenant_id}/release_index.json                            # sorted by version; one row promoted
   exports/{tenant_id}/{kind}/{name}/                                 # raw container: e.g. comparisons
 
   # ---- shared / no tenant data ----
   base-models/qwen3-vl-8b-instruct/                                  # cached from HF, pinned revision
-  adapters/foundation/v{n}/                                          # the unified adapter
-  adapters/scope/{scope}/v{n}/                                       # a scoped run's adapter
+  adapters/foundation/v{n}/                                          # the unified adapter (older runs)
+  adapters/scope/policy/v{n}/                                        # the adapter: the release itself
                      # published adapter = adapter_config.json + adapter_model.safetensors only
-  merged-models/{unified|scope/{scope}}/v{n}/                        # bf16, post merge_and_unload
-  quantized-models/{unified|scope/{scope}}/v{n}/vllm/{format}/       # fp8 / awq (gguf only as edge export)
-  registry/foundation/{run_id}/run_manifest.json, model_card.md
-  registry/scope/{scope}/{run_id}/run_manifest.json, model_card.md
+  merged-models/scope/policy/v{n}/                                   # older releases only: nothing is merged since 2026-10-23
+  quantized-models/scope/policy/v{n}/vllm/{format}/                  # older releases only (fp8 / awq; gguf only as edge export)
+  registry/foundation/{run_id}/run_manifest.json, model_card.md       # older runs
+  registry/scope/policy/policy-v{n}/run_manifest.json, model_card.md
   registry/adapters/{doc_type}/{run_id}/run_manifest.json
   registry/registry_index.json
   calibration/{version}/{doc_type}.json
-  eval-reports/v{n}/summary.json                                     # EvalReport.as_dict()
+  eval-reports/v{n}/summary.json                                     # EvalReport.as_dict() (older unified runs)
   eval-reports/v{n}/{doc_type}/report.json
   eval-reports/v{n}/gate_decision.json                              # the gate's verdict, NOT the report
-  eval-reports/v{n}/scope/{scope}/{summary,gate_decision,checkpoint_selection}.json
+  eval-reports/v{n}/scope/policy/{summary,gate_decision,checkpoint_selection}.json
 ```
 
-Every upload records its MD5; the adapter and merged-model pushes (`artifact_registry/transfer.py`) skip a file whose bytes Blob already holds (`BlobClient.upload_dir(..., skip_identical=True)`), so a re-push of an unchanged merged model sends nothing.
+Older releases are named `release-YYYY.M.N`; that form is still read, so an older index loads.
+
+Every upload records its MD5; the adapter push (`artifact_registry/transfer.py`; the merged-model push too, which the pipeline no longer runs) skips a file whose bytes Blob already holds (`BlobClient.upload_dir(..., skip_identical=True)`), so a re-push of an unchanged adapter sends nothing.
 
 **`gate_decision.json` is a separate key on purpose.** The promotion gate writes its verdict — pass/fail, per-metric deltas, failed gates — and the scored `EvalReport` writes `summary.json`. Sharing one key meant the gate overwrote the report it had just read, taking `by_doc_type` and every per-document error record with it; `vit_gate` then saw zero image-only and zero scanned documents and returned `insufficient_data` for ever. Two writers, two keys.
 
-**Tenant partitioning rule (arch §8b, §18):** everything holding tenant document data is prefixed by `tenant_id` — `raw-documents`, `processed`, `golden-labels`, `corpus`, `golden-eval-set`, `releases`, `exports` (`artifact_registry.paths.TENANT_SCOPED`). A frozen eval set is the tenant's documents, and source ids are numbered per tenant, so each tenant is gated on its own set; a set left at the old unscoped root is refused with the move to make. Shared artifacts addressed by scope and version (`base-models/`, `adapters/`, `merged-models/`, `registry/`) stay un-prefixed.
+**Tenant partitioning rule (arch §8b, §18):** everything holding tenant document data is prefixed by `tenant_id` — `raw-documents`, `processed`, `golden-labels`, `corpus`, `golden-eval-set`, `releases`, `exports` (`artifact_registry.paths.TENANT_SCOPED`). A frozen eval set is the tenant's documents, and source ids are numbered per tenant, so each tenant is gated on its own set; a set left at the old unscoped root is refused with the move to make. Shared artifacts addressed by the adapter's name and version (`base-models/`, `adapters/`, `merged-models/`, `registry/`) stay un-prefixed.
 
-**Scope for the current build:** `tenant_id` defaults from `DEFAULT_TENANT_ID` and is not a required argument on every CLI (`--tenant` names another). Tenants are used to keep corpora apart — the CGL data that trains `casualty_fleet`, the smoke run (`smoke`), base-vs-adapter comparisons (`compare`) — each with its own corpus, frozen eval set and releases. The rule that is enforced at build time is **no cross-tenant mixing** — a corpus file must never contain rows from two tenants, because that is a training-data-composition rule, not plumbing.
+**Scope for the current build:** `tenant_id` defaults from `DEFAULT_TENANT_ID` and is not a required argument on every CLI (`--tenant` names another). Tenants are used to keep corpora apart — the CGL data, the smoke run (`smoke`), base-vs-adapter comparisons (`compare`) — each with its own corpus, frozen eval set and releases. The rule that is enforced at build time is **no cross-tenant mixing** — a corpus file must never contain rows from two tenants, because that is a training-data-composition rule, not plumbing.
 
 **Access-control split (arch §18a):** `raw-documents/` lives in a separate container (`AZURE_RAW_CONTAINER`) from everything else — it is the layer holding unredacted PII. `intake/` (delivered batches staged by azcopy) and `exports/` (result sets that quote policy data, such as base-vs-adapter comparisons) sit in the same container under the same rule (`artifact_registry.paths.requires_raw_container`). No training or serving component ever reads it directly.
 
@@ -305,7 +309,7 @@ Every upload records its MD5; the adapter and merged-model pushes (`artifact_reg
 ```
 insurance-extraction-finetuning/
 ├── pyproject.toml  requirements*.txt  requirements-*.lock  .env.example  README.md
-├── configs/          base_model.yaml  scopes.yaml  layout_families.yaml  schema_sections.yaml
+├── configs/          base_model.yaml  schema_sections.yaml
 │   │                 model_view.yaml  lob_meanings.yaml  label_mappings.yaml
 │   │                 coverage_code_recodes.yaml  coverage_code_meanings.yaml (template)
 │   ├── canonical schema/LOB Schema/     34 client schema files: 31 lines (registered), _fallback,
@@ -313,7 +317,7 @@ insurance-extraction-finetuning/
 │   │                                    codes, crosswalks, notes
 │   ├── canonical schema/common schema/  common_model.json (1.1.0), lob_schema_map.yaml, inventory
 │   ├── shared/       vision.yaml (pixel budgets)  sequence.yaml (per-task caps)
-│   ├── training/     unified.yaml  personal_lines.yaml (extends unified)
+│   ├── training/     unified.yaml (the adapter's training config, with its data mix)
 │   ├── sweeps/       phase1_lr  phase2_epochs  phase3_rank  README
 │   ├── inference/    vllm_serving.yaml
 │   └── deepspeed/    zero2.json  zero3.json
@@ -321,11 +325,11 @@ insurance-extraction-finetuning/
 │                     common_fields.json, lob.enum.json, aliases/, examples/
 ├── prompts/          system_prompt_template.jinja, doc_type_classifier_prompt.jinja,
 │                     doc_types/{acord,lossrun,policy}.jinja
-├── common/           aliases canonical config constants gpu grounding ids label_mapping
-│                     lob logging_setup model_view normalize prompts run_ids
-│                     schema_sections schemas scopes structural_ids tasks
+├── common/           adapter aliases canonical config constants gpu grounding ids
+│                     label_mapping lob logging_setup model_view normalize prompts run_ids
+│                     schema_sections schemas structural_ids tasks
 ├── artifact_registry/  blob_client  paths  transfer
-├── registry_utils/   models  model_card  query_registry  write_run_manifest
+├── registry_utils/   models  model_card  query_registry  releases  write_run_manifest
 ├── data_pipeline/    audit  ocr_check  corpus_manifest
 │   ├── ingestion/    pull_intake  pull_raw_pdfs  prepare_bundles  label_rules
 │   │                 fill_synthetic_labels  import_labeled_pdfs  import_prepared
@@ -367,6 +371,8 @@ insurance-extraction-finetuning/
 └── tests/            122 test modules + conftest.py; fixtures/ (synthetic, no PII)
 ```
 
+`training/merge.py` and `postprocessing/quantize.py` (with `quant_thresholds` and `validate_quant`) are kept but no longer called by the pipeline: nothing is merged or quantized (decision 2026-10-23).
+
 `Documentation/` (these specs and the architecture documents) is listed in `.gitignore`, so new files there are not picked up; the files already tracked, these specs among them, remain under version control.
 
 **Key separation principle:** the repo never stores model weights, corpus data, or PDFs. Everything data/artifact-related is pulled from / pushed to Azure Blob at runtime via `artifact_registry/`.
@@ -383,7 +389,7 @@ IMPL-02  Azure Blob I/O + training run registry                (deps: 01)
 IMPL-03  Ingestion + MinerU OCR (+ version pinning)            (deps: 01, 02)
 IMPL-04  Labeling + golden JSON + day-zero bootstrap gate      (deps: 01, 02, 03)
 IMPL-05  Dataset builder (JSONL, modality, split)              (deps: 01, 02, 04)
-IMPL-06  Training (ms-swift LoRA, one adapter per scope)       (deps: 01, 02, 05)
+IMPL-06  Training (ms-swift LoRA, one policy adapter)          (deps: 01, 02, 05)
 IMPL-07  Inference core (shared model-runner primitive)        (deps: 01, 02)
 IMPL-08  Evaluation (metrics + gating)                         (deps: 01, 02, 06, 07)
 IMPL-09  Confidence calibration                                (deps: 01, 02, 07, 08)
@@ -397,10 +403,10 @@ IMPL-15  Pilot validation protocol (operational runbook)       (deps: 01-14; exe
 
 **Deferred until after IMPL-15 passes** (they are real work, just not first-cycle work):
 - **Hyperparameter sweep execution** (arch §11a) — 9–12 runs on 25–30 docs/type mostly measures noise. `configs/sweeps/` is authored in IMPL-01; running it belongs *after* the pilot and *before* production-scale training.
-- **Quantized-format validation** (arch §13b) — the primary serving path is vLLM on the merged fp16/bf16 model. Nothing is quantized in the first cycle, so nothing needs threshold validation yet.
+- **Quantized-format validation** (arch §13b) — the serving path is vLLM holding the bf16 base with the release's adapter applied per request. Nothing is merged or quantized (decision 2026-10-23), so nothing needs threshold validation.
 
 **Note on cross-references that point "forward" but are not build-order violations:**
-- `postprocessing/validate_quant.py` (IMPL-10) calls the testing routine (IMPL-12). `validate_quant` is a *gate you run after IMPL-12 exists*, not something merge/quantize needs. Build merge+quantize in IMPL-10; wire `validate_quant` once IMPL-12 is done.
+- `postprocessing/validate_quant.py` (IMPL-10) calls the testing routine (IMPL-12). `validate_quant` is a *gate you run after IMPL-12 exists*, not something merge/quantize needs. Build merge+quantize in IMPL-10; wire `validate_quant` once IMPL-12 is done. The pipeline no longer runs merge or quantize (decision 2026-10-23).
 - `evaluation/run_eval.py` (IMPL-08) can compute classifier accuracy only once the classifier (IMPL-11) exists. IMPL-08 runs *without* it (supply the true doc_type); classifier metrics fill in on a later pass.
 - IMPL-15 is a **runbook**, not a library. It orders the pilot experiments (arch §16) and is executed against the built system; nothing imports it.
 
@@ -505,8 +511,7 @@ Insurance documents contain PII (names, TINs/SSNs, addresses, financials).
   "pages_used": [1, 2, 3, 4, 5],
   "review_flags": ["valuation_date:low_confidence", "claims:row_count_mismatch"],
   "route": {"adapter": "...", "foundation_only": false, "classifier_confidence": 0.97,
-            "classifier_method": "...", "layout_family": null, "lob_fallback_used": false,
-            "lob_source": "..."},
+            "classifier_method": "...", "lob_fallback_used": false, "lob_source": "..."},
   "reconciliation": { "<Loss Runs only: claims against printed totals>" }
 }
 ```
@@ -517,7 +522,7 @@ Insurance documents contain PII (names, TINs/SSNs, addresses, financials).
 
 ## 10. Modality mix for training data (used by IMPL-05)
 
-Each training document appears **once per epoch**, its regime drawn per epoch from a seeded generator against the target mix (`data_pipeline/dataset_builder/sample_modes.py`, `common.constants.MODALITY_MIX`; arch v2.1 §6.1); the corpus always writes four epoch files. Validation and test rows take all three regimes. A scope's training config may set its own `modality_mix`; the corpus records the mix it was drawn with, and a run on a corpus drawn with another mix is refused.
+Each training document appears **once per epoch**, its regime drawn per epoch from a seeded generator against the target mix (`data_pipeline/dataset_builder/sample_modes.py`, `common.constants.MODALITY_MIX`; arch v2.1 §6.1); the corpus always writes four epoch files. Validation and test rows take all three regimes. The training config may set its own `modality_mix`; the corpus records the mix it was drawn with, and a run on a corpus drawn with another mix is refused.
 
 | Regime | Share | Purpose |
 |---|---|---|
@@ -539,7 +544,7 @@ The band is chosen per **document type** (the gate's metrics are per type) and a
 
 **A delivered split is used as given.** When every document carries a split (the SPEC_21 delivery's `split_manifest.csv`; the CGL bundles, whose split is drawn once at bundling and delivered in their metadata), `split_groups.assign_delivered_splits` takes it: one family per seed, a seed in two splits refused, synthetic twins allowed in val and test. The per-line carrier hold-out (Fideon SPEC_09 amendment item 4; decision 2026-10-19) holds **one carrier per line of business** out of train and validation, and only in a line whose real documents name **at least 10 carriers** (`split_groups.MIN_CARRIERS_PER_LINE_FOR_HELD_OUT`); a line with fewer holds none out. It applies to a drawn split and is **off** for a delivered split (`HOLD_OUT_CARRIER_PER_LINE = False`; the delivery already holds whole seeds out; asked for, the same minimum applies). At most 20 twins of one seed per render mode train (`MAX_TWINS_PER_SEED`).
 
-**What a scope's training view adds** (`training/corpus_view.py`, line-scoped views only): one render per twin per epoch (`render_rotation: true` — a twin's digital and scanned PDFs share one gold, so each epoch trains one and the next the other), small lines repeated up to `line_balance.max_repeat` toward `min_documents`, and for `personal_lines` a per-line `synthetic_fraction` / `scanned_share` (`configs/training/personal_lines.yaml`, all null until set; `training/data_mix.py`).
+**What the adapter's training view adds** (`training/corpus_view.py`, written under `train/scope/policy/` and `val/scope/policy/`): policies of one known line only (a package and a policy with no line are read against `_fallback.json`, and serving sends them to the base model); one render per twin per epoch (`render_rotation: true` — a twin's digital and scanned PDFs share one gold, so each epoch trains one and the next the other), small lines repeated up to `line_balance.max_repeat` toward `min_documents`, and a `synthetic_fraction` / `scanned_share`, by default or per line (`data_mix` in `configs/training/unified.yaml`, null until set; `training/data_mix.py`).
 
 ---
 
@@ -560,25 +565,30 @@ A cycle is run through **three commands plus one umbrella command**, all from `o
 
 | # | Command | Stages (`orchestration.pipeline_dag.STAGES`) | Ends with |
 |---|---|---|---|
-| **1** | `finetune` | 1 → 7: ingestion, preprocessing (OCR), labeling, dataset_build, training, checkpoint_eval, merge | Adapter + merged model on the **RunPod staging volume**; run manifest in Blob as `staged` |
-| **2** | `package` | 8 → 11: quantize, calibrate, evaluation_gate, package (push) | Adapter files, merged + quantized model, calibrators and the release bundle in **Azure Blob** |
-| **—** | `deploy-endpoint` / `rollback-endpoint` | 12: serving | The endpoint pointed at a promoted version (or the previous one) |
-| **3** | `extract` | 13 (§17 extraction routine) | JSON + confidence + metrics, locally |
+| **1** | `finetune` | 1 → 6: ingestion, preprocessing (OCR), labeling, dataset_build, training, checkpoint_eval | The adapter on the **RunPod staging volume**; run manifest in Blob as `staged` |
+| **2** | `package` | 7 → 9: calibrate, evaluation_gate, package (push) | Adapter files, calibrators and the release bundle in **Azure Blob**; a release that passed is **promoted**, the one it replaces archived |
+| **—** | `promote` / `versions` | none | A rollback: an older release promoted again (`--by` a person). `versions` prints the registry table (version, run status, release status, tier) |
+| **—** | `deploy-endpoint` / `rollback-endpoint` | 10: serving | The endpoint pointed at a promoted version (or the previous one) |
+| **3** | `extract` | 11 (§17 extraction routine) | JSON + confidence + metrics, locally |
 | **—** | `all` | `finetune` then `package` | Same as command 2 |
 
 ```bash
-python -m orchestration.run finetune --input ./intake --corpus-version v1 --out-version v2 [--scope personal_lines] [--tenant T]
-python -m orchestration.run package  --version v2 --release-id release-2026.10.1 --formats bf16 [--fixes-defect "<ticket>"]
-python -m orchestration.run package  --version v2 --release-id release-2026.10.1 --override-approver "A. Reviewer" --override-reason "<why, 20+ characters>" --override-gate <failed gate>   # a written waiver, one scope
+python -m orchestration.run finetune --input ./intake [--corpus-version v1] [--tenant T]   # takes the next version itself ("this cycle is v3")
+python -m orchestration.run finetune --input ./intake --fresh                              # from the base, not the promoted adapter
+python -m orchestration.run finetune --version v3 --from-stage training                    # resume, or rerun a failed cycle: name its version
+python -m orchestration.run package  --version v3 [--fixes-defect "<ticket>"]
+python -m orchestration.run package  --version v3 --override-approver "A. Reviewer" --override-reason "<why, 20+ characters>" --override-gate <failed gate>   # a written waiver
+python -m orchestration.run promote  --version v2 --by "<person>"                          # a rollback; refused unless v2's gate passed and serving would start with it
+python -m orchestration.run versions [--tenant T]                                          # the registry table
 python -m orchestration.run extract  --model base|v1|v2 --tenant T --source-ids policy_0001 policy_0002
 python -m orchestration.run extract  --model base --adapter <adapter folder> --tenant T --split test --corpus v1
-python -m orchestration.run all      --input ./intake --out-version v2 --release-id release-2026.10.1
+python -m orchestration.run all      --input ./intake
 python -m orchestration.run freeze-eval-set --corpus v1 [--tenant T] [--allow-small]   # once per tenant
-python -m orchestration.preflight --scope personal_lines [--skip-corpus]              # checks before finetune (incl. reviewed labels)
-python -m orchestration.smoke_run [--scope casualty_fleet]                            # small end-to-end run
+python -m orchestration.preflight [--skip-corpus]                                     # checks before finetune (incl. reviewed labels)
+python -m orchestration.smoke_run                                                     # small end-to-end run
 ```
 
-`extract` reads documents already imported and OCR'd (`--source-ids`, or a corpus split with `--split`/`--corpus`), scores them against their labels unless `--no-score`, and writes JSON per document to `testing/results/<model>/` and metrics to `testing/metrics/<model>/`. `--adapter` applies a LoRA folder (a checkpoint or a run's adapter) to the base model per request, unmerged.
+`extract` reads documents already imported and OCR'd (`--source-ids`, or a corpus split with `--split`/`--corpus`), scores them against their labels unless `--no-score`, and writes JSON per document to `testing/results/<model>/` and metrics to `testing/metrics/<model>/`. `--adapter` applies a LoRA folder (a checkpoint or a run's adapter) to the base model per request, unmerged. `--model vN` does the same with that version's adapter: there is no merged model to load (decision 2026-10-23).
 
 On the pod every one of these (except the seconds-long endpoint switches) starts itself in tmux and
 returns with the job's name; see §13.
@@ -588,21 +598,21 @@ returns with the job's name; see §13.
 **Three facts this surface has to respect, and does:**
 
 1. **Labeling is human work inside the span of command 1.** `finetune` ingests and OCRs everything, builds the corpus from only the source_ids that have a validated `golden.json`, and **reports the unlabeled backlog**. It aborts before training only when the labeled set is below `--min-labels-per-type` (default 25, matching IMPL-04's day-zero rule).
-2. **The gate is a hard stop inside command 2.** `package` quantizes and calibrates first — the gate reads `auto_accept_error_rate`, which does not exist until thresholds are chosen — then runs the evaluation gate on the frozen golden set through the serving pipeline. Non-inferiority is a paired bootstrap over the documents the candidate and the promoted release both scored — weighted as the metric counts them, and only when both were scored on the same frozen set of the tenant; otherwise a point comparison, with the reason in the decision's warnings — and a release that improves no primary metric is blocked unless it names the defect it fixes (`--fixes-defect`, per scope when several run). The only way past a failed gate is a written override, given with `--override-approver`, `--override-reason` and `--override-gate` (all three, one scope); there is no `--force`. A failed gate stops before anything is pushed and exits non-zero, so `all` never publishes a model that failed it. The release's routing check also runs before the push.
-3. **Command 1 launches one training job per scope.** Stages 1–4 build the corpus once and every scope shares it (`SHARED_STAGES`); stages 5–11 run once per scope (`PER_SCOPE_STAGES`, `--scope` is repeatable), each an independent adapter. v1 fanned out into 1 + N sequentially, because each per-type adapter sat on top of the Foundation. That topology is gone (arch v2.1 §4.1): vLLM applies one LoRA per request, so a Foundation LoRA and a per-type LoRA could never both be active on a call.
+2. **The gate is a hard stop inside command 2.** `package` calibrates first — the gate reads `auto_accept_error_rate`, which does not exist until thresholds are chosen — then runs the evaluation gate on the frozen golden set's policies of the lines the release serves, through the serving pipeline, with the base model and the selected adapter applied, as it is served. The baseline is the tenant's promoted release, read from its release index. A cycle that continued an adapter is also held, line by line, to the run it continued (IMPL-08). Non-inferiority is a paired bootstrap over the documents the candidate and the promoted release both scored — weighted as the metric counts them, and only when both were scored on the same frozen set of the tenant; otherwise a point comparison, with the reason in the decision's warnings — and a release that improves no primary metric is blocked unless it names the defect it fixes (`--fixes-defect`). The only way past a failed gate is a written override, given with `--override-approver`, `--override-reason` and `--override-gate` (all three); there is no `--force`. A failed gate stops before anything is pushed and exits non-zero, so `all` never publishes a model that failed it. The release's routing check also runs before the push.
+3. **Command 1 trains one adapter.** Every cycle trains the one policy adapter (`common/adapter.py`) over all the policy data so far, new and existing. By default it **continues the tenant's promoted release**: that adapter's weights, with a fresh optimizer and learning-rate schedule, on the original bf16 base (decision 2026-10-23). It starts from the base instead when given `--fresh` (after a data deletion, or to reset drift), or when the promoted release cannot be continued: nothing promoted, its run manifest unreadable, another base model, other LoRA settings, its adapter not in Blob, or another prompt hash or window plan (IMPL-13 §2). The reason is logged and recorded as `fresh_reason`; the run continued is the manifest's `parent_run_id`. A new `finetune` or `all` takes the next version itself: one more than the highest used by the adapter's runs (the registry index) or any tenant's corpora and releases. `--version vN` names one only to resume (`--from-stage`, which refuses to run without it) or to rerun a failed cycle. v1 fanned out into 1 + N sequentially, because each per-type adapter sat on top of the Foundation. That topology is gone (arch v2.1 §4.1): vLLM applies one LoRA per request, so a Foundation LoRA and a per-type LoRA could never both be active on a call.
 
-Every stage records its wall time (`wall_seconds`), and the run report so far is written after every stage to `$FIDEON_LOG_DIR` (default `/workspace/logs`, when that folder exists) as `run-<command>-<scope>-<tenant>-<version>.json`, so two scopes or tenants trained under one version tag keep their own.
+Every stage records its wall time (`wall_seconds`), and the run report so far is written after every stage to `$FIDEON_LOG_DIR` (default `/workspace/logs`, when that folder exists) as `run-<command>-<tenant>-<version>.json`, so two tenants' runs keep their own.
 
 ### 12a. Staging volume vs. registry — do not conflate these
 
 | | **Staging volume** | **Registry** |
 |---|---|---|
 | Where | RunPod network volume at `$RUNPOD_VOLUME_MOUNT/staging/` (default `/runpod-volume`; set `/workspace` when the pod mounts the volume there) | Azure Blob `registry/` |
-| Holds | Working copies of adapters, merged model, eval reports between commands 1 and 2 | Durable `run_manifest.json` per run |
+| Holds | Working copies of adapters (the cycle's, and the parent's it continues), eval reports between commands 1 and 2 | Durable `run_manifest.json` per run |
 | Lifetime | Cleared after a verified push | Permanent |
 | Guarantee | **None** — working storage | Lineage of record (arch §12) |
 
-RunPod pods are ephemeral (arch §14), so persistence between commands 1 and 2 comes from a network volume attached to every launched pod. Staging exists because the merged model is ~16 GB and quantization also runs on RunPod — pushing it to Azure at the end of command 1 and pulling it back at the start of command 2 is a 32 GB round trip for no benefit.
+RunPod pods are ephemeral (arch §14), so persistence between commands 1 and 2 comes from a network volume attached to every launched pod. Staging was first sized for the ~16 GB merged model, which is no longer built (decision 2026-10-23); it still keeps the checkpoints and the selected adapter on the pod between commands 1 and 2, where calibration and the gate run.
 
 **But a volume is not an artifact of record.** So command 1 **always writes its run manifest to Blob** with `artifacts.status: "staged"`, even though the weights stay on the volume; command 2 flips it to `"published"` with real Blob paths. Without that, a reclaimed volume means a training run that happened and left no trace.
 
@@ -625,9 +635,11 @@ What the build does now that the sections above did not describe. Each module sp
   (3.0.0) and `_fallback` (the schema for a policy with no single line, registry key `policy`). The
   registry bundles each overlay at load (`common.schemas._bundle`; version `<overlay>+common.1.1.0`) and
   `common.schemas.is_common_model` is the one switch every difference keys off. The other lines keep
-  self-contained files. A layout family part-way through the move (`casualty_fleet`: `gl` moved; `auto`,
-  `wc`, `umbrella` not) warns at load, and training refuses a scope whose corpus holds both shapes of one
-  family (`common.scopes.assert_one_output_shape`). `classic_auto.json` and `_common.json` are not
+  self-contained files. Training refuses a view whose single-line policies mix lines on the common model
+  with lines on self-contained files (`common.adapter.assert_one_output_shape`): one adapter would learn two
+  output shapes. The pre-upload audit and the preflight run the same check, so a mix is found before import
+  or staging. A package, or a policy with no line, is read against `_fallback.json`, which is on the common
+  model; the adapter is not taught it (§13.2). `classic_auto.json` and `_common.json` are not
   registered: 36 schema keys in all (31 lines, the fallback, three ACORD forms, the Loss Run).
 - **The model view** (`common/model_view.py`, `configs/model_view.yaml`) is what the prompt carries and the
   decoder enforces on a common-model line: every printed value raw/parsed/page_ref; identifiers, references,
@@ -658,8 +670,10 @@ What the build does now that the sections above did not describe. Each module sp
   self-contained lines, ACORD and Loss Run prompts are frozen as fingerprints
   (`tests/fixtures/old_style_prompt_fingerprints.json`). The **prompt hash** (`common.prompts.prompt_hash`)
   covers every template, every schema (the common model and the coverage-code files included),
-  `model_view.yaml`, the section map, `lob_meanings.yaml` and `layout_families.yaml`; serving refuses at
-  cold start to serve a release packaged with different prompt inputs.
+  `model_view.yaml`, the section map and `lob_meanings.yaml`; serving refuses at cold start to serve a
+  release packaged with different prompt inputs. It no longer covers `layout_families.yaml` (gone,
+  2026-10-22), so the window-plan pin changed and the corpus must be rebuilt, as the new training set
+  needs anyway.
 
 ### 13.2 Data, labels and splits
 - **Bundles before import** (`data_pipeline/ingestion/prepare_bundles.py`): `prepare_twin_bundles` reads the
@@ -710,13 +724,15 @@ What the build does now that the sections above did not describe. Each module sp
   each frozen document carries its record, and the gate refuses a frozen gold without one
   (`freeze-eval-set --mark-reviewed` copies records into a set frozen earlier, only onto a gold unchanged since). Later builds exclude its
   documents and their families and split new documents into train/val only.
-- **Scopes** (`configs/scopes.yaml`): `unified`, `policy`, `lossrun`, and two line-scoped policy adapters.
-  `personal_lines` covers homeowners, personal_auto (classic auto is read as personal auto), dwelling_fire,
-  ocean_marine, motorcycle, recreational_vehicle and personal_umbrella — **not flood**, and not a package of
-  common-model lines; `configs/training/personal_lines.yaml` adds its data mix. `casualty_fleet` covers `gl`
-  alone, trained on the CGL documents in their own tenant: serving routes by a release's lines, so `auto`,
-  `wc` and `umbrella` join only once they are on the common model and in the corpus. A line-scoped release
-  refuses a policy of another line, or with no `lob`.
+- **One adapter** (`common/adapter.py`; decision 2026-10-22): policy documents, the policy tasks, the
+  `unified` training config (which holds the data mix). There are no scopes: it trains on every policy line
+  the corpus holds, and its release records the lines it trained on; serving sends a policy of any other line
+  to the base model (§13.5). It trains on, is scored on and serves **single-line policies only**
+  (`common.lob.single_line`): a package and a policy with no line are left out of its training view and read
+  by the base model against `_fallback.json`, a shape it is not taught. Today the lines on the common model
+  are the seven personal lines and `gl`. The code for ACORD and Loss Run documents is kept and not trained.
+  The data tools (`prepare_bundles`, `fill_synthetic_labels`, `data_pipeline.audit`) take `--lines a,b`,
+  every line by default, compared by schema name (`--lines wc` keeps a row labelled `workers_comp`).
 - A policy's line is a canonical schema name (`flood`, `gl`, `cyber` …), validated against the lines that
   have a schema — not against the 12-value LOB enum, which is for labels that carry `line_of_business`.
 - Render-only and zero-page documents are skipped from training; a build with no train rows is refused,
@@ -729,10 +745,13 @@ What the build does now that the sections above did not describe. Each module sp
   copy, eval report, calibrator and releases, "needs
   retrain or delete" — since trained weights are not tenant-prefixed yet; a tenant's plan covers every prefix
   in `paths.TENANT_SCOPED`. Every prefix ends in `/`, so `policy_1` never reaches `policy_10`. A run that
-  continued from a checkpoint, or a per-type adapter on a listed Foundation, is listed too; a manifest or
-  storage call that cannot be read is listed "check by hand", naming the error type only.
+  continued a listed run (`parent_run_id`) carries what its parent learned, so the plan follows the chain
+  down, each listed "continued <parent>, listed here: needs retrain or delete"; a run continued by hand from
+  a checkpoint directory, or a per-type adapter on a listed Foundation, is listed too; a manifest or
+  storage call that cannot be read is listed "check by hand", naming the error type only. Retraining after
+  a deletion is a `--fresh` cycle without the document.
 
-### 13.3 Training, selection, merge, packaging
+### 13.3 Training, selection, packaging
 - ms-swift 3 CLI; staged rows in ms-swift's own format on the pod volume; before launch the real tokenizer
   and resize rule measure every row against `max_length` and each task's output reservation, and label
   masking is verified on encoded rows. Data-parallel on every GPU the pod has (`distributed.gpus: auto`) at
@@ -753,26 +772,58 @@ What the build does now that the sections above did not describe. Each module sp
 - **Calibration** is fitted on windowed policies merged and held to the label conventions as they are
   served, on one validation half, thresholds on the other; the calibrate stage reports expected calibration
   error per field type.
-- PEFT `merge_and_unload` on the GPU into the pinned local base.
+- **No merge** (decision 2026-10-23): the release is the selected adapter. Calibration and the gate load the
+  base with that adapter applied (`load_model("base", adapter=...)`), as it is served. `training/merge.py`
+  (PEFT `merge_and_unload` into the pinned local base) is no longer called by the pipeline.
+- **Incremental training** (decision 2026-10-23, `pipeline_dag.continuation`): a cycle continues the
+  tenant's promoted release — its adapter's weights, with a fresh optimizer and learning-rate schedule
+  (ms-swift `adapters`) — on new and existing data. It starts from the base when given `--fresh`, when
+  nothing is promoted, or when the parent's run manifest cannot be read, it trained on another base model,
+  it has another LoRA rank, alpha or target modules, its adapter is not in Blob, or its release was packaged
+  with another prompt hash or window plan, or its eval report is missing or on another yardstick (the set
+  frozen again, or other scoring code), which the line rule would block only after training. The reason is
+  logged and recorded (`fresh_reason`, on the run manifest and in the stage result); the parent is
+  `parent_run_id` (also in the registry index row), and its adapter is copied to staging
+  (`parent-adapters/policy/vN`). A continued run uses the non-null values of `continued_training` in
+  `configs/training/unified.yaml` (null for now, so as a fresh run). The first
+  cycle on the new training set and canonical schema starts fresh (the prompt hash changes); later ones
+  continue.
 - **More windows per policy** since every page is read (decision 2026-10-19): a longer training run, and a
-  corpus rebuild and retrain of both adapters before the next gate.
-- **`package`**: quantize → calibrate → evaluation gate on the tenant's frozen set through the serving
-  pipeline → push. The gate pairs the candidate's per-document scores with the promoted release's
-  (`pipeline_dag.paired_document_scores`) when both were scored on the same frozen set of the tenant, so
-  non-inferiority is a paired bootstrap, weighted as each metric counts its documents, and the improvement
-  rule is enforced (`--fixes-defect "<ticket>"`, per scope, stands in for an improvement and nothing else;
-  a blank or placeholder value is refused). Reports that cannot be paired get a point comparison, with the
+  corpus rebuild and retrain of the adapter before the next gate.
+- **One version per cycle** (decision 2026-10-22): a new `finetune`/`all` takes the next version
+  (`registry_utils.releases.next_cycle_version`, `artifact_registry.paths.next_version`), one sequence for
+  every tenant: the adapter's runs and every tenant's corpora and releases count, because runs, weights and
+  eval reports are not kept per tenant; `--version vN`
+  only resumes (`--from-stage` refuses without it) or reruns a failed cycle. `--out-version` and
+  `--release-id` are gone: the release id is the version.
+- **`package`**: calibrate → evaluation gate on the tenant's frozen policies of the lines the
+  release serves, through the serving pipeline → push the adapter → promote. The baseline is the tenant's promoted release, read from the release index
+  (`pipeline_dag.promoted_version`; before, it read a run-manifest status no real run ever set, so every
+  candidate was gated as a first version). The gate pairs the candidate's per-document scores with the
+  promoted release's (`pipeline_dag.paired_document_scores`) when both were scored on the same frozen set of
+  the tenant, so non-inferiority is a paired bootstrap, weighted as each metric counts its documents, and
+  the improvement rule is enforced (`--fixes-defect "<ticket>"` stands in for an improvement and nothing
+  else; a blank or placeholder value is refused). Reports that cannot be paired get a point comparison, with the
   reason in the decision's warnings. The release bundle
   records the gate's metrics and tier (**production** at field match ≥ 0.92, **interim** below, or whenever
-  the scope was scored on fewer than 150 frozen documents of a type it covers; none when blocked), latency P95 per adapter and peak GPU
+  the release was scored on fewer than 150 real frozen policies; none when blocked), the lines it trained on
+  (never none: a release with no trained line is refused, since an empty list reads as every line),
+  latency P95 per adapter and peak GPU
   memory (recorded, not gated: no latency SLA is agreed), and a routing table built before anything is
   pushed: a line that cannot be routed, or a line the release trained for that would not reach it, stops the
   release. The published adapter is
-  `adapter_config.json` + `adapter_model.safetensors` only (also for `finetune --push-adapters`); adapter and
-  merged-model pushes skip files whose MD5 Blob already records. A model card (`registry_utils/model_card.py`)
+  `adapter_config.json` + `adapter_model.safetensors` only (also for `finetune --push-adapters`), and is
+  the whole release (`served_as: lora_on_base`); the push skips files whose MD5 Blob already records. A model card (`registry_utils/model_card.py`)
   is written beside every run manifest.
+- **Promotion and rollback** (`registry_utils/releases.py`): `package` promotes a release whose gate passed
+  (every format with its calibrator and gate run) and archives the tenant's previously promoted release (its
+  index row and bundle status `archived`); the run manifests mirror it (`promoted` / `archived`). `promote
+  --version vK --by "<person>"` is a rollback, refused unless vK's bf16 gate decision passed, its bundle
+  records its lines and serving would start with it (the cold-start prompt-hash and window-plan checks);
+  promoting the promoted release changes nothing; nothing is deleted. `package` refuses a version already
+  promoted or archived (a rollback is `promote`), and a dry run never promotes. `versions` prints the registry table. The release index is sorted by version number.
 - **Run visibility**: `common/logging_setup.py` keeps our log lines visible for the whole run; every stage
-  records `wall_seconds`; the run report `run-<command>-<scope>-<tenant>-<version>.json` is rewritten after
+  records `wall_seconds`; the run report `run-<command>-<tenant>-<version>.json` is rewritten after
   every stage in `/workspace/logs` (§12).
 
 ### 13.4 The pod
@@ -782,7 +833,7 @@ What the build does now that the sections above did not describe. Each module sp
   flash-attn built against that torch; serving pod = the same **vLLM 0.11.0**; OCR pod = **MinerU 3.4.5**
   (`mineru[pipeline]`, plus `six`, which its OCR imports undeclared; wired in
   `data_pipeline/ocr/run_mineru.py`); quantization = `llmcompressor` in its own environment (its
-  `datasets`/`transformers` ranges conflict with ms-swift and vLLM).
+  `datasets`/`transformers` ranges conflict with ms-swift and vLLM; not run by the pipeline since 2026-10-23).
 - **Base model** in `/workspace/models` (`model.local_dir`, or `FIDEON_BASE_MODEL_DIR`); a real launch is
   refused when it is configured and absent. Pinned to revision `0c351dd01ed87e9c1b53cbc748cba10e6187ff3b`.
 - **H200 SXM pods (one GPU or several) with a network volume at `/workspace`**, prepared by
@@ -800,9 +851,10 @@ What the build does now that the sections above did not describe. Each module sp
   documents are still pending.
 - **Before a real run**: `python -m data_pipeline.ocr_check` (labelled values against the OCR text),
   `python -m orchestration.preflight` (GPU, packages, base model, config invariants, disk, Azure, OCR done,
-  every label with a review record, annotation agreement reported, and an in-memory corpus build;
+  every label with a review record, one output shape over the imported single-line policies, annotation
+  agreement reported, and an in-memory corpus build;
   `--skip-corpus` when `finetune` follows in the same chain), and
-  `python -m orchestration.smoke_run` (tenant `smoke`, version `v0`, `--scope`; a few sources per split with
+  `python -m orchestration.smoke_run` (tenant `smoke`, version `v0`, the policy adapter; a few sources per split with
   their twins; select → import → OCR → check → finetune, never freezing or packaging).
 - **Blob login** (`artifact_registry.blob_client.azure_from_environment`): a SAS token
   (`AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`) when both are set, else
@@ -835,8 +887,14 @@ What the build does now that the sections above did not describe. Each module sp
   per-document scores the eval report keeps (`EvalReport.per_document_scores()`), weighted so it tests the
   metric the report states (`per_document_weights()`), and paired only on the same frozen set of the tenant;
   a point comparison, with the reason in the decision's warnings, when the reports cannot be paired or fewer
-  than two documents measure a metric. Conditional metrics — exempt only
-  from "was it measured" — include `table_f1` (floor 0.88, Loss Run scopes), `worst_line_field_match`
+  than two documents measure a metric. It scores only the frozen policies of the lines the release serves
+  (`lines_scored`); a baseline scored on other lines, or without its calibrators, is judged on floors alone.
+  A continued run is also held, line by line, to the best run on each line since the last run from the base
+  (decision 2026-10-23): on at least 5 real documents both reports scored, a paired bootstrap must put the
+  95% lower bound above −0.015 (gate `line:<line>`); a line the parent served and the candidate drops blocks
+  too; and no comparable parent report blocks (`line_regression_evidence`, remedy `--fresh`).
+  Conditional metrics — exempt only
+  from "was it measured" — include `table_f1` (floor 0.88, a release serving Loss Runs), `worst_line_field_match`
   (floor 0.85, once a line has 200 values scored) and `scanned_accuracy` (an eval set with no scans, such as
   the all-digital CGL originals, is not blocked on it; one the frozen baseline measured is required). The
   report adds a `real_only` section and the held-out carriers apart (`held_out_carrier_match`, not gated).
@@ -853,13 +911,18 @@ What the build does now that the sections above did not describe. Each module sp
 - **Confidence** reads the printed value: a string's own tokens (not its quotes), `raw`'s span, and OCR
   agreement on the page it cites (`calibration.features.page_agreement`: 1.0 there, 0.5 printed only
   elsewhere, 0.0 nowhere).
-- **Routing**: serving goes through the release the plan chooses — its adapter and its calibrators. One
-  promoted release: the engine serves its merged model. Several, or any line that would fall back: the engine
-  loads the base with LoRA enabled and each release is its own LoRA, applied per request. An operator pin
-  (rollback) outranks everything; then a policy reaches the release of its line's **layout family**
-  (`configs/layout_families.yaml`); an unrestricted (`unified`/`policy`) release reads an unrouted policy
-  before the base model does; otherwise the base model reads it with no LoRA against `_fallback.json`,
-  flagged, with `lob_fallback_used` in the result's route. Line detection ships off (§1.3).
+- **Routing** (`serving/release_router.py`): **one promoted release per tenant** (the newest that can be
+  served, with a warning naming it, if the index ever holds several), through its adapter and its
+  calibrators. The release records the lines it trained on (the run's train view, else the corpus's
+  `policy_line_counts`). A policy of one line it covers goes to it; a package (even of lines it covers) and
+  any other known line go to the base model with no LoRA against `_fallback.json`,
+  flagged, with `lob_fallback_used` in the result's route; a policy with no line, or a line with no schema, is
+  refused unless the caller sends `allow_lob_fallback`. A release packaged since 2026-10-23 is its adapter
+  (`served_as: lora_on_base`), so the engine always holds the base and applies it per request. For an older
+  merged release, when every known line reaches it the engine serves its merged model; when any falls back,
+  it loads the base with LoRA enabled and applies the release as a LoRA per request. A rollback is `promote --version vK` (`routing.release_pins` is gone, and cold start
+  refuses a config still holding it or `routing.lob_family_threshold`). There are no
+  layout families, and the route has no `layout_family`. Line detection ships off (§1.3).
 
 ## Changes since 2026-10-05
 
@@ -901,3 +964,15 @@ What the build does now that the sections above did not describe. Each module sp
 - Purge plans find every import folder and batch, the pod-volume caches and every quantized format; a failed storage call is listed by error type. The bootstrap reads `.env` values as bash does (comment, escapes, CR).
 - `reviewer_id` names a person (any script), never a model or system; `--mark-reviewed` copies only onto an unchanged frozen gold; carrier keys read underscores as spaces.
 - The 150 minimum counts real documents only; a baseline on another yardstick is judged on floors alone.
+
+## Changes of 2026-10-22 (one adapter)
+
+- One adapter, for policy documents (decision 2026-10-22): no training scopes, no layout families (`configs/scopes.yaml`, `common/scopes.py`, `configs/layout_families.yaml`, `configs/training/personal_lines.yaml` gone; Fideon SPEC_09's adapter groups knowingly not followed), in the header, §0.1, §1.3, §2, §4, §5, §6, §9, §10 and §13; each cycle takes the next version, which names its release; `package` promotes and archives, `promote` rolls back, `versions` lists the registry; the gate's baseline is the promoted release in the index; serving has one promoted release per tenant and sends other lines to the base model; `--scope`, `--out-version`, `--release-id` and `release_pins` gone; the prompt hash no longer covers `layout_families.yaml`.
+- Code review of 2026-10-23: one version sequence for every tenant, every tenant's corpora and releases counted (§2, §12, §13.3); single-line policies only — the training view, the gate and serving leave a package and a policy with no line to the base model (§10, §12, §13.1, §13.2, §13.5); `--lines` compares schema names; the audit and the preflight check the output shape; a release with no trained line is refused, a released version is not packaged again, `promote` refuses a release serving would refuse, and a dry run never promotes (§13.3); the gate scores the lines the release serves, and a baseline scored on other lines or without calibrators is not compared; cold start refuses `release_pins` and `lob_family_threshold` (§13.5).
+
+## Changes of 2026-10-23 (incremental training)
+
+- Incremental training (the user's decision of 2026-10-23), in the header, §2, §12 and §13.3: a cycle continues the tenant's promoted adapter on new and existing data, on the original base, and starts from the base with `--fresh` or when the promoted one cannot be continued (`fresh_reason`); the parent is `parent_run_id`, its adapter staged under `parent-adapters/`.
+- No merge and no quantize (§2, §4, §5, §6, §12, §13.3, §13.4): stages are now 1–6 in `finetune` and 7–9 in `package`, 10 serving and 11 the feedback loop; the release is the adapter (`served_as: lora_on_base`), served on the bf16 base; `--formats` is gone from the examples; `merge.py` and `quantize.py` are kept but not called.
+- The gate holds a continued run line by line to its parent (§12, §13.5); serving always applies a `lora_on_base` release to the base (§13.5); purge plans follow `parent_run_id` down the chain, and retraining after a deletion is a `--fresh` cycle (§13.2).
+- Code review of the incremental training (§12): each line is held to the best run on it since the last run from the base, not to the parent alone, by a paired bootstrap over at least 5 real documents (not 200 values); a dropped line blocks.

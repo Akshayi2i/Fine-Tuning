@@ -14,7 +14,7 @@ Before committing to full corpus annotation, run three sequential experiments th
 
 **Run these in order. Do not skip to Experiment C.**
 
-**Policy documents only, for now** (decision 2026-10-22): wherever this protocol says *per document type*, read policies, and train and gate a policy scope. ACORD forms and Loss Runs return to the pilot when they are targeted again.
+**Policy documents only, for now** (decision 2026-10-22): wherever this protocol says *per document type*, read policies, and train and gate the one policy adapter (`common/adapter.py`; there are no training scopes). The code for ACORD and Loss Run documents is kept, and not trained.
 
 ## Deliverables
 
@@ -66,7 +66,7 @@ Confirm all of:
 
 ### 3. Experiment C — Pilot Training Run (Weeks 2–6, 25–30 documents per type)
 
-Annotate 25–30 documents per document type per IMPL-04 — **reviewed golds only**: no frontier model drafts a gold, and every gold needs a review record — `reviewer_id` and `review_date` — to train or score, a twin its seed's (decisions 2026-10-19 and 2026-10-22; the preflight and the corpus build refuse the run otherwise). Use the **pilot split ratios (~70/18/12)** from IMPL-05 (or the split a delivery arrives with — master §10). Train ONE adapter for the pilot's scope with the §11.1 pilot hyperparameters (`configs/training/unified.yaml`). Evaluate on the pilot test split, in every modality regime, with **every page of every document read**, chunk by chunk, never selected pages (decision 2026-10-19).
+Annotate 25–30 documents per document type per IMPL-04 — **reviewed golds only**: no frontier model drafts a gold, and every gold needs a review record — `reviewer_id` and `review_date` — to train or score, a twin its seed's (decisions 2026-10-19 and 2026-10-22; the preflight and the corpus build refuse the run otherwise). Use the **pilot split ratios (~70/18/12)** from IMPL-05 (or the split a delivery arrives with — master §10). Train the ONE policy adapter with the §11.1 pilot hyperparameters (`configs/training/unified.yaml`). The pilot's first cycle starts from the base, since nothing is promoted yet; a later cycle continues the promoted adapter unless given `--fresh` (decision 2026-10-23, IMPL-13 §2). Evaluate on the pilot test split, in every modality regime, with **every page of every document read**, chunk by chunk, never selected pages (decision 2026-10-19).
 
 This is the **minimum experiment that tests the architecture's generalisation claim**: whether one adapter captures cross-type behaviour without the types interfering, whether modality-dropout arbitration functions, whether totals reconciliation catches a missed row on unseen documents, and whether the per-field-type calibrators have enough data to be enforced at all — at pilot volume several field types will not clear the 300-instance floor and will route everything to review, which is the system working rather than failing.
 
@@ -85,13 +85,13 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 
 **The five gate-floor targets are the gate's own** (arch §0d): `_from_floor` builds each from `evaluation.gating.PILOT_FLOORS` (the threshold) and `GATING_METRICS` (the direction), and compares inclusively (≥ / ≤), as the gate does — so a model exactly at a floor passes both the gate and the pilot. A second copy of the thresholds in the pilot had drifted (field F1 0.80, schema validity 0.9999); there is now one table. The three relative criteria have no gate floor and keep strict comparisons.
 
-**LoB detection on a policy-only pilot.** A canonical policy label carries no `line_of_business` — the line comes with the request — so `lob_detection_accuracy` is structurally not applicable to policy-only scopes (`personal_lines`, `casualty_fleet`, `policy`) and the gate does not ask for it. `pilot/pilot_run.py` records it as not applicable when the pilot holds no ACORD or Loss Run documents (`Criterion.applies_to`; listed under `not_applicable` in the report), so it neither passes nor fails; for such a pilot, read it from `scripts/measure_lob_detection.py --corpus vN [--tenant T]` (the base model reading the line of each policy in the tenant's frozen eval set zero-shot, its line withheld, at serving's thresholds, against the 0.85 floor), and record that it stands in. Line detection stays off in serving until that measurement passes (master §1.3).
+**LoB detection on a policy-only pilot.** A canonical policy label carries no `line_of_business` — the line comes with the request — so `lob_detection_accuracy` is structurally not applicable to the policy adapter (`common.adapter.not_applicable_metrics`) and the gate does not ask for it. `pilot/pilot_run.py` records it as not applicable when the pilot holds no ACORD or Loss Run documents (`Criterion.applies_to`; listed under `not_applicable` in the report), so it neither passes nor fails; for such a pilot, read it from `scripts/measure_lob_detection.py --corpus vN [--tenant T]` (the base model reading the line of each policy in the tenant's frozen eval set zero-shot, its line withheld, at serving's thresholds, against the 0.85 floor), and record that it stands in. Line detection stays off in serving until that measurement passes (master §1.3).
 
 **A failed criterion signals a specific architectural issue to diagnose — not a reason to abandon the architecture.** Diagnose the failure-mode distribution, expand corpus coverage for the failing case, and re-run the pilot. Map each failure to its likely cause:
 
 | Failed criterion | First place to look |
 |---|---|
-| Field match low | Prompt/schema design; corpus coverage for that doc type; LR/epochs on the unified run (a targeted retrain, not the deferred sweep) |
+| Field match low | Prompt/schema design; corpus coverage for that doc type; LR/epochs on the adapter's run (a targeted retrain, not the deferred sweep) |
 | List-field recall low | Loss Run corpus row-length variety; row-completeness signal (IMPL-09); consider list-specific prompt rules |
 | Schema validity < 0.98 | Prompt rules (no fences, null-handling); JSON structural discipline in the training corpus |
 | Image-only F1 gap > 15% | **The ViT escalation gate (IMPL-06 `vit_gate`)** — but only if errors are perception-type, not schema/reasoning |
@@ -151,28 +151,35 @@ This is the **minimum experiment that tests the architecture's generalisation cl
   splits field accuracy into labels training showed and labels it never did (`unseen_labels`, reported).
 - **Freezing a pilot eval set** is per tenant: `freeze-eval-set --corpus vN [--tenant T]` writes
   `golden-eval-set/{tenant}/`, and needs `--allow-small` under 150 test documents per type: the set is then
-  directional (its manifest records `small_set_accepted`, and a release whose scope is scored on fewer than
-  150 of its documents of a type is capped at the `interim` tier, with a warning — as is a scope scored on
-  too few documents of a full-size set), and once frozen it is the yardstick for every later version of that
+  directional (its manifest records `small_set_accepted`, and a release scored on fewer than 150 real frozen
+  policies is capped at the `interim` tier, with a warning, whatever that flag says), and once frozen it is the yardstick for every later version of that
   tenant. Prefer to freeze from the first build at real scale; if a pilot set is frozen, replacing it later is
   a deliberate delete-and-refreeze after which older scores are not comparable.
 - **A pilot whose eval set holds no scans** (the CGL originals are all digital) is not blocked on
   `scanned_accuracy`: it is a conditional gate metric, required only when the eval set holds scanned documents
   — and required whenever the frozen baseline measured it, since its absence then means something broke.
-- **Pilots by scope and tenant**: `personal_lines` trains on the SPEC_21 personal-lines delivery;
-  `casualty_fleet` trains on the CGL documents alone (`gl`, real documents, no twins), in their own tenant,
-  bundled with `python -m data_pipeline.ingestion.prepare_bundles --input <PDFs/ + Gold JSON/> --lob gl --out <dir>`
+- **Pilots by tenant** (no training scopes since 2026-10-22): the SPEC_21 personal-lines delivery and the CGL
+  documents (`gl`, real documents, no twins) each train the one policy adapter, the CGL documents in their own
+  tenant, bundled with `python -m data_pipeline.ingestion.prepare_bundles --input <PDFs/ + Gold JSON/> --lob gl --out <dir>`
   (`cgl` reads as `gl`; one family per insured; split drawn once and delivered in the metadata). Each tenant has its
-  own corpus, frozen set and releases.
+  own corpus, frozen set and promoted release; versions are numbered across every tenant's runs, corpora and
+  releases, so two tenants never share a number (IMPL-13). A pilot trains, is gated and is served on
+  single-line policies of its known lines only: a package or a policy with no line is left out of training and
+  of the gate, and read by the base model (IMPL-06, IMPL-08).
+- **Pilot cycles continue** (decision 2026-10-23): a pilot cycle run after a release of its tenant is promoted
+  continues that release's adapter and is gated line by line against the best run on each line since the
+  last run from the base (IMPL-08); give `--fresh` when the
+  pilot is meant to measure a run from the base. Nothing is merged: the pilot's release is its adapter,
+  served on the bf16 base.
 - **Every page is read** (decision 2026-10-19): each window group reads every page of a policy, chunk by
   chunk, and the declarations group's first window is pages 1–5 plus the detected declarations page. That is
   more windows per policy, so a longer training run; a corpus built before the change must be rebuilt and the
   adapter retrained, and pilot or gate numbers from before it are not comparable with new ones.
 - **Before the pilot's `finetune`**: `python -m data_pipeline.ocr_check` (labelled values against the OCR
-  text), `python -m orchestration.preflight --scope <scope>` (it also fails on a label with no review
-  record and reports annotation agreement, warning only; add `--skip-corpus` when `finetune` follows in the
+  text), `python -m orchestration.preflight [--tenant T]` (it also fails on a label with no review
+  record and on imported policies that would teach two output shapes, and reports annotation agreement, warning only; add `--skip-corpus` when `finetune` follows in the
   same chain: the build then runs once, and refuses a >25% set-aside itself), and
-  `python -m orchestration.smoke_run --scope <scope>` (tenant `smoke`, version `v0`, 4 train / 1 val / 1 test
+  `python -m orchestration.smoke_run` (tenant `smoke`, version `v0`, the policy adapter, 4 train / 1 val / 1 test
   sources with their twins; never freezes or packages). The smoke run proves the plumbing; it is not
   Experiment B. Train/serve token parity is measured on the pod with
   `pytest tests/test_parity.py::test_template_token_parity` (GPU-marked; it skips without a GPU, the base
@@ -180,7 +187,7 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 - **Reading the results**: `extract` writes per-document JSON (with `all_fields`: every schema field, its value
   and its result against gold) and metrics; `python -m testing.compare_models` runs the same documents through
   the base model and base + adapter and writes both, with a workbook per document. Every stage of a run records
-  its wall time in `run-<command>-<scope>-<tenant>-<version>.json` under `/workspace/logs`.
+  its wall time in `run-<command>-<tenant>-<version>.json` under `/workspace/logs`.
 - **Pod runs**: every pilot command started on the pod runs detached in tmux (IMPL-13); install each pod with
   `bash scripts/pod_bootstrap.sh` (both environments, MinerU 3.4.5's pinned pipeline weights, the base model
   and the spike), and run OCR in `/workspace/venv-ocr` (MinerU 3.4.5, pipeline backend) before any pipeline
@@ -213,3 +220,13 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 - Reviewed golds: every gold needs a review record (decision 2026-10-22), a twin its seed's; the preflight fails on any without one.
 - Goal: the pilot covers policy documents only, for now (decision 2026-10-22).
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
+
+## Changes of 2026-10-22 (one adapter)
+
+- One adapter (decision 2026-10-22): the pilot trains and gates the one policy adapter, not a scope; LoB detection is not applicable to it; the interim cap counts real frozen policies; pilots by tenant, not by scope; preflight, smoke run and run report without `--scope`.
+- Code review of 2026-10-23: versions are numbered across every tenant's runs, corpora and releases; a pilot trains, is gated and is served on single-line policies only; the preflight also fails on imported policies teaching two output shapes.
+
+## Changes of 2026-10-23 (incremental training)
+
+- Experiment C and *Current implementation*: a pilot's first cycle starts from the base; a later one continues the promoted adapter unless `--fresh`, and is gated line by line against it; the release is the adapter, nothing merged (decision 2026-10-23).
+- Code review of the incremental training: a continued pilot cycle is gated, line by line, against the best run on each line since the last run from the base (IMPL-08).

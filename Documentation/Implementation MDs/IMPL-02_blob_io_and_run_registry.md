@@ -15,7 +15,8 @@ Provide a clean, typed interface for all Azure Blob reads/writes, and implement 
 ### 1. `artifact_registry/paths.py` (build this first)
 - The **single place** the Blob layout (master §4) is expressed. Every other function builds paths through it.
 - **Reserves the tenant prefix** (arch §8b): `TENANT_SCOPED` — `raw-documents/`, `processed/`, `golden-labels/`, `corpus/`, `releases/`, `exports/` and `golden-eval-set/` — are `{tenant_id}`-prefixed; `SHARED` — `base-models/`, `adapters/`, `merged-models/`, `quantized-models/`, `registry/`, `eval-reports/`, `calibration/` — are never prefixed (the module records that trained weights are tenant data under v2.1 and that moving `adapters/`, `merged-models/` and `quantized-models/` under the tenant is still a pending migration; until then a tenant deletion cannot remove trained weights by prefix, so the purge plans name each run trained on the tenant's corpora, its weights and its releases — IMPL-03 §1). `tenant_id` **defaults from `DEFAULT_TENANT_ID`** (else `default`) and is validated by `paths._tenant` (lowercase alphanumeric, `-`/`_`, at most 63 characters: it becomes a path segment). Every ingestion, OCR, import and pipeline CLI takes `--tenant`, and separate tenants are in real use: the CGL documents train under a tenant of their own, smoke runs under `smoke` / `smoke-cgl`. Each tenant has its own documents, labels, corpus versions, frozen eval set (`golden-eval-set/{tenant}/`) and releases.
-- Distinguishes the adapter lineages: `adapters/foundation/v{n}/` (unified), `adapters/scope/{scope}/v{n}/` (a scoped run) and `adapters/{doc_type}/v{n}/` (a §4.2 graduated per-type adapter). A per-tenant lineage is **not built** until a broker requires one.
+- Distinguishes the adapter lineages: `adapters/scope/policy/v{n}/` (the one adapter, `common.adapter`; decision 2026-10-22), `adapters/foundation/v{n}/` (older unified runs) and `adapters/{doc_type}/v{n}/` (a §4.2 graduated per-type adapter). A per-tenant lineage is **not built** until a broker requires one.
+- **Versions** (decision 2026-10-22): `paths.version_number("v3")` is 3; `paths.next_version(used)` is one more than the highest version in `used`, `v1` when there is none; `paths.corpus_root(tenant)` is `corpus/{tenant}`. A release is named by its cycle's version (`releases/{tenant}/v3/`); `release-YYYY.M.N` is still read, so an older index loads, and `next_release_id` is gone.
 - **Also expresses the RunPod staging paths** (master §12a) — `/runpod-volume/staging/{adapters,merged-models,eval-reports,run_manifests}/` — deliberately mirroring the Blob layout so `package` (IMPL-13 command 2) copies rather than translates. Staging paths and Blob paths are built by separate functions that must never be interchanged: one is working storage, the other is the artifact of record.
 
 ### 2. `artifact_registry/blob_client.py`
@@ -33,7 +34,7 @@ Provide a clean, typed interface for all Azure Blob reads/writes, and implement 
 *(One module, not the `push_to_blob.py` / `pull_from_blob.py` pair originally sketched: a push and its pull must agree on the path, and two files are two places for them to drift.)*
 - High-level, path-aware helpers keyed to the Blob layout. Tenant-scoped helpers accept an optional `tenant_id` that defaults from env:
   - `push_adapter(local_dir, kind, version, doc_type=None)` → foundation / per-type path; `pull_adapter(kind, version, local_dir, doc_type=None)`
-  - `push_scoped_adapter(local_dir, scope, version)` → `paths.scoped_adapter_dir` (see Current implementation)
+  - `push_scoped_adapter(local_dir, scope, version)` → `paths.scoped_adapter_dir`, called with the adapter's name (`policy`; see Current implementation)
   - `push_merged_model(local_dir, version, doc_type=None, scope=None)` / `pull_merged_model(...)`, `push_quantized(local_dir, version, fmt, doc_type=None, scope=None)` / `pull_quantized(...)`
   - `pull_base_model(local_dir)` (from `base-models/`, or from HF at the pinned revision if absent, then cache to Blob)
   - `push_corpus_version(local_dir, version, tenant_id=None)`, `pull_corpus_version(version, local_dir, tenant_id=None)`
@@ -42,12 +43,12 @@ Provide a clean, typed interface for all Azure Blob reads/writes, and implement 
 - Every push refuses a missing source directory (`TransferError`) rather than creating an empty prefix that would read as a published artifact.
 - No standalone pull CLI: the pipeline stages call these helpers directly (training stages its own data through `training/stage_data.py`). `pull_base_model` from the Hub is not wired; the pod reads the base from `/workspace/models` (`configs/base_model.yaml` `local_dir`).
 
-**Reading the index is not optional.** `_index` raises `RegistryQueryError` when the index blob exists but cannot be read. It must never degrade to an empty list: an empty registry and an unreadable one are different facts, and conflating them makes a throttled or 403'd Azure call look like a first-ever run — `latest_promoted` returns `None`, the promotion gate sets `is_first_version` and has nothing to regress against, and a candidate whose accuracy collapsed is promoted. The same swallow silently cleared the arch §12 Foundation cascade block.
+**Reading the index is not optional.** `_index` raises `RegistryQueryError` when the index blob exists but cannot be read. It must never degrade to an empty list: an empty registry and an unreadable one are different facts, and conflating them makes a throttled or 403'd Azure call look like a first-ever run — `latest_promoted` returns `None`, and the next cycle's version (`registry_utils.releases.next_cycle_version`, §7) would be counted without the adapter's runs. (The gate's baseline is read from the tenant's release index since 2026-10-22, IMPL-08.) The same swallow silently cleared the arch §12 Foundation cascade block.
 
 ### 4. `registry_utils/models.py`
 Pydantic model `RunManifest` capturing the arch §12 manifest **plus the v1 additions**:
 
-- `run_id`, `run_type` (`unified` | `foundation` | `per_type_adapter` | `scoped`), `doc_type` (nullable — the §4.2 graduated adapter a run *is*), `scope` (nullable, reads as `unified`) and `doc_types` (what a scoped run covers; required for `scoped`), `tenant_id` (nullable, defaulted), `status` (`training|trained|evaluated|promoted|archived|failed`), `created_at`, `continued_from` (a Foundation run continued from a checkpoint).
+- `run_id`, `run_type` (`unified` | `foundation` | `per_type_adapter` | `scoped`), `doc_type` (nullable — the §4.2 graduated adapter a run *is*), `scope` (the adapter's name, `policy`, for a run of it — every run the current code trains is `scoped`; an older run's training scope; nullable, reads as `unified`) and `doc_types` (what a scoped run covers; required for `scoped`), `tenant_id` (nullable, defaulted), `status` (`training|trained|evaluated|promoted|archived|failed`; `promoted` / `archived` mirror the run's release, §7), `created_at`, `continued_from` (the adapter directory a run's weights started from, when it continued), `parent_run_id` (the run a cycle continued, e.g. `policy-v3`; decision 2026-10-23) and `fresh_reason` (why a cycle started from the base instead; `None` when it continued, or for a run written before cycles continued).
   - `unified` / `foundation` runs may name neither a `doc_type` nor a narrower scope; a `scoped` run must name its scope and `doc_types` and no `doc_type`.
   - **`training` exists because the manifest is written *before* ms-swift is launched** — the run_id has to be reserved and the configuration captured even for a run that dies. Without it the pre-launch manifest defaulted to `trained`, so a pod that OOM'd at step 40 left a registry entry asserting a trained adapter over a staging path holding nothing, and `package` published Blob locations for weights that were never written. `training.train.launch_and_record` flips it to `trained` when ms-swift returns and to `failed` when it does not; **`stage_push` publishes only `trained`, `evaluated` or `promoted` runs.**
 - **`is_sweep_run`** (bool) + `sweep_id` / `sweep_phase` — reserved fields so sweep runs are first-class registry entries when sweeps are run (arch §11a; deferred past the IMPL-15 pilot).
@@ -59,15 +60,15 @@ Pydantic model `RunManifest` capturing the arch §12 manifest **plus the v1 addi
   - **`mineru_version`** and `ocr_device` (arch §8a) — read from the corpus manifest the run trains on (`training/train.py`), so the run records the MinerU that read its documents (the corpus build refuses documents read by more than one version, IMPL-03)
   - **`schema_version`** and **`prompt_template_version`** (arch §7)
 - `training_config`: **`technique` (`LoRA` | `QLoRA`) and `base_quantization` (`bf16_frozen_base`, or `<quant_type>_<double|single>_quant_<dtype>_compute` under 4-bit) — both REQUIRED, never defaulted**. They previously carried QLoRA/NF4 defaults on the model, so a bf16 run that did not pass them recorded a technique it never used; base precision is exactly the kind of change that causes a regression, and the manifest is what makes one attributable. Then lora_rank/alpha/dropout, bias, lr, lr_scheduler, warmup_ratio, epochs, **optimizer (`adamw_torch`, also required)**, betas, eps, weight_decay, max_grad_norm, per_device_batch, grad_accum, effective_batch_size, gradient_checkpointing, mixed_precision, target_modules, **`vit_trainable`** with `vit_method` (`frozen` | `lora`; when trainable it must be **LoRA-on-ViT, never full fine-tune** — arch §3), resolution_cap_px, `pixel_budget` (the image resize budget the trainer was actually given), max_seq_len, **`seed`**.
-- `data_stats`: train/val/test counts, `modality_mix` and `modality_mix_target`, **`lob_coverage`** (per-LoB-value share, arch §0b), `alias_coverage`, `confusable_example_count`, `tenant_ids` contributing, `split_policy` (carriers held out per line, single-carrier lines, lines naming fewer than the 10 carriers a hold-out needs (`lines_below_carrier_minimum`), families moved into test, twins dropped by the per-seed cap), `data_mix` (the scope's configured `synthetic_fraction` / `scanned_share` and what each line's train documents came to), `examples_by_line` (split → line → documents, real, synthetic, rows; scoped runs), `deidentified: true|false` and `image_redaction` (recorded; `false` and `unresolved` under Option A, no de-identification, which the architecture records as the current state — IMPL-00 §8, IMPL-05 §1).
+- `data_stats`: train/val/test counts, `modality_mix` and `modality_mix_target`, **`lob_coverage`** (per-LoB-value share, arch §0b), `alias_coverage`, `confusable_example_count`, `tenant_ids` contributing, `split_policy` (carriers held out per line, single-carrier lines, lines naming fewer than the 10 carriers a hold-out needs (`lines_below_carrier_minimum`), families moved into test, twins dropped by the per-seed cap), `data_mix` (the configured `synthetic_fraction` / `scanned_share` and what each line's train documents came to), `examples_by_line` (split → line → documents, real, synthetic, rows, of the run's view of the corpus), `deidentified: true|false` and `image_redaction` (recorded; `false` and `unresolved` under Option A, no de-identification, which the architecture records as the current state — IMPL-00 §8, IMPL-05 §1).
 - `eval_metrics` (all against the frozen golden eval set, arch §15):
   `field_exact_match`, `field_normalized_match`, `field_f1_list_fields`, `list_field_recall`, `schema_validity_rate`, `ece_confidence`, `ocr_arbitration_accuracy`, `image_only_accuracy`, `scanned_accuracy`, `doc_type_classifier_accuracy`, **`lob_detection_accuracy`** (overall, and `lob_accuracy_by_value`), `alias_accuracy` (reported), **`confusable_misattribution_rate`** (gating), `table_f1` and `lossrun_totals_reconciliation_rate` (Loss Runs), `held_out_carrier_match` (reported, not gated), `latency_ms_per_doc`.
-- `artifacts`: **`status`** (`staged` | `published`), **`staging_path`** (set while `staged`), `adapter_weights`, `merged_model`, `quantized_model`, `quantized_formats[]`, `eval_report`, `calibration_params`.
+- `artifacts`: **`status`** (`staged` | `published`), **`staging_path`** (set while `staged`), `adapter_weights`, `merged_model`, `quantized_model`, `quantized_formats[]`, `eval_report`, `calibration_params`. A run packaged since 2026-10-23 fills `adapter_weights` only of the weights: nothing is merged or quantized.
   - `finetune` (IMPL-13 command 1) writes the manifest with `status: "staged"` and weights still on the RunPod volume; `package` (command 2) flips it to `"published"` and fills the Blob paths. A manifest is written **either way**, so a reclaimed staging volume never means an untracked training run.
 - `promotion`: `gated_against`, `beat_previous_on_all_gates`, `failed_gates`, `promoted_by`, `promoted_at`, `tier` (`production` | `interim`, `None` when not gated or blocked).
 
 ### 5. `registry_utils/write_run_manifest.py`
-- `write_manifest(manifest: RunManifest)` → writes `registry/foundation/{run_id}/run_manifest.json` (unified and foundation runs share the slot), `registry/adapters/{doc_type}/{run_id}/…` or `registry/scope/{scope}/{run_id}/…` (`paths.run_manifest`) to Blob, rewrites the run's **model card** beside it (`model_card.md`, `registry_utils/model_card.py`, rendered from the manifest alone; a card that fails to write is logged, never fails the run), and updates `registry/registry_index.json` (a flat table: run_id, run_type, doc_type, scope, doc_types, status, artifact_status, corpus/foundation version, commit, created_at, is_sweep_run, key metrics).
+- `write_manifest(manifest: RunManifest)` → writes `registry/foundation/{run_id}/run_manifest.json` (unified and foundation runs share the slot), `registry/adapters/{doc_type}/{run_id}/…` or `registry/scope/{scope}/{run_id}/…` (`registry/scope/policy/policy-v3/` for the adapter; `paths.run_manifest`) to Blob, rewrites the run's **model card** beside it (`model_card.md`, `registry_utils/model_card.py`, rendered from the manifest alone; a card that fails to write is logged, never fails the run), and updates `registry/registry_index.json` (a flat table: run_id, run_type, doc_type, scope, doc_types, status, artifact_status, tenant_id, tier, corpus/foundation version, commit, created_at, is_sweep_run, `parent_run_id`, key metrics).
 - `capture_git_commit()` to fill `code_git_commit`, `is_dirty_worktree()` so callers can warn; `mineru_version` comes from the corpus manifest the training stage reads (IMPL-05), not from a capture here. `mark_promoted` and `mark_published` (below and IMPL-13).
 - `data_stats.deidentified` is **recorded, not enforced**: under Option A (no de-identification, IMPL-00 §8) every run records `false`. Should a de-identification option (B or C) be chosen later, the refusal belongs here — it is the right enforcement point.
 - `log_to_tracker` mirrors params and numeric metrics to MLflow when `MLFLOW_TRACKING_URI` is set (no-op otherwise; W&B is not wired) — the tracker gives the queryable UI, the Blob manifest is the durable record that travels with the artifacts (arch §12).
@@ -80,9 +81,18 @@ CLI + functions:
 - `latest_promoted(kind, doc_type)` → the version currently serving.
 - `resolve_model_version(tag)` → given a user tag, return the concrete artifact paths. Used by IMPL-07, IMPL-11, IMPL-12, IMPL-13.
   - **`"base"` is a valid tag** and resolves to the pinned HF base model with **no adapter** — the zero-shot path used by `extract --model base` (IMPL-13), the pilot baseline (IMPL-15), and day-zero pre-annotation (IMPL-04).
-  - `"v2"` resolves the merged model, plus a graduated per-type adapter (§4.2) when the routed type has one. Never a stack: one LoRA per request is what vLLM serves.
-  - Resolves from Blob for `published` versions and from the staging volume for `staged` ones, so `extract` works on a model that has not been packaged yet.
+  - `"v3"` resolves the policy adapter's run of that version first (`policy-v3`, kind `base_plus_adapter`: the base model with its adapter, staged or published; nothing is merged, so a non-bf16 format is refused; decision 2026-10-23), then an older unified or Foundation run, whose merged model comes with a graduated per-type adapter (§4.2) when the routed type has one. Before 2026-10-22 only the older runs were looked for, so `extract --model v3` could not find the model the current code trains. Never a stack: one LoRA per request is what vLLM serves.
+  - Resolves from Blob for `published` versions and from the staging volume for `staged` ones, so `extract` works on a model that has not been packaged yet. A staged version of the policy adapter loads the checkpoint its selection chose (`checkpoint_selection.json` in Blob), else the latest checkpoint on the staging volume, with a warning, else it is refused (`_staged_adapter`). It never loads the ms-swift output root, which holds no adapter.
+  - A version of the policy adapter is refused when its run trained on another base than the configured `model_id@revision` (`configs/base_model.yaml`; `base_model_refusal`): an adapter still loads on another base and answers with no error, on weights it never saw. An older merged model carries its own base and is not checked.
 - `diff_manifests(run_a, run_b)` → field-by-field delta. This is the arch §12 regression-debugging workflow: when a doc type regresses, diff the new manifest against the last-good one and see immediately whether the corpus, foundation version, MinerU version, or a hyperparameter moved.
+
+### 7. `registry_utils/releases.py` (decision 2026-10-22)
+One promoted release per tenant: promote, archive, roll back.
+- `promote_release(client, release_id, tenant_id, promoted_by=)` makes a release the tenant's one promoted release. Refused unless its bf16 gate decision passed and the bundle is valid as promoted (every serving format with its own calibrator and gate run). A policy-adapter bundle that records no lines is refused (an empty `lines` reads as every line at serving), and so is a release serving would refuse at cold start: `serving_refusal` runs the same prompt-hash, window-plan and base-model checks (a `lora_on_base` release whose adapter trained on another base is refused), so a rollback is promoted from the code it was packaged with, the code serving will run. Promoting the release already promoted changes nothing (its run keeps who promoted it and when). The release that was promoted is archived: its index row and bundle status become `archived`. The run manifests mirror it (`promoted`, with `promoted_by` and `promoted_at`, or `archived`). Nothing is deleted, so a later promotion can bring an archived release back.
+- `write_index` keeps `releases/{tenant}/release_index.json` sorted by version number (`v2` before `v10`).
+- `next_cycle_version(client, tenant_id)`: one more than every version already used (`used_versions`): the adapter's runs in the registry index, and every tenant's corpora (`corpus/{tenant}/vN`) and releases (`releases/{tenant}/vN`). One sequence for every tenant: runs, weights and eval reports are not kept per tenant, so two tenants on one number would write one run's artifacts over the other's. A corpus counts even without a run, so a cycle that failed before training, or one still building its corpus, does not lose its number to the next one, of any tenant.
+- `version_table(client, tenant_id)`: one row per version — run status, release status, tier — which `python -m orchestration.run versions` prints (IMPL-13).
+- `is_named_person(name)`: a promotion needs a person, not a system name.
 
 ## Constraints
 - Only this package imports `azure-storage-blob`.
@@ -118,11 +128,13 @@ CLI + functions:
 - [ ] `RunManifest` validates the arch §12 example (extended with the v1 fields) and rejects malformed input.
 - [ ] `write_run_manifest` creates the manifest and updates `registry_index.json`.
 - [ ] `adapters_depending_on("foundation-v2.0")` returns the right list from seeded manifests.
-- [ ] `resolve_model_version("v2")` returns concrete adapter/merged paths; `resolve_model_version("base")` returns the pinned base model with no adapter.
+- [ ] `resolve_model_version("v2")` returns the base and v2's adapter (`base_plus_adapter`, no merged model) and refuses a non-bf16 format; `resolve_model_version("base")` returns the pinned base model with no adapter.
 - [ ] A `staged` manifest resolves to staging-volume paths; a `published` one resolves to Blob paths.
+- [ ] A staged version resolves to its selected checkpoint, else its latest checkpoint on the volume with a warning, else it is refused. A version of the policy adapter trained on another base than the configured one is refused, and so is promoting such a `lora_on_base` release.
 - [ ] `diff_manifests` surfaces a changed `corpus_version` / `mineru_version` / hyperparameter.
 - [ ] Unit tests mock the Blob client (no live Azure needed for CI).
-- [ ] A published scoped adapter holds `adapter_config.json` and `adapter_model.safetensors` only; a folder missing either is refused.
+- [ ] A published adapter holds `adapter_config.json` and `adapter_model.safetensors` only; a folder missing either is refused.
+- [ ] Promoting a release archives the tenant's previously promoted one (index row, bundle and run manifest); a release whose bf16 gate did not pass, that records no lines, or that serving would refuse at cold start is not promoted; promoting the promoted release changes nothing; the next cycle's version is one more than any run, corpus or release of any tenant already uses.
 - [ ] A re-push of the same adapter or merged model writes nothing; a blob that records no MD5 is sent again; `upload_dir(names=...)` refuses a named file that is not there.
 - [ ] Each tenant pushes and pulls only its own golden eval set (`golden-eval-set/{tenant}/`).
 - [ ] With `AZURE_STORAGE_ACCOUNT_URL` and `AZURE_STORAGE_SAS_TOKEN` both set the client logs in with the SAS token; with one of them alone it refuses, naming the missing one; with neither it uses `AZURE_STORAGE_CONNECTION_STRING`. With `AZURE_RAW_SAS_TOKEN` set too, calls to the raw container use it and calls to the main container do not; it is refused without the URL and main token, or with no separate raw container, and no message holds a token.
@@ -136,27 +148,29 @@ CLI + functions:
 
 | Path | Holds |
 |---|---|
-| `adapters/scope/{scope}/v{n}/`, `merged-models/scope/{scope}/v{n}/`, `quantized-models/scope/{scope}/v{n}/vllm/{format}/` | a scoped run's own adapter and models (the unified scope keeps the pre-scope keys: `adapters/foundation/`, `merged-models/unified/`) |
-| `eval-reports/v{n}/scope/{scope}/{summary,gate_decision,checkpoint_selection}.json` | a scope's report, verdict and chosen checkpoint (`paths.eval_report`, `gate_decision`, `checkpoint_selection`; not tenant-prefixed) |
+| `adapters/scope/policy/v{n}/`, `merged-models/scope/policy/v{n}/`, `quantized-models/scope/policy/v{n}/vllm/{format}/` | the adapter's own weights and models (older unified runs keep the earlier keys: `adapters/foundation/`, `merged-models/unified/`). Since 2026-10-23 only the adapter is written: it is the release |
+| `eval-reports/v{n}/scope/policy/{summary,gate_decision,checkpoint_selection}.json` | the adapter's report, verdict and chosen checkpoint (`paths.eval_report`, `gate_decision`, `checkpoint_selection`; not tenant-prefixed). Each push of the adapter adds `pushed` to the checkpoint selection: the checkpoint it pushed, which `package --from-blob` checks (IMPL-13) |
 | `registry/{foundation\|adapters/{doc_type}\|scope/{scope}}/{run_id}/model_card.md` | the run's model card, beside its `run_manifest.json` (`paths.model_card`) |
-| `releases/{tenant}/{release_id}/bundle.json`, `.../calibration/{format}/calibrators.json`, `.../gate/{format}/gate_decision.json`, `releases/{tenant}/release_index.json` | the release bundle — the unit of promotion |
+| `releases/{tenant}/v{n}/bundle.json`, `.../calibration/{format}/calibrators.json`, `.../gate/{format}/gate_decision.json`, `releases/{tenant}/release_index.json` | the release bundle — the unit of promotion, named by the cycle's version; the index is sorted by version number |
 | `golden-eval-set/{tenant}/{source_id}/{golden.json,metadata.json,page_N.png,page_N.md}`, `golden-eval-set/{tenant}/manifest.json` | one tenant's frozen eval set (IMPL-08). A set left at the old root (`paths.legacy_golden_eval_manifest()`, `golden-eval-set/manifest.json`) is refused by `evaluation.freeze_eval_set` with the move to make, never read |
 | `intake/{batch}/{document}/` (raw container) | a delivered batch of bundle folders, staged with azcopy before import (`paths.intake_batch_dir`, IMPL-03) |
 | `exports/{tenant}/{kind}/{name}` (raw container) | result sets made for download to a laptop, e.g. a model comparison (`paths.export_dir`) |
-| staging: `{mount}/staging/train-data/{scope}/v{n}/`, `{mount}/staging/train-images/{tenant}/{corpus}/` | a run's staged JSONL; one page-image cache per corpus version, shared by every run on it |
+| staging: `{mount}/staging/train-data/policy/v{n}/`, `{mount}/staging/train-images/{tenant}/{corpus}/` | a run's staged JSONL; one page-image cache per corpus version, shared by every run on it |
+| staging: `{mount}/staging/parent-adapters/policy/v{n}/` | the adapter cycle `v{n}` continues, its parent's, copied from Blob (`paths.staging_parent_adapter_dir`; decision 2026-10-23) |
 
 The staging root is `$RUNPOD_VOLUME_MOUNT/staging` (default `/runpod-volume`; set `/workspace` when the pod
 mounts its volume there).
 
 **`transfer.py`** has scope-aware helpers — `push_scoped_adapter(local, scope, version)`,
-`push_merged_model(..., scope=)`, `push_quantized(..., scope=)` — which `package` uses to upload the real
-adapter, merged model and quantized formats. Each refuses a missing source directory instead of creating
+`push_merged_model(..., scope=)`, `push_quantized(..., scope=)`. `package` uploads the real adapter only
+(decision 2026-10-23); the merged-model and quantized pushes are kept but no longer called by the pipeline. Each refuses a missing source directory instead of creating
 an empty prefix that would read as a published model.
 
 - **A published adapter is its weights and config only.** `push_scoped_adapter` uploads
   `ADAPTER_FILES` = (`adapter_config.json`, `adapter_model.safetensors`) — never a checkpoint's optimizer and
   scheduler state (~1.5 GB of a ~2 GB rank-64 checkpoint) — and refuses a folder missing either file. Both
-  `package` and the training stage's `--push-adapters` publish through it.
+  `package` and `finetune --push-adapters` publish through it; `--push-adapters` pushes at the end of
+  checkpoint selection, not of training, and the pipeline records the checkpoint each push sent (`pushed`).
 - **A re-push sends nothing it does not have to.** `push_scoped_adapter` and `push_merged_model` (~18 GB of
   bf16 shards) call `upload_dir(..., skip_identical=True)`: a file whose MD5 matches the one recorded with the
   blob is left in place. Blobs written before MD5s were recorded are sent once more. `push_quantized`,
@@ -164,14 +178,23 @@ an empty prefix that would read as a published model.
 
 **Run manifest** records `tenant_id` and the manifest's `quantized_model` points at the first *quantized*
 format — bf16 is the merged model, never an export. `quantized_formats` lists every exported format, and the
-purge plans name each one's directory (IMPL-03).
+purge plans name each one's directory (IMPL-03). It also records `parent_run_id` and `fresh_reason` (§4); the
+registry index row carries `parent_run_id`, and the purge plans follow it down the chain (IMPL-03).
 
-**Release bundle** (`registry_utils/models.py::ReleaseBundle`) also records `tier` (`production` at field
-match ≥ 0.92, `interim` when it passed every floor below that, or when its scope was scored on fewer than
-150 frozen documents of a type it covers; `evaluation.gating.release_tier`), and — recorded, not gated, since no latency SLA is agreed
+**Release bundle** (`registry_utils/models.py::ReleaseBundle`) is named by the cycle's version
+(`release_id` `v3`) and also records `tier` (`production` at field
+match ≥ 0.92, `interim` when it passed every floor below that, or when it was scored on fewer than
+150 real frozen policies; `evaluation.gating.release_tier`), and — recorded, not gated, since no latency SLA is agreed
 (decision 2026-10-19) — `latency_p95_ms_by_adapter`, `peak_gpu_memory_mb`, `measured_with`, and `routing` (where
-every line of business routes once the release is promoted), plus `scope`, `doc_types` and `lines` (empty
-means every type / every line).
+every line of business routes once the release is promoted), plus `scope` (the adapter's name, `policy`),
+`doc_types` and `lines` — the lines it trained on (`pipeline_dag.trained_lines`: the single lines of the run's
+train view, else the corpus's `policy_line_counts`; a line seen only inside a package was not trained), which
+serving routes by (empty means every type / every line, as in a bundle written before they were recorded, so
+packaging refuses a new release with no trained line, IMPL-13). Its `status` is `promoted` or `archived` once
+`registry_utils.releases` has acted on it. `served_as` says how it is served: `lora_on_base` for every release
+since 2026-10-23 — the base with the release's adapter applied per request, `serving_formats.bf16` the
+adapter's Blob directory, `merged_model` empty, and any format but bf16 refused — and `merged` for older
+bundles, which must name their merged model.
 
 **Blob `upload_dir`/`download_dir`** are what staging, localisation and package use; images are fetched
 into the per-corpus cache atomically (unique `.part` names, renamed into place).
@@ -200,3 +223,14 @@ into the per-corpus cache atomically (unique `.part` names, renamed into place).
 - Header: aligned with `finetuning-architecture-v2.5.docx` and the code of 2026-10-22.
 - The release bundle records `window_plan_version`, the window plan of the corpus behind a policy release; serving refuses a mismatch (IMPL-11).
 - Acceptance: a `BlobClient` routes raw-layer calls to the raw login and the rest to the main one; the purge plans name every quantized format's directory.
+
+## Changes of 2026-10-22 (one adapter)
+
+- One adapter (decision 2026-10-22): its paths are `.../scope/policy/...` (§1, Current implementation); versions and next-version helpers in `paths`, the release id is the version (`next_release_id` gone); `resolve_model_version` finds the policy adapter's runs (§6); new §7 `registry_utils/releases.py` (promote, archive, next version, version table); the registry index gains `tenant_id` and `tier`; the bundle's `lines` are the lines it trained on, and its tier cap counts real frozen policies. New acceptance item.
+- Code review of 2026-10-23: `used_versions` counts every tenant's corpora and releases, not only this tenant's: one version sequence for every tenant (§7); `promote_release` refuses a policy release with no lines or one serving would refuse at cold start (`serving_refusal`), and promoting the promoted release changes nothing (§7); the bundle's `lines` are single lines only. Acceptance item updated.
+
+## Changes of 2026-10-23 (incremental training)
+
+- Incremental training (decision 2026-10-23): the run manifest records `parent_run_id` and `fresh_reason`, the registry index row `parent_run_id` (§4, §5, Current implementation); the staging path `parent-adapters/policy/v{n}/` holds the adapter a cycle continues.
+- Nothing is merged or quantized: `resolve_model_version("vN")` gives kind `base_plus_adapter` and refuses a non-bf16 format (§6, acceptance); `package` pushes the adapter only; the release bundle's `served_as` is `lora_on_base`, its bf16 format the adapter's directory (Current implementation).
+- Code review of the incremental training: `resolve_model_version("vN")` refuses a version trained on another base than the configured one, and a staged version loads its selected checkpoint, else its latest, else it is refused (§6); `serving_refusal` checks the base too (§7); `--push-adapters` pushes at the end of checkpoint selection, and every push records `pushed` in the checkpoint selection (Current implementation). New acceptance item.

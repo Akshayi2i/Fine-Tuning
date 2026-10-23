@@ -10,7 +10,14 @@ they cannot handle - scanned input, unknown carrier, structure failure.
 Its output schema is **owned by Fideon SPEC_00**, not by this repo. The schemas
 in `schemas/` are those canonical models serialised to JSON Schema.
 
-**Policy documents only, for now** (decision 2026-10-22). Train and gate a policy scope (`--scope policy`, or a line scope such as `personal_lines`); the ACORD and Loss Run code is kept, unchanged, but not targeted. A new training set and canonical schema are to be delivered, and the corpus, the frozen eval set and the adapters are rebuilt from them.
+**One adapter, for policy documents, one version per cycle, trained incrementally** (decisions 2026-10-22
+and 2026-10-23). Each fine-tuning cycle trains one LoRA over all the policy data so far, new and existing
+(`common/adapter.py`). By default it **continues the promoted adapter** on the same original base model -
+never on a merged model - and starts from the base only when it must (see *Versions and the registry*).
+Nothing is merged: the release is the adapter, served as a LoRA on the base. The cycle takes the next
+version number (`v1`, `v2`, ...), and that number names its run (`policy-v3`), its adapter and its release. There are no training scopes and no layout families. The code
+for other document types is kept, unchanged, but not trained. A new training set and canonical schema are to
+be delivered, and the corpus, the frozen eval set and the adapter are rebuilt from them.
 
 ## Documents
 
@@ -34,17 +41,30 @@ scanned page there is no text for a rule to read.
 ## Operator commands (IMPL-13)
 
 ```bash
-# 1  ingest -> OCR -> corpus -> train -> select checkpoint -> merge  (staged on the pod)
-python -m orchestration.run finetune --input ./intake --corpus-version v1 --out-version v2 --scope policy
+# 1  ingest -> OCR -> corpus -> train -> select checkpoint  (staged on the pod)
+#    A new cycle takes the next version itself and prints it ("this cycle is v3"). It continues the
+#    promoted adapter (e.g. v2) unless --fresh, or unless continuing is unsafe (the log says why).
+python -m orchestration.run finetune --input ./intake
+python -m orchestration.run finetune --input ./intake --fresh     # from the base model
 
-# 2  quantize -> calibrate -> GATE -> push real weights + release bundle to Azure Blob
-python -m orchestration.run package --version v2 --release-id release-2026.11.1 --formats bf16 --scope policy
-#    a release that improves no primary metric needs --fixes-defect "<ticket>" (scope=TICKET when several
-#    scopes run; a blank or placeholder value is refused). A scope scored on fewer than 150 real frozen
-#    documents of a type it covers (twins do not count) is capped at interim. A promoted release scored on
+# 2  calibrate -> GATE -> push the adapter + release bundle -> promote. Nothing is merged or quantized:
+#    calibration and the gate score the base with the adapter applied, as it is served.
+python -m orchestration.run package --version v3
+#    The gate compares v3 with the tenant's promoted release. A release that improves no primary metric
+#    needs --fixes-defect "<ticket>" (a blank or placeholder value is refused). Scored on fewer than 150
+#    real frozen policies (twins do not count), it is capped at interim. A promoted release scored on
 #    another frozen set, tenant or scoring code is no baseline: the candidate is judged on floors alone.
 #    A failed gate ships only with a written override, naming real gates:
-#    --override-approver "<person>" --override-reason "<why, 20+ chars>" --override-gate <gate> (one scope)
+#    --override-approver "<person>" --override-reason "<why, 20+ chars>" --override-gate <gate>
+#    A release that passes is promoted, and the one it replaces is archived.
+
+# resume a cycle, or rerun one that failed: name its version
+python -m orchestration.run finetune --version v3 --from-stage training
+
+# the registry: every version, its run status and its release status
+python -m orchestration.run versions
+# a rollback: serve v2 again (v3 is archived; its weights stay in Blob). Run it from v2's code.
+python -m orchestration.run promote --version v2 --by "<person>"
 
 # 3  extraction through the serving pipeline, on documents already imported and OCR'd
 python -m orchestration.run extract --model base|v1|v2 --tenant T --source-ids policy_0001 policy_0002
@@ -54,7 +74,7 @@ python -m orchestration.run extract --model base --adapter /workspace/staging/..
 #    JSON per document in testing/results/<model>/, metrics and summary.json in testing/metrics/<model>/
 
 # all = 1 + 2. Never includes extraction.
-python -m orchestration.run all --input ./intake --out-version v2 --release-id release-2026.11.1
+python -m orchestration.run all --input ./intake
 
 # once, from the first real corpus build: the gate's frozen eval set
 python -m orchestration.run freeze-eval-set --corpus v1
@@ -124,7 +144,7 @@ half a SAS login under "Still to do").
 ```bash
 /workspace/venv-ocr/bin/python -m data_pipeline.ocr.run_mineru --doc-type policy --all-unprocessed
 source /workspace/venv/bin/activate
-python -m orchestration.run finetune --scope personal_lines --skip-ingest --corpus-version v1 --out-version v1
+python -m orchestration.run finetune --skip-ingest
 ```
 
 `finetune` finds every document already OCR'd and skips that stage. If documents
@@ -175,7 +195,7 @@ the session's name. The job belongs to the pod, not to your SSH connection:
 shutting the laptop, letting it sleep or losing Wi-Fi does not stop it.
 
 ```bash
-python -m orchestration.run finetune --corpus-version v1 --out-version v1
+python -m orchestration.run finetune --corpus-version v1
 #   -> "This one is running as 'finetune-20261003-141502'."
 
 bash scripts/pod_run.sh list                  # every job on this pod
@@ -236,12 +256,12 @@ audited on the laptop (read-only):
 
 ```bash
 python -m data_pipeline.ingestion.prepare_bundles --input "data/training data" --out data/bundles
-python -m data_pipeline.audit                      # default: data/bundles, scope personal_lines
+python -m data_pipeline.audit                      # default: data/bundles, every line
 ```
 
 `prepare_bundles` writes `data/bundles/<document>/{document.pdf, golden.json, metadata.json}` (hard links:
 seconds, no second copy), with `metadata.json` taken from the manifest row: `lob`, `synthetic`, `template_id`
-(the source document) and the delivery's `split`. It skips lines outside the scope (flood), rows the generator
+(the source document) and the delivery's `split`. It skips lines outside `--lines` (every line by default), rows the generator
 flagged and rows whose files are missing. `data/bundles/` is git-ignored. Documents the audit rejects are
 listed in `data/bundle_exclusions.csv` (`document,reason`, git-ignored); a re-run keeps them out and removes
 any folder an earlier run made. A line the generator's folder got wrong is corrected in `data/bundle_lob_overrides.csv`
@@ -280,8 +300,8 @@ one carrier out of train and val per line of business, only in a line naming 10 
 placeholder carrier ("N/A", "Unknown", "Unknown Insurance Company", "Not Stated") is no carrier ("Other Mutual" is one), and a carrier seen through a synthetic family is never the one held out. The gate report adds a
 **`real_only`** section, the same metrics over the real documents alone, and the composition of the set.
 
-It reports blockers (one PDF + `golden.json` + `metadata.json` per folder, PDF readable, `lob` valid and in
-scope, `page_ref` inside the PDF, a review record, no form edition left inside a form number on a common-model line),
+It reports blockers (one PDF + `golden.json` + `metadata.json` per folder, PDF readable, `lob` valid (and in
+`--lines` when given), `page_ref` inside the PDF, a review record, no form edition left inside a form number on a common-model line),
 checks each labelled value against the text on its page, checks formats and
 totals, and draws a 5% spot-check sample per line. Fix and re-run until it exits 0. The report and CSVs go to
 `data/audit_report/`, which is git-ignored: they quote label values.
@@ -338,7 +358,7 @@ Before any `finetune`, the preflight checks everything it depends on in minutes,
 memory with the same function the dataset build uses (nothing written):
 
 ```bash
-python -m orchestration.preflight --scope personal_lines      # exit 1 on any FAIL
+python -m orchestration.preflight                             # exit 1 on any FAIL
 ```
 
 GPU free, packages, the pinned base model, config invariants, disk, Azure write/overwrite/delete, every
@@ -405,16 +425,70 @@ Windows are taken as each is answered: a window cut off or stopped for repeating
 once, not after the slowest window. `--ocr-parts N` sends a PDF to MinerU as N runs of pages at once (faster only
 if one task leaves the GPU idle: measure it); `--tier` picks MinerU's tier.
 
-## Scopes
+## Versions and the registry
 
-A training run covers a **scope** (`configs/scopes.yaml`): `unified` (every type), `policy`, `lossrun`, and
-`personal_lines` — policies of homeowners, personal auto, dwelling fire, ocean marine, classic auto,
-motorcycle, recreational vehicle and personal umbrella (not flood). A line-scoped release answers only for
-its lines; a policy request must carry its `lob` to reach it.
+Every fine-tuning cycle trains the one policy adapter and takes the next version: one more than the highest
+number used by the adapter's runs (the registry index) or by any tenant's corpora and releases. It is one
+sequence for every tenant, because runs and weights are not kept per tenant. The number names the run
+(`registry/scope/policy/policy-v3/`), the adapter (`adapters/scope/policy/v3/`) and the release
+(`releases/<tenant>/v3/`).
 
-```bash
-python -m orchestration.run finetune --scope personal_lines --corpus-version v1 --out-version v1
-```
+- **Incremental by default.** A cycle continues the tenant's promoted adapter: its weights, trained further
+  on new and existing data, on the same base, with a fresh optimizer and learning-rate schedule. The run
+  records its parent (`parent_run_id`). It **starts from the base** when you pass `--fresh` (after deleting a
+  client's data, or now and then to reset drift), when nothing is promoted, or when continuing is unsafe: the
+  parent trained on another base model, has another LoRA rank, alpha or target modules, its adapter files are
+  not in Blob, its `adapter_config.json` cannot be read or was saved with other LoRA settings (dropout,
+  rsLoRA or bias too), its release has no bundle, or it was packaged with another prompt hash or window plan
+  (a schema, template or section-map change - so the first cycle on the new canonical schema starts fresh),
+  or its eval report is missing or on another yardstick (the set frozen again, or other scoring code: the
+  gate could not compare the two line by line, and would block the cycle only after training it). The reason
+  is logged and recorded (`fresh_reason`). A release with an old-style name (`release-YYYY.M.N`) is continued
+  too. A continued cycle may train with fewer epochs or a lower rate: `continued_training:` in
+  `configs/training/unified.yaml` (null = as a fresh run; set it from a measured run). A key the
+  `optimization` block does not have, or an epoch count or rate that is not positive, is refused before any
+  work. `--fresh` is for a new cycle: with `--version` of a version that already trained, or with a
+  `--from-stage` after training, it is refused before the command starts.
+- **What continuing costs.** Old documents train again in every cycle, so over many cycles they are seen more
+  often than new ones; a wrong label learned once carries forward until it is fixed in the data; reproducing a
+  version needs its chain of parents; and a deleted client's data stays in every later adapter until a
+  `--fresh` cycle trains without it (the purge plan lists the whole chain).
+- **Gated line by line against the runs before it.** On top of the usual comparison with the promoted
+  release, each line a continued run serves is held to the best run on that line since the last run from the
+  base (the parent, its parent, and so on): the one with the highest field match on the line's real
+  documents that both reports scored, with at least 5 such documents (on a tie, the nearer run). A paired
+  bootstrap over those documents blocks the line (`line:<line>`) unless the lower bound of the 95% interval
+  of (candidate - best) is above -0.015. A line with fewer than 5 shared real documents, or a new line, gets
+  a warning only. A line the parent's release served and this run no longer serves blocks. With no
+  comparable parent report (missing, on another frozen set or scoring code, or without each document's
+  line) the run is blocked (`line_regression_evidence`): train the next cycle `--fresh`, or keep the
+  parent's report on the frozen set. A small line has a wide interval, so it may block until it has more
+  documents; a written override can waive it as `line:<line>`.
+- **Served as a LoRA on the base.** Nothing is merged or quantized: the release is the adapter
+  (`served_as: lora_on_base`), bf16 only. `extract --model v3` loads the base with v3's adapter: for a
+  version not yet packaged, the checkpoint its selection chose, else its latest checkpoint on the volume
+  (with a warning). An adapter runs only on the base it trained on: serving, `promote` and
+  `extract --model v3` refuse one trained on another base than `model_id@revision` in
+  `configs/base_model.yaml`.
+- **Keeping the adapter in Blob.** `finetune --push-adapters` pushes the selected checkpoint to Blob at the
+  end of checkpoint selection, and every push records which checkpoint it pushed. If the staging volume is
+  lost, `package --version v3 --from-blob` scores and releases the adapter in Blob, with no upload. It is
+  refused unless both adapter files are there and the recorded push is the selected checkpoint.
+- **Promoted.** `package` promotes a release whose gate passed. The tenant then has one promoted release:
+  serving reads it, and the next candidate is gated against it. The release it replaced is archived. A dry
+  run never promotes. A version already promoted or archived is not packaged again.
+- **Rollback.** `promote --version v2 --by "<person>"` makes v2 the promoted release again and archives the
+  current one. Nothing is deleted. It is refused when serving would refuse v2 at start-up (another prompt
+  hash or window plan, or an adapter trained on another base): run `promote` from the code v2 was packaged
+  with, and serve that code. The next cycle then continues v2.
+- **Lines.** The adapter trains on, is scored on and serves **single-line policies** of the lines it trained
+  on; the release records those lines. A policy of any other line, a package of several lines, or a policy
+  with no line goes to the base model against `_fallback.json`, flagged `lob_fallback_used` (a policy with
+  no line only when the caller sends `allow_lob_fallback`). A release that trained on no line is refused.
+- **One output shape.** Policies of lines on the common model (today the seven personal lines and `gl`)
+  cannot train beside policies of lines on self-contained schema files. The audit blocks such a folder and
+  the preflight fails such a tenant, before training would refuse it; leave those lines out before import
+  with `prepare_bundles --lines ...`.
 
 ## Build status
 
@@ -471,10 +545,10 @@ the reason and what unblocks it. They are the whole of what Phase 0 gates.
 
 | Where | Waiting on |
 |---|---|
-| `postprocessing/quantize.py` (FP8/AWQ export, GGUF export) | llm-compressor in its own environment; FP8 verified by the spike (bf16 needs no export) |
+| `postprocessing/quantize.py` (FP8/AWQ export, GGUF export) | not used by the pipeline since 2026-10-23 (the release is a LoRA on the bf16 base); kept for an edge export |
 | `artifact_registry/transfer.py` (`pull_base_model` from the Hub) | not needed on the pod: the base is read from `/workspace/models` |
 | `orchestration/runpod_controller.py` (`RunPodBackend`, endpoint deploy) | `RUNPOD_API_KEY` and the network volume; until then jobs run on the pod in tmux |
-| `inference_core/model_runner.py` (vLLM and HF backends, written; merge in `training/merge.py`, written) | a GPU to run on - they refuse without CUDA |
+| `inference_core/model_runner.py` (vLLM and HF backends, written; `training/merge.py` is no longer called by the pipeline) | a GPU to run on - they refuse without CUDA |
 | `testing/run_extraction.py` (`extract`), `pilot/zero_shot_baseline.py` CLIs | a GPU with vLLM, as above; `extract` reads documents already imported and OCR'd |
 | `training/data_collator.py` custom hook | nothing - ms-swift collates and masks; the hook exists only for a genuine override |
 | `evaluation/golden_eval.py`, `data_pipeline/labeling/active_learning.py` inference loops | a live model backend on the GPU; the golden eval runs through the serving pipeline |

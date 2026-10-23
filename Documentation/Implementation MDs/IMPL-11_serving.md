@@ -37,12 +37,12 @@ confidence calibration
 ## Deliverables
 
 ### 1. `serving/vllm_entrypoint.py`
-- RunPod Serverless handler wrapping vLLM, serving the promoted merged/quantized model over an OpenAI-compatible API, **with logprobs enabled** (calibration depends on them).
-- **One LoRA per request, never a reload.** With one promoted release covering every line, the engine is that release's merged model and no adapter is applied. With several releases — or one that leaves lines to the base model — the engine loads the **base with LoRA enabled** and each release is its adapter, applied per request (`serves_base_with_loras`, `load_release_runtimes`). A §4.2 graduated per-type adapter would be applied the same way, from the classifier result. One LoRA per request is what vLLM supports, which is exactly why the v1 Foundation-plus-per-type stack could never have been served.
-- Pulls the promoted releases' adapters and calibrators from Blob on cold start (IMPL-02); version configurable. The model itself is handed to `cold_start` — loading it there is not wired yet, and `cold_start` refuses without one.
+- RunPod Serverless handler wrapping vLLM, serving the promoted release over an OpenAI-compatible API, **with logprobs enabled** (calibration depends on them). A release packaged since 2026-10-23 is its adapter (`served_as: lora_on_base`), served on the bf16 base; nothing is merged or quantized.
+- **One LoRA per request, never a reload.** A tenant has one promoted release (decision 2026-10-22). A `lora_on_base` release always runs with the engine holding the **base with LoRA enabled** and the release's adapter applied per request (`serves_base_with_loras` is True for it; `load_release_runtimes`). An older merged release: when it covers every known line, the engine is that release's merged model and no adapter is applied; when it leaves lines to the base model, the engine loads the base with LoRA enabled and the release's adapter is applied per request. A §4.2 graduated per-type adapter would be applied the same way, from the classifier result. One LoRA per request is what vLLM supports, which is exactly why the v1 Foundation-plus-per-type stack could never have been served.
+- Pulls the promoted release's adapter and calibrators from Blob on cold start (IMPL-02); version configurable. The model itself is handed to `cold_start` — loading it there is not wired yet, and `cold_start` refuses without one.
 - Uses IMPL-07 `model_runner` / `input_builder` for generation so output matches eval and testing exactly.
 - **Asserts the serving MinerU version matches the training corpus pin** (IMPL-03 `assert_version_matches`) wherever MinerU is installed — a mismatch is distribution shift and a regression trigger (arch §8a), not a warning to ignore. A serving pod without MinerU does no OCR; it logs the pin its requests' page texts must come from.
-- **Every tuneable in `configs/inference/vllm_serving.yaml` must have a reader.** `serving_thresholds()` lifts `routing.classifier_confidence_threshold`, `confidence.review_threshold`, `routing.detect_lob`, `routing.lob_confidence_threshold`, `routing.lob_family_threshold` and `routing.fallback_doc_type` out of the config and passes them into `extract`; `release_pins()` reads `routing.release_pins`. (There is no page threshold to read: every page is read, in windows planned by the function the corpus build planned its training rows with, so nothing in serving's config can re-shape documents away from what was trained. The `long_documents` block keeps only `conflict_resolution: declarations_page_wins`, which names the rule the window merge applies by group order; no code reads it.) They were declared in that file and read by no code, so an operator could raise `review_threshold`, redeploy, and change nothing at all — the hardcoded defaults inside `extract` won silently every time. A test asserts each key the helper emits is a parameter `extract` accepts.
+- **Every tuneable in `configs/inference/vllm_serving.yaml` must have a reader.** `serving_thresholds()` lifts `routing.classifier_confidence_threshold`, `confidence.review_threshold`, `routing.detect_lob`, `routing.lob_confidence_threshold`, `routing.lob_uncertain_threshold` and `routing.fallback_doc_type` out of the config and passes them into `extract`. (`routing.release_pins` and `release_pins()` are gone: a rollback is `promote --version vK`, IMPL-13. A config still holding `release_pins` or the removed `lob_family_threshold` is refused at cold start, `assert_no_retired_settings`.) (There is no page threshold to read: every page is read, in windows planned by the function the corpus build planned its training rows with, so nothing in serving's config can re-shape documents away from what was trained. The `long_documents` block keeps only `conflict_resolution: declarations_page_wins`, which names the rule the window merge applies by group order; no code reads it.) They were declared in that file and read by no code, so an operator could raise `review_threshold`, redeploy, and change nothing at all — the hardcoded defaults inside `extract` won silently every time. A test asserts each key the helper emits is a parameter `extract` accepts.
 - **Calibration is selected after classification, not before.** The handler hands the whole `{doc_type: params}` map to `extract`, which picks the entry once the classifier has said what the document is. Resolving it in the handler from the caller-supplied `doc_type` meant a lookup on `""` for every request that did not name its own type — which is every classification-driven request, the endpoint's entire purpose — and the request was refused before extraction ran. `assert_calibration_present` accepts the map and checks it is non-empty; an empty one is still no calibration. It is checked only when no release is served, or some served release has no calibrators of its own.
 - **The adapter map holds adapters that exist.** `resolve_model_version(..., doc_type=…)` constructs `type_adapter` unconditionally — it is a path, not evidence anything was trained — so `build_adapter_map` confirms the directory holds an `adapter_config.json` before mapping a doc type to it. Trusting the path mapped all three types on a `--foundation-only` build, and vLLM was then handed a `LoRARequest` for a directory that does not exist, failing every request instead of serving Foundation-only with a `routing:no_adapter_available` flag.
 - **No plaintext PII in logs**; do not persist raw request/response bodies (master §8). The payload log call sits **inside** the handler's `try`: `safe_log_payload` iterates the payload, so an `input` that is not a JSON object raised straight out of the handler and RunPod returned an opaque platform error — the exact failure the structured-error contract exists to prevent.
@@ -59,7 +59,7 @@ document ──> classifier ──> confidence >= threshold ? ──> yes ──
 - Identifies doc type ∈ {`acord`, `policy`, `lossrun`} **and the ACORD form number** — the two-level classification of arch §4b. Returns label + confidence.
 - Reads a document's **first two pages** — their images by page number and their text joined, cut at 4,000 characters (`classifier_input`, `classifier_messages`) — the same rule a training row is built by.
 - **Default implementation: zero-shot via the Foundation model** (arch §4a Option C) using `doc_type_classifier_prompt.jinja` — zero extra infrastructure, and the Foundation already understands these document types.
-- **Also reads a policy's line of business** when asked (`Classification.lob`), with the probability of the line's own tokens as its confidence (`line_confidence`) — never a number the model writes about itself. Used only with `routing.detect_lob` on, which ships **off** (§6, *Current implementation*). With detection on and no classifier supplied, the endpoint builds `ZeroShotClassifier` on the engine's base weights with no adapter (`line_classifier`) — only when the engine holds the base; an engine holding one release's merged model reads no line. The line decides which release's adapter reads the policy, so no adapter can have been chosen yet.
+- **Also reads a policy's line of business** when asked (`Classification.lob`), with the probability of the line's own tokens as its confidence (`line_confidence`) — never a number the model writes about itself. Used only with `routing.detect_lob` on, which ships **off** (§6, *Current implementation*). With detection on and no classifier supplied, the endpoint builds `ZeroShotClassifier` on the engine's base weights with no adapter (`line_classifier`) — only when the engine holds the base; an engine holding one release's merged model reads no line. The line decides whether the release's adapter or the base model reads the policy, so no adapter can have been chosen yet.
 - Interface is swappable for a **dedicated vision classifier** (Option B) later, which is the right escalation if classification accuracy becomes a *measured* bottleneck — it works in both OCR and image-only modes, unlike a text-feature classifier.
 - **Day-zero (arch §4c):** before Foundation v1.0 exists, the classifier runs against the **base** `Qwen3-VL-8B-Instruct`. This path is explicitly temporary and is superseded on promotion of Foundation v1.0, after which the base model is retired from the production inference path.
 - **Has its own accuracy target and is measured on the golden eval set** alongside extraction metrics (IMPL-08 `classifier_accuracy`) — a classifier at 92% caps the whole system at 92%.
@@ -81,7 +81,7 @@ Long-document handling, primarily a **Policy-document** concern (arch §7). Poli
 
 The page numbers in the markers are the document's real numbers, so a window's numbering tells the model it is holding a fragment: fields living on pages it was not shown are absent, not missing. `image_only` carries the markers without markdown — the guarantee is *no OCR text*, not *no text at all*.
 
-- **No document is page-routed** — a policy of any length is read over every page, in windows; there is no per-scope list of routed types (`long_doc_types` is gone).
+- **No document is page-routed** — a policy of any length is read over every page, in windows; there is no list of routed types (`long_doc_types` is gone).
 - **Record which pages fed each extraction** in the output metadata (`pages_used`, master §9), so a low-confidence field can be traced to the specific page it came from. A policy's `pages_used` is every page.
 
 ### 5. Confidence post-processing — composed in `serving/pipeline.py`
@@ -94,7 +94,7 @@ The page numbers in the markers are the document's real numbers, so a window's n
 - Never returns raw (uncalibrated) confidence as if calibrated — IMPL-09 raises when calibration is missing.
 
 ### 6. `serving/pipeline.py` (request orchestrator)
-Per request: classify (or take the caller's `doc_type`) → route adapter/prompt/schema → resolve the policy's line (caller's; detected only with `detect_lob` on) → route through the serving plan (release, layout family, or base model + `_fallback.json`) → read: policy windows / Loss Run windows / one call → merge → serving guards (common-model lines) → IMPL-09 confidence → list completeness → canonical envelope → schema validation → every-key fill → final JSON.
+Per request: classify (or take the caller's `doc_type`) → route adapter/prompt/schema → resolve the policy's line (caller's; detected only with `detect_lob` on) → route through the serving plan (the promoted release, or base model + `_fallback.json`) → read: policy windows / Loss Run windows / one call → merge → serving guards (common-model lines) → IMPL-09 confidence → list completeness → canonical envelope → schema validation → every-key fill → final JSON.
 
 **This is the canonical pipeline the testing harness (IMPL-12) reuses**, which is what guarantees test == prod. Testing must call it, never re-implement it. The golden eval (IMPL-08) reads through it too, and checkpoint selection's whole-document pass merges its windows with the same `serving/policy_merge.py`.
 
@@ -109,18 +109,19 @@ Per request: classify (or take the caller's `doc_type`) → route adapter/prompt
 
 ## Acceptance checklist
 - [ ] Endpoint serves a request end-to-end → schema-shaped JSON + calibrated confidence + `line_of_business`.
-- [ ] Where a type has graduated, the correct per-type adapter is hot-swapped from the classification result; otherwise the merged model serves it with no adapter, and that is NOT flagged for review — flagging the expected path would queue every document.
+- [ ] Where a type has graduated, the correct per-type adapter is hot-swapped from the classification result; otherwise the release serves it — its adapter on the base, or an older release's merged model with no adapter — and that is NOT flagged for review — flagging the expected path would queue every document.
 - [ ] ACORD classification returns both `doc_type` and `acord_form`, and the form selects the schema.
 - [ ] Low classifier confidence → **Foundation-only fallback + review flag**, never a silent guess.
 - [ ] A policy of any length is read in windows over **every page**, and its `pages_used` is every page; a page no section signal matches is read like any other.
 - [ ] The declarations group's (and `dtd`'s) first window is pages 1–5 plus the detected declarations page, read together; a declarations page behind a cover sheet joins it; every later page follows in windows.
 - [ ] A window's user turn is a **subsequence** of the full document's — the same blocks, fewer pairs. Comparing system prompts alone does not catch a divergence here.
 - [ ] `pages_used` reflects the pages actually sent, including for `image_only` documents that carry no per-page OCR text.
-- [ ] Nothing in serving's config or a release's scope selects pages: there is no page threshold and no `long_doc_types`.
+- [ ] Nothing in serving's config or a release selects pages: there is no page threshold and no `long_doc_types`.
 - [ ] A window that fails (unparseable, or cut at the token limit) is split in half and retried; one that still fails alone is dropped and flagged `window_failed:<group>:p<page>`, and the rest of the document is returned.
 - [ ] A served policy JSON carries every key of its line's schema, `null` where nothing was extracted.
 - [ ] A served common-model policy with page text carries `text_sections` from the section builder, valid against the client's schema, with every word of its page text somewhere in the JSON (`text_coverage` 1.0 on the test fixtures); one with none is flagged `text_sections:no_page_text`. The copied builder matches `SOURCE.json`.
-- [ ] A policy with no line, detection off, is refused unless the caller sends `allow_lob_fallback`; a known line no promoted release covers is read by the base model against `_fallback.json`, flagged `route:lob_fallback_used`.
+- [ ] A policy with no line, detection off, is refused unless the caller sends `allow_lob_fallback`; a known line the promoted release did not train on, and a package even of lines it trained on, is read by the base model against `_fallback.json`, flagged `route:lob_fallback_used`.
+- [ ] One promoted release serves a tenant; if the index holds several, the newest that can be served serves, with a warning naming it. Cold start reads the release's `window_plan_version` (`ServedRelease`), and refuses a config still holding `routing.release_pins` or `routing.lob_family_threshold`. It also refuses a `lora_on_base` release whose adapter trained on another base than the configured `model_id@revision`; an older merged release is not checked.
 - [ ] A schema-invalid generation is rejected, not returned.
 - [ ] Checkpoint selection judges a merged common-model answer with serving's verdict (`served_schema_verdict`), not a stricter copy of it.
 - [ ] On a common-model line, a form's edition left in its form number in an unambiguous shape is moved to the form's empty `edition_date` (`MM/YY`) and takes the number's span; a filled `edition_date` is never overwritten.
@@ -204,37 +205,49 @@ Flags `claims:merge_conflict`, `claims:totals_mismatch`; the output carries `rec
 (`routing.detect_lob: false`) until `scripts/measure_lob_detection.py` has measured it on held-out policies; off,
 a policy with no line is refused, or read against the fallback when the caller sends `allow_lob_fallback`. On: a
 line read at or above `lob_confidence_threshold` (0.90) routes as the caller's would; at or above
-`lob_family_threshold` (0.60) it routes to that line's family, flagged `lob:uncertain_within_family`; below, the
-base model reads the policy against the fallback, flagged `lob:undetected`.
+`lob_uncertain_threshold` (0.60, was `lob_family_threshold`) it is read with that line's schema, flagged
+`lob:uncertain` (was `lob:uncertain_within_family`) for a person to check; below, the base model reads the
+policy against the fallback, flagged `lob:undetected`. The LOB detection report no longer has
+`family_accuracy`.
 
-**Routing by layout family** (`serving/release_router.py::ServingPlan.route`, `configs/layout_families.yaml`:
-`personal_lines` = homeowners, personal_auto, dwelling_fire, ocean_marine, motorcycle, recreational_vehicle,
-personal_umbrella; `casualty_fleet` = gl, auto, wc):
-- a rollback pin (`routing.release_pins`) takes every document of its type;
-- a policy whose line is missing or in no family goes to an unrestricted release (unified, policy) still serving
-  policies; with none, to the base-model fallback when the caller allowed it (or detection found no line);
-  otherwise it is refused;
-- a routable line goes to the narrowest promoted release whose `lines` cover all of its lines (newest on a tie;
-  a package of common-model lines never reaches a line-scoped release);
-- a known line no promoted release covers is read by the **base model with no LoRA against `_fallback.json`**,
-  flagged `route:lob_fallback_used`, with the release's calibrators dropped (every field goes to review). It is
-  refused when the engine holds a release's merged model rather than the base (`base_model_loaded`).
-`route` in the output records `layout_family`, `lob_fallback_used` and `lob_source`. The release step records
-the same routing as a table on the bundle and fails when a line cannot be routed (`serving/routing_check.py`,
-IMPL-13 §4).
+**One promoted release per tenant** (`serving/release_router.py`, `build_serving_plan`, `ServingPlan.route`;
+decision 2026-10-22). The release marked `promoted` in the tenant's release index serves; should the index
+hold several, the newest that can be served serves and the warning names it. There are no layout families
+(`configs/layout_families.yaml` is gone; Fideon SPEC_06 §9a / SPEC_09's family adapters are knowingly not
+followed). The release records the lines it trained on (`lines`: the single lines of the run's train view,
+else the corpus's `policy_line_counts`; never none for a new release, since packaging refuses one, IMPL-13):
+- a policy of ONE line the release covers goes to it (`ServedRelease.covers_lob`, `common.lob.single_line`);
+- any other known line, and a package even of lines the release covers (it is read against `_fallback.json`,
+  a shape the adapter is not taught) — every line, while nothing is promoted — is read by the **base model
+  with no LoRA against `_fallback.json`**, flagged `route:lob_fallback_used`, with the release's calibrators
+  dropped (every field goes to review). Before the code review of 2026-10-23 a package of self-contained
+  lines went to the release. It is refused when the engine holds an older release's merged model rather than
+  the base (`base_model_loaded`; a `lora_on_base` engine always holds the base); the error says a policy with no line, a package or an undetected line cannot be
+  read there, and to send the policy's single line;
+- a policy with no line, or a line with no schema, is refused unless the caller sends `allow_lob_fallback` (or
+  detection found no line); an older promoted release that records no lines reads it instead;
+- a document of a type the release does not cover is refused (`UnservedDocType`).
+`route` in the output records `lob_fallback_used` and `lob_source` (no `layout_family`). The release step
+records the same routing as a table on the bundle and fails when a line cannot be routed, or a line the
+release trained on would not reach it; it routes every known line, the canonical policy schemas
+(`serving/routing_check.py`, IMPL-13 §4).
 
-**Serving through the chosen release** (`serving/vllm_entrypoint.load_release_runtimes`, `extract(...,
-release_runtimes=)`): cold start builds, per served release, its adapter and its fitted calibrators and
-thresholds (`releases/.../calibration/{format}/calibrators.json`). With **one** release covering every line the
-engine serves its merged model and no adapter is applied; with **several**, or one that leaves a known line to
-the base model (`serves_base_with_loras`), the engine loads the base with LoRA enabled and each release's adapter
-is downloaded to `staging/serving-adapters/<release_id>/` and applied per request — cold start refuses a model
-loaded without LoRA support (`enable_lora: false`), or a release whose adapter is missing. `extract` routes each
-request through the release `route` returned. The v1 per-version calibration is needed only for a release
-without its own calibrators. An operator **pin** outranks line-scoped routing, so a rollback applies to every
-document of the type. Cold start does not require a unified run when releases are promoted. No scope lists
-page-routed types any more: `long_doc_types` and `long_doc_types_for` were removed, and every served type
-reads every page.
+**Serving through the release** (`serving/vllm_entrypoint.load_release_runtimes`, `extract(...,
+release_runtimes=)`): cold start builds the release's adapter and its fitted calibrators and
+thresholds (`releases/.../calibration/{format}/calibrators.json`). A `lora_on_base` release (every release
+since 2026-10-23) always has the engine load the base with LoRA enabled (`serves_base_with_loras` is True for
+it): its adapter (`ServedRelease.adapter_dir`, the bundle's `serving_formats.bf16`) is downloaded to
+`staging/serving-adapters/<release_id>/` and applied per request. For an older merged release, when every
+known line reaches it the engine serves its merged model and no adapter is applied; when it leaves a known
+line to the base model, the engine loads the base with LoRA enabled and applies the release's adapter the same
+way — cold start refuses a model loaded without LoRA support (`enable_lora: false`), or a release whose
+adapter is missing. `extract` routes each request through the release `route` returned. The v1 per-version
+calibration is needed only for a release without its own calibrators. A rollback is a promotion
+(`promote --version vK`, IMPL-13), not a pin. Cold start does not require a unified run when a release is
+promoted. **Fixed (2026-10-22):** `ServedRelease` now carries `window_plan_version`, which
+`assert_window_plan_served` reads at cold start; without it, any promoted policy release raised
+`AttributeError`. No release lists page-routed types any more: `long_doc_types` and `long_doc_types_for` were
+removed, and every served type reads every page.
 
 **Parity with training**: the same blank-page placeholder, the same pixel budget (engine
 `mm_processor_kwargs`), the same window plan over every page (`pages_to_read`, `plan_windows`), dates in `MM/DD/YYYY` by the same word rule,
@@ -244,10 +257,18 @@ the same classifier input, and the calibration page text by the same definition
 **Cold start** (`assert_prompt_hash`): each release records the hash of **every prompt input** — all
 templates (`prompts/**/*.jinja`, the per-doc-type ones included), every schema (ours and the client's
 canonical files) and the section map. A release packaged with different prompt inputs is **refused**; one
-with no recorded hash is warned about.
+with no recorded hash is warned about. A release served as a LoRA on the base (`lora_on_base`) is also
+refused when its adapter trained on another base than the configured `model_id@revision`
+(`configs/base_model.yaml`; `assert_base_model_served`, through `query_registry.base_model_refusal`): a
+moved revision pin changes the weights under the adapter, which would still load and answer with no error.
+An older merged release carries its own base and is not checked. `promote` runs the same prompt-hash,
+window-plan and base-model checks (`registry_utils.releases.serving_refusal`), so a release this endpoint
+would refuse is never promoted (IMPL-13). Cold start also refuses a serving config still holding a removed setting, `routing.release_pins`
+or `routing.lob_family_threshold` (`vllm_entrypoint.assert_no_retired_settings`): read by nothing, it would be
+ignored without a word.
 
 **Engine**: vLLM `==0.11.0` (the build calibration was fitted with); refuses to start without CUDA; loads the
-merged model, or the base from the pod's local copy.
+base from the pod's local copy (for every `lora_on_base` release), or an older release's merged model.
 
 **OCR pin at cold start**: the corpus manifest must still record `mineru_version`, but the version comparison
 runs only where MinerU is installed. A serving pod does no OCR (requests carry page texts produced by the pinned
@@ -281,6 +302,11 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - A batch whose windows all failed with one error is read again window by window; latency is one entry per batch.
 - Cold start refuses a policy release whose recorded window plan is not this code's (`assert_window_plan_served`).
 
+## Changes of 2026-10-22 (one adapter)
+
+- One promoted release per tenant (decision 2026-10-22): no layout families and no `release_pins` (a rollback is `promote`); a policy of a line the release trained on goes to it, any other known line to the base model against `_fallback.json`; `route` has no `layout_family`; the routing check routes every known line; `lob_uncertain_threshold` and `lob:uncertain` replace the family names, and the LOB detection report drops `family_accuracy`; fixed: `ServedRelease` carries `window_plan_version`, which the cold-start check reads. New acceptance item.
+- Code review of 2026-10-23: `covers_lob` covers a policy of ONE line the release trained on, so a package of trained lines now goes to the base model against `_fallback.json`, flagged `lob_fallback_used`; cold start refuses a config still holding `routing.release_pins` or `routing.lob_family_threshold` (`assert_no_retired_settings`); `promote` runs the cold-start prompt-hash and window-plan checks; the several-promoted warning names the release served; the merged-engine error no longer suggests a remedy that does not exist. Acceptance items updated.
+
 ## Changes of 2026-10-23 (window calls, forms job, full text)
 
 - A round's windows go to vLLM in calls of at most 96 (`MAX_WINDOWS_PER_BATCH`, was 32): at 32 a call, about one call in four of the CGL checkpoint selection waited ~140 s on one long window with the GPU nearly idle. A 69-page policy (81 windows) is one call. Not yet measured in serving.
@@ -295,3 +321,8 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - A streamed answer whose last 3,000 characters are one passage of at most 500 repeated (`repeating_tail`) is stopped and its connection closed, finish reason `repetition` (`STOPPED_REPEATING`), which counts as cut off: the window is split as at the token limit, instead of writing to 12,288 tokens.
 - Every window read is recorded in `ExtractionResult.window_stats` (group, pages, attempt, outcome, seconds, time to first token, prompt and answer tokens, finish reason), not in the served JSON; `Generation` carries `prompt_tokens` and `first_token_ms`.
 - Page images can go to a served model by path (`images="file"`, a `file://` URL; vLLM needs `--allowed-local-media-path`) instead of as base64.
+
+## Changes of 2026-10-23 (incremental training)
+
+- Nothing is merged (decision 2026-10-23): a release is its adapter (`served_as: lora_on_base`), so the engine always holds the bf16 base and applies the release's adapter per request (`serves_base_with_loras` is True for it); an older merged release is served as before (§1, acceptance, *Current implementation*: serving through the release, the engine).
+- Code review of the incremental training: cold start refuses a `lora_on_base` release whose adapter trained on another base than the configured one (`assert_base_model_served`), and `promote` runs the same check (*Current implementation*, cold start; acceptance).
