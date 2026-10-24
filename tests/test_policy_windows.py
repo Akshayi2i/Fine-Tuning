@@ -411,7 +411,12 @@ def test_a_failed_window_is_split_and_retried_over_fewer_pages(client):
     assert result.schema_valid
 
 
-def test_a_window_that_fails_alone_is_flagged_and_the_rest_returned(client):
+def test_a_window_that_fails_alone_is_flagged_and_the_rest_returned(client, monkeypatch):
+    import serving.printed_values as printed_values
+
+    # Its page text prints none of the answer's values; the printed-values
+    # check is not what this tests (tests/test_printed_values.py).
+    monkeypatch.setattr(printed_values, "configured_mode", lambda: printed_values.FLAG)
     backend = _ScriptedBackend(
         fail=lambda group, pages: "garbage" if group == "arrays" and 12 in pages else None
     )

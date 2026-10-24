@@ -76,12 +76,14 @@ def test_printed_on_another_page_is_a_wrong_page_not_an_invention():
 
 
 def test_extra_fields_are_scored_apart():
+    """The rate counts every value the model wrote, as serving's printed-values
+    check does (decision 2026-10-24); the extra fields are also reported alone."""
     got = {"policy": {"policy_number": _value("Dwelling", "Dwelling", [2])},
            "additional_fields": [{"label": "Note", "section_hint": "discounts",
                                   "value": _value("Water Leak Detection", "x", [1])}]}
     core = score_hallucinations([({}, got, PAGES)])
     extra = score_hallucinations([({}, got, PAGES)], overflow=True)
-    assert (core.name, core.opportunities, core.hits) == ("hallucination_rate", 1, 0)
+    assert (core.name, core.opportunities, core.hits) == ("hallucination_rate", 2, 1)
     # Its label and section hint are bare values of a canonical answer: not looked for.
     assert (extra.name, extra.opportunities, extra.hits) == ("additional_fields_hallucination_rate", 1, 1)
 

@@ -5,7 +5,7 @@ written next to the data. The report says what would stop an import, which
 labelled values the PDF does not support, which values are in the wrong format,
 and whether there is enough of each line to train and to measure.
 
-The checks, in five layers:
+The checks, in six layers:
 
 1. **Structure** (blocker): one PDF, a ``golden.json`` and a ``metadata.json``
    per folder; the PDF opens and has pages; no two folders hold the same PDF.
@@ -20,7 +20,12 @@ The checks, in five layers:
    Pages without text (scans) are left for the check after OCR.
 4. **Formats**: dates in ``parsed`` are readable (the build writes them MM/DD/YYYY); amounts in ``parsed`` agree
    with ``raw``; an effective date precedes its expiration date.
-5. **Totals**: documents per line, digital vs scanned, page counts, lines too
+5. **Label consistency** (warning), across the folder: each kind of value written
+   one way. A typed field in one format, no placeholder ("N/A") beside a null
+   for one field, and a date's or an amount's ``raw`` that reads as its
+   ``parsed``. A field written two ways teaches the model both; which way is the
+   convention is the user's choice, so nothing here blocks.
+6. **Totals**: documents per line, digital vs scanned, page counts, lines too
    small to measure, and whether the test split can reach the 150 documents the
    golden eval set is frozen from.
 
@@ -46,10 +51,12 @@ import re
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from functools import cache, lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from common import grounding
+from common.normalize import format_output_date, infer_field_kind, normalize_currency, normalize_date
 from data_pipeline.ocr.run_mineru import TEXT_LAYER_MIN_CHARS as MIN_TEXT_CHARS
 
 log = logging.getLogger(__name__)
@@ -70,6 +77,31 @@ class Finding:
     severity: str          # blocker | warning | info
     check: str
     detail: str
+
+
+@dataclass
+class ConsistencyFinding(Finding):
+    """A ``label_consistency`` warning, with what the report groups it by."""
+
+    kind: str = ""         # format | placeholder | raw_vs_parsed (CONSISTENCY_KINDS)
+    path: str = ""         # the field, list indices removed: coverages[].limits[].amount
+
+
+@dataclass
+class LabelFacts:
+    """What :func:`label_consistency` needs of one label, read in one walk of it
+    (:func:`label_facts`), so no label is held once its document is audited."""
+
+    #: (field, kind) -> the shapes its typed values train in.
+    shapes: dict[tuple[str, str], set[str]] = field(default_factory=dict)
+    #: Field -> the placeholders written for it, trimmed.
+    placeholders: dict[str, set[str]] = field(default_factory=dict)
+    #: Objects at each path, and of them how many give each field a value: a
+    #: field is left null where its object is there without it.
+    objects: Counter[str] = field(default_factory=Counter)
+    filled: Counter[str] = field(default_factory=Counter)
+    #: (the value's path, how its raw and parsed disagree), dates and amounts.
+    contradictions: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -94,6 +126,8 @@ class DocumentAudit:
     split: str | None = None
     synthetic: bool = False
     template_id: str | None = None
+    #: The label's part in label_consistency; None without a readable label.
+    labels: LabelFacts | None = None
 
     @property
     def digital(self) -> bool:
@@ -312,6 +346,8 @@ def audit_document(folder: Path, report: AuditReport, checksums: dict[str, str])
 
     # ---- 4. formats
     _check_formats(name, envelopes, report)
+    # ---- 5. label consistency: compared across the folder (label_consistency)
+    audit.labels = label_facts(label, lob)
     return audit
 
 
@@ -329,9 +365,54 @@ _MONTH_YEAR = re.compile(r"^\s*\(?\s*(0?[1-9]|1[0-2]|00)\s*[/. -]?\s*(\d{2}|\d{4
 _FIGURES = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
-def _check_formats(name: str, envelopes: list[tuple[str, dict]], report: AuditReport) -> None:
-    from common.normalize import infer_field_kind, normalize_currency, normalize_date
+@lru_cache(maxsize=1 << 16)
+def _date_of(text: str) -> str | None:
+    """:func:`common.normalize.normalize_date`, remembered: a folder repeats its
+    dates (a source and its twins), and each layout it tries and fails is a
+    raised error."""
+    return normalize_date(text)
 
+
+@lru_cache(maxsize=1 << 16)
+def _output_date(text: str) -> str | None:
+    """:func:`common.normalize.format_output_date`, remembered (:func:`_date_of`)."""
+    return format_output_date(text)
+
+
+def _unreadable_date(text: str) -> bool:
+    """A date the pipeline cannot read, so it would train as written.
+
+    A month and year (a form's edition date, "05-17") has no day to write
+    MM/DD/YYYY with; the output formatter keeps it as written, in the target and
+    in serving alike, so it is consistent, not an error.
+    """
+    return _date_of(text) is None and not _MONTH_YEAR.match(text)
+
+
+def _amount_problem(raw: Any, parsed: Any) -> str | None:
+    """``"not a number"``, ``"disagree"`` (``raw`` reads as another amount) or
+    ``None``, for one amount's ``raw`` and ``parsed``."""
+    if parsed in (None, "") or raw in (None, ""):
+        return None
+    # A field named like an amount that holds a word on both sides is an
+    # indicator ("Additional" / "Return" premium), not a misread figure.
+    if not any(ch.isdigit() for ch in f"{raw}{parsed}"):
+        return None
+    # A split limit is several amounts in one field; it has no single number.
+    if len(_FIGURES.findall(str(parsed))) >= 2:
+        return None
+    try:
+        number = float(str(parsed).replace(",", ""))
+    except ValueError:
+        return "not a number"
+    printed = normalize_currency(raw)
+    # Magnitudes: a return or credit is printed "$109.00" and recorded -109.0.
+    if printed is not None and abs(abs(float(printed)) - abs(number)) > 0.005:
+        return "disagree"
+    return None
+
+
+def _check_formats(name: str, envelopes: list[tuple[str, dict]], report: AuditReport) -> None:
     def flag(check: str, detail: str) -> None:
         report.formats.append(Finding(name, "warning", check, detail))
 
@@ -348,29 +429,15 @@ def _check_formats(name: str, envelopes: list[tuple[str, dict]], report: AuditRe
             # every date to MM/DD/YYYY itself (common.canonical.with_output_dates).
             # A date it cannot read is the problem — it would train as written.
             text = str(parsed)
-            # A month and year (a form's edition date, "05-17") has no day to
-            # write MM/DD/YYYY with; the output formatter keeps it as written, in
-            # the target and in serving alike, so it is consistent, not an error.
-            if normalize_date(text) is None and not _MONTH_YEAR.match(text):
+            if _unreadable_date(text):
                 flag("date_format", f"{path}: parsed {text!r} is not a readable date")
             elif leaf in ("effective_date", "expiration_date"):
                 dates[path[: len(path) - len(leaf)]][leaf] = text
-        if kind == "currency" and parsed not in (None, "") and raw not in (None, ""):
-            # A field named like an amount that holds a word on both sides is an
-            # indicator ("Additional" / "Return" premium), not a misread figure.
-            if not any(ch.isdigit() for ch in f"{raw}{parsed}"):
-                continue
-            # A split limit is several amounts in one field; it has no single number.
-            if len(_FIGURES.findall(str(parsed))) >= 2:
-                continue
-            try:
-                number = float(str(parsed).replace(",", ""))
-            except ValueError:
+        if kind == "currency":
+            problem = _amount_problem(raw, parsed)
+            if problem == "not a number":
                 flag("amount", f"{path}: parsed {parsed!r} is not a number")
-                continue
-            printed = normalize_currency(raw)
-            # Magnitudes: a return or credit is printed "$109.00" and recorded -109.0.
-            if printed is not None and abs(abs(float(printed)) - abs(number)) > 0.005:
+            elif problem == "disagree":
                 flag("amount", f"{path}: raw {raw!r} and parsed {parsed!r} disagree")
     for parent, pair in dates.items():
         start, end = (normalize_date(pair.get("effective_date")),
@@ -378,6 +445,355 @@ def _check_formats(name: str, envelopes: list[tuple[str, dict]], report: AuditRe
         if start and end and end <= start:
             flag("period", f"{parent or '(top)'}: expiration {pair['expiration_date']} is not after "
                            f"effective {pair['effective_date']}")
+
+
+# --------------------------------------------------------------------------
+# Label consistency: each kind of value written one way across the labels
+# --------------------------------------------------------------------------
+
+#: The check's name in warnings.csv.
+LABEL_CONSISTENCY = "label_consistency"
+#: The kinds of finding it makes, in the order the report lists them.
+CONSISTENCY_KINDS = ("format", "placeholder", "raw_vs_parsed")
+
+#: What a label writes for a value it does not have, compared trimmed and case
+#: aside. Short and explicit: each of them is a placeholder in any field.
+PLACEHOLDERS = frozenset({"n/a", "na", "none", "not applicable", "-", "--", "tbd", "unknown", "nil"})
+#: Folders named per shape and per placeholder field, for a person to open.
+EXAMPLES_PER_SHAPE = 3
+
+#: The kinds written in one form, by calibration.features.infer_field_type's
+#: name for them; the rest (identifiers, names, addresses, free text) are text.
+_TYPED_KINDS = {"date": "date", "money": "money", "number": "number", "enum": "enum"}
+
+#: How a number is written. A whole amount is 1250 or 1250.0, two answers the
+#: model learns both of; one with decimals (1250.5) is written the same way under
+#: either, so it splits from neither.
+WHOLE = "whole number as 1250"
+WHOLE_POINT = "whole number as 1250.0"
+DECIMAL = "number with decimals"
+
+_INDICES = re.compile(r"\[\d+\]")
+_LETTER_RUN = re.compile(r"A+|a+")
+_SPELLING_NOISE = re.compile(r"[\W_]+")
+
+
+class _Kind(NamedTuple):
+    #: date, money, number, percent, boolean or enum; None for text.
+    kind: str | None
+    #: The typed value a common-model line declares the field as (DateValue).
+    declared: str | None
+    #: A validator of the declared value's ``parsed``: what the schema accepts.
+    valid: Any
+    #: common.normalize.infer_field_kind: the reading _check_formats makes.
+    by_name: str
+
+
+@cache
+def _declared_types() -> dict[str, tuple[str, Any]]:
+    """Field (list markers removed) -> (the typed value it is declared as, a
+    validator of that value's ``parsed``), over every common-model line's model
+    view.
+
+    The walk of :func:`calibration.features.common_model_field_types`, kept by
+    definition so a percent is not a count, nor a yes/no an enum. A plain
+    ``FieldValue`` declares no type: the field's name decides its kind.
+    """
+    from jsonschema import Draft202012Validator
+
+    from common.schemas import is_common_model, resolve_local, resolved_schema, schema_selectors
+
+    out: dict[str, tuple[str, Any]] = {}
+    validators: dict[str, Any] = {}
+
+    def value_type(sub: Any, defs: dict[str, Any]) -> str:
+        ref = sub.get("$ref") if isinstance(sub, dict) else None
+        name = ref.rsplit("/", 1)[-1] if isinstance(ref, str) else ""
+        defn = defs.get(name)
+        is_value = isinstance(defn, dict) and {"raw", "parsed", "page_ref"} <= set(defn.get("properties") or {})
+        return name if is_value else ""
+
+    def walk(node: dict[str, Any], defs: dict[str, Any], path: str, seen: frozenset[str]) -> None:
+        for variant in [node, *(node.get("anyOf") or [])]:
+            for key, sub in ((variant.get("properties") or {}) if isinstance(variant, dict) else {}).items():
+                here = f"{path}.{key}" if path else key
+                resolved = resolve_local(sub, defs)
+                items = resolved.get("items") if isinstance(resolved, dict) else None
+                name = value_type(sub, defs) or value_type(items, defs)    # a value, or a list of them
+                if name:
+                    if name != "FieldValue" and here not in out:
+                        if name not in validators:
+                            validators[name] = Draft202012Validator(defs[name]["properties"]["parsed"])
+                        out[here] = (name, validators[name])
+                    continue
+                refs = {r.rsplit("/", 1)[-1] for r in (
+                    sub.get("$ref") if isinstance(sub, dict) else None,
+                    items.get("$ref") if isinstance(items, dict) else None) if isinstance(r, str)}
+                if refs & seen:
+                    continue            # a definition that contains itself
+                for child in (resolved, resolve_local(items, defs) if items is not None else None):
+                    if isinstance(child, dict) and (child.get("properties") or child.get("anyOf")):
+                        walk(child, defs, here, seen | refs)
+
+    for doc_type, form, lob in schema_selectors():
+        if doc_type == "policy" and is_common_model(doc_type, form, lob):
+            view = resolved_schema(doc_type, form, lob)
+            walk(view, view.get("$defs") or {}, "", frozenset())
+    return out
+
+
+@cache
+def _kind_of(field_path: str, common_model: bool) -> _Kind:
+    """A field's kind (list markers ``[]``), as calibration and scoring read it
+    (:func:`calibration.features.infer_field_type`: the reviewed table, then the
+    type a common-model line declares, then the field's name)."""
+    from calibration.features import infer_field_type
+
+    name, valid = (_declared_types().get(field_path.replace("[]", "")) if common_model else None) or (None, None)
+    kind = _TYPED_KINDS.get(infer_field_type(field_path, common_model=common_model))
+    if kind == "number" and name == "PercentValue":
+        kind = "percent"
+    elif kind == "enum" and name == "BoolValue":
+        kind = "boolean"
+    return _Kind(kind, name, valid, infer_field_kind(field_path))
+
+
+def _on_common_model(lob: Any) -> bool:
+    from common.lob import lob_lines
+    from common.schemas import SchemaError, is_common_model
+
+    try:
+        return is_common_model("policy", None, sorted(lob_lines(lob)) or None)
+    except SchemaError:
+        return False
+
+
+def _blank(value: Any) -> bool:
+    return value is None or isinstance(value, str) and not value.strip()
+
+
+def _placeholder(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().casefold() in PLACEHOLDERS
+
+
+def _shape(value: Any) -> str:
+    """How a value is written: a number's form, true/false, or text as a
+    signature - each digit a 9, each run of capitals an A and of small letters
+    an a (``"05/11"`` is ``99/99``, ``"Jan 1, 2026"`` is ``Aa 9, 9999``)."""
+    if isinstance(value, bool):
+        return "true/false"
+    if isinstance(value, int):
+        return WHOLE
+    if isinstance(value, float):
+        return WHOLE_POINT if value.is_integer() else DECIMAL
+    if isinstance(value, str):
+        signature = "".join("9" if ch.isdigit() else "A" if ch.isupper() else "a" if ch.isalpha() else ch
+                            for ch in value)
+        return f'text "{_LETTER_RUN.sub(lambda run: run.group()[0], signature)}"'
+    return type(value).__name__
+
+
+@lru_cache(maxsize=1 << 16)
+def _declared_accepts(field_path: str, form: type, value: Any) -> bool:
+    """Whether the type a common-model line declares the field as accepts
+    ``value`` as its ``parsed``; remembered (``form``, the value's type, keeps 1,
+    1.0 and True apart)."""
+    return _kind_of(field_path, True).valid.is_valid(value)
+
+
+def _written_as(field_path: str, kind: _Kind, raw: Any, parsed: Any, common_model: bool) -> str | None:
+    """The shape ``parsed`` trains in, or ``None`` for a value another check
+    already reports: one the schema refuses (a blocker), or one formats.csv
+    names (an unreadable date, an amount that is not a number)."""
+    if kind.valid is not None and not (
+            _declared_accepts(field_path, type(parsed), parsed) if isinstance(parsed, (str, int, float))
+            else kind.valid.is_valid(parsed)):
+        return None
+    if kind.kind == "enum":
+        return json.dumps(parsed, ensure_ascii=False)
+    if kind.by_name == "date" and _unreadable_date(str(parsed)):
+        return None
+    if kind.by_name == "currency" and isinstance(parsed, str) and _amount_problem(raw, parsed) == "not a number":
+        return None
+    if kind.kind == "date" and (kind.declared == "DateValue" if common_model else kind.by_name == "date"):
+        # The corpus build writes these in MM/DD/YYYY wherever it can read them
+        # (common.canonical.to_model_target): the form the model is taught.
+        parsed = _output_date(str(parsed)) or parsed
+    return _shape(parsed)
+
+
+def _contradiction(field_path: str, kind: _Kind, raw: Any, parsed: Any) -> str | None:
+    """How a date's or an amount's ``raw``, read by ``common.normalize`` as
+    scoring reads values, contradicts its ``parsed``; ``None`` when it does not
+    or cannot be read."""
+    if kind.kind == "date":
+        printed, recorded = (None if value is None else _date_of(str(value)) for value in (raw, parsed))
+        if printed and recorded and printed != recorded:
+            return f"raw {raw!r} reads {printed}, parsed {parsed!r} reads {recorded}"
+    # A field named like an amount is compared by _check_formats (formats.csv).
+    elif kind.kind == "money" and kind.by_name != "currency" and _amount_problem(raw, parsed) == "disagree":
+        return f"raw {raw!r} reads {normalize_currency(raw)}, parsed is {parsed!r}"
+    return None
+
+
+def label_facts(label: Any, lob: Any) -> LabelFacts | None:
+    """One label's part in :func:`label_consistency`, from one walk of what it
+    teaches: not the fields the system supplies, a ``fideon:`` note or the full
+    text (``text_sections``), which no target holds."""
+    from common.canonical import is_field_value, without_system_fields
+    from data_pipeline.dataset_builder.policy_windows import EXCLUDED_FROM_TARGETS
+
+    if not isinstance(label, dict):
+        return None
+    common_model = _on_common_model(lob)
+    facts = LabelFacts()
+
+    def read(path: str, where: str, envelope: dict[str, Any]) -> bool:
+        """Records one value; whether it holds one."""
+        raw, parsed = envelope.get("raw"), envelope.get("parsed")
+        if _blank(raw) and _blank(parsed):
+            return False
+        held_raw, held_parsed = _placeholder(raw), _placeholder(parsed)
+        if held_raw or held_parsed:
+            facts.placeholders.setdefault(path, set()).update(
+                value.strip() for value, held in ((raw, held_raw), (parsed, held_parsed)) if held)
+        kind = _kind_of(path, common_model)
+        if kind.kind is None:
+            return True
+        if not held_parsed and not _blank(parsed):
+            shape = _written_as(path, kind, raw, parsed, common_model)
+            if shape is not None:
+                facts.shapes.setdefault((path, kind.kind), set()).add(shape)
+        problem = _contradiction(path, kind, raw, parsed)
+        if problem:
+            facts.contradictions.append((where, problem))
+        return True
+
+    def walk(node: dict[str, Any], path: str, where: str) -> None:
+        facts.objects[path] += 1
+        for key, value in node.items():
+            key = str(key)
+            if key.startswith("fideon:") or not path and key in EXCLUDED_FROM_TARGETS:
+                continue
+            # Interned: thousands of labels share a few hundred paths.
+            here, at = (sys.intern(f"{path}.{key}"), f"{where}.{key}") if path else (sys.intern(key), key)
+            if is_field_value(value):
+                if read(here, at, value):
+                    facts.filled[here] += 1
+            elif isinstance(value, dict):
+                walk(value, here, at)
+            elif isinstance(value, list):
+                listed, valued = sys.intern(f"{here}[]"), False
+                for index, item in enumerate(value):
+                    if is_field_value(item):
+                        valued = read(listed, f"{at}[{index}]", item) or valued
+                    elif isinstance(item, dict):
+                        walk(item, listed, f"{at}[{index}]")
+                if valued:
+                    facts.filled[listed] += 1
+
+    walk(without_system_fields(label), "", "")
+    return facts
+
+
+def label_consistency(documents: list[DocumentAudit]) -> list[Finding]:
+    """Warnings for each kind of value the folder's labels write more than one way.
+
+    A field written two ways across the labels teaches the model both, and it
+    then writes one at random: form editions were once written two ways (900
+    labels one way, 1,012 the other). Warnings, not blockers: which way is the
+    convention is the user's to decide; the audit shows the split.
+
+    * **format** - a typed field (date, money, number, percent, boolean, enum)
+      whose values train in more than one shape: text ``99/99`` beside
+      ``99 99``, a number beside text, 1250 beside 1250.0; for an enum, one
+      value spelt two ways (``claims_made``, ``Claims Made``). Read as the
+      corpus build writes them (dates in MM/DD/YYYY where it can read them); a
+      value the schema refuses or formats.csv names is left to those reports.
+      One finding per field, per enum value: each shape, how many labels hold
+      it, and some of them.
+    * **placeholder** - a field some labels give a placeholder
+      (:data:`PLACEHOLDERS`) and others leave null where its object is there:
+      the model would learn to write "N/A" sometimes and nothing other times.
+    * **raw_vs_parsed** - a date or an amount whose ``raw``, read by the
+      normaliser scoring reads values with, contradicts its ``parsed``. One
+      per value.
+
+    Every split is reported, however few labels it holds.
+    """
+    labelled = [d for d in documents if d.labels is not None]
+    source = {d.folder: d.template_id or d.folder for d in labelled}
+    found: list[Finding] = []
+
+    def finding(folder: str, kind: str, path: str, detail: str) -> ConsistencyFinding:
+        return ConsistencyFinding(folder, "warning", LABEL_CONSISTENCY, f"{kind}: {detail}", kind=kind, path=path)
+
+    def examples(folders: list[str]) -> str:
+        """Up to EXAMPLES_PER_SHAPE folders, of different sources first: a
+        source's twins show one layout's labels, not the corpus's."""
+        seen: set[str] = set()
+        first: list[str] = []
+        rest: list[str] = []
+        for folder in folders:
+            (rest if source[folder] in seen else first).append(folder)
+            seen.add(source[folder])
+        return ", ".join([*first, *rest][:EXAMPLES_PER_SHAPE])
+
+    def holding(by_shape: dict[str, list[str]]) -> str:
+        """Each shape, the most-held first: how many labels hold it, and some of them."""
+        ranked = sorted(by_shape.items(), key=lambda item: (-len(item[1]), item[0]))
+        return "; ".join(f"{shape} in {len(folders)} label(s) (e.g. {examples(folders)})"
+                         for shape, folders in ranked)
+
+    # ---- one format per field
+    holders: dict[tuple[str, str], dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for doc in labelled:
+        for key, shapes in doc.labels.shapes.items():
+            for shape in shapes:
+                holders[key][shape].append(doc.folder)
+    for (path, kind), by_shape in sorted(holders.items()):
+        if kind == "enum":
+            values: dict[str, dict[str, list[str]]] = defaultdict(dict)
+            for spelling, folders in by_shape.items():
+                values[_SPELLING_NOISE.sub("", spelling.casefold())][spelling] = folders
+            for _, spellings in sorted(values.items()):
+                if len(spellings) > 1:
+                    found.append(finding(".", "format", path,
+                                         f"{path} (enum) spells one value {len(spellings)} ways: "
+                                         f"{holding(spellings)}"))
+        elif len(_splitting(set(by_shape))) > 1:
+            found.append(finding(".", "format", path,
+                                 f"{path} ({kind}) is written in {len(by_shape)} shapes: {holding(by_shape)}"))
+
+    # ---- placeholders against nulls
+    placed: dict[str, list[str]] = defaultdict(list)
+    spelt: dict[str, Counter[str]] = defaultdict(Counter)
+    for doc in labelled:
+        for path, written in doc.labels.placeholders.items():
+            placed[path].append(doc.folder)
+            spelt[path].update(written)
+    for path in sorted(placed):
+        parent = path.rsplit(".", 1)[0] if "." in path else ""
+        empty = [d.folder for d in labelled if d.labels.objects[parent] > d.labels.filled[path]]
+        if empty:
+            written = ", ".join(f"{text!r} {n}" for text, n in sorted(spelt[path].items(),
+                                                                       key=lambda item: (-item[1], item[0])))
+            found.append(finding(".", "placeholder", path,
+                                 f"{path} is a placeholder in {len(placed[path])} label(s) ({written}; e.g. "
+                                 f"{examples(placed[path])}) and left null in {len(empty)} "
+                                 f"(e.g. {examples(empty)})"))
+
+    # ---- raw against parsed
+    for doc in labelled:
+        for where, problem in doc.labels.contradictions:
+            found.append(finding(doc.folder, "raw_vs_parsed", _INDICES.sub("[]", where), f"{where}: {problem}"))
+    return found
+
+
+def _splitting(shapes: set[str]) -> set[str]:
+    """The shapes that split a field: a decimal beside whole numbers written one
+    way is that one convention."""
+    return shapes - {DECIMAL} if shapes & {WHOLE, WHOLE_POINT} else shapes
 
 
 # --------------------------------------------------------------------------
@@ -396,6 +812,7 @@ def audit_folder(root: Path, *, lines: frozenset[str] | None = None, seed: int =
             log.info("audited %d of %d folders", index, len(folders))
     report.findings.extend(delivered_split_findings(report.documents))
     report.findings.extend(output_shape_findings(report.documents))
+    report.findings.extend(label_consistency(report.documents))
 
     by_line: dict[str, list[str]] = defaultdict(list)
     for doc in report.documents:
@@ -473,6 +890,7 @@ def summary(report: AuditReport) -> dict[str, Any]:
         for d in importable
     )
     checked = sum(results[k] for k in ("ok", "wrong_page", "not_found", "no_page_ref"))
+    consistency = [f for f in report.findings if isinstance(f, ConsistencyFinding)]
     return {
         "folders": len(docs),
         "importable": len(importable),
@@ -483,6 +901,9 @@ def summary(report: AuditReport) -> dict[str, Any]:
         "values": dict(results),
         "values_found_on_their_page": round(results["ok"] / checked, 4) if checked else None,
         "format_findings": dict(Counter(f.check for f in report.formats)),
+        "label_consistency": {kind: sum(1 for f in consistency if f.kind == kind) for kind in CONSISTENCY_KINDS},
+        "label_consistency_fields": {kind: sorted({f.path for f in consistency if f.kind == kind})
+                                     for kind in CONSISTENCY_KINDS},
         "documents_per_line": dict(sorted(lines.items())),
         "lines_too_small_to_measure": sorted(
             line for line, n in lines.items() if n < MIN_DOCS_TO_MEASURE_LINE),
@@ -550,6 +971,21 @@ def render(report: AuditReport, facts: dict[str, Any]) -> str:
         "## Formats",
     ]
     lines += [f"- {k}: {v}" for k, v in facts["format_findings"].items()] or ["- none"]
+    consistency, fields = facts["label_consistency"], facts["label_consistency_fields"]
+    lines += [
+        "",
+        f"## Label consistency: {sum(consistency.values())} warning(s) — see warnings.csv",
+        "Each kind of value written one way: a field written two ways teaches the model both. "
+        "Which way is the convention is yours to choose; nothing here blocks.",
+    ]
+    counted = {
+        "format": f"one format per field: {consistency['format']} split(s) in",
+        "placeholder": "a placeholder beside a null:",
+        "raw_vs_parsed": f"raw against parsed (dates, amounts): {consistency['raw_vs_parsed']} value(s) in",
+    }
+    for kind in CONSISTENCY_KINDS:
+        named = fields[kind]
+        lines.append(f"- {counted[kind]} {len(named)} field(s)" + (f": {', '.join(named)}" if named else ""))
     lines += ["", "## Totals", "| Line | Documents |", "|---|---|"]
     lines += [f"| {k} | {v} |" for k, v in facts["documents_per_line"].items()]
     lines += [

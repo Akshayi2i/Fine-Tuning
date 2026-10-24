@@ -54,6 +54,11 @@ CALIBRATION = CalibrationParams(
 #: line still self-contained, and in no family part-way through that move.
 LINE = "property"
 
+#: The page GOLDEN is read from. It prints every value the fake model writes:
+#: a served policy holds no value its pages do not print (serving.printed_values).
+PAGE_TEXT = ("**Applicant** Rivera Fabrication LLC\nGranite Mutual Insurance Co\n"
+             "Policy Number WC-8842317-01  Effective 04/01/2026")
+
 
 @pytest.fixture
 def client() -> BlobClient:
@@ -69,7 +74,7 @@ def _request(**over) -> ExtractionRequest:
     base = dict(
         source_id="policy_0001",
         image_paths=["processed/default/policy/policy_0001/page_1.png"],
-        ocr_text="**Applicant** Rivera Fabrication LLC",
+        ocr_text=PAGE_TEXT,
         known_doc_type="policy",
         known_lob=LINE,
     )
@@ -305,7 +310,8 @@ def test_every_output_date_is_mm_dd_yyyy_whatever_the_model_wrote(client):
         },
     })
     result = extract(
-        _request(), load_model("base", client, backend_impl=EchoBackend(iso)),
+        _request(ocr_text=f"{PAGE_TEXT}\nPolicy Period April 1, 2026 to 4/1/27"),
+        load_model("base", client, backend_impl=EchoBackend(iso)),
         StaticClassifier("policy"), CALIBRATION,
     )
     policy = result.extraction["policy"]

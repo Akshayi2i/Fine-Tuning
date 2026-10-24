@@ -94,59 +94,62 @@ def score_false_nulls(
 
 
 def score_hallucinations(
-    documents: Sequence[tuple[dict[str, Any], dict[str, Any], str | Mapping[int, str]]],
+    documents: Sequence[tuple[dict[str, Any], dict[str, Any], str | Mapping[int, Any]]],
     *,
     overflow: bool = False,
 ) -> FaultReport:
-    """Values the model emitted that are printed on no page it was sent.
+    """Values the model wrote that no page of the document prints.
 
-    Each tuple is ``(expected, got, text)``: the OCR text of the pages that were
-    actually sent, as one string or as page number -> that page's text. Checking
-    against the golden label alone would call every wrong value a hallucination,
-    including an honest misread of something printed on the page, and those
-    have different remedies: a misread wants better perception, an invention
-    wants better grounding.
+    Each tuple is ``(expected, got, text)``: the text of the document's pages,
+    as one string or as page number -> that page's text (or the page prepared
+    once, ``common.grounding.TolerantPage``). Checking against the golden label
+    alone would call every wrong value a hallucination, including an honest
+    misread of something printed on the page, and those have different
+    remedies: a misread wants better perception, an invention wants better
+    grounding.
 
-    Looked for as ``common.grounding`` looks: the value AS PRINTED (``raw``, not
-    the reformatted ``parsed`` - "$2,100,000", not 2100000.0), on word
-    boundaries, and - given each page's text - on the pages it cites. Printed
-    only on another page is a wrong page, not an invention. A value too short to
-    look for ("1", "NY") is on almost every page and is left out of the rate
-    rather than counted as grounded.
+    Looked for as serving's printed-values check looks (``serving.printed_values``,
+    decision 2026-10-24), so checkpoint selection reads the rate the gate reads:
+    every value the model wrote (:func:`_written`: each envelope's ``raw``, extra
+    fields and list members included), by :func:`common.grounding.ground_tolerant`
+    over every page - the value AS PRINTED ("$2,100,000", not the reformatted
+    2100000.0), forgiving the misreads OCR makes. Printed only on a page it does
+    not cite is a wrong page, not an invention. A value the text cannot settle -
+    too short to look for ("1", "NY"), a reading (a bool), or one citing a page
+    with no text - is left out of the rate rather than counted as printed.
 
-    ``overflow`` scores only the extra fields (``additional_fields``), otherwise
-    everything else: overflow is free text by design, and folded into one rate
-    it hid how often the schema's own fields are invented.
+    Measured on the model's answer: every value it wrote, right or wrong by the
+    label. A right value written in a form no page prints is one serving holds
+    back too, so the label does not excuse it. ``expected`` is not read.
+
+    ``overflow`` scores the extra fields (``additional_fields``) alone, reported
+    beside the rate: overflow is free text by design, and inside the one rate
+    it can hide how often the schema's own fields are invented.
 
     A field is only checked when the model emitted something. Correctly-absent
     values cannot be hallucinated, and checking them would make the denominator
     meaningless.
     """
     from common import grounding
-    from evaluation.metrics.field_accuracy import flatten_scalars
 
     report = FaultReport("additional_fields_hallucination_rate" if overflow else "hallucination_rate")
-    for expected, got, text in documents:
+    for _expected, got, text in documents:
         by_page = isinstance(text, Mapping)
-        pages = {int(n): t for n, t in text.items()} if by_page else {1: text or ""}
-        expected_flat = flatten_scalars(expected)
+        # Prepared once per document: a policy has hundreds of values to look up.
+        pages = grounding.tolerant_pages({int(n): t for n, t in text.items()} if by_page else {1: text or ""})
 
-        for path, value, printed, cited in _emitted(got, bare_printed=not _has_envelope(got)):
-            if _is_empty(value) or isinstance(value, bool) or path.startswith("additional_fields") != overflow:
+        for path, printed, cited in _written(got, bare_printed=not _has_envelope(got)):
+            if _is_empty(printed) or (overflow and not path.startswith("additional_fields")):
                 continue
-            where = grounding.ground(printed, cited if by_page else None, pages)
+            where = grounding.ground_tolerant(printed, cited if by_page else None, pages)
             if where.status == grounding.UNCHECKED:
                 continue
             report.opportunities += 1
-            # Right answers are never hallucinations, whatever the text lookup
-            # says: a correct value can be printed in a form the search misses.
-            if values_agree(expected_flat.get(path), value, path):
-                continue
             if where.status == grounding.NOT_PRINTED:
                 report.hits += 1
                 report.instances.append({
                     "field": path, "emitted": str(printed)[:80],
-                    "reason": "printed on no page that was sent",
+                    "reason": "printed on no page of the document",
                 })
     return report
 
@@ -238,6 +241,35 @@ def _emitted(node: Any, prefix: str = "", *, bare_printed: bool = True) -> Any:
                 yield path, value, None, []
         else:
             yield path, value, value if bare_printed else None, []
+
+
+def _written(node: Any, prefix: str = "", *, bare_printed: bool = True) -> Any:
+    """Each value written in the form a page prints it, as ``(path, printed,
+    cited pages)``: every envelope's ``raw`` - each of a list of envelopes, the
+    extra fields' too - as serving's printed-values check reads them (an
+    envelope with no ``raw`` prints nothing to look for), and in a flat answer
+    (``bare_printed``) each bare value itself. A canonical answer's bare values
+    are codes, ids, links and section hints, which no page prints; a list of
+    bare values is a set of codes, not a printed phrase."""
+    from common.canonical import is_field_value
+
+    for key, value in (node or {}).items():
+        path = f"{prefix}{key}"
+        if is_field_value(value):
+            yield path, value.get("raw"), value.get("page_ref") or []
+        elif isinstance(value, dict):
+            yield from _written(value, f"{path}.", bare_printed=bare_printed)
+        elif isinstance(value, list):
+            table = any(isinstance(item, dict) for item in value)
+            for index, item in enumerate(value):
+                if is_field_value(item):
+                    yield f"{path}[{index}]", item.get("raw"), item.get("page_ref") or []
+                elif isinstance(item, dict):
+                    yield from _written(item, f"{path}[{index}].", bare_printed=bare_printed)
+                elif table and bare_printed:
+                    yield f"{path}[{index}]", item, []
+        elif bare_printed:
+            yield path, value, []
 
 
 def _has_envelope(node: Any) -> bool:

@@ -125,14 +125,16 @@ def test_the_finalists_are_judged_on_whole_documents():
 
 
 def test_a_finalist_that_invents_more_does_not_win_on_accuracy():
+    """Within the guard margin on field match, the fewest invented values win
+    (decision 2026-10-24); invention is the ranking there, not a guard."""
     from evaluation.checkpoint_eval import choose_on_documents
 
     report = _report([(280, 0.62), (560, 0.60)])
-    full = {"/ck/checkpoint-280": _document_metrics(0.55, invented=0.10),
+    full = {"/ck/checkpoint-280": _document_metrics(0.57, invented=0.10),
             "/ck/checkpoint-560": _document_metrics(0.58, invented=0.16)}     # 6 points more invented
     choose_on_documents(report, lambda ck: full[ck], finalists=3, guard_margin=0.02)
     assert report.selected == "/ck/checkpoint-280"
-    assert report.document_choice["excluded_by_guard"] == ["/ck/checkpoint-560"]
+    assert report.document_choice["excluded_by_guard"] == []
 
 
 def test_a_sample_that_is_the_whole_split_is_judged_without_scoring_again():

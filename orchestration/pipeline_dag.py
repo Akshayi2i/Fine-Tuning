@@ -1395,6 +1395,9 @@ def _selection_settings(ctx: StageContext) -> dict[str, Any]:
         "selection_document_finalists": int(evaluation.get("selection_document_finalists") or 0),
         "selection_guard_margin": float(evaluation.get("selection_guard_margin") or 0.0),
         "selection_document_modes": modes,
+        # The finalists' pass read twice, for the run-to-run guard; on unless
+        # the config says false (decision 2026-10-24).
+        "selection_run_to_run_check": bool(evaluation.get("selection_run_to_run_check", True)),
     }
 
 
@@ -1415,6 +1418,10 @@ def _checkpoint_scorer(ctx: StageContext) -> Any:
         "sample_rows": int(selection["validation_sample_rows"]),
         # The finalists' whole-document pass (and a near-tie) reads these modes only.
         "full_modes": selection["selection_document_modes"],
+        # ...and is read twice, for the run-to-run guard, when there are
+        # finalists to judge: a near-tie alone reads nothing twice.
+        "repeat": bool(selection["selection_run_to_run_check"]
+                       and selection["selection_document_finalists"] >= 2),
     }
     distributed = training_config(ADAPTER.training_config).get("distributed") or {}
     gpus = scoring_gpus()[: training_gpus(distributed)]

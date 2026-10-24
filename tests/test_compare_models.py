@@ -111,9 +111,13 @@ def _imported(client, source_id="policy_0001", tenant="compare"):
     client.write_json(paths.golden_label("policy", source_id, tenant), {"policy": {"policy_number": _env("PA-1")}})
 
 
-def test_one_document_goes_through_both_routes_with_one_model_load(client, tmp_path):
+def test_one_document_goes_through_both_routes_with_one_model_load(client, tmp_path, monkeypatch):
+    import serving.printed_values as printed_values
     from testing.compare_models import compare_documents
 
+    # Its page text prints none of the answer's values; the printed-values
+    # check is not what this tests (tests/test_printed_values.py).
+    monkeypatch.setattr(printed_values, "configured_mode", lambda: printed_values.FLAG)
     _imported(client)
     backend = TwoAnswers()
     adapter_model = load_model("base", client, backend_impl=backend, adapter=str(_adapter(tmp_path)))

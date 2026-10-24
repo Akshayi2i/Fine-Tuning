@@ -24,6 +24,11 @@ this one's.
 Each document is run in all three input modes. ``noisy_ocr_image`` uses the
 corpus build's own seeded corruption, and renders the same prompt serving sends
 for clean OCR: the noise lives in the data, never in the instruction.
+
+Then each document's main mode is read once more, its windows sent in reverse
+order, so the engine batches them differently: how often the two answers agree
+is ``run_to_run_agreement`` (decision 2026-10-24). And each reading carries
+serving's own printed-values record, which ``hallucination_rate`` reads.
 """
 
 from __future__ import annotations
@@ -44,6 +49,9 @@ log = logging.getLogger(__name__)
 
 #: The modes every golden document is evaluated in.
 GOLDEN_MODES: tuple[str, ...] = ("ocr_plus_image", "noisy_ocr_image", "image_only")
+
+#: The mode read twice for run_to_run_agreement: the one production reads.
+MAIN_MODE = "ocr_plus_image"
 
 _PAGE = re.compile(r"page_(\d+)\.(png|md)$")
 
@@ -183,21 +191,39 @@ def evaluate(
     thresholds: Any = None,
     modes: Sequence[str] = GOLDEN_MODES,
     seed: int = 42,
+    run_to_run: bool | None = None,
 ) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
     """``(expected, got, metadata)`` triples for :func:`run_eval.build_report`.
 
     A document that fails to extract is scored as an empty answer, never
     dropped: dropping it would score the model on the documents it managed.
+
+    ``run_to_run`` (default: :func:`run_to_run_check`): after the normal
+    passes, every document's main mode (:data:`MAIN_MODE`) is extracted again
+    with its windows sent in reverse order (``send_order="reversed"``), and the
+    second answer rides on the main-mode triple's metadata
+    (``run_eval.REPEAT_ANSWER``) for ``run_to_run_agreement``. It costs one more
+    main-mode pass over the whole set. A repeat that fails to extract is an
+    empty second answer, as a first pass that fails is an empty first one.
     """
+    from dataclasses import replace
+
     from calibration.fit_calibration import CalibrationParams
     from data_pipeline.dataset_builder.noisy_ocr_augment import corrupt_ocr_pages
+    from evaluation.run_eval import PRINTED_CHECK, REPEAT_ANSWER
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import ExtractionRequest, extract
     from training.stage_data import localize_keys
 
+    repeat = run_to_run_check() if run_to_run is None else run_to_run
     local = localize_keys(
         client, sorted({key for doc in documents for key in doc.image_keys}), images_root
     )
+    #: The main-mode readings to repeat: what was sent, and the metadata the
+    #: second answer joins.
+    again: list[tuple[GoldenDocument, Any, Any, dict[str, Any]]] = []
+    #: Policy readings sent page text that came back with no printed-values record.
+    unchecked: list[str] = []
     triples = []
     for doc in documents:
         calibration = CalibrationParams(
@@ -231,6 +257,8 @@ def evaluate(
                 "held_out_carrier": doc.held_out_carrier,
                 "page_count": len(doc.image_keys),
             }
+            if repeat and mode == MAIN_MODE:
+                again.append((doc, request, calibration, metadata))
             try:
                 result = extract(
                     request, model, StaticClassifier(doc.doc_type, doc.acord_form), calibration,
@@ -241,6 +269,13 @@ def evaluate(
                 metadata["error"] = f"{type(exc).__name__}: {exc}"
                 triples.append((doc.golden, {}, metadata))
                 continue
+            # Serving's own printed-values check (serving.printed_values): the
+            # values it could check and those no page prints, recorded before
+            # strict mode removed any. None with no page text: nothing checked.
+            metadata[PRINTED_CHECK] = getattr(result, "printed_check", None)
+            if (metadata[PRINTED_CHECK] is None and doc.doc_type == "policy" and mode != "image_only"
+                    and any(str(text).strip() for text in texts.values())):
+                unchecked.append(f"{doc.source_id} ({mode})")
             metadata["field_confidence"] = {
                 path: body["confidence"] for path, body in result.fields.items()
             }
@@ -257,7 +292,42 @@ def evaluate(
             metadata["schema_valid"] = result.schema_valid
             metadata["validation_errors"] = list(result.validation_errors[:4])
             triples.append((doc.golden, result.extraction, metadata))
+    if unchecked:
+        log.warning(
+            "golden eval: %d policy reading(s) were sent page text and came back with no "
+            "printed-values record, so hallucination_rate does not count their values: %s",
+            len(unchecked), unchecked[:5],
+        )
+
+    # The repeat pass, after every document's own: the same request, its
+    # windows sent in reverse order (the merge keeps planned order), so the
+    # engine batches them differently.
+    for doc, request, calibration, metadata in again:
+        try:
+            result = extract(
+                replace(request, send_order="reversed"), model,
+                StaticClassifier(doc.doc_type, doc.acord_form), calibration,
+                calibrators=calibrators, thresholds=thresholds, strict_schema=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - an empty second answer, not dropped
+            log.warning("golden eval: %s (%s, repeat) failed: %s", doc.source_id, MAIN_MODE, exc)
+            metadata["repeat_error"] = f"{type(exc).__name__}: {exc}"
+            metadata[REPEAT_ANSWER] = {}
+            continue
+        metadata[REPEAT_ANSWER] = result.extraction
     return triples
+
+
+def run_to_run_check() -> bool:
+    """Whether the golden eval reads each document's main mode twice, for
+    ``run_to_run_agreement``: ``run_to_run_check`` under ``evaluation`` in the
+    adapter's training config (configs/training/unified.yaml), on unless it says
+    false. On, it costs one more main-mode pass over the frozen set."""
+    from common.adapter import ADAPTER
+    from common.config import training_config
+
+    evaluation = training_config(ADAPTER.training_config).get("evaluation") or {}
+    return bool(evaluation.get("run_to_run_check", True))
 
 
 def assert_scoreable(
@@ -332,6 +402,9 @@ def evaluate_version(
     ``adapter_checkpoint`` names the checkpoint ``model`` applies (the pipeline
     passes it), recorded so the report is never reused for another one.
 
+    Each document's main mode is read twice when :func:`run_to_run_check` is
+    on (the default): one more main-mode pass, for ``run_to_run_agreement``.
+
     ``lines`` are the lines of business the release serves: only frozen policies
     of one of them are scored, because serving sends every other policy (another
     line, a package, no line) to the base model, not to this release. ``None``
@@ -359,16 +432,22 @@ def evaluate_version(
         )
     from evaluation.release_measurements import GpuMemorySampler
 
+    # The repeat pass for run_to_run_agreement: one more main-mode pass.
+    repeat = run_to_run_check()
     with GpuMemorySampler() as memory:
         triples = evaluate(
             documents, model, client,
             paths.staging_train_images_dir(f"golden-{corpus_version}", tenant_id),
-            calibrators=calibrators, thresholds=thresholds,
+            calibrators=calibrators, thresholds=thresholds, run_to_run=repeat,
         )
     failed = sum(1 for _e, _g, meta in triples if meta.get("error"))
     report = build_report(version, triples, corpus_version=corpus_version)
     body = report.as_dict()
     body["documents_failed"] = failed
+    # Whether each document's main mode was read twice (run_to_run_agreement),
+    # and how many second readings failed (scored as empty answers).
+    body["run_to_run_check"] = repeat
+    body["repeats_failed"] = sum(1 for _e, _g, meta in triples if meta.get("repeat_error"))
     # Which lines were scored (None: every frozen document), so the gate reuses
     # this report, or compares a baseline with it, only for the same lines.
     body["lines_scored"] = sorted(lines) if lines is not None else None

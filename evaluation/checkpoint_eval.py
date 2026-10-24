@@ -255,12 +255,18 @@ def select_best(
     return report
 
 
-def generation_scorer(rows: list[dict[str, Any]], model: Any) -> Scorer:
+def generation_scorer(rows: list[dict[str, Any]], model: Any, *, repeat: bool = False) -> Scorer:
     """Score a checkpoint by generating the validation rows with it as a LoRA.
 
     Scored through :func:`evaluation.validation_generation.score_generations`,
     which is the gate's own ``build_report``. A selector scoring by a different
     definition of "correct" picks a checkpoint the gate rejects.
+
+    ``repeat``: each checkpoint's rows are generated a second time, in the
+    reverse order (``generate_validation(order="reversed")``), so the engine
+    batches them differently, and its metrics carry how often the two readings
+    agree (``document_run_to_run_agreement`` over whole documents). Twice the
+    generation for every checkpoint it scores.
     """
     from evaluation.validation_generation import (
         assert_generations_usable,
@@ -285,14 +291,24 @@ def generation_scorer(rows: list[dict[str, Any]], model: Any) -> Scorer:
         stats: dict[str, Any] = {}
         generations = generate_validation(rows, model, adapter=checkpoint, stats=stats)
         # What each pass cost, for the stage result: rows, calls, seconds.
-        passes.append({"checkpoint": checkpoint, **stats})
+        record = {"checkpoint": checkpoint, **stats}
+        passes.append(record)
         # Raises for a broken pass, so select_best records this checkpoint as
         # unscorable instead of ranking it at 0.0 — and refuses the stage when
         # no checkpoint scored at all.
         assert_generations_usable(generations, what=f"checkpoint {checkpoint}")
+        again: dict[str, Any] = {}
+        if repeat:
+            # The same rows in the reverse order: what run-to-run agreement
+            # compares the first reading with. Its cost rides on the first's.
+            repeat_stats: dict[str, Any] = {}
+            again["repeat"] = generate_validation(rows, model, adapter=checkpoint, stats=repeat_stats,
+                                                  order="reversed")
+            record["repeat"] = repeat_stats
+            assert_generations_usable(again["repeat"], what=f"checkpoint {checkpoint}'s second pass")
         return {
             k: float(v)
-            for k, v in score_generations(generations, model_version=checkpoint).items()
+            for k, v in score_generations(generations, model_version=checkpoint, **again).items()
             if isinstance(v, (int, float))
         }
 
@@ -309,10 +325,12 @@ def generation_cost(scorer: Any) -> dict[str, Any]:
     passes = [*getattr(scorer, "passes", []), *getattr(getattr(scorer, "full", None), "passes", [])]
     if not passes:
         return {}
+    # A pass read twice for run-to-run agreement carries its second reading.
+    readings = [reading for p in passes for reading in (p, p.get("repeat") or {})]
     return {
         "passes": passes,
-        "rows": sum(int(p.get("generated", 0)) for p in passes),
-        "seconds": round(sum(float(p.get("seconds", 0.0)) for p in passes), 1),
+        "rows": sum(int(r.get("generated", 0)) for r in readings),
+        "seconds": round(sum(float(r.get("seconds", 0.0)) for r in readings), 1),
     }
 
 
@@ -349,7 +367,16 @@ def break_tie(report: SelectionReport, full_scorer: Scorer, margin: float) -> Se
 
 #: Document-level metrics the finalists are judged on (validation_generation.score_generations).
 DOCUMENT_ACCURACY = "document_field_normalized_match"
-DOCUMENT_GUARDS = ("document_hallucination_rate", "document_false_null_rate")
+#: Values no page prints: of the finalists close enough on accuracy, the one
+#: inventing the fewest wins (decision 2026-10-24).
+DOCUMENT_INVENTION = "document_hallucination_rate"
+#: Lower is better: a finalist more than the guard margin above the best
+#: finalist's does not win.
+DOCUMENT_GUARDS = ("document_false_null_rate",)
+#: Higher is better: the same documents read twice, the second time in the
+#: reverse order. A finalist more than the guard margin below the best
+#: finalist's does not read the same twice, and does not win.
+DOCUMENT_AGREEMENT = "document_run_to_run_agreement"
 
 
 def rows_in_modes(rows: list[dict[str, Any]], modes: Sequence[str] | None) -> list[dict[str, Any]]:
@@ -381,12 +408,27 @@ def choose_on_documents(
     The candidates were ranked window by window on the validation sample - a few
     hundred windows, a few dozen documents. The finalists are scored on every
     validation row (``full_scorer``; ``None`` when the sample already is the
-    whole split, and its scores are used as they are), and the one with the best
-    accuracy over whole documents - windows merged as serving merges them -
-    wins, among those whose rate of invented values and of printed values left
-    empty is within ``guard_margin`` of the best finalist's. A checkpoint that
-    buys accuracy by inventing more, or by leaving more empty, does not win on
-    it. Ties go to the later step, as in :func:`select_best`.
+    whole split, and its scores are used as they are) over whole documents -
+    windows merged as serving merges them - and decided in three steps
+    (decision 2026-10-24: the model must invent nothing, and read the same
+    document the same twice):
+
+    1. Guards. A finalist whose rate of printed values left empty is more than
+       ``guard_margin`` above the best finalist's, or whose run-to-run
+       agreement - where the scorer read the documents twice
+       (``selection_run_to_run_check``) - is more than ``guard_margin`` below
+       the best finalist's, does not win.
+    2. Field match. Of the rest, those within ``guard_margin`` of the best
+       one's document accuracy go on. A finalist the guards excluded sets no
+       bar: it cannot win.
+    3. Invention. Of those, the one inventing the fewest values wins
+       (:data:`DOCUMENT_INVENTION`); ties go to the higher field match, then to
+       the later step, as in :func:`select_best`. A finalist with nothing
+       checkable has no rate and ranks after one that has.
+
+    Guards that between them exclude every finalist exclude none. Without
+    whole-document scores (no policy windows) the window-level metrics stand
+    in, as they do for accuracy.
 
     ``modes`` names the reading modes ``full_scorer`` reads (``selection_document_modes``;
     none = all three), recorded with the decision.
@@ -413,26 +455,53 @@ def choose_on_documents(
     if len(scored) < 2:
         return report
 
-    def accuracy(c: CheckpointScore) -> float:
+    def metric(c: CheckpointScore, name: str, stand_in: str | None = None) -> float | None:
         m = metrics[c.checkpoint]
-        return float(m.get(DOCUMENT_ACCURACY, m.get("field_normalized_match", 0.0)))
+        value = m.get(name, m.get(stand_in) if stand_in else None)
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
-    best = {g: min((metrics[c.checkpoint][g] for c in scored if g in metrics[c.checkpoint]), default=None)
-            for g in DOCUMENT_GUARDS}
-    excluded = [c.checkpoint for c in scored if any(
-        best[g] is not None and g in metrics[c.checkpoint] and metrics[c.checkpoint][g] > best[g] + guard_margin
-        for g in DOCUMENT_GUARDS)]
-    eligible = [c for c in scored if c.checkpoint not in excluded] or scored
-    winner = max(eligible, key=lambda c: (accuracy(c), c.step))
+    def accuracy(c: CheckpointScore) -> float:
+        return metric(c, DOCUMENT_ACCURACY, "field_normalized_match") or 0.0
+
+    # 1. Guards: each against the best finalist on it.
+    failed: dict[str, list[str]] = {}
+    for guard in DOCUMENT_GUARDS:
+        values = {c.checkpoint: v for c in scored if (v := metric(c, guard)) is not None}
+        for checkpoint, value in values.items():
+            if value > min(values.values()) + guard_margin:
+                failed.setdefault(checkpoint, []).append(guard)
+    agreement = {c.checkpoint: v for c in scored
+                 if (v := metric(c, DOCUMENT_AGREEMENT, "run_to_run_agreement")) is not None}
+    for checkpoint, value in agreement.items():
+        if value < max(agreement.values()) - guard_margin:
+            failed.setdefault(checkpoint, []).append(DOCUMENT_AGREEMENT)
+    guarded = [c for c in scored if c.checkpoint not in failed] or scored
+    # 2. Field match within the margin of the best that can win.
+    bar = max(accuracy(c) for c in guarded) - guard_margin
+    close = [c for c in guarded if accuracy(c) >= bar]
+
+    # 3. The fewest invented values; then field match; then the later step.
+    def rank(c: CheckpointScore) -> tuple[bool, float, float, int]:
+        invented = metric(c, DOCUMENT_INVENTION, "hallucination_rate")
+        return invented is not None, -(invented or 0.0), accuracy(c), c.step
+
+    winner = max(close, key=rank)
     report.document_choice = {
         "finalists": {c.checkpoint: {k: round(float(metrics[c.checkpoint][k]), 4)
-                                     for k in (DOCUMENT_ACCURACY, *DOCUMENT_GUARDS) if k in metrics[c.checkpoint]}
+                                     for k in (DOCUMENT_ACCURACY, DOCUMENT_INVENTION, *DOCUMENT_GUARDS,
+                                               DOCUMENT_AGREEMENT) if k in metrics[c.checkpoint]}
                       for c in scored},
         "guard_margin": guard_margin,
         # What the decision read: the whole-document pass's modes, or - when the
         # split is its own sample and no pass ran - the sample, in every mode.
         "modes": (list(modes) if modes else "all") if full_scorer is not None else "sample (all modes)",
-        "excluded_by_guard": excluded,
+        # Guards that failed every finalist excluded none (guarded is then all).
+        "excluded_by_guard": [c.checkpoint for c in scored if c not in guarded],
+        "guards_failed": {c.checkpoint: failed[c.checkpoint] for c in scored if c.checkpoint in failed},
+        "behind_on_field_match": [c.checkpoint for c in guarded if c not in close],
+        # Whether the finalists were read twice: off (selection_run_to_run_check),
+        # or no pass to read twice, and the agreement guard did not apply.
+        "run_to_run_measured": bool(agreement),
         "decided": winner.checkpoint,
         "changed_choice": winner.checkpoint != report.selected,
     }
@@ -444,7 +513,7 @@ def choose_on_documents(
 
 def vllm_scorer(
     *, client: Any, val_path: str, model: Any = None, images_root: str | None = None,
-    sample_rows: int = 0, full_modes: Sequence[str] | None = None,
+    sample_rows: int = 0, full_modes: Sequence[str] | None = None, repeat: bool = False,
 ) -> Scorer:
     """A :func:`generation_scorer` over the stored validation split, on the base.
 
@@ -455,8 +524,17 @@ def vllm_scorer(
     ``full_modes`` narrows ``.full`` - the finalists' whole-document pass and the
     near-tie - to those reading modes (:func:`rows_in_modes`); the sample keeps
     every mode. On the CGL run one mode was a third of the ~6,170 rows per finalist.
+
+    ``repeat``: the pass the finalists are judged on (:func:`choose_on_documents`)
+    reads its rows twice, the second time in reverse order, for the run-to-run
+    guard (:func:`generation_scorer`): ``.full``, or - for a split that is its
+    own sample, whose scores judge the finalists - the scorer itself. One more
+    pass per checkpoint that scorer scores.
     """
     from evaluation.validation_generation import read_rows
+
+    def scorer(part: list[dict[str, Any]]) -> Scorer:
+        return generation_scorer(part, model, repeat=True) if repeat else generation_scorer(part, model)
 
     rows = read_rows(client.read_text(val_path))
     # Checked before the engine loads: a mode filter that matches no row is a
@@ -473,7 +551,7 @@ def vllm_scorer(
 
         model = load_model("base", client)
     if not sample_rows:
-        return generation_scorer(rows, model)
+        return scorer(rows)
     # Candidates are ranked on the fixed validation sample; ``.full`` - the
     # finalists' whole-document pass and the near-tie (break_tie) - scores every
     # row of the named modes. One engine serves both. Only a split that is its
@@ -482,9 +560,10 @@ def vllm_scorer(
     from evaluation.validation_sample import validation_sample
 
     sample = validation_sample(rows, sample_rows)
+    if len(sample) >= len(rows):
+        return scorer(sample)
     score = generation_scorer(sample, model)
-    if len(sample) < len(rows):
-        score.full = generation_scorer(rows_in_modes(rows, full_modes), model)  # type: ignore[attr-defined]
+    score.full = scorer(rows_in_modes(rows, full_modes))  # type: ignore[attr-defined]
     return score
 
 
@@ -544,6 +623,8 @@ class ParallelScorer:
     full_split: bool = False
     #: The reading modes the full split is narrowed to (:func:`rows_in_modes`).
     full_modes: list[str] = field(default_factory=list)
+    #: The finalists' pass is read twice, for run-to-run agreement (:func:`vllm_scorer`).
+    repeat: bool = False
     poll_seconds: float = 15.0
     #: What each worker's generation passes cost, as the workers report them
     #: (:func:`generation_cost`).
@@ -579,6 +660,8 @@ class ParallelScorer:
                 command.append("--full")
                 for mode in self.full_modes:
                     command += ["--full-mode", mode]
+            if self.repeat:
+                command.append("--repeat")
             for checkpoint in share:
                 command += ["--checkpoint", checkpoint]
             # One GPU each; the worker scores in place - it must not re-launch
@@ -618,7 +701,7 @@ class ParallelScorer:
 
 def parallel_vllm_scorer(
     *, client: Any, val_path: str, images_root: str | None, sample_rows: int, gpus: list[str],
-    work_dir: Path, full_modes: Sequence[str] | None = None,
+    work_dir: Path, full_modes: Sequence[str] | None = None, repeat: bool = False,
 ) -> ParallelScorer:
     """A :class:`ParallelScorer` over the stored validation split, with a ``.full``
     one for the near-tie when the sample is smaller than the split.
@@ -638,7 +721,8 @@ def parallel_vllm_scorer(
 
         localize_rows(rows, client, images_root)
     settings = dict(val_path=val_path, images_root=images_root, sample_rows=sample_rows,
-                    gpus=list(gpus), work_dir=Path(work_dir), full_modes=list(full_modes or []))
+                    gpus=list(gpus), work_dir=Path(work_dir), full_modes=list(full_modes or []),
+                    repeat=repeat)
     scorer = ParallelScorer(**settings)
     if sample_rows and len(validation_sample(rows, sample_rows)) < len(rows):
         scorer.full = ParallelScorer(**settings, full_split=True)  # type: ignore[attr-defined]

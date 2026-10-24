@@ -410,7 +410,10 @@ def test_a_self_contained_report_scores_as_before():
 
 #: The report above as the scoring produced it before those fixes - except
 #: hallucination_rate, redefined on purpose (common.grounding): a value too short
-#: to look for ("OH", "1") is no longer counted as grounded (0.3333 before); and
+#: to look for ("OH", "1") is no longer counted as grounded (0.3333 before), and
+#: since serving's printed-values check (decision 2026-10-24) a right value no
+#: page prints - the two limits of 1000000 - counts as invented too (0.3571
+#: before); and
 #: the page-list measures added since (accuracy plan, stage 0.3); and the line
 #: it is filed under, gl until gl moved to the common model (1.1.0), every
 #: number unchanged by the move; and how many values the line's accuracy is
@@ -421,7 +424,7 @@ PINNED_OLD_STYLE = {
     "field_scored_by_lob": {SELF_CONTAINED: 3},
     "field_exact_match": 0.6667, "field_f1": 0.6667, "field_f1_list_fields": 0.6667,
     "field_normalized_match": 0.6667, "field_precision": 0.6667, "field_recall": 0.6667,
-    "hallucination_rate": 0.3571, "list_field_precision": 0.6667, "list_field_recall": 0.6667,
+    "hallucination_rate": 0.5, "list_field_precision": 0.6667, "list_field_recall": 0.6667,
     "lob_accuracy_by_value": {}, "schema_validity_rate": 0.0,
     "page_ref_exact_rate": 1.0, "page_ref_precision": 1.0, "page_ref_recall": 1.0,
 }

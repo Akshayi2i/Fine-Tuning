@@ -123,6 +123,15 @@ confidence:
   # weakest link, which is what you want when flagging risky fields.
   aggregation: "min"           # min | mean | geomean
 
+printed_values:
+  # A served policy holds no value its PDF does not print (decision 2026-10-24).
+  # Every value the model wrote is looked up on the pages' text, forgiving OCR's
+  # misreads, on scans too (common.grounding.ground_tolerant). strict: one no page
+  # prints is taken out of the JSON - its key stays, null - and flagged
+  # <path>:not_printed_removed. flag: it is kept and flagged <path>:not_printed.
+  # serving.printed_values; any other value is refused.
+  mode: strict
+
 long_documents:
   # Every page of a document is read, chunk by chunk, never selected pages
   # (decision 2026-10-19): a long policy in windows planned by the same

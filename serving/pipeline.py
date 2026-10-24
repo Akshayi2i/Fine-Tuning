@@ -100,6 +100,12 @@ class ExtractionRequest:
     #: A line of business L1/L2 proposed without being sure enough to send it as
     #: ``known_lob``: reconciled with the line the classifier reads.
     lob_hypothesis: str | None = None
+    #: The order a policy's windows go to the model: ``planned`` (the longest
+    #: expected answers first, :func:`_send_order`) or ``reversed``. The answers
+    #: are merged in planned order either way. The golden eval's repeat pass sends
+    #: them reversed, so the engine batches them differently, and measures whether
+    #: the same document reads the same (``run_to_run_agreement``).
+    send_order: str = "planned"
 
 
 @dataclass
@@ -133,6 +139,11 @@ class ExtractionResult:
     #: every-word rule, common.full_text.text_coverage). Common-model policies
     #: only; None for every other type and for a request with no page text.
     text_coverage: float | None = None
+    #: What the printed-values check found (serving.printed_values, decision
+    #: 2026-10-24): the values it could check, and each one the model wrote that
+    #: no page prints - removed from the JSON in strict mode. None when no check
+    #: ran: not a policy, or no page text yet (fields first: attach_full_text).
+    printed_check: dict[str, Any] | None = None
     #: A policy's windows, one entry each time one was read
     #: (``_window_stat``): its group, pages, attempt, prompt and answer
     #: tokens, seconds and outcome - where the time went. Not in the served
@@ -576,7 +587,7 @@ def _read_in_rounds(request: ExtractionRequest, model: LoadedModel, route_: Rout
         read.rounds += 1
         # Indexed by planned position: sent in another order, read back in this one.
         results: list[Any] = [None] * len(pending)
-        order = _send_order(pending, route_.schema_doc_type)
+        order = _sending(request, pending, route_.schema_doc_type)
         for start in range(0, len(order), MAX_WINDOWS_PER_BATCH):
             positions = order[start:start + MAX_WINDOWS_PER_BATCH]
             requests = [window_request(*pending[position]) for position in positions]
@@ -623,7 +634,7 @@ def _read_as_answered(request: ExtractionRequest, model: LoadedModel, route_: Ro
         future = submit_generation(model, window_request(group, pages), adapter=route_.adapter)
         running[future] = (path, group, pages)
 
-    for position in _send_order(plan, route_.schema_doc_type):
+    for position in _sending(request, plan, route_.schema_doc_type):
         send((position,), *plan[position])
 
     settled_at: list[tuple[tuple[int, tuple[int, ...]], _Settled]] = []
@@ -663,6 +674,17 @@ def _send_order(pending: list[tuple[str, list[int]]], doc_type: str | None) -> l
     caps = {group: _window_answer_cap(group, doc_type) for group, _pages in pending}
     return sorted(range(len(pending)),
                   key=lambda position: (-caps[pending[position][0]], -len(pending[position][1])))
+
+
+def _sending(request: ExtractionRequest, pending: list[tuple[str, list[int]]],
+             doc_type: str | None) -> list[int]:
+    """:func:`_send_order`, reversed when the request asks (``send_order``)."""
+    order = _send_order(pending, doc_type)
+    if request.send_order == "reversed":
+        return order[::-1]
+    if request.send_order != "planned":
+        raise PipelineError(f"send_order is {request.send_order!r}; expected 'planned' or 'reversed'")
+    return order
 
 
 def _batch_in_halves(
@@ -782,6 +804,64 @@ def _full_text_pages(request: ExtractionRequest) -> list[str]:
     if len(request.image_paths) == 1 and request.ocr_text:
         return [request.ocr_text]
     return []
+
+
+#: A full-text tier built after the fields that did not pass the client's
+#: schema: the fields stand, served without it.
+FULL_TEXT_INVALID_FLAG = "text_sections:invalid"
+
+
+def attach_full_text(result: ExtractionResult, page_texts: dict[int, str], *, lob: str) -> ExtractionResult:
+    """The full-text tier, added to a result whose fields were read without page
+    text (fields first: the model read the page images while the one GPU's
+    MinerU waited, ``serving.fields_first``).
+
+    As :func:`extract` builds it for a request that carries the text: Fideon's
+    section builder over the page text (``common.full_text``), the result
+    checked against the client's schema with it, ``text_coverage`` measured on
+    what is served. Only a result flagged ``text_sections:no_page_text`` gets
+    one - :func:`extract` flags exactly the documents that have the tier (a
+    common-model policy) and were read without text; any other is left as it
+    is. A tier that fails the schema is left out and flagged, the fields
+    untouched. An image-only read is also looked over for declarations fields
+    left empty that the text prints (``likely_missed``), as :func:`extract`
+    looks over a read that had its text. Returns ``result``.
+    """
+    if page_texts and result.doc_type == "policy" and result.printed_check is None:
+        # Printed values only (decision 2026-10-24): the fields were read from
+        # the images alone, so this is the first text to hold them to - for
+        # every policy, not only the lines with a full-text tier.
+        from serving.printed_values import hold_result_to_printed
+
+        hold_result_to_printed(result, page_texts)
+    if page_texts and result.doc_type == "policy" and result.mode == "image_only":
+        # Read from the images alone, the fields were never looked for on the
+        # page text: a declarations field left empty while a page prints its
+        # label and a value is flagged now, as extract flags it with text.
+        missed = _likely_missed(result.extraction, page_texts, lob)
+        if missed:
+            result.review_flags = sorted({*result.review_flags, *missed})
+    if NO_FULL_TEXT_FLAG not in result.review_flags or not page_texts:
+        return result
+    pages = [page_texts.get(page) or "" for page in sorted(page_texts)]
+    sections = build_text_sections(pages)
+    if not sections:
+        return result                                    # still flagged text_sections:no_page_text
+    output = {**result.extraction, "text_sections": sections}
+    # The tier is judged by the errors it brings: fields that already break the
+    # schema (flagged schema:invalid when they were read) must not cost the
+    # document its full text too.
+    already = set(iter_validation_errors(result.extraction, result.doc_type, None, lob))
+    errors = [error for error in iter_validation_errors(output, result.doc_type, None, lob) if error not in already]
+    if errors:
+        log.warning("%s: the full-text tier fails the schema (%s); served without it",
+                    result.source_id, errors[0])
+        result.review_flags = sorted({*result.review_flags, FULL_TEXT_INVALID_FLAG})
+        return result
+    result.extraction = output
+    result.review_flags = [flag for flag in result.review_flags if flag != NO_FULL_TEXT_FLAG]
+    result.text_coverage = text_coverage(pages, output)
+    return result
 
 
 @dataclass
@@ -1397,6 +1477,7 @@ def extract(
     reconciliation: dict[str, Any] | None = None
     window_latencies: list[float] = []
     window_stats: list[dict[str, Any]] = []
+    printed_check: dict[str, Any] | None = None
     windows = lossrun_windows(request) if route_.schema_doc_type == "lossrun" else []
 
     if canonical and route_.schema_doc_type == "policy":
@@ -1424,6 +1505,17 @@ def extract(
             merge_flags.extend(conformed.flags)
             if page_texts:
                 merge_flags.extend(_likely_missed(extraction, page_texts, lob))
+        # Printed values only (decision 2026-10-24): a value the answer holds
+        # that no page prints is taken out of the JSON and listed for review
+        # (serving.printed_values). With no page text (image only) nothing can be
+        # checked yet: fields first checks it when MinerU's text arrives.
+        from serving.printed_values import hold_to_printed
+
+        held = hold_to_printed(extraction, all_spans, None if request.modality_mode == "image_only" else (
+            dict(request.page_texts) or dict(enumerate(_all_page_texts(request), start=1))), lob=lob)
+        extraction, all_spans, printed_check = held.extraction, held.spans, held.record
+        # Flags raised before it follow their values; a value taken out keeps one.
+        merge_flags = held.joined(merge_flags)
     elif len(windows) > 1:
         # A Loss Run longer than one window: read by window, merged and
         # reconciled. One that fits a window is read in one call below.
@@ -1643,6 +1735,7 @@ def extract(
         window_latencies_ms=window_latencies,
         text_coverage=coverage,
         window_stats=window_stats,
+        printed_check=printed_check,
     )
 
     log.info(

@@ -163,10 +163,11 @@ evaluation:
   # decides. Sample noise only matters inside such a margin.
   selection_tie_break_margin: 0.015
   # The best candidates on the sample are then scored on every validation row
-  # and judged on whole documents - windows merged as serving merges them: the
-  # best document accuracy wins, among finalists whose rates of invented values
-  # and of printed values left empty are within the guard margin of the best
-  # finalist's. 0 or 1: the sample decides (with the near-tie rule above).
+  # and judged on whole documents - windows merged as serving merges them: of
+  # the finalists whose document accuracy is within the guard margin of the
+  # best one's, and whose rate of printed values left empty is within it of the
+  # best finalist's, the one inventing the fewest values wins (decision
+  # 2026-10-24). 0 or 1: the sample decides (with the near-tie rule above).
   # Costs one full validation pass per finalist, run at once on a multi-GPU pod.
   # 2, not 3: on the CGL run each finalist pass was ~6,170 rows (~1 h 55 min on
   # one H200), and the third finalist never won (replayed with 2, it still
@@ -177,6 +178,17 @@ evaluation:
   # ranks every candidate in all three modes, and the golden gate scores all three.
   selection_document_modes: [ocr_plus_image]
   selection_guard_margin: 0.02
+  # Run-to-run agreement (decision 2026-10-24): the same document must read the
+  # same twice. The finalists' whole-document pass is generated a second time,
+  # its rows in the reverse order, and a finalist whose agreement between the
+  # two is more than the guard margin below the best finalist's does not win.
+  # Costs one more whole-document pass per finalist.
+  selection_run_to_run_check: true
+  # The golden eval reads every document's main mode (ocr_plus_image) a second
+  # time, its windows sent in reverse order, and the gate holds the release to
+  # run_to_run_agreement (evaluation.golden_eval). Costs one more main-mode pass
+  # over the frozen set.
+  run_to_run_check: true
   metric_for_best_model: "eval_loss"
   greater_is_better: false
   early_stopping_patience: 3

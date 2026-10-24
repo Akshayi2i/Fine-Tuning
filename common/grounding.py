@@ -146,3 +146,146 @@ def ground(raw: Any, cited: Iterable[Any] | None, pages: Mapping[int, str | Page
     if any(number in texts and not texts[number].words for number in wanted):
         return Grounding(UNCHECKED)
     return Grounding(NOT_PRINTED)
+
+
+# --------------------------------------------------------------------------
+# OCR-tolerant: what a scan's text can settle (decision 2026-10-24)
+# --------------------------------------------------------------------------
+
+#: Letters OCR reads for digits, and digits it reads for letters ("NIP0115" as
+#: "NIPO115", "$5" as "$S"). Folded to the digit in every word that holds a
+#: digit, on both sides, before the words are compared. A word with no digit is
+#: never folded: "SOLD" is not "5010".
+_DIGIT_LOOKALIKES = str.maketrans({"o": "0", "q": "0", "i": "1", "l": "1", "s": "5", "b": "8",
+                                   "z": "2", "g": "6"})
+
+#: A word of this many letters or more matches a page's word one character
+#: away (one dropped, added or changed: "lnsurance", "Insuranee"). Shorter
+#: words, and every word holding a digit, must match once folded: one digit
+#: changed is another number.
+FUZZY_MIN_CHARS = 5
+
+
+def _fold(word: str) -> str:
+    return word.translate(_DIGIT_LOOKALIKES) if any(ch.isdigit() for ch in word) else word
+
+
+def _deletions(word: str) -> set[str]:
+    return {word[:i] + word[i + 1:] for i in range(len(word))}
+
+
+def _readings(figure: str) -> set[float]:
+    """The amounts a figure may be once OCR has misread its separators: as
+    written, every separator a thousands mark ("1.000.000" is 1000000), or the
+    last one the decimal point ("1.000,50" is 1000.5). Never a figure with its
+    decimal point moved: "$2,500" is not "$25.00"."""
+    out: set[float] = set()
+    if (number := _as_number(figure)) is not None:
+        out.add(number)
+    digits = re.sub(r"\D", "", figure)
+    if not digits:
+        return out
+    marks = [at for at, ch in enumerate(figure) if ch in ".,"]
+    if not marks or len(figure) - marks[-1] - 1 != 2:
+        # A last mark with three digits after it, or none, is a thousands mark.
+        out.add(float(digits))
+    if marks:
+        whole, cents = re.sub(r"\D", "", figure[:marks[-1]]), re.sub(r"\D", "", figure[marks[-1] + 1:])
+        if whole and cents:
+            out.add(round(float(f"{whole}.{cents}"), 2))
+    return out
+
+
+class TolerantPage:
+    """A page's text, prepared once for :func:`ground_tolerant`: normalised,
+    its digit-holding words folded, and every figure as a run of digits."""
+
+    def __init__(self, text: str | None) -> None:
+        self.exact = PageText(text)
+        words = self.exact.padded.split()
+        self.words = {_fold(word) for word in words}
+        self.padded = f" {' '.join(_fold(word) for word in words)} "
+        #: Every amount the page may print, each figure read every way its
+        #: separators allow (:func:`_readings`), and without a leading 5 where it
+        #: shows no "$": a "$" read as a "5" ("$37.47" printed, "537.47" read).
+        self.amounts: set[float] = set()
+        for figure in _FIGURE.findall(text or ""):
+            body = figure.lstrip("$")
+            if len(re.sub(r"\D", "", body)) < MIN_CHECKABLE_CHARS:
+                continue
+            self.amounts |= _readings(body)
+            if not figure.startswith("$") and body.startswith("5") and len(body) > MIN_CHECKABLE_CHARS:
+                self.amounts |= _readings(body[1:])
+        self._near: dict[str, set[str]] | None = None
+
+    def near(self, word: str) -> bool:
+        """Whether a page word is at most one character from ``word``."""
+        if self._near is None:
+            self._near = {}
+            for page_word in self.words:
+                if len(page_word) >= FUZZY_MIN_CHARS - 1 and not any(ch.isdigit() for ch in page_word):
+                    self._near.setdefault(page_word, set()).add(page_word)
+                    for deleted in _deletions(page_word):
+                        self._near.setdefault(deleted, set()).add(page_word)
+        return word in self._near or any(deleted in self._near for deleted in _deletions(word))
+
+    @property
+    def has_text(self) -> bool:
+        return bool(self.exact.words)
+
+
+def tolerant_pages(pages: Mapping[int, str | TolerantPage | None]) -> dict[int, TolerantPage]:
+    """Each page prepared for :func:`ground_tolerant`, once per document: a
+    policy has hundreds of values to look up on the same pages."""
+    return {int(number): text if isinstance(text, TolerantPage) else TolerantPage(text)
+            for number, text in pages.items()}
+
+
+def _tolerantly_on(value: str, raw: Any, page: TolerantPage) -> bool:
+    if on_page(raw, page.exact):
+        return True
+    words = [_fold(word) for word in value.split()]
+    if f" {' '.join(words)} " in page.padded:
+        return True
+    number = _as_number(raw)
+    if number is not None and len(re.sub(r"\D", "", str(raw))) >= MIN_CHECKABLE_CHARS and number in page.amounts:
+        return True
+    if not words or not any(sum(ch.isalpha() for ch in word) >= 3 for word in words) and len(words) > 1:
+        return False
+    for word in words:
+        if word in page.words:
+            continue
+        if len(word) >= FUZZY_MIN_CHARS and not any(ch.isdigit() for ch in word) and page.near(word):
+            continue
+        return False
+    return True
+
+
+def ground_tolerant(raw: Any, cited: Iterable[Any] | None,
+                    pages: Mapping[int, str | TolerantPage | None]) -> Grounding:
+    """:func:`ground`, tolerant of what OCR does to a scan.
+
+    A scan's text misreads, so on its own word a value is never "printed
+    nowhere" (``data_pipeline.ingestion.label_rules``). Where a value must be
+    printed to be served (``serving.printed_values``, decision 2026-10-24) the
+    search forgives the misreads OCR makes, and only them: digit lookalikes in a
+    word holding a digit (:data:`_DIGIT_LOOKALIKES`), one character in a word of
+    :data:`FUZZY_MIN_CHARS` letters or more, a figure's separators, and a "$"
+    read as a "5". Every page is searched; the statuses are :func:`ground`'s.
+    A ``bool`` is a reading, not a printed value: unchecked.
+    """
+    if isinstance(raw, bool):
+        return Grounding(UNCHECKED)
+    value = normalise(raw) if raw is not None else ""
+    if len(value) < MIN_CHECKABLE_CHARS:
+        return Grounding(UNCHECKED)
+    texts = tolerant_pages(pages)
+    if not any(text.has_text for text in texts.values()):
+        return Grounding(UNCHECKED)
+    found = tuple(sorted(number for number, text in texts.items() if _tolerantly_on(value, raw, text)))
+    wanted = {int(page) for page in cited or () if str(page).lstrip("-").isdigit()}
+    if found:
+        return Grounding(ON_CITED_PAGE if not wanted or wanted & set(found) else ON_OTHER_PAGE, found)
+    if any(number in texts and not texts[number].has_text for number in wanted):
+        return Grounding(UNCHECKED)
+    return Grounding(NOT_PRINTED)

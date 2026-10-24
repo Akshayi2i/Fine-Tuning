@@ -71,7 +71,14 @@ class _Replay(ModelBackend):
 
 def _serve_replay(gold, pages, lob="personal_auto", *, strict=False, edit=None):
     """Serve ``gold`` by replaying its training targets; ``edit`` changes the
-    answers first, ``strict`` validates as the endpoint does."""
+    answers first, ``strict`` validates as the endpoint does.
+
+    The page text prints none of the gold's values, and the printed-values
+    check is not what these tests are about (tests/test_printed_values.py): it
+    only flags them here."""
+    from unittest import mock
+
+    import serving.printed_values as printed_values
     from data_pipeline.dataset_builder.build_jsonl import SourceDocument, expand_document
     from tests.test_serving_pipeline import CALIBRATION
 
@@ -91,8 +98,9 @@ def _serve_replay(gold, pages, lob="personal_auto", *, strict=False, edit=None):
         known_doc_type="policy", known_lob=lob, source_file_name="auto_fixture.pdf",
         ocr_meta={"modality": "native_pdf"},
     )
-    result = extract(request, load_model("base", client, backend_impl=backend),
-                     StaticClassifier("policy"), CALIBRATION, strict_schema=strict)
+    with mock.patch.object(printed_values, "configured_mode", return_value=printed_values.FLAG):
+        result = extract(request, load_model("base", client, backend_impl=backend),
+                         StaticClassifier("policy"), CALIBRATION, strict_schema=strict)
     return result, backend, answers
 
 

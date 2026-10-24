@@ -172,6 +172,7 @@ def generate_validation(
     constrain: bool | None = None,
     batch_rows: int | None = None,
     stats: dict[str, Any] | None = None,
+    order: str = "planned",
 ) -> list[ValidationGeneration]:
     """Generate every row once. A row that fails is recorded, never dropped.
 
@@ -182,7 +183,15 @@ def generate_validation(
     ``batch_rows`` defaults to :func:`configured_batch_rows`. ``stats``, when
     given, is filled with what the pass cost: rows, calls, seconds and the
     slowest call - the numbers a stage reports, so a run's time is measured.
+
+    ``order`` is the order the rows go to the engine: ``planned`` (calls of
+    ``batch_rows`` rows in row order, each longest answer first) or
+    ``reversed`` - that order backwards, in calls of the same size, so the
+    engine batches the rows differently (run_to_run_agreement's second pass).
+    The results come back in row order either way.
     """
+    if order not in ("planned", "reversed"):
+        raise ValueError(f"order is {order!r}; expected 'planned' or 'reversed'")
     import time
 
     from common.schemas import resolved_schema, with_page_bounds
@@ -242,13 +251,17 @@ def generate_validation(
         return out
 
     size = max(1, batch_rows if batch_rows is not None else configured_batch_rows())
+    # Longest expected answer first, within the call only: a call ends when its
+    # longest answer does, so started first it runs beside the short ones
+    # instead of after them. The chunks are the same for every checkpoint and
+    # each result goes back to its own row.
+    planned = [item for first in range(0, len(pending), size)
+               for item in sorted(pending[first:first + size], key=lambda item: -item[4])]
+    if order == "reversed":
+        planned.reverse()
     started, calls, slowest = time.monotonic(), 0, 0.0
-    for first in range(0, len(pending), size):
-        # Longest expected answer first, within the call only: a call ends when
-        # its longest answer does, so started first it runs beside the short ones
-        # instead of after them. The chunks are the same for every checkpoint and
-        # each result goes back to its own row.
-        chunk = sorted(pending[first:first + size], key=lambda item: -item[4])
+    for first in range(0, len(planned), size):
+        chunk = planned[first:first + size]
         began = time.monotonic()
         results = generate_batch(model, [(m, s, cap) for _e, m, s, cap, _n in chunk], adapter=adapter)
         if len(chunk) > 1 and all(isinstance(r, Exception) for r in results):
@@ -315,7 +328,8 @@ def _finish(entry: ValidationGeneration, result: Any) -> None:
 
 
 def score_generations(
-    generations: Sequence[ValidationGeneration], *, model_version: str = "validation"
+    generations: Sequence[ValidationGeneration], *, model_version: str = "validation",
+    repeat: Sequence[ValidationGeneration] | None = None,
 ) -> dict[str, Any]:
     """The gate's metrics over these generations — the one definition of correct.
 
@@ -325,19 +339,44 @@ def score_generations(
     A window's score cannot see what only the merge does - a row read twice, a
     value two windows disagree on, a link that survives only when one window
     shows both rows - and the document is what ships.
+
+    ``repeat`` is the same rows generated a second time in another order
+    (``generate_validation(order="reversed")``): each answer is compared with
+    its second reading, as the gate compares them - ``run_to_run_agreement``,
+    and ``document_run_to_run_agreement`` over whole documents.
     """
     from evaluation.run_eval import build_report
 
-    report = build_report(
-        model_version,
-        [(g.golden, g.extraction or {}, g.metadata) for g in generations],
-    )
-    metrics = dict(report.gate_metrics())
+    rows = [(g.golden, g.extraction or {}, g.metadata) for g in generations]
+    if repeat is not None:
+        rows = _with_repeat(rows, [(g.golden, g.extraction or {}, g.metadata) for g in repeat])
+    metrics = dict(build_report(model_version, rows).gate_metrics())
     if any(_is_window(g) for g in generations):
-        whole = build_report(model_version, merged_documents(generations)).gate_metrics()
+        documents = merged_documents(generations)
+        if repeat is not None:
+            documents = _with_repeat(documents, merged_documents(repeat))
+        whole = build_report(model_version, documents).gate_metrics()
         metrics.update({f"document_{name}": value for name, value in whole.items()
                         if isinstance(value, (int, float)) and not isinstance(value, bool)})
     return metrics
+
+
+def _with_repeat(first: list[tuple[Any, Any, dict[str, Any]]],
+                 second: list[tuple[Any, Any, dict[str, Any]]]) -> list[tuple[Any, Any, dict[str, Any]]]:
+    """``first``'s triples, each carrying ``second``'s answer to the same
+    reading (``run_eval.REPEAT_ANSWER``). Both passes generate the same rows and
+    return them in row order, so they pair by position - checked, never assumed."""
+    from evaluation.run_eval import REPEAT_ANSWER
+
+    if len(first) != len(second):
+        raise ValueError(f"the repeat pass read {len(second)} reading(s), the first {len(first)}")
+    out = []
+    for (gold, answer, metadata), (_gold, again, other) in zip(first, second, strict=True):
+        reading = (metadata.get("source_id"), metadata.get("modality_mode"), metadata.get("sections"))
+        if reading != (other.get("source_id"), other.get("modality_mode"), other.get("sections")):
+            raise ValueError(f"the repeat pass is out of step with the first at {reading}")
+        out.append((gold, answer, {**metadata, REPEAT_ANSWER: again}))
+    return out
 
 
 def _is_window(generation: ValidationGeneration) -> bool:

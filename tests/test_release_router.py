@@ -460,12 +460,16 @@ def test_no_adapter_means_none_even_when_the_model_has_a_default():
     assert [call["adapter"] for call in backend.calls] == ["/adapters/policy", None]
 
 
-def test_the_fallback_never_fails_on_calibration_the_endpoint_does_not_hold(client):
+def test_the_fallback_never_fails_on_calibration_the_endpoint_does_not_hold(client, monkeypatch):
+    import serving.printed_values as printed_values
     from inference_core.model_runner import EchoBackend, load_model
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import extract
     from tests.test_policy_windows import _decl_response
 
+    # Its page text prints none of the answer's values; the printed-values
+    # check is not what this tests (tests/test_printed_values.py).
+    monkeypatch.setattr(printed_values, "configured_mode", lambda: printed_values.FLAG)
     _personal(client)
     model = load_model("base", client, backend_impl=EchoBackend(json.dumps(_decl_response())))
     result = extract(_policy_request("agriculture_farm"), model, StaticClassifier("policy"), {},

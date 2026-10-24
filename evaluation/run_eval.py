@@ -48,6 +48,22 @@ log = logging.getLogger(__name__)
 #: Eval subsets scored separately from the full set (IMPL-08 §3).
 EVAL_SUBSETS: tuple[str, ...] = ("image_only", "scanned", "noisy_ocr", "long_policy")
 
+#: Where a reading's metadata carries serving's printed-values record
+#: (``ExtractionResult.printed_check``, golden_eval): what hallucination_rate
+#: reads for a document served through serving.
+PRINTED_CHECK = "printed_check"
+
+#: Where a reading's metadata carries a second answer to the same document, read
+#: in another order (golden_eval's repeat pass, validation_generation's): what
+#: run_to_run_agreement compares the answer with.
+REPEAT_ANSWER = "repeat_extraction"
+
+#: Gate metrics pooled over the whole set by their per-document weights - the
+#: values checked, the fields compared - rather than each doc type's rate
+#: weighted by its readings: hallucination_rate is every value no page prints
+#: over every value checked, wherever they are.
+POOLED_METRICS: tuple[str, ...] = ("hallucination_rate", "run_to_run_agreement")
+
 
 class EvalError(RuntimeError):
     """Raised when an evaluation cannot be trusted or cannot be run."""
@@ -374,6 +390,15 @@ class SubsetReport:
     #: are left out: they count toward no minimum (decision 2026-10-22). Kept
     #: out of :meth:`as_dict`, like the scores.
     per_document_line: dict[str, str] = field(default_factory=dict)
+    #: ``{metric: (sum of score x weight, sum of weight)}`` for
+    #: :data:`POOLED_METRICS`, which :meth:`EvalReport.gate_metrics` pools
+    #: across doc types. Kept out of :meth:`as_dict`.
+    pooled: dict[str, tuple[float, float]] = field(default_factory=dict)
+    #: What hallucination_rate is over: the values checked, those no page
+    #: prints, and the first of them; None when nothing was checked.
+    printed_values: dict[str, Any] | None = None
+    #: What run_to_run_agreement is over: the documents and fields compared.
+    run_to_run: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -381,6 +406,8 @@ class SubsetReport:
             "subset": self.subset,
             "documents": self.documents,
             **{k: (round(v, 4) if isinstance(v, float) else v) for k, v in self.metrics.items()},
+            **({"printed_values": self.printed_values} if self.printed_values else {}),
+            **({"run_to_run": self.run_to_run} if self.run_to_run else {}),
             "error_summary": self.error_summary,
             "error_records": self.error_records,
         }
@@ -444,6 +471,16 @@ class EvalReport:
             if total_docs:
                 metrics[gate_name] = sum(v * n for v, n in scores) / total_docs
 
+        # Pooled over every doc type's documents (POOLED_METRICS), so the rate
+        # is every value no page prints over every value checked.
+        for name in POOLED_METRICS:
+            parts = [report.pooled[name] for report in self.full_set() if name in report.pooled]
+            weight = sum(w for _s, w in parts)
+            if weight:
+                metrics[name] = sum(s for s, _w in parts) / weight
+            else:
+                metrics.pop(name, None)
+
         if not self.classifier_scored:
             # Deliberately absent rather than zero: the gate treats a missing
             # metric as "not passed", which is the right answer for one nobody
@@ -479,14 +516,16 @@ class EvalReport:
         A document's weight is its items (list fields, readings) times its doc
         type's readings over that type's items: each type's metric is a mean
         over its items, and ``gate_metrics`` weights each type's metric by its
-        readings (``SubsetReport.documents``).
+        readings (``SubsetReport.documents``). A pooled metric
+        (:data:`POOLED_METRICS`) is pooled over the items themselves - the
+        values checked, the fields compared - so its weight is its items.
         """
         weights: dict[str, dict[str, float]] = {}
         for report, name, source_metric in self._per_document_sources():
             items = report.per_document_items.get(source_metric, {})
             total = sum(items.values())
             if total and report.documents:
-                scale = report.documents / total
+                scale = 1.0 if name in POOLED_METRICS else report.documents / total
                 weights.setdefault(name, {}).update(
                     {source: n * scale for source, n in items.items()})
         return {name: by_source for name, by_source in weights.items() if by_source}
@@ -836,6 +875,24 @@ def score_subset(
         "schema_validity_rate": {
             source: n for source, n in validity_readings.items() if source and n},
     }
+    # Pooled over values and fields, not averaged over readings: a document
+    # counts by the values its text could settle, and by the fields its two
+    # readings compared (POOLED_METRICS).
+    printed = _printed_values(scored, common_model, score_hallucinations)
+    agreement = _run_to_run(scored, common_model, lines)
+    for name, tally in (("hallucination_rate", printed), ("run_to_run_agreement", agreement)):
+        report.per_document[name] = tally.per_document()
+        report.per_document_items[name] = tally.weights()
+        if tally.weight:
+            report.pooled[name] = (tally.score, tally.weight)
+    if printed.weight:
+        report.printed_values = {
+            "documents": len(printed.by_document), "checked": int(printed.weight),
+            "not_printed": int(printed.score), "instances": printed.instances[:25],
+        }
+    if agreement.weight:
+        report.run_to_run = {"documents": len(agreement.by_document),
+                             "fields_compared": round(agreement.weight, 1)}
     if unselectable:
         log.warning(
             "%d ACORD eval document(s) record no acord_form, so no schema could be selected and "
@@ -911,18 +968,23 @@ def score_subset(
             [_read_values(expected, got, cm) for (expected, got, _), cm in zip(scored, common_model, strict=True)],
             source_ids=[m.get("source_id", "") for _, _, m in scored],
         ).rate,
-        # Scored against the TEXT OF THE PAGES THAT WERE SENT, not against the
+        # Scored against the TEXT OF THE DOCUMENT'S PAGES, not against the
         # golden label: checking against the label alone would call every wrong
         # value a hallucination, including an honest misread of something
-        # actually printed — and those have different remedies.
+        # actually printed — and those have different remedies. Through
+        # serving, serving's own printed-values check (_printed_values).
         #
-        # Only rows that were SENT text: against an image-only row's empty text
+        # Only readings that had text: against an image-only row's empty text
         # every value the model read off the image would count as invented.
-        # The extra fields apart: free text by design, they hid the rate of the
-        # schema's own fields.
-        "hallucination_rate": _hallucination_rate(scored, common_model, score_hallucinations),
+        # Every value the model wrote counts, as serving counts it; the extra
+        # fields are also reported alone where scored here: free text by
+        # design, inside the one rate they can hide the schema's own fields.
+        "hallucination_rate": printed.rate,
         "additional_fields_hallucination_rate": _hallucination_rate(
             scored, common_model, score_hallucinations, overflow=True),
+        # Two readings of one document in the main mode, the second sent in
+        # another order: the share of fields they agree on (run_to_run_agreement).
+        "run_to_run_agreement": agreement.rate,
         # Emitted only where reconciliation ran — Loss Runs. gate_metrics()
         # weights by the documents that produced each metric, so a metric that
         # only one doc type can produce still reaches the gate, weighted by that
@@ -986,17 +1048,154 @@ def _error_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _hallucination_rate(scored: list[tuple[Any, Any, dict[str, Any]]], common_model: list[bool],
                         score: Any, *, overflow: bool = False) -> float | None:
-    """``score_hallucinations`` over the rows that were sent OCR text, each
-    page's own text where the row kept it (``ocr_pages``) so a value is looked
-    for on the pages it cites; ``None`` when nothing checkable was emitted on a
+    """``score_hallucinations`` over the rows that were sent OCR text
+    (:func:`_reading_text`); ``None`` when nothing checkable was emitted on a
     row that was sent text - not measured, rather than a perfect 0."""
     sent = [
-        (*_read_values(expected, got, cm), metadata.get("ocr_pages") or str(metadata["ocr_text"]))
+        (*_read_values(expected, got, cm), text)
         for (expected, got, metadata), cm in zip(scored, common_model, strict=True)
-        if metadata.get("ocr_text")
+        if (text := _reading_text(metadata)) is not None
     ]
     report = score(sent, overflow=overflow) if sent else None
     return report.rate if report is not None and report.opportunities else None
+
+
+#: Where :func:`build_report` keeps, on a reading's own copy of its metadata,
+#: every page of its document the eval holds, prepared once
+#: (``common.grounding.tolerant_pages``): a policy's windows each carry their
+#: own pages, and a value is looked for on all of the document's.
+_DOCUMENT_PAGES = "_document_pages"
+
+#: Where :func:`build_report` keeps the second answer (:data:`REPEAT_ANSWER`)
+#: as the first is scored: narrowed to the schema, ids made comparable.
+_REPEAT_SCORED = "_repeat_scored"
+
+
+def _reading_text(metadata: dict[str, Any]) -> Any:
+    """The text a reading's values are looked for in: every page of its
+    document (:data:`_DOCUMENT_PAGES`), else the reading's own pages
+    (``ocr_pages``), else its text whole; ``None`` for a reading sent no text."""
+    if not metadata.get("ocr_text"):
+        return None
+    return metadata.get(_DOCUMENT_PAGES) or metadata.get("ocr_pages") or str(metadata["ocr_text"])
+
+
+@dataclass
+class _Pooled:
+    """A metric pooled over readings, per document: ``[sum of score x weight,
+    sum of weight]``, keyed by source id (``#n`` for a reading without one)."""
+
+    by_document: dict[str, list[float]] = field(default_factory=dict)
+    instances: list[dict[str, Any]] = field(default_factory=list)
+
+    def add(self, key: str, weighted_score: float, weight: float) -> None:
+        tally = self.by_document.setdefault(key, [0.0, 0.0])
+        tally[0] += weighted_score
+        tally[1] += weight
+
+    @property
+    def score(self) -> float:
+        return sum(s for s, _w in self.by_document.values())
+
+    @property
+    def weight(self) -> float:
+        return sum(w for _s, w in self.by_document.values())
+
+    @property
+    def rate(self) -> float | None:
+        return self.score / self.weight if self.weight else None
+
+    def per_document(self) -> dict[str, float]:
+        return {k: s / w for k, (s, w) in self.by_document.items() if w and not k.startswith("#")}
+
+    def weights(self) -> dict[str, float]:
+        return {k: w for k, (_s, w) in self.by_document.items() if w and not k.startswith("#")}
+
+
+def _printed_values(scored: Sequence[tuple[Any, Any, dict[str, Any]]], common_model: list[bool],
+                    score: Any) -> _Pooled:
+    """hallucination_rate's counts, per document: of the values its readings
+    wrote that the text could settle (the weight), those no page of the
+    document prints (decision 2026-10-24).
+
+    A reading served through serving (golden_eval) carries serving's own
+    record (:data:`PRINTED_CHECK`): ``len(not_printed)`` of ``checked``,
+    recorded before strict mode removed any, so it measures the model. A record
+    of None - no page text, as image only reads - leaves the reading out. Any
+    other reading that had text (a validation row) is scored here by the same
+    matcher (``score_hallucinations``, OCR-tolerant over every page). A reading
+    with nothing checked counts nowhere.
+    """
+    tally = _Pooled()
+    for index, ((expected, got, metadata), cm) in enumerate(zip(scored, common_model, strict=True)):
+        if PRINTED_CHECK in metadata:
+            record = metadata[PRINTED_CHECK]
+            if not isinstance(record, dict):
+                continue
+            entries = [e for e in record.get("not_printed") or [] if isinstance(e, dict)]
+            invented, checked = len(entries), int(record.get("checked") or 0)
+            found = [{"field": e.get("path"), "emitted": str(e.get("raw"))[:80],
+                      "pages": list(e.get("pages") or [])} for e in entries]
+        else:
+            text = _reading_text(metadata)
+            if text is None:
+                continue
+            fault = score([(*_read_values(expected, got, cm), text)])
+            invented, checked, found = fault.hits, fault.opportunities, fault.instances
+        if not checked:
+            continue
+        tally.add(str(metadata.get("source_id") or f"#{index}"), invented, checked)
+        tally.instances.extend({"source_id": metadata.get("source_id", ""), **entry} for entry in found)
+    return tally
+
+
+def _run_to_run(scored: Sequence[tuple[Any, Any, dict[str, Any]]], common_model: list[bool],
+                lines: Sequence[Any]) -> _Pooled:
+    """run_to_run_agreement's counts, per document: each reading that carries a
+    second answer (:data:`REPEAT_ANSWER`) against it, weighted by the fields
+    compared (:func:`run_to_run_agreement`)."""
+    tally = _Pooled()
+    for index, ((_expected, got, metadata), cm, line) in enumerate(
+            zip(scored, common_model, lines, strict=True)):
+        if _REPEAT_SCORED not in metadata:
+            continue
+        agreed = run_to_run_agreement(got, metadata[_REPEAT_SCORED], common_model=cm, line=line)
+        if agreed is None:
+            continue
+        share, compared = agreed
+        tally.add(str(metadata.get("source_id") or f"#{index}"), share * compared, compared)
+    return tally
+
+
+def run_to_run_agreement(first: Any, second: Any, *, common_model: bool = False,
+                         line: Any = None) -> tuple[float, float] | None:
+    """How alike two answers to one document are: ``(share of fields equal,
+    fields compared)``, or ``None`` when neither wrote a field.
+
+    Field match's own scorer (``score_fields``, as :func:`score_subset` calls
+    it), each answer held as the reference in turn - the second against the
+    first, then the first against the second - and the two shares averaged:
+    name and table matching are not symmetric. A field null in both is not
+    compared: a served answer holds every key of its schema, most of them null,
+    and two readings agreeing a field is absent would bury the fields that were
+    read. Fields compared is the mean of the two counts.
+    """
+    from evaluation.metrics.common_model import core_for_scoring
+    from evaluation.metrics.extraction_faults import _is_empty
+    from evaluation.metrics.field_accuracy import score_fields
+
+    shares: list[float] = []
+    counts: list[int] = []
+    for reference, other in ((first or {}, second or {}), (second or {}, first or {})):
+        accuracy = (score_fields(*core_for_scoring(reference, other, line), skip_lists=False)
+                    if common_model else score_fields(reference, other))
+        compared = [r for r in accuracy.results if not (_is_empty(r.expected) and _is_empty(r.got))]
+        if compared:
+            shares.append(sum(r.correct for r in compared) / len(compared))
+            counts.append(len(compared))
+    if not counts:
+        return None
+    return sum(shares) / len(shares), sum(counts) / len(counts)
 
 
 def _read_values(expected: Any, got: Any, common_model: bool) -> tuple[Any, Any]:
@@ -1083,7 +1282,9 @@ def build_report(
     Args:
         documents: ``(expected, got, metadata)`` triples. ``metadata`` carries
             ``doc_type``, ``modality_mode``, ``is_scanned``, ``page_count`` and
-            ``source_id`` — the fields :func:`subset_of` reads.
+            ``source_id`` — the fields :func:`subset_of` reads — and, where
+            there is one, serving's printed-values record (:data:`PRINTED_CHECK`)
+            and a second answer to compare with (:data:`REPEAT_ANSWER`).
     """
     report = EvalReport(
         model_version=model_version,
@@ -1091,8 +1292,9 @@ def build_report(
         classifier_scored=classifier_scored,
     )
 
-    from common.canonical import without_system_fields
+    from common.lob import merge_line
 
+    pages = _document_pages(documents)
     buckets: dict[tuple[str, str], list[Any]] = {}
     for expected, got, metadata in documents:
         doc_type = metadata.get("doc_type", "unknown")
@@ -1103,30 +1305,18 @@ def build_report(
             # against the client's schema even a perfect answer was invalid.
             # Kept on a copy: the caller's metadata is not ours to change.
             metadata = {**metadata, _PRODUCED: got}
-        # Not scored: the system supplies them, the model is never asked
-        # (common.canonical.SYSTEM_SUPPLIED_FIELDS). Stripped from both sides, so a
-        # gold label or frozen eval set that still carries them counts nothing.
-        expected, got = without_system_fields(expected), without_system_fields(got)
-        # A gold label written for another line's schema is scored in this
-        # line's (configs/label_mappings.yaml), and only on what that schema can
-        # hold - as its training target was built (common.canonical.schema_label).
-        from common.canonical import schema_label
-
-        # Both sides: a key outside the schema is not a field this report
-        # measures. The constrained model cannot write one; an unconstrained
-        # output that does fails schema_validity_rate, which is where it counts.
         selectors = (doc_type, metadata.get("acord_form"), metadata.get("lob"))
-        expected = schema_label(expected, *selectors)
-        got = schema_label(got, *selectors)
-        if common_model:
-            # Ids are the writer's numbering, never right or wrong: links are
-            # compared by what they name (common.structural_ids).
-            from common.lob import merge_line
-            from common.structural_ids import comparable_view
-
-            line = merge_line(metadata.get("lob"))
-            expected = comparable_view(expected, line)
-            got = comparable_view(got, line)
+        line = merge_line(metadata.get("lob")) if common_model else None
+        expected = _scored_view(expected, selectors, line, common_model)
+        got = _scored_view(got, selectors, line, common_model)
+        if REPEAT_ANSWER in metadata:
+            # The second answer is compared with the first as the first is
+            # scored: the same fields, the same comparable ids.
+            metadata = {**metadata, _REPEAT_SCORED: _scored_view(
+                metadata[REPEAT_ANSWER] or {}, selectors, line, common_model)}
+        document = (metadata.get("source_id"), metadata.get("modality_mode"))
+        if document in pages:
+            metadata = {**metadata, _DOCUMENT_PAGES: pages[document]}
         for subset in subset_of(metadata):
             buckets.setdefault((doc_type, subset), []).append((expected, got, metadata))
 
@@ -1146,6 +1336,45 @@ def build_report(
             sorted(missing),
         )
     return report
+
+
+def _scored_view(doc: Any, selectors: tuple[Any, Any, Any], line: Any, common_model: bool) -> Any:
+    """An answer or a label as :func:`build_report` scores it."""
+    from common.canonical import schema_label, without_system_fields
+
+    # Not scored: the system supplies them, the model is never asked
+    # (common.canonical.SYSTEM_SUPPLIED_FIELDS). Stripped from both sides, so a
+    # gold label or frozen eval set that still carries them counts nothing.
+    doc = without_system_fields(doc)
+    # A gold label written for another line's schema is scored in this line's
+    # (configs/label_mappings.yaml), and only on what that schema can hold - as
+    # its training target was built (common.canonical.schema_label). Both
+    # sides: a key outside the schema is not a field this report measures. The
+    # constrained model cannot write one; an unconstrained output that does
+    # fails schema_validity_rate, which is where it counts.
+    doc = schema_label(doc, *selectors)
+    if common_model:
+        # Ids are the writer's numbering, never right or wrong: links are
+        # compared by what they name (common.structural_ids).
+        from common.structural_ids import comparable_view
+
+        doc = comparable_view(doc, line)
+    return doc
+
+
+def _document_pages(documents: Sequence[tuple[Any, Any, dict[str, Any]]]) -> dict[tuple[Any, Any], Any]:
+    """Every page's text the readings of each document carry, by ``(source id,
+    mode)``, prepared once for the OCR-tolerant search: a policy's windows each
+    carry their own pages, and serving looks for a value on all of them. Only
+    readings with a source id: two without one are not one document."""
+    from common.grounding import tolerant_pages
+
+    texts: dict[tuple[Any, Any], dict[int, str]] = {}
+    for _expected, _got, metadata in documents:
+        if metadata.get("source_id") and metadata.get("ocr_text") and metadata.get("ocr_pages"):
+            texts.setdefault((metadata["source_id"], metadata.get("modality_mode")), {}).update(
+                {int(number): text for number, text in metadata["ocr_pages"].items()})
+    return {document: tolerant_pages(pages) for document, pages in texts.items()}
 
 
 def write_report(report: EvalReport, client: BlobClient) -> list[str]:

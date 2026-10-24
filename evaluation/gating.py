@@ -80,6 +80,16 @@ GATING_METRICS: dict[str, Direction] = {
     # The weakest common-model line's field match (evaluation.run_eval): one
     # line cannot hide behind the others' volume.
     "worst_line_field_match": "higher_is_better",
+    # The model must invent nothing (decision 2026-10-24): of the values it
+    # wrote that the page text could settle, the share no page of the document
+    # prints. On the golden set through serving, read from serving's own
+    # printed-values check (ExtractionResult.printed_check), recorded before
+    # strict mode removes them, so it measures the model (evaluation.run_eval).
+    "hallucination_rate": "lower_is_better",
+    # Its output must be consistent (decision 2026-10-24): the share of fields
+    # equal between two readings of the same document in the main mode, the
+    # second with its windows sent in reverse order (evaluation.golden_eval).
+    "run_to_run_agreement": "higher_is_better",
 }
 
 #: Gating under arch v2.1 §15.2, but **not enforced yet** — nothing produces
@@ -94,8 +104,6 @@ GATING_METRICS: dict[str, Direction] = {
 #: the gate demands is what the scorer emits.
 PENDING_GATING_METRICS: dict[str, str] = {
     "list_field_precision": "row alignment (§15.1 Hungarian matching) — not written",
-    "hallucination_rate": "metric written; needs the OCR text of the pages that were sent "
-                          "carried through eval metadata (§15.2)",
 }
 
 #: Metrics that only exist when the eval set contains the relevant documents.
@@ -121,6 +129,20 @@ CONDITIONAL_METRICS: frozenset[str] = frozenset({
     # documents all arrive digital (the CGL originals) has none to hold, and a
     # set that holds scans still holds it to non-inferiority with the baseline.
     "scanned_accuracy",
+    # Only page text can settle whether a value is printed: a frozen set whose
+    # pages carry no text (page_N.md is optional), or read only from images,
+    # has no value to check, and blocking on that would make the gate a
+    # statement about how the set was frozen - a frozen set cannot be given
+    # text afterwards. Not a way to stop looking: once a promoted release has
+    # measured it, the frozen set has the text, and a candidate that does not
+    # measure it is blocked as unmeasured (a printed-values check that stopped
+    # recording, say).
+    "hallucination_rate",
+    # Only measured when the golden eval repeats the main mode
+    # (``run_to_run_check`` in the adapter's training config, on by default). A
+    # switch that blocked every release when used would not be a switch; once a
+    # promoted release has measured it, every later candidate must too.
+    "run_to_run_agreement",
 })
 
 
@@ -171,6 +193,10 @@ PILOT_FLOORS: dict[str, float] = {
     # thresholds hold on unseen documents passes with room.
     "auto_accept_error_rate": 0.02,
     "worst_line_field_match": 0.85,
+    # No ceiling on hallucination_rate and no floor on run_to_run_agreement yet:
+    # the user sets them after the first measured run (decision 2026-10-24).
+    # Until then each is held to non-inferiority with the promoted release
+    # alone, and a first measurement passes on it.
 }
 
 #: Non-inferiority margins in absolute units (arch v2.1 §15.5). Per metric,
@@ -197,6 +223,10 @@ NON_INFERIORITY_DELTA: dict[str, float] = {
     # values users receive unreviewed and still count as no worse.
     "auto_accept_error_rate": 0.005,
     "worst_line_field_match": 0.015,
+    # The same margin as a printed value left empty: a value invented and one
+    # left out are the two ways a release stops reading what the page prints.
+    "hallucination_rate": 0.010,
+    # run_to_run_agreement takes DEFAULT_DELTA.
 }
 DEFAULT_DELTA = 0.015
 
@@ -556,6 +586,18 @@ def promotion_gate(
             applicable=name not in not_applicable
             or (name in CONDITIONAL_METRICS and baseline.get(name) is not None),
         )
+        if current_metrics is not None and verdict.current is None and verdict.candidate is not None:
+            # A promoted report scored before the metric was measured: nothing
+            # to compare with, so the candidate's first measurement is judged on
+            # the floor alone - never blocked for a comparison that cannot be
+            # made - and the decision says so rather than reading as compared.
+            result.warnings.append(
+                f"{name}: the promoted release's eval report does not measure it, so it was judged "
+                + (f"on its floor ({verdict.floor:.4f}) alone" if verdict.floor is not None
+                   else "on no floor (none is set yet) and no comparison")
+                + ": no non-inferiority test. Once a release that measures it is promoted, later "
+                "candidates are compared with it."
+            )
         if name in samples and verdict.current is not None:
             current_scores, candidate_scores, *weights = samples[name]
             current_weights, candidate_weights = (list(weights) + [None, None])[:2]
