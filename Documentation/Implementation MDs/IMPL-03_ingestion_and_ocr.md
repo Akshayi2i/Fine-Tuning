@@ -405,3 +405,7 @@ corrected at bundling instead.
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (one served MinerU)
+
+- The OCR of record is the MinerU 4 API served on the pod, for the training corpus and for serving alike (decision 2026-10-23): `configs/shared/ocr.yaml` pins its version (4.0.12) and tier (`basic`), read by `common.config.served_mineru`. `data_pipeline.ocr.served_ocr.ServedMinerUEngine` is the OCR stage's engine for it (the `OcrEngine` protocol): pages rendered by the shared renderer while the server reads the PDF, OCR or text mode decided by the stage's rule (`reads_by_ocr`, now `ocr_mode_for`), each task's reported version and tier checked against the pin. It runs wherever the server is reachable - no MinerU and no GPU there - and records `mineru_version` (the pin), `ocr_device: cuda` (the server's), `mineru_backend: api` and `mineru_tier` in `ocr_meta.json` (`process_document` takes the environment from an engine that has one). `run_mineru --mineru-url` (default `$MINERU_URL`, token `$MINERU_TOKEN`) uses it, and `--all-unprocessed` then also lists documents another MinerU read. The in-process MinerU 3.4.5 engine stays for a corpus already read by it; a corpus is still read by one MinerU (`assert_one_mineru_version`).

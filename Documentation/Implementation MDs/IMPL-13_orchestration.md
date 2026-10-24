@@ -535,3 +535,7 @@ resumes from the failed step. It never freezes an eval set or packages a release
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (one served MinerU)
+
+- Preprocessing reads with the served MinerU when `$MINERU_URL` is set (`ServedMinerUEngine.from_environment`, IMPL-03): it then runs in any environment, and both the stage and its done-check count a document another MinerU read as still to read. Without it, the in-process MinerU of the OCR environment, as before.

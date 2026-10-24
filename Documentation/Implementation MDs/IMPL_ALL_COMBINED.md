@@ -1989,6 +1989,10 @@ corrected at bundling instead.
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
 
+## Changes of 2026-10-24 (one served MinerU)
+
+- The OCR of record is the MinerU 4 API served on the pod, for the training corpus and for serving alike (decision 2026-10-23): `configs/shared/ocr.yaml` pins its version (4.0.12) and tier (`basic`), read by `common.config.served_mineru`. `data_pipeline.ocr.served_ocr.ServedMinerUEngine` is the OCR stage's engine for it (the `OcrEngine` protocol): pages rendered by the shared renderer while the server reads the PDF, OCR or text mode decided by the stage's rule (`reads_by_ocr`, now `ocr_mode_for`), each task's reported version and tier checked against the pin. It runs wherever the server is reachable - no MinerU and no GPU there - and records `mineru_version` (the pin), `ocr_device: cuda` (the server's), `mineru_backend: api` and `mineru_tier` in `ocr_meta.json` (`process_document` takes the environment from an engine that has one). `run_mineru --mineru-url` (default `$MINERU_URL`, token `$MINERU_TOKEN`) uses it, and `--all-unprocessed` then also lists documents another MinerU read. The in-process MinerU 3.4.5 engine stays for a corpus already read by it; a corpus is still read by one MinerU (`assert_one_mineru_version`).
+
 ---
 
 # IMPL-04_labeling_golden_json
@@ -4506,7 +4510,7 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 ## Changes of 2026-10-23 (page bytes)
 
 - A served model is sent a gray page (an RGB render whose channels are equal everywhere) as an 8-bit grayscale PNG (`inference_core.page_links.sent_png`, `OpenAIChatBackend(gray_pages=True)`, the default): vLLM converts every image to RGB, so the model reads the same pixels, at 66% of the bytes (all 114 pages of a scan checked); a page with any colour, or one PIL cannot read, goes as it is on disk. Each page is encoded once however many windows send it.
-- `images="link"` (`inference_core.page_links.PageLinks`): each page is uploaded once to Blob (`transient/page-links/<run>/<document>/`) and every window's request carries a read-only link the server fetches itself, instead of the image about four times a page; a page with no link goes inline. The link's token is a read-only SAS given (`PAGE_LINK_SAS_TOKEN`, refused unless `sp=r`) or one signed for the blob alone from the account key (`BlobClient.read_link`, IMPL-02). The pages are deleted after the document; the links expire (2 hours when signed here).
+- `images="link"` (`inference_core.page_links.PageLinks`): each page is uploaded once to Blob (`transient/page-links/<run>/<document>/`) and every window's request carries a read-only link the server fetches itself, instead of the image about four times a page; a page with no link goes inline. The link's token is a read-only SAS given (`PAGE_LINK_SAS_TOKEN`, refused unless `sp=r`) or one signed for the blob alone from the account key (`BlobClient.read_link`, IMPL-02). The pages are deleted after the document; the links expire (1 hour when signed here).
 
 ## Changes of 2026-10-23 (incremental training)
 
@@ -4516,6 +4520,12 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (production on Azure)
+
+- The routine runs on Azure and RunPod serves only a stock vLLM and the MinerU 4 API (no code of ours there). Every served document's text comes from the pinned MinerU (`configs/shared/ocr.yaml`, IMPL-03): `ServedOcr(expected_version=)` refuses a task another version or tier read.
+- `OpenAIChatBackend(model=name)` checks at start that the server lists `name` and, for a LoRA, that its `parent` is our base model (`configs/base_model.yaml`); a server that cannot list its models is not checked. `scripts/served_adapter.py` makes the promoted release's adapter ready for the pod's network volume: it refuses a release not served as `lora_on_base`, one whose OCR pin is not the served MinerU's, and an adapter vLLM cannot serve (LoRA on the vision side, `modules_to_save`, a rank above 512), downloads it as `policy-<version>`, and prints the copy command and the vLLM flags (`--enable-lora --max-lora-rank --max-loras 1 --lora-modules`).
+- Model and MinerU URLs must be HTTPS, or HTTP to this machine only (`common.transport.assert_encrypted`); page links expire after an hour. Outside the code: the Azure region near the RunPod data centre, RunPod Secure Cloud under a data processing agreement, vLLM's request logging off.
 
 ---
 
@@ -4815,6 +4825,10 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (one served MinerU)
+
+- `testing/latency_check.py` and `testing/extract_server.py` read with the pinned MinerU (`configs/shared/ocr.yaml`): `--tier` defaults to the pinned tier, every task's version and tier are checked, and `--any-mineru` accepts another (timing only); `latency_check` refuses a `--tier` other than the pinned one without it. `--ocr-mode` defaults to the OCR stage's rule, per document, rather than MinerU's `auto`.
 
 ---
 
@@ -5357,6 +5371,10 @@ resumes from the failed step. It never freezes an eval set or packages a release
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (one served MinerU)
+
+- Preprocessing reads with the served MinerU when `$MINERU_URL` is set (`ServedMinerUEngine.from_environment`, IMPL-03): it then runs in any environment, and both the stage and its done-check count a document another MinerU read as still to read. Without it, the in-process MinerU of the OCR environment, as before.
 
 ---
 

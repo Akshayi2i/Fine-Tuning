@@ -27,8 +27,13 @@ def _serve(handler):
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
 
 
+BASE_ONLY = [{"id": "Qwen3-VL-8B-Instruct", "root": "/workspace/models/Qwen3-VL-8B-Instruct", "parent": None}]
+
+
 class _Vllm(BaseHTTPRequestHandler):
     seen: list = []
+    #: What GET /v1/models lists: the base, and a LoRA with its base as parent.
+    models: list = BASE_ONLY
 
     def log_message(self, *args):
         pass
@@ -42,7 +47,7 @@ class _Vllm(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):  # noqa: N802
-        self._json({"data": [{"id": "Qwen3-VL-8B-Instruct"}]})
+        self._json({"data": _Vllm.models})
 
     def do_POST(self):  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -90,7 +95,7 @@ class _Vllm(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def vllm():
-    _Vllm.seen = []
+    _Vllm.seen, _Vllm.models = [], BASE_ONLY
     httpd, url = _serve(_Vllm)
     yield url
     httpd.shutdown()
@@ -302,6 +307,7 @@ def test_structured_content_reads_as_the_ocr_stage_writes_a_page():
 
 class _MinerU(BaseHTTPRequestHandler):
     polls = 0
+    posted: list = []
 
     def log_message(self, *args):
         pass
@@ -316,6 +322,7 @@ class _MinerU(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         self.rfile.read(int(self.headers["Content-Length"]))
+        _MinerU.posted.append(self.path)
         failed = "broken" in self.path
         self._json({"task_id": "job_failed" if failed else "job_1", "status": "queued"}, status=202)
 
@@ -416,3 +423,88 @@ def test_pages_are_rendered_while_minerU_reads_them_and_land_where_the_pipeline_
         assert refused["ok"] is False and "MinerU read 2 pages, the renderer 3" in refused["error"]
     finally:
         httpd.shutdown()
+
+
+# --------------------------------------------------------------------------
+# One MinerU for training and serving; HTTPS; the served adapter
+# --------------------------------------------------------------------------
+
+
+def test_the_corpus_is_read_by_the_served_minerU_and_records_its_pin(tmp_path):
+    from artifact_registry import paths
+    from artifact_registry.blob_client import BlobClient, InMemoryBackend
+    from data_pipeline.ocr.run_mineru import process_document
+    from data_pipeline.ocr.served_ocr import ServedMinerUEngine
+
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw", context="ocr")
+    client.write_bytes(paths.raw_pdf("policy", "policy_0001"), _pdf(2))
+    client.write_json(paths.raw_metadata("policy", "policy_0001"),
+                      {"source_id": "policy_0001", "doc_type": "policy", "checksum_sha256": "abc"})
+    _MinerU.posted, _MinerU.polls = [], 0
+    httpd, url = _serve(_MinerU)
+    try:
+        engine = ServedMinerUEngine(url, "tok", render_workers=1)     # no MinerU and no GPU here
+        meta = process_document("policy", "policy_0001", client, engine)
+        again = process_document("policy", "policy_0001", client, engine)
+    finally:
+        httpd.shutdown()
+    assert meta["mineru_version"] == "4.0.12" and meta["mineru_backend"] == "api" and meta["mineru_tier"] == "basic"
+    assert meta["ocr_device"] == "cuda" and meta["page_count"] == 2 and not meta["read_by_ocr"]
+    assert "ocr_mode=txt" in _MinerU.posted[0]                         # a digital PDF: the OCR stage's rule
+    assert client.read_text(paths.processed_page("policy", "policy_0001", 2, "md")).startswith("## Conditions")
+    assert "_reprocessed" not in again and len(_MinerU.posted) == 1     # the same MinerU: not read again
+
+
+def test_text_from_another_minerU_than_the_pinned_one_is_refused(tmp_path):
+    from data_pipeline.ocr.served_ocr import ServedOcr, ServedOcrError
+
+    httpd, url = _serve(_MinerU)
+    try:
+        with pytest.raises(ServedOcrError, match="read by MinerU 4.0.12 .* trained on text from MinerU 3.4.5"):
+            ServedOcr(url, render_workers=1, expected_version="3.4.5").read(_pdf(2), tmp_path / "a")
+        with pytest.raises(ServedOcrError, match="tier basic"):
+            ServedOcr(url, tier="flash", render_workers=1, expected_version="4.0.12").read(_pdf(2), tmp_path / "b")
+        read = ServedOcr(url, render_workers=1).read(_pdf(2), tmp_path / "c")    # a timing test: anything goes
+        assert read["ocr"]["version"] == "4.0.12" and read["ocr"]["ocr_mode"] == "txt"
+    finally:
+        httpd.shutdown()
+
+
+def test_the_ocr_stage_finds_the_served_minerU_in_the_environment(monkeypatch):
+    from common.config import served_mineru
+    from data_pipeline.ocr.served_ocr import ServedMinerUEngine
+
+    monkeypatch.delenv("MINERU_URL", raising=False)
+    assert ServedMinerUEngine.from_environment() is None
+    monkeypatch.setenv("MINERU_URL", "https://pod-8001.proxy.runpod.net")
+    monkeypatch.setenv("MINERU_TOKEN", "tok")
+    engine = ServedMinerUEngine.from_environment()
+    assert engine.reader.mineru_url.endswith("proxy.runpod.net") and engine.reader.token == "tok"
+    assert engine.environment().mineru_version == served_mineru()["version"] == "4.0.12"
+
+
+def test_pages_never_leave_this_machine_unencrypted():
+    from common.transport import InsecureUrlError, assert_encrypted
+    from data_pipeline.ocr.served_ocr import ServedOcr
+
+    for url in ("https://pod-8000.proxy.runpod.net", "http://localhost:8000", "http://127.0.0.1:8001", "http://[::1]:9"):
+        assert_encrypted(url, "a server")
+    for url in ("http://pod-8000.proxy.runpod.net", "http://10.0.0.5:8000", "ftp://x"):
+        with pytest.raises(InsecureUrlError, match="not HTTPS"):
+            assert_encrypted(url, "a server")
+    with pytest.raises(InsecureUrlError):
+        OpenAIChatBackend("http://pod-8000.proxy.runpod.net", model="served")
+    with pytest.raises(InsecureUrlError):
+        ServedOcr("http://pod-8001.proxy.runpod.net")
+
+
+def test_the_adapter_asked_for_must_be_served_and_on_our_base(vllm):
+    lora = {"id": "policy-v3", "root": "/workspace/adapters/policy-v3", "parent": "Qwen3-VL-8B-Instruct"}
+    _Vllm.models = [*BASE_ONLY, lora]
+    assert OpenAIChatBackend(vllm, model="policy-v3").model == "policy-v3"
+    with pytest.raises(ModelRunnerError, match="does not serve 'policy-v4'.*--lora-modules policy-v4="):
+        OpenAIChatBackend(vllm, model="policy-v4")
+    _Vllm.models = [{"id": "llama", "root": "/workspace/models/Llama-3.1-8B", "parent": None},
+                    {**lora, "parent": "llama"}]
+    with pytest.raises(ModelRunnerError, match="not on qwen3-vl-8b-instruct"):
+        OpenAIChatBackend(vllm, model="policy-v3")

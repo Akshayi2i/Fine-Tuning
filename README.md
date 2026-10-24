@@ -449,6 +449,26 @@ A RunPod serverless vLLM endpoint is a `--model-url` too (`https://api.runpod.ai
 tried): `--token` is then the RunPod API key, `--mineru-token` the pod's, and `--images link` is needed, since
 the serverless API caps a request's size.
 
+### Production on Azure
+
+The extraction routine runs on Azure (a job per PDF: upload, queue, worker, JSON in Blob); RunPod runs only two
+plain servers, a stock vLLM and a MinerU 4 API, reached over HTTPS. No code of ours runs on RunPod. Three
+things hold that together:
+
+- **One MinerU for training and serving.** `configs/shared/ocr.yaml` pins the served MinerU (4.0.12, tier `basic`).
+  The training corpus is OCR'd through the same server (`MINERU_URL`, `MINERU_TOKEN`; `run_mineru --mineru-url`,
+  or the pipeline's preprocessing stage when `MINERU_URL` is set), and every served document is too; a task read
+  by another version or tier is refused. A corpus read in-process by MinerU 3.4.5 is read again first.
+- **The adapter on the pod's volume.** `python -m scripts.served_adapter` downloads the promoted release's adapter,
+  refuses one vLLM cannot serve or one trained on another MinerU's text, and prints the copy command and the vLLM
+  flags (`--enable-lora --max-lora-rank R --lora-modules policy-vN=/workspace/adapters/policy-vN`). The routine
+  asks for `policy-vN` and checks at start that vLLM serves it on our base.
+- **Pages leave Azure only encrypted, and briefly.** Model and MinerU URLs must be HTTPS (plain HTTP only to this
+  machine); page links are read-only and expire in an hour, and the pages are deleted after each document. Not
+  code, but needed: put the Azure region and the RunPod data centre near each other; use RunPod's Secure Cloud
+  under a data processing agreement that covers insurance documents; keep vLLM's request logging off (its
+  default; never `--enable-log-requests`).
+
 ## Versions and the registry
 
 Every fine-tuning cycle trains the one policy adapter and takes the next version: one more than the highest

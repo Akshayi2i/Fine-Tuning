@@ -292,3 +292,7 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (one served MinerU)
+
+- `testing/latency_check.py` and `testing/extract_server.py` read with the pinned MinerU (`configs/shared/ocr.yaml`): `--tier` defaults to the pinned tier, every task's version and tier are checked, and `--any-mineru` accepts another (timing only); `latency_check` refuses a `--tier` other than the pinned one without it. `--ocr-mode` defaults to the OCR stage's rule, per document, rather than MinerU's `auto`.

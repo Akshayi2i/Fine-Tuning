@@ -303,7 +303,8 @@ def test_nothing_pending_needs_no_mineru(monkeypatch):
     from orchestration import pipeline_dag
 
     monkeypatch.setattr("importlib.util.find_spec", lambda name, *a: None)
-    monkeypatch.setattr(run_mineru, "find_unprocessed", lambda raw, dt, tenant: [])
+    monkeypatch.delenv("MINERU_URL", raising=False)                  # the in-process MinerU's path
+    monkeypatch.setattr(run_mineru, "find_unprocessed", lambda raw, dt, tenant, mineru_version=None: [])
     monkeypatch.setattr(run_mineru, "MinerUEngine", lambda: object())
     result = pipeline_dag.stage_preprocessing(_ctx(0))
     assert result.status == "completed"

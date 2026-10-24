@@ -395,7 +395,7 @@ class BlobClient:
             )
         self._retry(self._backend.delete, self._container_for(key), key)
 
-    def read_link(self, key: str, *, expiry_s: int = 7200, read_token: str | None = None) -> str:
+    def read_link(self, key: str, *, expiry_s: int = 3600, read_token: str | None = None) -> str:
         """A read-only URL to ``key`` for someone with no login of ours (a served
         model fetching a page image). Never to the raw container: its blobs
         leave our storage only through ingestion and OCR."""

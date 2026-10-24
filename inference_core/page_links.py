@@ -16,7 +16,8 @@ changing what the model sees:
   fetches itself, over the data centre's network. A request is then a few
   kilobytes, which also keeps it under the RunPod serverless API's request cap.
   The blobs are transient (``transient/page-links/``) and deleted once the
-  document is read; the links expire on their own.
+  document is read; the links expire on their own, after an hour (a document
+  takes minutes): a link's life is how long a copied one would still read.
 """
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ class PageLinks:
     """
 
     def __init__(self, client: BlobClient, prefix: str, *, read_token: str | None = None,
-                 expiry_s: int = 7200, gray: bool = True, workers: int = 8) -> None:
+                 expiry_s: int = 3600, gray: bool = True, workers: int = 8) -> None:
         self.client = client
         self.prefix = prefix.strip("/")
         self.read_token = read_token

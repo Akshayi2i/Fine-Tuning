@@ -518,7 +518,10 @@ def main(argv: list[str] | None = None) -> int:
     served.add_argument("--images", default="inline", choices=["inline", "file"],
                         help="page images in each request, or by path (vLLM needs --allowed-local-media-path)")
     served.add_argument("--concurrency", type=int, default=128, help="windows in flight at most")
-    served.add_argument("--tier", default="basic", help="the MinerU tier (flash, basic, standard, advanced)")
+    served.add_argument("--tier", default=None, help="the MinerU tier (default the pinned one, "
+                        "configs/shared/ocr.yaml)")
+    served.add_argument("--any-mineru", action="store_true",
+                        help="accept a MinerU version or tier other than the pinned one (timing only)")
     served.add_argument("--ocr-parts", type=int, default=1, help="a PDF to MinerU as this many runs of pages at once")
     served.add_argument("--render-workers", type=int, default=None, help="processes rendering pages at once")
     args = parser.parse_args(argv)
@@ -540,10 +543,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         model = load_model(args.gpu_memory_utilization, args.adapter)    # vLLM first: MinerU takes the rest
     if args.mineru_url:
+        from common.config import served_mineru
         from data_pipeline.ocr.served_ocr import ServedOcr
 
-        ocr: Any = ServedOcr(args.mineru_url, args.remote_token, tier=args.tier, ocr_parts=args.ocr_parts,
-                             render_workers=args.render_workers)
+        pin = served_mineru()
+        ocr: Any = ServedOcr(args.mineru_url, args.remote_token, tier=args.tier or pin["tier"],
+                             ocr_parts=args.ocr_parts, render_workers=args.render_workers,
+                             expected_version=None if args.any_mineru else pin["version"])
     else:
         ocr = OcrWorker(args.ocr_python)
     warm_ocr(ocr, args.work_dir)

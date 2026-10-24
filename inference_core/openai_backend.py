@@ -196,6 +196,9 @@ class OpenAIChatBackend(ModelBackend):
             raise ValueError(f"images must be one of {IMAGE_TRANSPORTS}, got {images!r}")
         if images == "link" and links is None:
             raise ValueError("images='link' needs links (inference_core.page_links.PageLinks)")
+        from common.transport import assert_encrypted
+
+        assert_encrypted(base_url, "the model server")
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
@@ -210,6 +213,8 @@ class OpenAIChatBackend(ModelBackend):
         self._lock = threading.Lock()
         self._pool: ThreadPoolExecutor | None = None
         self.model = model or self._served_model()
+        if model:
+            self._check_served(model)
 
     def supports_logprobs(self) -> bool:
         return True
@@ -231,7 +236,8 @@ class OpenAIChatBackend(ModelBackend):
                                                 thread_name_prefix="served-model")
             return self._pool
 
-    def _request(self, path: str, body: bytes | None = None, *, stream: bool = False) -> Any:
+    def _request(self, path: str, body: bytes | None = None, *, stream: bool = False,
+                 timeout: float | None = None) -> Any:
         """The JSON answer to ``path``; with ``stream``, one chat completion's
         streamed chunks, read as :func:`_read_stream` reads them."""
         headers = {"User-Agent": "fideon-openai-backend/1", "Content-Type": "application/json"}
@@ -241,7 +247,7 @@ class OpenAIChatBackend(ModelBackend):
                                          method="POST" if body is not None else "GET")
         started = time.perf_counter()
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
                 if stream:
                     return _read_stream(response, started=started, stop_repeats=self.stop_repeats)
                 return json.loads(response.read().decode("utf-8"))
@@ -255,6 +261,41 @@ class OpenAIChatBackend(ModelBackend):
         if len(served) != 1:
             raise ModelRunnerError(f"{self.base_url} serves {len(served)} models; name the one to use")
         return str(served[0]["id"])
+
+    def _check_served(self, name: str) -> None:
+        """Refuse a model name the server does not serve, or an adapter it
+        serves on another base than ours: vLLM answers an unknown name with an
+        error per window, and an adapter on the wrong base with plausible JSON.
+
+        vLLM lists each LoRA it loaded (``--lora-modules name=path``) with its
+        base as ``parent``. A server that cannot list its models is not checked.
+        """
+        from common.config import base_model_config
+
+        try:
+            served = self._request("/v1/models", timeout=30).get("data") or []
+        except ModelRunnerError as exc:
+            log.warning("could not list what %s serves, so %r is not checked: %s", self.base_url, name, exc)
+            return
+        entry = next((item for item in served if item.get("id") == name), None)
+        if entry is None:
+            raise ModelRunnerError(
+                f"{self.base_url} does not serve {name!r} (it serves {[item.get('id') for item in served]}). "
+                f"A policy adapter is loaded into vLLM with --enable-lora --lora-modules {name}=<its folder on "
+                "the pod's volume>: scripts/served_adapter.py fetches it and prints the flags."
+            )
+        parent = entry.get("parent")
+        if not parent:
+            return
+        base = next((item for item in served if item.get("id") == parent), {})
+        ours = str(base_model_config()["model"]["model_id"]).rsplit("/", 1)[-1].lower()
+        where = f"{parent} {base.get('root') or ''}".lower()
+        if ours not in where:
+            raise ModelRunnerError(
+                f"{name!r} is served on {base.get('root') or parent}, not on {ours}: an adapter on another "
+                "base reads every page wrongly and still writes valid JSON. Serve it on the pinned base "
+                "(configs/base_model.yaml)."
+            )
 
     def payload(self, messages: list[dict[str, Any]], config: RunnerConfig) -> dict[str, Any]:
         from common.config import pixel_budget

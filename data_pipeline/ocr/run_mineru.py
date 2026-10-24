@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -409,7 +410,10 @@ def process_document(
     forces reprocessing, because each one changes the input distribution the
     model was trained to arbitrate against.
     """
-    env = current_environment(device, strict=device == "cuda")
+    # A served MinerU says what it is (the pin it checks every task against);
+    # the in-process one is the version installed here.
+    env = (engine.environment() if hasattr(engine, "environment")
+           else current_environment(device, strict=device == "cuda"))
     cap = resolution_cap_px()
     meta_key = paths.ocr_meta(doc_type, source_id, tenant_id)
 
@@ -480,6 +484,8 @@ def process_document(
         "read_by_ocr": any(p.read_by_ocr for p in pages),
         "drawn_check": True,
         "ocr_rules": OCR_RULES_VERSION,
+        # How it was read: the served API and its tier, when it was (ServedMinerUEngine).
+        **(engine.meta() if hasattr(engine, "meta") else {}),
     }
     client.write_json(meta_key, ocr_meta)
     # The marker distinguishes a real OCR pass from the stored metadata returned
@@ -662,6 +668,9 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     # accepts a single value is a way to be surprised later, not a choice.
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--force-reprocess", action="store_true")
+    parser.add_argument("--mineru-url", default=os.environ.get("MINERU_URL"),
+                        help="read with the served MinerU at this URL (the pin in configs/shared/ocr.yaml; "
+                             "token $MINERU_TOKEN), not the one installed here (default $MINERU_URL)")
     parser.add_argument("--shard", default=None, metavar="I/N",
                         help="process only this share of the documents (0-based I of N), so N "
                              "processes - one per GPU, each with its own CUDA_VISIBLE_DEVICES - "
@@ -675,10 +684,17 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     client = for_ocr()
-    engine = MinerUEngine(device="cuda")
+    if args.mineru_url:
+        from data_pipeline.ocr.served_ocr import MINERU_TOKEN_ENV, ServedMinerUEngine
+
+        engine: OcrEngine = ServedMinerUEngine(
+            args.mineru_url, os.environ.get(MINERU_TOKEN_ENV) or os.environ.get("FIDEON_REMOTE_TOKEN"))
+        version = engine.environment().mineru_version
+    else:
+        engine, version = MinerUEngine(device="cuda"), get_mineru_version()
 
     source_ids = (
-        find_unprocessed(client, args.doc_type, args.tenant, mineru_version=get_mineru_version())
+        find_unprocessed(client, args.doc_type, args.tenant, mineru_version=version)
         if args.all_unprocessed else args.source_ids
     )
     if args.shard:

@@ -345,8 +345,12 @@ def stage_ingestion(ctx: StageContext) -> StageResult:
 
 def _is_preprocessed(ctx: StageContext) -> bool:
     from data_pipeline.ocr.run_mineru import find_unprocessed
+    from data_pipeline.ocr.served_ocr import ServedMinerUEngine
 
-    return not any(find_unprocessed(ctx.raw, dt, ctx.tenant_id) for dt in ctx.doc_types)
+    # With the served MinerU, a document another MinerU read still needs reading.
+    engine = ctx.ocr_engine or ServedMinerUEngine.from_environment()
+    version = engine.environment().mineru_version if hasattr(engine, "environment") else None
+    return not any(find_unprocessed(ctx.raw, dt, ctx.tenant_id, mineru_version=version) for dt in ctx.doc_types)
 
 
 #: The OCR environment on the pod. MinerU 1.x cannot share an environment with
@@ -386,13 +390,19 @@ def _assert_ocr_runnable(ctx: StageContext) -> None:
 def stage_preprocessing(ctx: StageContext) -> StageResult:
     """MinerU OCR plus page rendering at the resolution cap. **Runs on GPU.**"""
     from data_pipeline.ocr.run_mineru import MinerUEngine, find_unprocessed, process_batch
+    from data_pipeline.ocr.served_ocr import ServedMinerUEngine
 
-    if ctx.ocr_engine is None:
+    # The served MinerU when $MINERU_URL names one (configs/shared/ocr.yaml): it
+    # runs anywhere that reaches it. Otherwise the one installed in the OCR environment.
+    engine = ctx.ocr_engine or ServedMinerUEngine.from_environment()
+    if engine is None:
         _assert_ocr_runnable(ctx)
-    engine = ctx.ocr_engine or MinerUEngine()
+        engine = MinerUEngine()
+    # A served engine also re-reads what another MinerU read: one corpus, one MinerU.
+    version = engine.environment().mineru_version if hasattr(engine, "environment") else None
     processed, skipped, failed = [], [], []
     for doc_type in ctx.doc_types:
-        pending = find_unprocessed(ctx.raw, doc_type, ctx.tenant_id)
+        pending = find_unprocessed(ctx.raw, doc_type, ctx.tenant_id, mineru_version=version)
         if not pending:
             continue
         outcome = process_batch(pending, doc_type, ctx.raw, engine, tenant_id=ctx.tenant_id)
@@ -588,7 +598,8 @@ def assert_one_mineru_version(read_by: dict[str, int]) -> None:
         counts = ", ".join(f"{version} ({n})" for version, n in sorted(read_by.items()))
         raise PipelineError(
             f"the documents were read by more than one MinerU: {counts}. Read them again with one: "
-            "run_mineru --all-unprocessed in the OCR environment re-reads those another MinerU read."
+            "run_mineru --all-unprocessed (with --mineru-url for the served MinerU, the pin in "
+            "configs/shared/ocr.yaml) re-reads those another MinerU read."
         )
 
 

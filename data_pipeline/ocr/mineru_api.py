@@ -1,11 +1,12 @@
 """MinerU behind its own HTTP API (MinerU 4's ``/v1/tasks``), as one markdown string per page.
 
-The OCR stage runs MinerU in-process (``run_mineru.MinerUEngine``, MinerU 3.4.5,
-the corpus pin). This reads a MinerU someone already serves - on a pod, behind
-its RunPod proxy URL or on localhost - for the extraction test runner
-(``testing/latency_check.py``). A served MinerU 4 is another version than the one
-the corpus was read with: its text is close, not identical, so use it to time
-and check the routine, not to build training data.
+This reads a MinerU someone already serves - on a pod, behind its RunPod proxy
+URL or on localhost. Since 2026-10-23 it is the OCR of record for training and
+serving alike (``configs/shared/ocr.yaml``: version and tier pinned;
+``data_pipeline.ocr.served_ocr``): the corpus is read through it
+(``ServedMinerUEngine``) and so is every served document (``ServedOcr``). A
+corpus read in-process by MinerU 3.4.5 (``run_mineru.MinerUEngine``) is another
+distribution - close text, not identical - and is read again before it trains.
 
 **One page string per page, formatted as the OCR stage formats it**
 (:func:`run_mineru.pages_from_content_list`): a header at the head of its page,

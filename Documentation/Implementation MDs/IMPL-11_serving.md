@@ -325,7 +325,7 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 ## Changes of 2026-10-23 (page bytes)
 
 - A served model is sent a gray page (an RGB render whose channels are equal everywhere) as an 8-bit grayscale PNG (`inference_core.page_links.sent_png`, `OpenAIChatBackend(gray_pages=True)`, the default): vLLM converts every image to RGB, so the model reads the same pixels, at 66% of the bytes (all 114 pages of a scan checked); a page with any colour, or one PIL cannot read, goes as it is on disk. Each page is encoded once however many windows send it.
-- `images="link"` (`inference_core.page_links.PageLinks`): each page is uploaded once to Blob (`transient/page-links/<run>/<document>/`) and every window's request carries a read-only link the server fetches itself, instead of the image about four times a page; a page with no link goes inline. The link's token is a read-only SAS given (`PAGE_LINK_SAS_TOKEN`, refused unless `sp=r`) or one signed for the blob alone from the account key (`BlobClient.read_link`, IMPL-02). The pages are deleted after the document; the links expire (2 hours when signed here).
+- `images="link"` (`inference_core.page_links.PageLinks`): each page is uploaded once to Blob (`transient/page-links/<run>/<document>/`) and every window's request carries a read-only link the server fetches itself, instead of the image about four times a page; a page with no link goes inline. The link's token is a read-only SAS given (`PAGE_LINK_SAS_TOKEN`, refused unless `sp=r`) or one signed for the blob alone from the account key (`BlobClient.read_link`, IMPL-02). The pages are deleted after the document; the links expire (1 hour when signed here).
 
 ## Changes of 2026-10-23 (incremental training)
 
@@ -335,3 +335,9 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (production on Azure)
+
+- The routine runs on Azure and RunPod serves only a stock vLLM and the MinerU 4 API (no code of ours there). Every served document's text comes from the pinned MinerU (`configs/shared/ocr.yaml`, IMPL-03): `ServedOcr(expected_version=)` refuses a task another version or tier read.
+- `OpenAIChatBackend(model=name)` checks at start that the server lists `name` and, for a LoRA, that its `parent` is our base model (`configs/base_model.yaml`); a server that cannot list its models is not checked. `scripts/served_adapter.py` makes the promoted release's adapter ready for the pod's network volume: it refuses a release not served as `lora_on_base`, one whose OCR pin is not the served MinerU's, and an adapter vLLM cannot serve (LoRA on the vision side, `modules_to_save`, a rank above 512), downloads it as `policy-<version>`, and prints the copy command and the vLLM flags (`--enable-lora --max-lora-rank --max-loras 1 --lora-modules`).
+- Model and MinerU URLs must be HTTPS, or HTTP to this machine only (`common.transport.assert_encrypted`); page links expire after an hour. Outside the code: the Azure region near the RunPod data centre, RunPod Secure Cloud under a data processing agreement, vLLM's request logging off.

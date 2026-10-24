@@ -1,0 +1,21 @@
+# The OCR that writes every page text the model reads (arch §8a).
+#
+# Read by the OCR stage (the training corpus) AND by serving. One pin, both
+# readers: the model learns how MinerU formats a page - headings, tables,
+# reading order - so text from another MinerU is input it was not trained on.
+#
+# Decision 2026-10-23: the MinerU 4 API served on the pod, for both. The corpus
+# is OCR'd through it (data_pipeline.ocr.served_ocr.ServedMinerUEngine) and so
+# is every served document (ServedOcr); each task reports the version that read
+# it, and a task read by another version is refused. The in-process MinerU 3.4.5
+# (run_mineru.MinerUEngine) stays for a corpus already read by it.
+#
+# The server's address and token are not configuration but environment:
+# MINERU_URL and MINERU_TOKEN (FIDEON_REMOTE_TOKEN when unset).
+
+served_mineru:
+  # What the server must report as its parser_version.
+  version: "4.0.12"
+  # Its quality/speed trade-off; part of the pin, since another tier reads a
+  # page with other models. `basic`: its local lightweight models.
+  tier: basic

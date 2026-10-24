@@ -89,7 +89,7 @@ QUICK = {
     "pilot/pilot_report.py", "pilot/zero_shot_baseline.py",
     "data_pipeline/ocr/mineru_config.py", "scripts/propose_field_types.py",
     "scripts/diagnose_windowing.py", "scripts/check_alias_coverage.py",
-    "scripts/check_section_builder.py",
+    "scripts/check_section_builder.py", "scripts/served_adapter.py",
 }
 
 

@@ -206,8 +206,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="MinerU's bearer token, when it is not --token's (default --token)")
     parser.add_argument("--doc", dest="docs", action="append", type=parse_doc, required=True, metavar="PDF=LOB")
     parser.add_argument("--mode", default="ocr_plus_image", choices=["ocr_plus_image", "image_only"])
-    parser.add_argument("--tier", default="basic", help="the MinerU tier (flash, basic, standard, advanced)")
-    parser.add_argument("--ocr-mode", default="auto", choices=["auto", "txt", "ocr"])
+    parser.add_argument("--tier", default=None,
+                        help="the MinerU tier (default the pinned one, configs/shared/ocr.yaml)")
+    parser.add_argument("--ocr-mode", default=None, choices=["auto", "txt", "ocr"],
+                        help="force MinerU's mode (default: decided per document as the OCR stage does)")
+    parser.add_argument("--any-mineru", action="store_true",
+                        help="accept text from a MinerU version or tier other than the pinned one "
+                             "(timing only: the model is trained on the pinned one's text)")
     parser.add_argument("--ocr-parts", type=int, default=1,
                         help="send each PDF to MinerU as this many runs of pages, one after another, "
                              "each read while the next uploads")
@@ -233,6 +238,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=None,
                         help="where results go (default testing/results/latency_check/<time>)")
     args = parser.parse_args(argv)
+    from common.config import served_mineru
+
+    pin = served_mineru()
+    args.tier = args.tier or pin["tier"]
+    if args.tier != pin["tier"] and not args.any_mineru:
+        parser.error(f"--tier {args.tier} is not the pinned tier ({pin['tier']}): the model is trained on "
+                     "the pinned one's text. Add --any-mineru to time it anyway.")
     missing = [str(pdf) for pdf, _lob in args.docs if not pdf.is_file()]
     if missing:
         parser.error(f"no such PDF: {', '.join(missing)}")
@@ -267,8 +279,10 @@ def main(argv: list[str] | None = None) -> int:
     client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
     model = load_model("base", client, backend_impl=backend, label=backend.model)
     reader = ServedOcr(args.mineru_url, args.mineru_token or args.token, tier=args.tier,
-                       ocr_mode=args.ocr_mode, ocr_parts=args.ocr_parts, render_workers=args.render_workers)
+                       ocr_mode=args.ocr_mode, ocr_parts=args.ocr_parts, render_workers=args.render_workers,
+                       expected_version=None if args.any_mineru else pin["version"])
     print(f"model {backend.model} at {args.model_url}; MinerU at {args.mineru_url} (tier {args.tier}, "
+          f"{'any version' if args.any_mineru else 'version ' + pin['version']}, "
           f"{args.ocr_parts} part(s)); images {args.images}"
           f"{'' if args.color_pages else ', gray pages as grayscale PNG'}", flush=True)
 

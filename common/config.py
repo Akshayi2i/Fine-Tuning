@@ -37,6 +37,8 @@ SERVING_CONFIG = CONFIG_DIR / "inference" / "vllm_serving.yaml"
 #: nothing downstream reports that as anything but degraded accuracy.
 SHARED_VISION_CONFIG = CONFIG_DIR / "shared" / "vision.yaml"
 SHARED_SEQUENCE_CONFIG = CONFIG_DIR / "shared" / "sequence.yaml"
+#: The served MinerU the corpus and serving both read pages with (arch §8a).
+SHARED_OCR_CONFIG = CONFIG_DIR / "shared" / "ocr.yaml"
 
 
 class ConfigError(RuntimeError):
@@ -160,6 +162,16 @@ def shared_vision_config() -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def shared_sequence_config() -> dict[str, Any]:
     return load_yaml(SHARED_SEQUENCE_CONFIG)
+
+
+def served_mineru() -> dict[str, str]:
+    """``{"version", "tier"}``: the served MinerU every page text comes from,
+    for the training corpus and for serving alike."""
+    block = load_yaml(SHARED_OCR_CONFIG).get("served_mineru") or {}
+    missing = [key for key in ("version", "tier") if not block.get(key)]
+    if missing:
+        raise ConfigError(f"served_mineru in {SHARED_OCR_CONFIG.name} needs {' and '.join(missing)}")
+    return {"version": str(block["version"]), "tier": str(block["tier"])}
 
 
 def vision_for_task(task: str) -> dict[str, Any]:
