@@ -6,7 +6,7 @@
 >
 > **Naming hazard (master §0.1):** the architecture's "**Fideon SPEC_12**" is the external multi-tenant deployment spec. This file is our testing harness. Different documents.
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §17 (**extraction/testing routine**), §19 (folder placement), §13a (serving format: the adapter on the bf16 base), §5 (confidence without ground truth).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §17 (**extraction/testing routine**), §19 (folder placement), §13a (serving format: the adapter on the bf16 base), §5 (confidence without ground truth).
 
 ## Goal
 
@@ -309,3 +309,12 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 
 - Test outputs are served outputs, so they hold printed values only (IMPL-11; the user's decision of 2026-10-24): in strict mode, the default, a value no page prints is null in `extraction` and in `all_fields`, flagged `<path>:not_printed_removed`; against gold, a removed value the gold holds counts as missed. `printed_values.mode: flag` in `configs/inference/vllm_serving.yaml` keeps such values and flags them `<path>:not_printed` instead. What the check found (`ExtractionResult.printed_check`) is not written to the results JSON.
 - Fields first: the fields served at `fields_ready` are held to the pages they cite (`serving.fields_first.verify_fields`, IMPL-11); a value not found on them yet is held back (`pending_full_text`), and the whole document is checked when MinerU's full text arrives, before the full-text tier. So `latency_check`'s `Exact match at fields` scores the fields as first served, and its final score the fully checked ones.
+
+## Changes of 2026-10-24 (QA fixes)
+
+- The served MinerU client's QA fixes (IMPL-03) apply to the test runners; a non-pinned `--tier` is refused unless `--any-mineru` (the job server too). See IMPL-11 for the merge, printed-values and transport fixes.
+- `extract_client`: a Status column (`done`, `fields served, full text failed: ...`, `FAILED: ...`, `NOT SENT: ...`); a timing the server did not report is left blank, never a crash; `summary.*` is always written; exit 1 unless every document was read in full. Lines and PDF sizes are checked before anything is uploaded (`/health` reports `max_pdf_bytes`); the documents already queued are still collected after a refusal; `--url` must be HTTPS or HTTP to this machine, redirects are refused, and server errors are reported, not raised. Output names never clash (`-2` added; `summary` reserved). The job server answers 401 for a non-ASCII token and 400 for a bad Content-Length, lists its jobs under a lock, and refuses a non-pinned `--tier` and plain-HTTP server URLs before the detach. `latency_check` canonicalises each `--doc` line and refuses an unknown one, refuses a run named twice and `--concurrency` below 1, and checks the URLs and the link login before the detach (`setup_problem`, against the environment the run will have).
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

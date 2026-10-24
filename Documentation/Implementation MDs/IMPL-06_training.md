@@ -4,7 +4,7 @@
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-05.
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §3 (ViT escalation gate — **LoRA, never full FT**), §4.1 (**one policy adapter**), §4.2 (**incremental training**: each cycle continues the promoted adapter), §6.1 (per-epoch modality sampling), §7b (policy windows over every page), §8b (tenancy per Fideon SPEC_12; de-identification per Fideon SPEC_11 — Option A, none, see IMPL-05 §1), **§9.2 (bf16 base vs 4-bit)**, §9.3 (memory settings), §9.4 / §9a (frozen ViT and mergers; LoRA targets), §10 (**locked three-layer trainer stack**; §10.1 fallback, §10.2 parity tests), §11 (hyperparameters), §11.2 (checkpoint selection), §11a (**sweep methodology**), §12 (versioning + run registry).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §3 (ViT escalation gate — **LoRA, never full FT**), §4.1 (**one policy adapter**), §4.2 (**incremental training**: each cycle continues the promoted adapter), §6.1 (per-epoch modality sampling), §7b (policy windows over every page), §8b (tenancy per Fideon SPEC_12; de-identification per Fideon SPEC_11 — Option A, none, see IMPL-05 §1), **§9.2 (bf16 base vs 4-bit)**, §9.3 (memory settings), §9.4 / §9a (frozen ViT and mergers; LoRA targets), §10 (**locked three-layer trainer stack**; §10.1 fallback, §10.2 parity tests), §11 (hyperparameters), §11.2 (checkpoint selection), §11a (**sweep methodology**), §12 (versioning + run registry).
 
 ## Goal
 
@@ -374,3 +374,12 @@ reviewed before it trains again.
 
 - §3 checkpoint selection (the user's decisions of 2026-10-24: nothing invented, consistent output): guards on false nulls and on run-to-run agreement (the finalists' pass generated again in reverse order, `selection_run_to_run_check`), then the finalists within the guard margin on field match, then the fewest invented values; `document_hallucination_rate` is no longer a guard. Invented values are now looked for on every page of the document with the OCR-tolerant matcher serving uses (IMPL-08).
 - Continuing: the scoring code changed, so a cycle continuing a release scored before 2026-10-24 starts from the base; none is promoted yet.
+
+## Changes of 2026-10-24 (QA fixes)
+
+- A resumed run keeps the checkpoint's own save and eval cadence and `save_total_limit` (`training.train.resumed_cadence`): on more GPUs the limit shrank and rotation deleted earlier evaluation checkpoints. Checkpoint discovery reads eval steps from `log_history`.
+- A cycle starts fresh, the reason recorded, when the parent chain's training documents cannot be read, or when its corpus would validate on documents the chain trained on (IMPL-05).
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

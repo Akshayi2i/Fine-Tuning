@@ -4,7 +4,7 @@
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-06, IMPL-07. Uses the shared inference core (IMPL-07) for all model runs — no forward dependency on serving or testing.
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §15 (**metric definitions + LoB metric**), §0b (LoB gating), §3 (ViT gate inputs), §5 (list-field recall), §13 step 6 (the gate is a hard stop), §12 (gate result recorded in the manifest).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §15 (**metric definitions + LoB metric**), §0b (LoB gating), §3 (ViT gate inputs), §5 (list-field recall), §13 step 6 (the gate is a hard stop), §12 (gate result recorded in the manifest).
 
 ## Goal
 
@@ -394,3 +394,13 @@ extra.
 - §3: `hallucination_rate` is read from serving's record (`printed_check`), before strict removal; `run_to_run_agreement` from a second main-mode reading with its windows reversed (`run_to_run_check`, on); both keep per-document scores, pooled over the set; the report's `printed_values` and `run_to_run` blocks.
 - §4: both are gating metrics (`hallucination_rate` δ 0.010, `run_to_run_agreement` δ 0.015), conditional until a promoted release has measured them, with no ceiling or floor yet; `PENDING_GATING_METRICS` holds `list_field_precision` only; a gating metric a comparable baseline lacks is judged on floors only, with a warning; the "no ceiling on invented values" item is replaced. New acceptance item.
 - *Current implementation*: `generate_validation(order="reversed")` and `score_generations(repeat=)`; checkpoint selection guards on false nulls and on run-to-run agreement, keeps the finalists within the margin on field match, and picks the one inventing the fewest values; `document_choice` records the guards; the hallucination scorer searches every page with `ground_tolerant` and counts a right value no page prints.
+
+## Changes of 2026-10-24 (QA fixes)
+
+- An eval report is reused for the gate only when scored on this tenant's set as frozen now and with today's scoring code (`frozen_at`, `frozen_from_corpus`, `scoring_fingerprint`); otherwise it is scored again, and a dry run refuses. The scoring code changed (2026-10-24), so a promoted release's report is on another yardstick: the next cycle is judged on the floors alone, and starts fresh, until that release is scored again.
+- A gating metric that is NaN, infinite or not a number fails closed. A fault rate with nothing counted is absent, not 0.0. ECE refuses confidences outside [0, 1] (within 1e-6 of the range read as its edge).
+- `hallucination_rate` counts a `parsed` value behind a blank `raw` as serving checks it (`grounding.printed_forms`), and two-character values as whole tokens.
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

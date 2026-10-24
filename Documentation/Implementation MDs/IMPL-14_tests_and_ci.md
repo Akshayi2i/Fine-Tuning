@@ -4,7 +4,7 @@
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: all prior specs (01–13).
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0a/§0b (schema + LoB contracts), §5 (list-field recall), §7 (prompt identity, split leakage), §8a/§8b (MinerU pin, tenancy), §10 (collator masking, §10.2 parity tests), §15 (gating).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §0a/§0b (schema + LoB contracts), §5 (list-field recall), §7 (prompt identity, split leakage), §8a/§8b (MinerU pin, tenancy), §10 (collator masking, §10.2 parity tests), §15 (gating).
 
 ## Goal
 
@@ -282,3 +282,7 @@ real vLLM engines (the tests fake the engine), and a real upload.
 ## Changes of 2026-10-24 (printed values only and consistency)
 
 - *Current implementation*: 3,459 tests in 140 modules; a table for the new `test_grounding_tolerant.py`, `test_printed_values.py`, `test_invention_and_agreement.py` and `test_audit_label_consistency.py` (the user's decisions of 2026-10-24: nothing invented in the served JSON, consistent output).
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

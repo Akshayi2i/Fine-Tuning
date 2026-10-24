@@ -4,7 +4,7 @@
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: none. This spec creates the repo skeleton and all static configuration that later modules read.
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0a (schema contract), §0b (LoB), §6 (modality instructions), §7 (dataset format, schema registry, prompt template), §9/§9a (LoRA targets), §11 (full hyperparameter spec), §11a (sweeps), §13a/§13b (quantization), §19 (repo structure).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §0a (schema contract), §0b (LoB), §6 (modality instructions), §7 (dataset format, schema registry, prompt template), §9/§9a (LoRA targets), §11 (full hyperparameter spec), §11a (sweeps), §13a/§13b (quantization), §19 (repo structure).
 
 ## Goal
 
@@ -325,3 +325,7 @@ not yet read by the model view).
 
 - §2 `vllm_serving.yaml`: `printed_values.mode` (strict by default). `unified.yaml`'s evaluation block: `selection_run_to_run_check` and `run_to_run_check`, both on (the run-to-run agreement of checkpoint selection and the gate, IMPL-08).
 - §5 `common/grounding.py`: `ground_tolerant` beside `ground`.
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

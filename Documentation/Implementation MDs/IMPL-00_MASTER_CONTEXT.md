@@ -4,13 +4,13 @@
 
 > **Purpose of this file.** This is the shared context every other spec assumes. When you run any individual spec (IMPL-01 … IMPL-15) in Claude Code, that spec references this file for global conventions. Read this once; each module spec then adds only what's specific to it.
 >
-> **Source of truth.** This spec set and the architecture document **`Documentation/finetuning-architecture-v2.6.docx`** are **in sync** as of this revision (v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only), except for the decisions of 2026-10-24, which the architecture does not record yet. Where a spec cites a section like "(arch §4)", it refers to that document.
+> **Source of truth.** This spec set and the architecture document **`Documentation/finetuning-architecture-v2.7.docx`** are **in sync** as of this revision (v2.6, v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only). Where a spec cites a section like "(arch §4)", it refers to that document.
 >
 > **Precedence.** The architecture carries the *why* — design rationale, trade-offs, the reasoning behind each decision. These specs carry the *how* — module boundaries, file paths, function signatures, acceptance criteria. Neither outranks the other: they describe the same system at different altitudes. **If they disagree, that is a bug in one of them.** Fix the disagreement rather than picking a winner, and say which one you changed.
 >
 > Anything genuinely build-level — a CLI flag, a module name, a test — lives here and is not expected to appear in the architecture.
 >
-> **Revision:** aligned to **`finetuning-architecture-v2.6.docx`** (its Revision v2.6, 2026-10-23), which records the decisions of 2026-10-19, 2026-10-22 and 2026-10-23 below. It does not record the decisions of 2026-10-24 yet, among them printed values only and consistent output (§2, §13). The section numbers are unchanged from v2.1; §4 is now the one policy adapter (§4.1) trained incrementally (§4.2), §13a the serving format (the adapter on the bf16 base), and §13b is not applied.
+> **Revision:** aligned to **`finetuning-architecture-v2.7.docx`** (its Revision v2.7, 2026-10-24), which records the decisions of 2026-10-19, 2026-10-22, 2026-10-23 and 2026-10-24 below, printed values only, consistent output and fields first among them (§2, §13). The section numbers are unchanged from v2.1; §4 is now the one policy adapter (§4.1) trained incrementally (§4.2), §13a the serving format (the adapter on the bf16 base), and §13b is not applied.
 >
 > **Current target.** **One adapter, for policy documents, one version per cycle** (decisions 2026-10-22). Each fine-tuning cycle trains one LoRA (`common/adapter.py`) over all the policy data so far, new and existing. It **continues the tenant's promoted adapter**, on the original bf16 base, unless it has to start from the base (decision 2026-10-23, §12). Nothing is merged or quantized: the release is the adapter, and serving loads the base and applies it. The cycle takes the next version number (`v1`, `v2`, …), and that number names its run (`policy-v3`), its adapter and its release. There are no training scopes and no layout families. The code for ACORD and Loss Run documents is kept, unchanged, but not trained. A new training set and canonical schema are to be delivered, and the corpus, the frozen eval set and the adapter are rebuilt from them.
 >
@@ -1020,3 +1020,8 @@ What the build does now that the sections above did not describe. Each module sp
 - §13.5: `hallucination_rate` (from that record, before removal) and the new `run_to_run_agreement` (the main mode read twice, the second time with its windows reversed, `ExtractionRequest.send_order`) are gating metrics, conditional until a promoted release has measured them, with no ceiling or floor yet; the "no ceiling on invented values" item is replaced.
 - §13.3: checkpoint selection guards on printed values left empty and on run-to-run agreement, keeps the finalists close on field match, and picks the one inventing the fewest values. The scoring code changed, so a cycle continuing a release scored before 2026-10-24 starts from the base; none is promoted yet.
 - §13.2: the pre-upload audit warns on labels that write one kind of value two ways (`label_consistency`).
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+- Header: the Source of truth and Revision lines no longer list decisions missing from the architecture.

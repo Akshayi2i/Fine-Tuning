@@ -4,7 +4,7 @@
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01 (schemas, alias registry, `common.normalize`, `common.aliases`), IMPL-02, IMPL-03 (MinerU output — `derive_aliases` reads it).
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0a (schema contract), §0b (LoB in every label), §0e (decisions of 2026-10-19: **no frontier model**, reviewed golds only), §4c (**day-zero bootstrap**), §7c "Golden Label Generation", §13 step 11 (feedback loop).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §0a (schema contract), §0b (LoB in every label), §0e (decisions of 2026-10-19: **no frontier model**, reviewed golds only), §4c (**day-zero bootstrap**), §7c "Golden Label Generation", §13 step 11 (feedback loop).
 
 ## Goal
 
@@ -383,3 +383,7 @@ row per value. Page text is normalised once per page.
 ## Changes of 2026-10-24 (printed values only and consistency)
 
 - Audit: a sixth layer, label consistency (the user's decision of 2026-10-24: consistent output), warnings only: a typed field written in more than one shape, a placeholder beside nulls in the same field, a date's or an amount's `raw` contradicting its `parsed`; in `warnings.csv`, the report and `summary()`. Run it on the new training set before the first cycle. New acceptance item.
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

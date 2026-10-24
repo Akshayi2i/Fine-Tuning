@@ -4,7 +4,7 @@
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-07, IMPL-08. Uses the inference core (IMPL-07) for logprobs/spans and the evaluation normalizer (IMPL-08) for the correctness signal. No forward dependency on serving/testing.
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §5 (**confidence flow, calibration, list-field second signal**), §0b (LoB carries confidence too), §15 (ECE as a gating metric).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §5 (**confidence flow, calibration, list-field second signal**), §0b (LoB carries confidence too), §15 (ECE as a gating metric).
 
 ## Goal
 
@@ -219,3 +219,12 @@ back to the default target.
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (QA fixes)
+
+- `margin_over_runner_up` is the selected checkpoint's sample F1 minus the best other candidate's, so it is negative when a whole-document pass or a tie-break chose the sample's runner-up; the low-margin warning reads it.
+- The validation merge honours `window_leads`, as serving's merge does.
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

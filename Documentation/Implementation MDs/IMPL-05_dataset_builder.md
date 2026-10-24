@@ -4,7 +4,7 @@
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02, IMPL-04.
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0e (decisions of 2026-10-19), §6 (modality dropout), §7 (dataset format, schema registry, prompt template versioning, long documents), §8 (corpus versioning, split strategy), §8a (MinerU pin in the manifest), §8b (tenant isolation per Fideon SPEC_12; **de-identification per Fideon SPEC_11 — Option A, none, see §1**), §0b (LoB coverage).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §0e (decisions of 2026-10-19), §6 (modality dropout), §7 (dataset format, schema registry, prompt template versioning, long documents), §8 (corpus versioning, split strategy), §8a (MinerU pin in the manifest), §8b (tenant isolation per Fideon SPEC_12; **de-identification per Fideon SPEC_11 — Option A, none, see §1**), §0b (LoB coverage).
 
 ## Goal
 
@@ -182,7 +182,7 @@ by page count alone; a noisy row is planned on the clean text, since its corrupt
 the plan. A run split with overlapping windows is refitted as one run, each window again opening on the
 last `run_overlap_pages` of the one before, so no page break goes unread (`_fit_overlapping`). The corpus
 manifest pins `window_plan_version` = `policy_windows.window_plan_id()`: the rule's version
-(`WINDOW_PLAN_VERSION`, now `"3"`) and a fingerprint of everything the planner sizes windows from — the
+(`WINDOW_PLAN_VERSION`, now `"4"`) and a fingerprint of everything the planner sizes windows from — the
 section map, each policy task's sequence budget and visual tokens per page, the per-page estimates and the
 prompt hash — so a budget edit that moves windows changes the pin. It also pins `review_rule_version`
 (`corpus_manifest.REVIEW_RULE_VERSION`, now `"2"`: every gold reviewed). Training and packaging refuse a
@@ -432,7 +432,7 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 
 - Windows sized by their pages' own text (decision 2026-10-22): a window that would not fit its call is split into the fewest that fit, as evenly as they allow (`fit_windows_to_text`); a dense policy is read, never set aside. More, smaller windows on text-heavy policies, so a longer run.
 - A value with no `page_ref` is taught in the window the declarations lead, or a group's only window (`PolicyWindowPlan.holds_unpaged`), not dropped from every window.
-- The corpus manifest pins `window_plan_version` (`policy_windows.WINDOW_PLAN_VERSION`, `"2"`); training and packaging refuse a policy corpus built with another plan (IMPL-13).
+- The corpus manifest pins `window_plan_version` (`policy_windows.WINDOW_PLAN_VERSION`, `"4"` since 2026-10-24); training and packaging refuse a policy corpus built with another plan (IMPL-13).
 - Golds: every gold needs a review record to train (decision 2026-10-22), a twin its seed's; the build's refusal says they "have no review record".
 - Golds: the corpus build reads a stored gold under the form-edition rule where it holds (`load_golden_label`), exactly as the gate scores it; on a self-contained line the edition stays in the number. `label_verification.verified_label` takes `doc_type=` and `lob=` to do the same.
 - Split, policies only: a placeholder carrier is no carrier; a carrier any synthetic family trains is never held out; a seed family's real carrier counts toward the 10 (`GroupRecord.holds_real`); a delivered split counts and chooses from real carriers.
@@ -455,3 +455,14 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (QA fixes)
+
+- Window plan version 4 (`WINDOW_PLAN_VERSION`): a window a text split makes shares `run_overlap_pages` with the one before wherever the cut falls between consecutive pages - a run its page count kept whole and the declarations-led window included - and a window that could hold no page beyond the shared ones starts after them (no window of shared pages only). A corpus or release cut with plan 3 is refused; the corpus must be rebuilt and the adapter retrained.
+- Rows carry `window_leads` (the window holds the declarations page), so validation merges a split declarations window as serving does.
+- A continuing cycle's corpus pins the families its parent chain trained on to train, ahead of the line-size rule, the carrier hold-out and the empty-split repair (`split_assignment.continues`, `pinned_to_train`); a reused corpus that validates on chain-trained documents makes the cycle start from the base.
+- A gold whose every value is null is set aside (`empty_label`, with its reason), never trained as an empty target. `unprinted_values` paths are renumbered after label verification removes list items (`label_verification.paths_after_removal`), and list members are removed.
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

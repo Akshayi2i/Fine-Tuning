@@ -4,7 +4,7 @@
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-01, IMPL-02.
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0e (decisions of 2026-10-19: GPU only, reviewed golds), §7 (page images, multi-page), §7c (delivered golds), §8a (**MinerU version pinning**), §11 (resolution cap), §13 steps 1–2, §18a (raw-document storage, dedup, retention, access pattern), §18.2–18.3 (storage tiers, purge cascade).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §0e (decisions of 2026-10-19: GPU only, reviewed golds), §7 (page images, multi-page), §7c (delivered golds), §8a (**MinerU version pinning**), §11 (resolution cap), §13 steps 1–2, §18a (raw-document storage, dedup, retention, access pattern), §18.2–18.3 (storage tiers, purge cascade).
 
 ## Goal
 
@@ -409,3 +409,13 @@ corrected at bundling instead.
 ## Changes of 2026-10-24 (one served MinerU)
 
 - The OCR of record is the MinerU 4 API served on the pod, for the training corpus and for serving alike (decision 2026-10-23): `configs/shared/ocr.yaml` pins its version (4.0.12) and tier (`basic`), read by `common.config.served_mineru`. `data_pipeline.ocr.served_ocr.ServedMinerUEngine` is the OCR stage's engine for it (the `OcrEngine` protocol): pages rendered by the shared renderer while the server reads the PDF, OCR or text mode decided by the stage's rule (`reads_by_ocr`, now `ocr_mode_for`), each task's reported version and tier checked against the pin. It runs wherever the server is reachable - no MinerU and no GPU there - and records `mineru_version` (the pin), `ocr_device: cuda` (the server's), `mineru_backend: api` and `mineru_tier` in `ocr_meta.json` (`process_document` takes the environment from an engine that has one). `run_mineru --mineru-url` (default `$MINERU_URL`, token `$MINERU_TOKEN`) uses it, and `--all-unprocessed` then also lists documents another MinerU read. The in-process MinerU 3.4.5 engine stays for a corpus already read by it; a corpus is still read by one MinerU (`assert_one_mineru_version`).
+
+## Changes of 2026-10-24 (QA fixes)
+
+- A served reading's MinerU tier is part of the skip check: `process_document` re-reads a document whose stored `mineru_tier` is not the engine's, and `find_unprocessed(..., mineru_tier=)` (default: the pinned tier, for readings that record one) lists it, so `--all-unprocessed` reads it again.
+- The served MinerU client refuses a task that leaves out any page it was sent (every run of a multi-run read, not only a single task); checks every run's version and tier against the pin (`version_parts`, `tier_parts`), a missing tier included; retries a poll or result fetch after 1, 3 and 8 s on 429/5xx, an unreachable server, a dropped connection or a non-JSON body (never the upload); fails a PDF at the first failing run and stops the others; fails at once on ending statuses MinerU 4 does not use (cancelled, error, ...); and states the server's reason when it cannot read an answer. `select_pages` keeps form fields (pages are copied with `insert_pdf`, as `split_pdf` does). A failed rendering stops MinerU's reading.
+- `audit.py` and `label_verification.py` look a value up by its raw form, not a normalised copy: normalised, a code's pieces were words found apart (`common.grounding.appears_on`). Page references are read by `common.canonical.page_numbers`: whole numbers or digit strings; "p1" names no page instead of failing the build.
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

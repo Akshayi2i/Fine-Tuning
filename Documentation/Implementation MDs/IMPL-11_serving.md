@@ -6,7 +6,7 @@
 >
 > **Naming hazard (master §0.1):** the architecture's "**Fideon SPEC_11**" is the external Presidio de-identification spec (implemented in our IMPL-05). This file is our serving layer. Different documents.
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0a (audit gate contract), §0b (LoB output), §0e (decisions of 2026-10-19: every page read), §4a (**classifier as a load-bearing component**), §4b (ACORD two-level), §4c (day-zero classifier), §5 (confidence), §7 (long documents: every page, read in windows), §14 (**RunPod split: what runs where**).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §0a (audit gate contract), §0b (LoB output), §0e (decisions of 2026-10-19: every page read), §4a (**classifier as a load-bearing component**), §4b (ACORD two-level), §4c (day-zero classifier), §5 (confidence), §7 (long documents: every page, read in windows), §14 (**RunPod split: what runs where**).
 
 ## Goal
 
@@ -384,3 +384,16 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 
 - Printed values only (the user's decision of 2026-10-24: nothing invented in the served JSON): `serving/printed_values.py` holds every canonical policy to its pages after the merge and `conform`, with the OCR-tolerant `common.grounding.ground_tolerant`, on scans too. `printed_values.mode` in `configs/inference/vllm_serving.yaml`: `strict` (the default) takes a value printed nowhere out and flags it `<path>:not_printed_removed`, replacing `conform`'s `<path>:not_printed`; `flag` keeps it and flags it `<path>:not_printed`; any other value is refused. The record is `ExtractionResult.printed_check`; with no page text nothing is checked, flagged `printed_values:no_page_text`. Fields first runs the check in `attach_full_text` (`hold_result_to_printed`) once MinerU's text arrives (*Current implementation*, §6, acceptance).
 - `ExtractionRequest.send_order` (`planned`, the default, or `reversed`; anything else is refused): the order a policy's windows go to the model, on both reading paths. The merge keeps planned order. The golden eval's repeat pass uses `reversed` to measure `run_to_run_agreement` (IMPL-08).
+
+## Changes of 2026-10-24 (QA fixes)
+
+- **Merge:** within its group, the window holding the declarations page (`PolicyWindow.leads`) merges first, so a declarations window split by its text or retried in halves still gives the declarations value (the half holding the declarations page inherits the lead; else the first half). A section in the wrong JSON type fails its window. Page references are held to the window's pages: one outside them is dropped and the value flagged `<path>:page_ref_outside_window`; "12" is page 12. `extract` refuses a request with no images or with `page_texts` not numbered 1..n; with no serving plan, a line with no schema is refused unless `allow_lob_fallback` is sent (then the base model against `_fallback.json`, flagged `route:lob_fallback_used`).
+- **Printed values only, the rule:** a value is looked up on the cited pages that have text, then on every page with text. Found anywhere: printed. Not found, and every cited page has text (or it cites none): removed in strict mode. Not found while a cited page has no text (an image MinerU could not read): kept and flagged `<path>:unverified_unread_page`, counted as unchecked (record key `unread_page`). Unchecked only when no page has text. Codes match as one run of words, never pieces found apart; figures match whole, and a money amount only an amount-like printed figure (currency sign, separator or cents) - never a year or a code; two-character values match as whole tokens; yes/no readings and single characters stay unchecked; a `parsed` value behind a blank `raw` is looked for in its printed forms.
+- **Removed rows:** ids are never renumbered after a removal (gaps are possible); a link to a removed row is dropped and flagged `link_to_removed_row`. A value removed with its row is named by its list and its position in the model's answer, `list[#N]`, so no flag names a served path that holds another value; `list_fields` follow the served JSON. A served row's id and links are the same at `fields_ready`, at `done` and on the standard path.
+- **Fields first:** nothing is served when no cited page has text (`fields_verified` false, no `fields_ready`).
+- **Transport:** redirects are refused (`common.transport.open_url`), so a token never follows one; a stream that ends with no finish reason and no `[DONE]` is `stream_cut`, cut off, and its window split; a stream broken mid-chunk is a `ModelRunnerError`. A page link's SAS must be a container or blob SAS (`sr=c`/`sr=b`, `sp=r`): an account SAS is refused. A transparent PNG is sent as it is on disk.
+- A window's truncation message names its finish reason: the token limit, an answer stopped for repeating itself (`repetition`), or a stream that broke off (`stream_cut`).
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

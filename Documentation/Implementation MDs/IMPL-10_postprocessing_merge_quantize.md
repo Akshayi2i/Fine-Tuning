@@ -4,7 +4,7 @@
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: IMPL-02, IMPL-06.
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §13 (no merge or quantize stage since 2026-10-23), §13a (**serving format: the adapter on the bf16 base**), §13b (quantization quality thresholds, not applied), §18 (artifact paths).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §13 (no merge or quantize stage since 2026-10-23), §13a (**serving format: the adapter on the bf16 base**), §13b (quantization quality thresholds, not applied), §18 (artifact paths).
 
 ## Goal
 
@@ -208,3 +208,7 @@ manifest's `quantized_model` points at the first quantized format — never bf16
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

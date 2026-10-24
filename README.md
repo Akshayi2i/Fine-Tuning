@@ -23,11 +23,11 @@ be delivered, and the corpus, the frozen eval set and the adapter are rebuilt fr
 
 | Where | What |
 |---|---|
-| `Documentation/finetuning-architecture-v2.6.docx` | The design and its rationale - the *why* (v2.6: one policy adapter, one version per cycle, incremental training and no merge, with the decisions of 2026-10-19, 2026-10-22 and 2026-10-23, §0e and Appendix A). v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only |
+| `Documentation/finetuning-architecture-v2.7.docx` | The design and its rationale - the *why* (v2.7: printed values only, consistent output, fields first, one MinerU and production on Azure, on top of v2.6's one policy adapter and incremental training; the decisions of 2026-10-19 to 2026-10-24, §0e and Appendix A). v2.6, v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only |
 | `Documentation/Implementation MDs/IMPL-00` .. `IMPL-15` | Module specs and acceptance criteria - the *how*; IMPL-00 §13 indexes what the code does now |
 | `Documentation/Implementation MDs/IMPL_ALL_COMBINED.md` | All specs in one file |
 
-The two are in sync, except that v2.6 does not record the decisions of 2026-10-24 yet. **If they disagree,
+The two are in sync. **If they disagree,
 that is a bug in one of them** - fix the disagreement rather than picking a winner.
 
 ## Two production modes, one model
@@ -53,6 +53,15 @@ Two decisions of 2026-10-24: nothing invented in the served JSON, and consistent
   With no page text (image only) nothing is checked (`printed_values:no_page_text`). With fields first, the
   fields served at `fields_ready` are first held to the pages they cite (a value not found there yet is
   held back, `pending_full_text`), and the whole document is checked when MinerU's full text arrives.
+- **How a value is looked for** (QA fixes of 2026-10-24). On the cited pages that have text, then on every
+  page with text. A value no such page prints is removed when every page it cites has text; one whose cited
+  page has no text (an image MinerU could not read) is kept and flagged `<path>:unverified_unread_page` -
+  never silent, never counted as invented. A code matches only as one run of words ("PAP-2025-0042" is not
+  found on a page printing "PAP-2026-0042" beside a 2025); a figure only whole, and a money amount only an
+  amount-like figure (a year or a code is no premium); two-character values as whole tokens; a `parsed`
+  value behind a blank `raw` in its printed forms. Yes/no readings and single characters stay unchecked.
+  Rows are never renumbered after a removal, so a served row's id and links are the same at `fields_ready`,
+  at `done` and on the standard path; a removed value is named `list[#N]` (its place in the model's answer).
 - **Gated.** `hallucination_rate` (of the values checked, the share no page prints, counted before removal so
   it measures the model) and `run_to_run_agreement` (the golden eval reads each document's main mode a second
   time, its windows sent in reverse order, and counts the fields that agree) are gating metrics, each held to
@@ -441,6 +450,10 @@ FIDEON_REMOTE_TOKEN=<their token> python -m testing.extract_server --port 8002 \
     --model-url http://localhost:8000 --mineru-url http://localhost:8001 --images file
 ```
 
+On the pod, a value set on the command line, as the token above, beats the one in `.env` for every setting
+`.env`/`.env.example` names, also once the command detaches (`bash scripts/pod_run.sh env` prints what a run
+would get). `--remote-token` works too, but its value then shows in the run script and in `ps`.
+
 Post PDFs from the laptop with `testing.extract_client --url https://<pod id>-8002.proxy.runpod.net` as above.
 To measure, run `testing.latency_check` on the pod against the same servers; it also scores each document
 against its gold JSON (`--gold-dir`, or the `Gold_json` folder beside the PDF's) and records every window's
@@ -453,7 +466,9 @@ python -m testing.latency_check --model-url http://localhost:8000 --mineru-url h
 
 Windows are taken as each is answered: a window cut off or stopped for repeating itself is split and resent at
 once, not after the slowest window. `--ocr-parts N` sends a PDF to MinerU as N runs of pages, one after another,
-so it reads the first while the rest upload (measure it against one task); `--tier` picks MinerU's tier.
+so it reads the first while the rest upload (measure it against one task). Only the pinned MinerU tier
+(`configs/shared/ocr.yaml`) is accepted; `--tier` names another only with `--any-mineru`, for timing, and both
+`latency_check` and the job server refuse it before the command detaches.
 
 ### From a laptop, through the proxy
 
@@ -464,9 +479,12 @@ things cut them without changing what the model sees:
 - **Gray pages go as grayscale PNGs**, always: vLLM makes every image RGB, so the model gets the same pixels, at
   66% of the bytes (all 114 pages of that scan checked). `--color-pages` sends them as rendered.
 - **`--images link`** uploads each page once to Blob while MinerU reads the PDF, and sends vLLM a read-only link it
-  fetches itself: about 105 MB of pages instead of 871 MB of requests. It needs the storage login in `.env` and a
-  read-only SAS for the links (`PAGE_LINK_SAS_TOKEN`, `sp=r`; refused if it may write), unless the login is a
-  connection string holding the account key. The pages are deleted after each document.
+  fetches itself: about 105 MB of pages instead of 871 MB of requests. It needs a storage login
+  (`AZURE_STORAGE_ACCOUNT_URL` + `AZURE_STORAGE_SAS_TOKEN`, or `AZURE_STORAGE_CONNECTION_STRING`) and a read-only
+  SAS for one container for the links (`PAGE_LINK_SAS_TOKEN`: `sr=c`, `sp=r`; refused if it may write, or if it
+  is an account SAS, which could read the raw documents), unless the login is a connection string holding the
+  account key. On the laptop nothing reads `.env`: set them in the shell (`$env:NAME = "..."` in PowerShell);
+  they are checked before anything runs. The pages are deleted after each document.
 - **`--ocr-parts 4`** starts MinerU on the first pages while the rest of the PDF uploads.
 
 ```powershell
@@ -524,7 +542,7 @@ things hold that together:
   by another version or tier is refused. A corpus read in-process by MinerU 3.4.5 is read again first.
 - **The adapter on the pod's volume.** `python -m scripts.served_adapter` downloads the promoted release's adapter,
   refuses one vLLM cannot serve or one trained on another MinerU's text, and prints the copy command and the vLLM
-  flags (`--enable-lora --max-lora-rank R --lora-modules policy-vN=/workspace/adapters/policy-vN`). The routine
+  flags (`--enable-lora --max-lora-rank R --max-loras 1 --lora-modules policy-vN=/workspace/adapters/policy-vN`). The routine
   asks for `policy-vN` and checks at start that vLLM serves it on our base.
 - **Pages leave Azure only encrypted, and briefly.** Model and MinerU URLs must be HTTPS (plain HTTP only to this
   machine); page links are read-only and expire in an hour, and the pages are deleted after each document. Not
@@ -549,7 +567,9 @@ sequence for every tenant, because runs and weights are not kept per tenant. The
   rsLoRA or bias too), its release has no bundle, or it was packaged with another prompt hash or window plan
   (a schema, template or section-map change - so the first cycle on the new canonical schema starts fresh),
   or its eval report is missing or on another yardstick (the set frozen again, or other scoring code: the
-  gate could not compare the two line by line, and would block the cycle only after training it). The reason
+  gate could not compare the two line by line, and would block the cycle only after training it), or the
+  chain's training documents cannot be read, or the corpus would validate on documents the chain trained on
+  (a continuing corpus pins those documents to train). The reason
   is logged and recorded (`fresh_reason`). A release with an old-style name (`release-YYYY.M.N`) is continued
   too. A continued cycle may train with fewer epochs or a lower rate: `continued_training:` in
   `configs/training/unified.yaml` (null = as a fresh run; set it from a measured run). A key the
@@ -639,7 +659,11 @@ test suite is not evidence about extraction quality.
 - **Every page is read, chunk by chunk, never selected pages** - in training and
   in serving, by one window planner (decision 2026-10-19). A window whose pages'
   own text would not fit its call is split into windows that do (decision
-  2026-10-22), and a corpus built with another window plan neither trains nor packages.
+  2026-10-22), and a corpus built with another window plan neither trains nor packages. The plan is
+  version 4 since the QA fixes of 2026-10-24 (no window of shared pages only; a text split shares a page;
+  a split declarations window keeps its lead): the corpus must be rebuilt and the adapter retrained, which
+  the next training set does anyway. The scoring code changed with them too, so a promoted release's eval
+  report is on another yardstick until it is scored again.
 - **No frontier model touches the data.** Drafts come from the self-hosted
   Qwen3-VL only, and no gold trains or scores without a review record.
 - **GPU only.** Every step that runs a model refuses to start without CUDA;

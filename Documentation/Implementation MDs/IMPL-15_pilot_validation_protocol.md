@@ -6,7 +6,7 @@
 >
 > **This spec is executed, not imported.** It is an operational runbook, not a library — nothing else in the repo depends on it. It exists because architecture v1 added §16, which has no home in the module specs.
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §16 (**pilot validation protocol**: 16.1 zero-shot baseline, 16.2 smoke test, 16.3 pilot run, 16.4 exit decision), §0d (the floors the pilot targets come from), §0e (decisions of 2026-10-19), §8 (pilot split ratios), §8b (de-identification), §4c (day-zero bootstrap), §15 (metrics).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §16 (**pilot validation protocol**: 16.1 zero-shot baseline, 16.2 smoke test, 16.3 pilot run, 16.4 exit decision), §0d (the floors the pilot targets come from), §0e (decisions of 2026-10-19), §8 (pilot split ratios), §8b (de-identification), §4c (day-zero bootstrap), §15 (metrics).
 
 ## Goal
 
@@ -234,3 +234,7 @@ This is the **minimum experiment that tests the architecture's generalisation cl
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.

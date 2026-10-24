@@ -4,7 +4,7 @@
 
 > Read `IMPL-00_MASTER_CONTEXT.md` first. Dependencies: all prior specs (01–12).
 >
-> **Architecture refs:** `finetuning-architecture-v2.6.docx` §0e (decisions of 2026-10-19), §13 (**end-to-end pipeline, 11 stages, idempotency, the gate**), §13c (**operator command surface**), §14 (**RunPod: ephemeral training pods vs. persistent serving endpoint**), §12 (every cycle recorded), §17 (extraction routine), §11a (sweep orchestration — deferred).
+> **Architecture refs:** `finetuning-architecture-v2.7.docx` §0e (decisions of 2026-10-19), §13 (**end-to-end pipeline, 11 stages, idempotency, the gate**), §13c (**operator command surface**), §14 (**RunPod: ephemeral training pods vs. persistent serving endpoint**), §12 (every cycle recorded), §17 (extraction routine), §11a (sweep orchestration — deferred).
 
 ## Goal
 
@@ -545,3 +545,12 @@ resumes from the failed step. It never freezes an eval set or packages a release
 - Checkpoint selection (the user's decisions of 2026-10-24: nothing invented, consistent output): guards on printed values left empty and on run-to-run agreement, then the finalists within the guard margin on field match, then the fewest invented values; the finalists' pass is read twice for the agreement guard when there are 2 or more finalists (`selection_run_to_run_check` in `_selection_settings`, on unless the config says false) (§4).
 - The gate's eval reads each document's main mode a second time for `run_to_run_agreement` (`evaluation.run_to_run_check` in `configs/training/unified.yaml`, on) (§2).
 - The scoring code changed, so a cycle continuing a release scored before 2026-10-24 starts from the base (another yardstick); none is promoted yet (§2).
+
+## Changes of 2026-10-24 (QA fixes)
+
+- `plan_corpus` asks `continuation()` and passes the parent chain's training documents to the split (IMPL-05); `stage_training` starts from the base when a reused corpus validates on them.
+- `orchestration.run extract` refuses `--split` without `--corpus`, and `--adapter` with a model other than `base`, before the detach. `scripts/pod_run.sh`: a value set on the caller's command line beats `.env` for every setting `.env`/`.env.example` names, detached runs included (written to an owner-only `<name>.env` beside the log, sourced after `.env`, then deleted; a value equal to the pod's own is not the caller's), and `bash scripts/pod_run.sh env` prints the environment a run would get.
+
+## Changes of 2026-10-24 (architecture v2.7)
+
+- Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
