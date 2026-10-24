@@ -98,7 +98,7 @@ def test_strict_takes_out_a_value_no_page_prints_and_keeps_its_key():
     entry = next(e for e in held.record["not_printed"] if e["path"] == "policy.policy_number")
     assert entry == {"path": "policy.policy_number", "raw": "PA-2026-9999", "pages": [1]}
     assert held.record["mode"] == "strict" and held.record["removed"] is True
-    assert set(held.record) == {"mode", "checked", "unchecked", "not_printed", "removed"}
+    assert set(held.record) == {"mode", "checked", "unchecked", "not_printed", "removed", "unread_page"}
 
 
 def test_flag_mode_keeps_the_value_and_flags_it(flag_mode):
@@ -121,24 +121,28 @@ def test_an_extra_field_no_page_prints_leaves_its_list():
     assert [entry["label"] for entry in held.extraction["additional_fields"]] == ["Agency Code"]
     assert held.spans["additional_fields[0].value"] == "span:additional_fields[1].value"
     assert "additional_fields[1].value" not in held.spans
-    assert "additional_fields[0].value:not_printed_removed" in held.flags
+    # Named by its place in the answer, marked: additional_fields[0] is the Agency Code now.
+    assert "additional_fields[#0].value:not_printed_removed" in held.flags
+    assert "additional_fields[0].value:not_printed_removed" not in held.flags
+    assert held.record["not_printed"][-1]["path"] == "additional_fields[#0].value"
 
 
-def test_a_row_with_nothing_printed_goes_and_the_rows_after_it_move_up():
+def test_a_row_with_nothing_printed_goes_and_the_rows_after_it_move_up_keeping_their_ids():
     held = hold_to_printed(_answer(), _spans(), PAGES)
     vehicles = held.extraction["vehicles"]
 
-    # The invented vehicle is gone; the third is the second now, numbered so.
+    # The invented vehicle is gone; the third is the second now, its id its own.
     assert [v["vin"]["raw"] for v in vehicles] == ["1HGCV1F30KA000001", "2T3P1RFV5MC000002"]
-    assert [v["unit_id"] for v in vehicles] == ["veh_1", "veh_2"]
-    # A link to it is dropped; the link to the vehicle that moved follows it.
+    assert [v["unit_id"] for v in vehicles] == ["veh_1", "veh_3"]
+    # A link to it is dropped, and flagged; the link to the vehicle that moved is as it was.
     first, second = held.extraction["coverages"]
-    assert "applies_to" not in first and second["applies_to"] == ["veh_2"]
+    assert "applies_to" not in first and second["applies_to"] == ["veh_3"]
+    assert "coverages[0].applies_to:link_to_removed_row" in held.flags
     # Its spans go, and the next row's follow it up.
     assert held.spans["vehicles[1].vin"] == "span:vehicles[2].vin"
     assert held.spans["vehicles[1].year"] == "span:vehicles[2].year"
     assert "vehicles[2].vin" not in held.spans
-    assert {"vehicles[1].vin:not_printed_removed", "vehicles[1].make:not_printed_removed"} <= set(held.flags)
+    assert {"vehicles[#1].vin:not_printed_removed", "vehicles[#1].make:not_printed_removed"} <= set(held.flags)
 
 
 def test_a_row_keeps_what_is_printed_and_loses_what_is_not():
@@ -150,12 +154,13 @@ def test_a_row_keeps_what_is_printed_and_loses_what_is_not():
     assert coverage["coverage_name"]["raw"] == "Collision" and coverage["deductibles"] == []
     assert "coverages[1].deductibles[0].amount" not in held.spans
     assert held.spans["coverages[1].coverage_name"] == "span:coverages[1].coverage_name"
+    assert "coverages[1].deductibles[#0].amount:not_printed_removed" in held.flags
 
 
 def test_unchecked_values_are_kept_and_counted():
     answer = {
         "policy": {"rating_state": _fv("NY"), "policy_number": _fv("PA-2026-0042"),
-                   "subject_to_audit": _fv(True)},
+                   "subject_to_audit": _fv(True), "auditable": _fv("No")},
         # A page it cites has no text: the scan may print it where OCR read nothing.
         "premium": {"total": _fv("$9,999.00", 3)},
         # A row whose only value found nowhere sits beside one too short to look for.
@@ -163,29 +168,155 @@ def test_unchecked_values_are_kept_and_counted():
     }
     held = hold_to_printed(answer, {}, {**PAGES, 3: ""})
 
-    assert held.extraction["policy"]["rating_state"]["raw"] == "NY"
+    assert held.extraction["policy"]["rating_state"]["raw"] == "NY"     # two characters: found as a token
     assert held.extraction["policy"]["subject_to_audit"]["raw"] is True
+    assert held.extraction["policy"]["auditable"]["raw"] == "No"
     assert held.extraction["premium"]["total"]["raw"] == "$9,999.00"
     assert held.extraction["vehicles"][0]["vehicle_number"]["raw"] == "7"
     assert held.extraction["vehicles"][0]["vin"] is None
-    assert held.record["unchecked"] == 4 and held.record["checked"] == 2
+    assert held.record["unchecked"] == 4 and held.record["checked"] == 3 and held.record["unread_page"] == 1
+    # Kept on an unread page, never silently.
+    assert "premium.total:unverified_unread_page" in held.flags
 
 
-def test_system_fields_and_values_with_nothing_printed_are_not_checked():
+def test_system_fields_are_not_checked():
     answer = {
         "document": {"page_count": _fv("99"), "title": _fv("Personal Auto Policy Declarations Copy")},
         "policy": {"is_package": _fv("Package Policy Form 1234")},
-        "named_insured": {"doing_business_as": {"raw": None, "parsed": "JR Hauling", "page_ref": [1]},
-                          "primary_name": {"raw": "", "parsed": "JANE", "page_ref": [1]}},
     }
     held = hold_to_printed(answer, {}, PAGES)
 
     assert held.extraction["document"]["page_count"]["raw"] == "99"
     assert held.extraction["policy"]["is_package"]["raw"] == "Package Policy Form 1234"
-    assert held.extraction["named_insured"]["doing_business_as"]["parsed"] == "JR Hauling"
-    assert held.extraction["named_insured"]["primary_name"]["parsed"] == "JANE"
     assert held.extraction["document"]["title"] is None                 # the one value checked
     assert held.record["checked"] == 1 and held.record["unchecked"] == 0
+
+
+def test_a_parsed_value_behind_a_blank_raw_is_looked_for_too():
+    """No parsed value is served unchecked: with raw empty or a placeholder, the
+    forms parsed is printed in are looked for."""
+    answer = {
+        "named_insured": {"doing_business_as": {"raw": None, "parsed": "JR Hauling", "page_ref": [1]},
+                          "primary_name": {"raw": "", "parsed": "JANE", "page_ref": [1]}},
+        "carrier": {"name": {"raw": "-", "parsed": "Granite Mutual Insurance Company", "page_ref": [1]}},
+        "policy": {"policy_number": {"raw": "", "parsed": "PA-2026-9999", "page_ref": [1]},
+                   "effective_date": {"raw": "", "parsed": "2026-04-01", "page_ref": [1]},
+                   "expiration_date": {"raw": "--", "parsed": "2027-04-01", "page_ref": [1]},
+                   "subject_to_audit": {"raw": "", "parsed": True, "page_ref": [1]},
+                   "auditable": {"raw": "-", "parsed": None, "page_ref": [1]}},
+    }
+    held = hold_to_printed(answer, {}, PAGES, lob="personal_auto")
+
+    assert held.extraction["named_insured"] == {"doing_business_as": None, "primary_name": None}
+    assert held.extraction["policy"]["policy_number"] is None
+    assert held.extraction["policy"]["expiration_date"] is None          # no page prints 04/01/2027
+    # Printed in another form of the same value: kept.
+    assert held.extraction["carrier"]["name"]["parsed"] == "Granite Mutual Insurance Company"
+    assert held.extraction["policy"]["effective_date"]["parsed"] == "2026-04-01"   # printed 04/01/2026
+    # A reading, and a dash with nothing behind it: nothing to look for that a page settles.
+    assert held.extraction["policy"]["subject_to_audit"]["parsed"] is True
+    assert held.extraction["policy"]["auditable"]["raw"] == "-"
+    listed = {entry["path"]: entry["raw"] for entry in held.record["not_printed"]}
+    assert listed == {"named_insured.doing_business_as": "JR Hauling", "named_insured.primary_name": "JANE",
+                      "policy.policy_number": "PA-2026-9999", "policy.expiration_date": "04/01/2027"}
+    assert held.record["checked"] == 6 and held.record["unchecked"] == 1
+
+
+def test_a_short_value_no_page_prints_is_taken_out():
+    answer = {"policy": {"rating_state": _fv("NJ"), "state": _fv("NY")},
+              "coverages": [{"coverage_id": "cov_1", "coverage_code": "COLL",
+                             "deductibles": [{"deductible_type": "flat", "amount": _fv("$50", 2)},
+                                             {"deductible_type": "flat", "amount": _fv("$500", 2)}]}]}
+    held = hold_to_printed(answer, {}, PAGES)
+
+    assert held.extraction["policy"] == {"rating_state": None, "state": _fv("NY")}
+    assert [d["amount"]["raw"] for d in held.extraction["coverages"][0]["deductibles"]] == ["$500"]
+    assert {"policy.rating_state:not_printed_removed",
+            "coverages[0].deductibles[#0].amount:not_printed_removed"} <= set(held.flags)
+
+
+# --------------------------------------------------------------------------
+# A blank page among those a value cites (the rule in the module docstring)
+# --------------------------------------------------------------------------
+
+
+BLANK_3 = {**PAGES, 3: ""}
+
+
+@pytest.mark.parametrize("cited", [[1], [1, 2], [9], []])
+def test_printed_nowhere_and_every_cited_page_read_is_taken_out(cited):
+    """Rule 3: on no page with text, and every page it cites has text (or is no
+    page of the document, or it cites none): printed nowhere."""
+    answer = {"carrier": {"name": {"raw": "Acme Phantom Insurance Co", "parsed": "x", "page_ref": cited}}}
+    held = hold_to_printed(answer, {}, BLANK_3)
+
+    assert held.extraction["carrier"]["name"] is None
+    assert held.flags == ["carrier.name:not_printed_removed"]
+    assert held.record["checked"] == 1 and held.record["unread_page"] == 0
+
+
+@pytest.mark.parametrize("cited", [[3], [1, 3], [2, 3]])
+def test_printed_on_no_page_with_text_while_a_cited_page_has_none_is_kept_and_flagged(cited):
+    """Rule 4: a page it cites could not be read, and may print it: kept,
+    flagged, and counted unchecked - in neither the checked count nor the
+    not_printed list, the invented rate's two terms."""
+    answer = {"carrier": {"name": {"raw": "Acme Phantom Insurance Co", "parsed": "x", "page_ref": cited}}}
+    held = hold_to_printed(answer, {}, BLANK_3)
+
+    assert held.extraction["carrier"]["name"]["raw"] == "Acme Phantom Insurance Co"
+    assert held.flags == ["carrier.name:unverified_unread_page"]
+    assert held.record == {"mode": "strict", "checked": 0, "unchecked": 1, "not_printed": [], "removed": True,
+                           "unread_page": 1}
+
+
+def test_printed_on_another_page_than_a_blank_cited_one_is_printed():
+    answer = {"carrier": {"name": _fv("Granite Mutual Insurance Company", 3)}}
+    held = hold_to_printed(answer, {}, BLANK_3)
+    assert held.flags == [] and held.record["checked"] == 1 and held.record["unread_page"] == 0
+
+
+def test_flag_mode_flags_an_unread_page_too(flag_mode):
+    answer = {"carrier": {"name": {"raw": "Acme Phantom Insurance Co", "parsed": "x", "page_ref": [1, 3]}}}
+    held = hold_to_printed(answer, {}, BLANK_3)
+    assert held.flags == ["carrier.name:unverified_unread_page"] and held.record["not_printed"] == []
+
+
+# --------------------------------------------------------------------------
+# A flag never names a served path that holds another value
+# --------------------------------------------------------------------------
+
+
+def _served_at(tree, path):
+    try:
+        return printed_values._at(tree, path)
+    except (KeyError, IndexError, TypeError):
+        return KeyError
+
+
+def test_no_flag_names_a_served_path_holding_another_value():
+    """M9: the rows after one taken out move up; a flag on a value taken out
+    with its row names it by its place in the answer, marked, never by the
+    served path the next row now has."""
+    answer = _answer()
+    # The first vehicle invented too: the third is served as vehicles[0].
+    answer["vehicles"][0] = {"unit_id": "veh_1", "vin": _fv("ZZZZZ000000000000", 2), "make": _fv("Rivian", 2)}
+    held = hold_to_printed(answer, {}, PAGES)
+    served = held.extraction
+
+    assert [v["unit_id"] for v in served["vehicles"]] == ["veh_3"]           # its id its own
+    assert sorted(flag for flag in held.flags if flag.startswith("vehicles")) == [
+        "vehicles[#0].make:not_printed_removed", "vehicles[#0].vin:not_printed_removed",
+        "vehicles[#1].make:not_printed_removed", "vehicles[#1].vin:not_printed_removed"]
+    assert {entry["path"] for entry in held.record["not_printed"] if entry["path"].startswith("vehicles")} == {
+        "vehicles[#0].vin", "vehicles[#0].make", "vehicles[#1].vin", "vehicles[#1].make"}
+    # A flag on a plain path names a value served there: a null where one was taken out.
+    for flag in held.flags:
+        path, _, kind = flag.rpartition(":")
+        if kind == "not_printed_removed" and "[#" not in path:
+            assert _served_at(served, path) is None, flag
+    # The link to a vehicle taken out goes, flagged; the one to the vehicle left is as merged.
+    assert "applies_to" not in served["coverages"][0] and served["coverages"][1]["applies_to"] == ["veh_3"]
+    assert "coverages[0].applies_to:link_to_removed_row" in held.flags
 
 
 @pytest.mark.parametrize("texts", [None, {}, {1: "", 2: "   \n"}])

@@ -33,6 +33,23 @@ from typing import Any
 
 from common.normalize import format_output_date, infer_field_kind
 
+
+def page_numbers(refs: Any) -> list[int]:
+    """The pages a ``page_ref`` names, in its order: whole numbers, written as
+    numbers or as digits ("12"). Anything else ("p1", a range, a bool) names no
+    page. A label or an answer citing one is not a page any code here can
+    place: the value is then one with no recorded page, never a crash."""
+    out: list[int] = []
+    for ref in refs if isinstance(refs, list) else ():
+        if isinstance(ref, bool):
+            continue
+        if isinstance(ref, int):
+            out.append(ref)
+        elif isinstance(ref, str) and ref.strip().isdigit():
+            out.append(int(ref.strip()))
+    return out
+
+
 #: The keys of the client's ``FieldValue`` envelope.
 FIELD_VALUE_KEYS: frozenset[str] = frozenset({"raw", "parsed", "confidence", "page_ref", "flagged"})
 
@@ -251,7 +268,7 @@ def _slim(node: Any, path: str) -> Any:
         return {
             "raw": node.get("raw"),
             "parsed": _output_value(path, node.get("parsed")),
-            "page_ref": [int(p) for p in (node.get("page_ref") or [])],
+            "page_ref": page_numbers(node.get("page_ref")),
         }
     if isinstance(node, dict):
         out = {}
@@ -322,7 +339,7 @@ def _slim_against(node: Any, schema: dict[str, Any]) -> Any:
             if name == "DateValue" and parsed is not None:
                 parsed = format_output_date(parsed) or parsed
             return {"raw": value.get("raw"), "parsed": parsed,
-                    "page_ref": [int(p) for p in (value.get("page_ref") or [])]}
+                    "page_ref": page_numbers(value.get("page_ref"))}
         if isinstance(value, dict):
             props = resolved.get("properties") or {}
             out = {}
@@ -684,7 +701,7 @@ def _envelope(node: Any, path: str, confidence: Mapping[str, tuple[float, bool]]
             "confidence": {"score": round(float(score), 4), "source": CONFIDENCE_SOURCE},
             # Once each, in order: the client's schema holds page_ref to unique
             # items, and a value a merge joined across windows can cite one twice.
-            "page_ref": sorted({int(p) for p in (node.get("page_ref") or [])}),
+            "page_ref": sorted(set(page_numbers(node.get("page_ref")))),
             "flagged": bool(flagged),
         }
     if isinstance(node, dict):

@@ -74,7 +74,8 @@ def oracle(source_id: str, label: dict, lob: Any, page_count: int,
     # As the dataset build does: pages placed from the OCR text, when there is one.
     placed = with_inferred_pages(label, ocr_pages, report,
                                  sections=multi_window_sections(lob, plans))
-    windows = [PolicyWindow(group=p.group, pages=list(p.pages),
+    # leads as serving merges them: a split declarations window's lead piece first.
+    windows = [PolicyWindow(group=p.group, pages=list(p.pages), leads=p.leads,
                             extraction=window_target(placed, lob, p, report)) for p in plans]
     merged = merge_policy_windows(windows, lob=lob)
     result.windows, result.conflicts = len(plans), len(merged.conflicts)

@@ -38,6 +38,7 @@ attribute later is the thing actually worth preventing.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -257,6 +258,12 @@ class GateError(RuntimeError):
     """Raised when a gate decision cannot be made."""
 
 
+def _finite(value: Any) -> bool:
+    """A real, finite number (a bool is not one: it is a reading, not a rate)."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
 @dataclass
 class MetricVerdict:
     """One metric's outcome: its floor, and its movement against the baseline."""
@@ -279,9 +286,23 @@ class MetricVerdict:
         return self.candidate is None
 
     @property
+    def not_a_number(self) -> bool:
+        """A value is there, but it is no finite number: NaN, an infinity, or
+        not a number at all.
+
+        Kept apart from ``unmeasured`` because it fails differently: NaN loses
+        every comparison, so ``candidate <= floor`` and ``signed > -delta`` are
+        both False - and with no floor and no baseline (a first release's
+        hallucination_rate or run_to_run_agreement) nothing compared it, and it
+        passed. It blocks instead (fails closed): a rate that came out NaN was
+        divided by nothing or broke on the way, and says nothing either way.
+        """
+        return self.candidate is not None and not _finite(self.candidate)
+
+    @property
     def meets_floor(self) -> bool:
         """Whether the absolute floor is met. Applies with or without a baseline."""
-        if self.candidate is None:
+        if self.candidate is None or self.not_a_number:
             return False
         if self.floor is None:
             return True
@@ -299,6 +320,8 @@ class MetricVerdict:
         point comparison against δ, which is weaker than a bootstrap and is
         recorded as such in ``basis``.
         """
+        if self.not_a_number:
+            return False
         if self.current is None or self.candidate is None:
             return True
         if self.interval is not None:
@@ -326,6 +349,8 @@ class MetricVerdict:
             # could produce it" is a fact about coverage, "it was not measured"
             # is a missing result.
             return f"{self.name}: {'NOT APPLICABLE' if not self.applicable else 'NOT MEASURED'}"
+        if self.not_a_number:
+            return f"{self.name}: NOT A NUMBER ({self.candidate!r})"
         parts = [f"{self.name}: {self.candidate:.4f}"]
         if self.floor is not None:
             parts.append(f"floor {self.floor:.4f} {'✓' if self.meets_floor else '✗'}")
@@ -636,6 +661,16 @@ def promotion_gate(
                     "%s is not applicable to this run — nothing it covers produces it. That is "
                     "not a pass, it is a statement about what was scored.", name,
                 )
+            continue
+        if verdict.not_a_number:
+            # Before the floor and non-inferiority, which NaN passes by losing
+            # every comparison when there is nothing to compare it with.
+            _block(result, name,
+                   f"{name} is {verdict.candidate!r}, not a finite number. NaN loses every "
+                   "comparison, so with no floor and no baseline it was passing unchecked; a "
+                   "metric that came out as no number was not measured on anything, and fails "
+                   "closed. Find why the scoring produced it (a rate divided by nothing, a "
+                   "broken reading) and score again.")
             continue
         if not verdict.meets_floor:
             _block(result, name,

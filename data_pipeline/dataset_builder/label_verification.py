@@ -69,7 +69,7 @@ def verified_label(
 
     A copy when anything changes; ``label`` itself otherwise.
     """
-    from common.canonical import is_field_value
+    from common.canonical import is_field_value, page_numbers
     from data_pipeline.audit import MIN_CHECKABLE_CHARS, _appears, _Page, normalise
     from data_pipeline.ingestion.label_rules import under_edition_rule
 
@@ -98,8 +98,10 @@ def verified_label(
         if len(value) < MIN_CHECKABLE_CHARS:
             report.too_short += 1
             continue
-        found = [number for number, page in enumerate(pages, start=1) if _appears(value, page)]
-        cited = {int(p) for p in node.get("page_ref") or []}
+        # The raw value, not its normalised copy: normalised, a code's pieces
+        # are words, found apart (common.grounding.appears_on).
+        found = [number for number, page in enumerate(pages, start=1) if _appears(str(raw), page)]
+        cited = set(page_numbers(node.get("page_ref")))
         if cited & set(found) or (not cited and found):
             # No page cited: placement is with_inferred_pages' decision.
             report.kept += 1
@@ -129,6 +131,61 @@ def verified_label(
         elif isinstance(parent, list) and isinstance(steps[-1], int) and steps[-1] < len(parent):
             parent.pop(steps[-1])
     return out
+
+
+def paths_after_removal(paths: Sequence[str], removed: Sequence[str]) -> list[str]:
+    """``paths``, recorded against a label, as they read on that label once the
+    values at ``removed`` (recorded against the same label) are gone - as
+    :func:`verified_label` removes them, its ``report.dropped``.
+
+    Removing a list member renumbers every member after it, so a path recorded
+    against the original gold (``unprinted_values``, from prepare_bundles)
+    named another member on the verified label, or none: an unprinted
+    ``additional_names[2]`` after ``[1]`` was dropped resolved to nothing, and
+    that value no page prints was taught; an unprinted ``[1]`` resolved to
+    what had been ``[2]``, and held a printed value's window out. Each index
+    past a removed member of its own list moves down one per removal; a path at
+    or under a removed value is left out, its value being gone.
+    """
+    gone = [_steps(path) for path in removed]
+    out: list[str] = []
+    for path in paths:
+        steps = _steps(path)
+        if any(steps[:len(r)] == r for r in gone):
+            continue
+        moved = list(steps)
+        for r in gone:
+            depth = len(r) - 1
+            # Compared in the original numbering: every removal was recorded in it.
+            if (r and isinstance(r[-1], int) and len(steps) > depth and steps[:depth] == r[:-1]
+                    and isinstance(steps[depth], int) and steps[depth] > r[-1]):
+                moved[depth] -= 1
+        out.append(_path(moved))
+    return out
+
+
+def without_paths(label: dict[str, Any], paths: Sequence[str]) -> dict[str, Any]:
+    """A copy of ``label`` without the values at ``paths`` - list members
+    included, the highest index first so no removal renumbers another still to
+    be made. A path that leads nowhere is skipped."""
+    out = copy.deepcopy(label)
+    for steps in sorted((_steps(path) for path in paths), key=_removal_order, reverse=True):
+        if not steps:
+            continue
+        parent = _at(out, steps[:-1])
+        if isinstance(parent, dict):
+            parent.pop(steps[-1], None)
+        elif isinstance(parent, list) and isinstance(steps[-1], int) and steps[-1] < len(parent):
+            parent.pop(steps[-1])
+    return out
+
+
+def _path(steps: Sequence[Any]) -> str:
+    """The path string :func:`_steps` reads: ``coverages[2].limit``."""
+    text = ""
+    for step in steps:
+        text += f"[{step}]" if isinstance(step, int) else (f".{step}" if text else str(step))
+    return text
 
 
 def _steps(path: str) -> list[Any]:

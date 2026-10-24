@@ -918,19 +918,29 @@ def plan_corpus(ctx: StageContext) -> CorpusPlan:
             raise PipelineError("every labeled document is in the frozen eval set or its families")
 
     by_type = group_records(documents)
+    # A cycle that will continue the promoted adapter (stage_training asks the
+    # same question): every document its chain trained on stays in train, or
+    # the continued adapter is validated on what it memorised. continuation()
+    # refuses to continue a chain whose documents cannot be read.
+    parent, _fresh = continuation(ctx)
+    continues = ADAPTER.run_id(parent) if parent is not None else None
+    trained = lineage_training_documents(ctx, continues)[0] if continues else set()
     if delivered:
         from data_pipeline.dataset_builder.split_groups import SplitError, assign_delivered_splits
 
         try:
             assignment = assign_delivered_splits(
-                by_type, delivered_split_of(documents), seed=ctx.seed, with_test=not frozen
+                by_type, delivered_split_of(documents), seed=ctx.seed, with_test=not frozen,
+                trained=trained,
             )
         except SplitError as exc:
             raise PipelineError(str(exc)) from exc
         assignment.held_out_source_ids.extend(delivered_held_out_ids(documents, assignment))
         log.info("using the delivered split: %s", assignment.counts_by_doc_type)
     else:
-        assignment = assign_group_splits(by_type, seed=ctx.seed, with_test=not frozen)
+        assignment = assign_group_splits(by_type, seed=ctx.seed, with_test=not frozen,
+                                         trained=trained)
+    assignment.continues = continues
     if frozen:
         # The test set is the frozen one; so are the carriers it holds out. Recorded
         # so the run manifest and model card say what the gate's documents hold out.
@@ -1241,7 +1251,86 @@ def continuation(ctx: StageContext) -> tuple[str | None, str | None]:
     if different:
         return None, (f"{run_id}'s eval report is on another yardstick, so the gate could not "
                       f"compare this cycle with it line by line: {different}")
+    _trained, unread = lineage_training_documents(ctx, run_id)
+    if unread:
+        return None, (f"the documents {run_id}'s chain of runs trained on cannot be read ({unread}), "
+                      "so the split could not keep them out of validation, where the continued "
+                      "adapter would be scored on documents it memorised")
     return parent, None
+
+
+def lineage_training_documents(ctx: StageContext, run_id: str) -> tuple[set[str], str | None]:
+    """The source ids ``run_id`` and every run it continued trained on, down
+    ``parent_run_id`` to the run from the base: ``(ids, None)``, or ``(the ids
+    read so far, why the rest cannot be read)``.
+
+    Read from each run's corpus (``source_ids_by_split["train"]``): a document
+    in the train split of any corpus on the chain is one the continued adapter
+    has seen, so a cycle continuing it must not validate on it: checkpoint
+    selection and the calibration fits would read a memorised document as an
+    unseen one (the split pins it to train,
+    ``split_groups.assign_group_splits(trained=...)``). The
+    corpus's train split, not the narrower train view: a document the view
+    left out is pinned too, which costs one validation document at most and
+    never lets a seen one through.
+
+    A run whose manifest or corpus manifest cannot be read, or one continued
+    by hand from a directory (``continued_from`` with no parent run), leaves the
+    chain's documents unknown: absent evidence is not a clean split.
+    """
+    from registry_utils.query_registry import RegistryQueryError
+    from registry_utils.query_registry import get as get_manifest
+
+    trained: set[str] = set()
+    seen: set[str] = set()
+    current: str | None = run_id
+    while current:
+        if current in seen:
+            return trained, f"the chain of runs loops at {current}"
+        seen.add(current)
+        try:
+            manifest = get_manifest(current, ctx.client)
+        except (RegistryQueryError, KeyError, FileNotFoundError, ValueError) as exc:
+            return trained, f"the run manifest of {current} cannot be read ({type(exc).__name__})"
+        key = paths.corpus_manifest(manifest.dependencies.corpus_version, ctx.tenant_id)
+        try:
+            corpus = ctx.client.read_json(key) if ctx.client.exists(key) else None
+        except ValueError as exc:  # not JSON
+            return trained, f"{current}'s corpus manifest at {key} cannot be read ({type(exc).__name__})"
+        by_split = (corpus or {}).get("source_ids_by_split")
+        if not isinstance(by_split, dict):
+            return trained, f"{current}'s corpus manifest at {key} does not list its train documents"
+        trained.update(str(s) for s in by_split.get("train") or [])
+        if manifest.continued_from and not manifest.parent_run_id:
+            return trained, (f"{current} continued {manifest.continued_from}, a directory, so what "
+                             "the weights it started from trained on is not recorded")
+        current = manifest.parent_run_id
+    return trained, None
+
+
+def corpus_validates_on_trained(ctx: StageContext, corpus_manifest: dict[str, Any],
+                                parent: str) -> str | None:
+    """Why this corpus cannot be trained by a cycle continuing ``parent``: its
+    val or test split holds documents ``parent``'s chain trained on, or that
+    chain's documents cannot be read. ``None`` when it can.
+
+    A corpus is built for one continuation (``plan_corpus`` pins what that
+    chain trained on), but one reused with ``--corpus-version``, or built while
+    another release was promoted, was not; continued on it, the adapter would
+    pick its checkpoint and fit its calibration on documents it memorised.
+    """
+    trained, unread = lineage_training_documents(ctx, ADAPTER.run_id(parent))
+    if unread:
+        return f"the documents {ADAPTER.run_id(parent)}'s chain trained on cannot be read ({unread})"
+    by_split = corpus_manifest.get("source_ids_by_split") or {}
+    seen = {split: sorted(trained & set(by_split.get(split) or [])) for split in ("val", "test")}
+    seen = {split: ids for split, ids in seen.items() if ids}
+    if not seen:
+        return None
+    shown = "; ".join(f"{split}: {len(ids)} ({', '.join(ids[:3])})" for split, ids in seen.items())
+    return (f"corpus {ctx.corpus} holds documents {ADAPTER.run_id(parent)}'s chain trained on outside "
+            f"train ({shown}): the continued adapter would select its checkpoint and fit "
+            "calibration on documents it memorised. Rebuild the corpus in this cycle to continue")
 
 
 def stage_parent_adapter(ctx: StageContext, parent: str) -> str:
@@ -1275,6 +1364,10 @@ def stage_training(ctx: StageContext) -> StageResult:
     _assert_corpus_pins(corpus_manifest, f"training run {ctx.out_version}")
     # Continue the promoted adapter, or start from the base, and why.
     parent, fresh_reason = continuation(ctx)
+    if parent is not None and (held := corpus_validates_on_trained(ctx, corpus_manifest, parent)):
+        # Built for another chain (or reused): from the base, the documents in
+        # val are unseen again, so the corpus is sound for a fresh run.
+        parent, fresh_reason = None, held
     continue_from = parent_run_id = None
     if parent is None:
         log.info("%s starts from the base model: %s", ctx.out_version, fresh_reason)
@@ -1510,7 +1603,14 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
                                        client=ctx.client)
         _record_pushed(ctx, str(report.selected))
         log.info("pushed the selected adapter %s -> %s", report.selected, blob_dir)
-    detail = f"selected {report.selected} (margin {report.margin:+.4f} field F1)"
+    # The margin is the SELECTED checkpoint's on the sample (negative when whole
+    # documents or the full split chose one the sample ranks behind), so the
+    # detail says which decision overrode the sample rather than reading as a lead.
+    overrode = ("whole validation documents" if (report.document_choice or {}).get("changed_choice")
+                else "the full validation split" if (report.tie_break or {}).get("changed_choice")
+                else None)
+    detail = (f"selected {report.selected} (margin {report.margin:+.4f} field F1 on the validation "
+              f"sample{f'; chosen on {overrode} over the sample leader' if overrode else ''})")
     if report.loss_and_f1_disagreed:
         detail += f"; validation loss would have shipped {report.best_loss_checkpoint}"
     from evaluation.checkpoint_eval import generation_cost
@@ -1599,15 +1699,20 @@ def eval_report_metrics(ctx: StageContext) -> dict[str, Any]:
     supposed to come from — after asserting the eval set does not overlap the
     corpus. If an eval report for this version already exists (a resumed run, or
     a scoring pass done separately), it is read rather than recomputed - when it
-    records that it was scored on this tenant's frozen set. The report path
-    names no tenant, so another tenant's report there, or one that does not say
-    whose set it was scored on, is scored again as if it were absent.
+    records that it was scored on this tenant's frozen set as it stands now, by
+    the scoring code running now (``run_eval.EVAL_SET_IDENTITY``). The report
+    path names no tenant, so another tenant's report there, or one that does not
+    say whose set it was scored on, is scored again as if it were absent. So is
+    one scored before the set was frozen again (corrected golds: one source id
+    may now be another document or another gold) or under other scoring code
+    (other label rules or scorers): its numbers are another yardstick's, and
+    the gate would pass on them while recording the current set beside them.
 
     Wiring this in is what makes ``finetune`` completable: the CLI supplied no
     provider at all, so every real run trained a Foundation and three adapters on
     an A100 and then aborted at the gate.
     """
-    from evaluation.run_eval import assert_eval_set_disjoint
+    from evaluation.run_eval import assert_eval_set_disjoint, eval_set_record
 
     assert_eval_set_disjoint(ctx.client, ctx.corpus, ctx.tenant_id)
 
@@ -1640,6 +1745,8 @@ def eval_report_metrics(ctx: StageContext) -> dict[str, Any]:
         elif recorded["tenant_id"] != tenant:
             not_reused = (f"it was scored on tenant {recorded['tenant_id']!r}'s frozen set, and this "
                           f"candidate gates tenant {tenant!r}")
+        elif stale := _other_yardstick(recorded, eval_set_record(ctx.client, ctx.tenant_id, [])):
+            not_reused = stale
         elif calibrators is not None and report.get("calibrated") is not True:
             # Scored before this release had calibrators: every field was
             # flagged, so auto_accept_error_rate read a trivial 0.0.
@@ -1686,6 +1793,37 @@ def eval_report_metrics(ctx: StageContext) -> dict[str, Any]:
     finally:
         release_model(model)
     return dict(report.get("gate_metrics") or {})
+
+
+def _other_yardstick(recorded: dict[str, Any], current: dict[str, Any]) -> str | None:
+    """Why an eval report's ``eval_set`` (``recorded``) is not the yardstick the
+    gate holds now (``current``, ``run_eval.eval_set_record`` of the set and the
+    code as they stand); ``None`` when it is.
+
+    Compared field by field rather than through ``yardstick_difference``, which
+    compares two releases' reports and would call this one "the promoted
+    release". The tenant is checked by the caller. A report that records no
+    freeze or no fingerprint (written before reports recorded them) cannot be
+    shown to be on today's yardstick, so it is not.
+    """
+    then = (recorded.get("frozen_at"), recorded.get("frozen_from_corpus"))
+    now = (current.get("frozen_at"), current.get("frozen_from_corpus"))
+    if not all(then):
+        return ("it does not record which freeze of the eval set it was scored on (written before "
+                "reports recorded it), so it cannot be shown to be scored on the set as it stands")
+    if then != now and not all(now):
+        return (f"it was scored on the set frozen {then[0]} from {then[1]}, and no set is frozen "
+                "now: what it was scored on is not the gate's yardstick")
+    if then != now:
+        return (f"it was scored on the set frozen {then[0]} from {then[1]}, and the gate holds the "
+                f"set frozen {now[0]} from {now[1]}: the set was frozen again (corrected golds), so "
+                "one source id may be another document or another gold")
+    if recorded.get("scoring_fingerprint") != current.get("scoring_fingerprint"):
+        return (f"it was scored by other scoring code (fingerprint "
+                f"{recorded.get('scoring_fingerprint') or 'unrecorded'}, the code now "
+                f"{current.get('scoring_fingerprint')}): other label rules, label verification or "
+                "scorers read and score the same gold differently")
+    return None
 
 
 def release_calibration(ctx: StageContext, fmt: str) -> tuple[Any, Any]:

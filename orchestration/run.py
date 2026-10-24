@@ -8,7 +8,8 @@ the next version number, which names its run, adapter and release::
     python -m orchestration.run package  --version v3              # stages 7-9 of that version
     python -m orchestration.run promote  --version v2 --by "Name"  # a rollback to v2
     python -m orchestration.run versions                           # the registry, per version
-    python -m orchestration.run extract  --model base --input testing/test_data/
+    python -m orchestration.run extract  --model v2 --split test --corpus v1
+    python -m orchestration.run extract  --model base --adapter ./checkpoint-400 --source-ids policy_0001
 
 A fresh ``finetune`` or ``all`` takes the next version itself; ``--version``
 names one only to resume a cycle (``--from-stage``) or rerun one that failed.
@@ -384,7 +385,8 @@ def flag_problem(args: argparse.Namespace) -> str | None:
     ``--fixes-defect`` or ``--override-*`` surfaced inside tmux with the
     operator's command already exited 0, and off the pod as a traceback.
     ``--fixes-defect`` and the written override are read here exactly as
-    ``build_context`` reads them.
+    ``build_context`` reads them; ``extract``'s flags as
+    ``testing.run_extraction`` refuses them.
     """
     if args.command == "freeze-eval-set":
         marks = [flag for flag, given in (("--mark-held-out", args.mark_held_out),
@@ -401,6 +403,14 @@ def flag_problem(args: argparse.Namespace) -> str | None:
 
         if not is_named_person(args.promoted_by):
             return "promote --by must name the person accountable for it, not a system identity"
+        return None
+    if args.command == "extract":
+        # testing.run_extraction refuses these too, but only once it runs: inside
+        # tmux on the pod, with this command already exited 0. Its words, here.
+        if args.split and not args.corpus:
+            return "extract --split needs --corpus"
+        if args.adapter and args.model != "base":
+            return "extract --adapter applies a LoRA to the base model: use --model base with it"
         return None
     if args.command not in ("finetune", "package", "all"):
         return None

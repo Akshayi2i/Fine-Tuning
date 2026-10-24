@@ -406,14 +406,17 @@ def process_document(
     """OCR and render one document into ``processed/``.
 
     Idempotent: skips when output already exists **and** the source checksum,
-    MinerU version, and device all still match. A change to any of the three
-    forces reprocessing, because each one changes the input distribution the
-    model was trained to arbitrate against.
+    MinerU version, and device all still match - and, read by a served MinerU,
+    its tier. A change to any of them forces reprocessing, because each one
+    changes the input distribution the model was trained to arbitrate against.
     """
     # A served MinerU says what it is (the pin it checks every task against);
     # the in-process one is the version installed here.
     env = (engine.environment() if hasattr(engine, "environment")
            else current_environment(device, strict=device == "cuda"))
+    # A served MinerU's tier is part of its pin (configs/shared/ocr.yaml): a
+    # reading at another tier was made by other models, another distribution.
+    tier = (engine.meta() if hasattr(engine, "meta") else {}).get("mineru_tier")
     cap = resolution_cap_px()
     meta_key = paths.ocr_meta(doc_type, source_id, tenant_id)
 
@@ -430,6 +433,7 @@ def process_document(
             and existing.get("mineru_version") == env.mineru_version
             and existing.get("ocr_device") == env.device
             and existing.get("resolution_cap_px") == cap
+            and (tier is None or existing.get("mineru_tier") == tier)
         )
         if unchanged:
             redo = _needs_ocr_now(existing, client, doc_type, source_id, tenant_id)
@@ -573,11 +577,16 @@ def process_batch(
 
 
 def find_unprocessed(client: BlobClient, doc_type: str, tenant_id: str | None = None,
-                     mineru_version: str | None = None) -> list[str]:
+                     mineru_version: str | None = None, mineru_tier: str | None = None) -> list[str]:
     """Ingested documents with no ``ocr_meta.json`` yet - and, given the running
     ``mineru_version``, those read by another MinerU: the model learns how MinerU
     formats its output, so a tenant read by two versions is two distributions,
-    and ``--all-unprocessed`` reads them again."""
+    and ``--all-unprocessed`` reads them again.
+
+    A reading by a served MinerU records its tier, part of the pin: one made at
+    another tier than ``mineru_tier`` - by default, given a version, the pinned
+    tier (``configs/shared/ocr.yaml``) - is listed too. A reading that records
+    no tier (MinerU in-process) is held to its version alone."""
     tenant = paths._tenant(tenant_id)
     ingested = {
         key.split("/")[3]
@@ -601,6 +610,14 @@ def find_unprocessed(client: BlobClient, doc_type: str, tenant_id: str | None = 
             continue
         if mineru_version and meta.get("mineru_version") != mineru_version:
             continue
+        recorded_tier = meta.get("mineru_tier")
+        if (mineru_version or mineru_tier) and recorded_tier is not None:
+            if mineru_tier is None:
+                from common.config import served_mineru
+
+                mineru_tier = served_mineru()["tier"]
+            if recorded_tier != mineru_tier:
+                continue
         done.add(key.split("/")[3])
     return sorted(ingested - done)
 
@@ -687,14 +704,15 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     if args.mineru_url:
         from data_pipeline.ocr.served_ocr import MINERU_TOKEN_ENV, ServedMinerUEngine
 
-        engine: OcrEngine = ServedMinerUEngine(
+        served = ServedMinerUEngine(
             args.mineru_url, os.environ.get(MINERU_TOKEN_ENV) or os.environ.get("FIDEON_REMOTE_TOKEN"))
-        version = engine.environment().mineru_version
+        engine: OcrEngine = served
+        version, tier = served.environment().mineru_version, served.tier
     else:
-        engine, version = MinerUEngine(device="cuda"), get_mineru_version()
+        engine, version, tier = MinerUEngine(device="cuda"), get_mineru_version(), None
 
     source_ids = (
-        find_unprocessed(client, args.doc_type, args.tenant, mineru_version=version)
+        find_unprocessed(client, args.doc_type, args.tenant, mineru_version=version, mineru_tier=tier)
         if args.all_unprocessed else args.source_ids
     )
     if args.shard:

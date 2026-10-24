@@ -24,8 +24,23 @@ def test_ground_says_where_a_value_is_printed_against_the_pages_it_cites():
 
 def test_what_cannot_be_checked_is_neither_grounded_nor_not():
     assert grounding.ground("NY", [1], PAGES).status == grounding.UNCHECKED          # too short
-    assert grounding.ground("Loss of Use", [3], PAGES).status == grounding.UNCHECKED  # cited page has no text
+    # On no page with text, and a page it cites has none: that page may print it.
+    assert grounding.ground("Loss of Use", [3], PAGES) == grounding.Grounding(grounding.UNCHECKED, unread=(3,))
     assert grounding.ground("anything", [1], {1: ""}).status == grounding.UNCHECKED  # nothing has text
+
+
+def test_a_blank_page_among_those_cited_does_not_stop_the_search():
+    """H1: a blank page it cites leaves the other pages to settle it."""
+    # Cites a page with text and a blank one: printed on neither with text.
+    both = grounding.ground("Loss of Use", [2, 3], PAGES)
+    assert both.status == grounding.UNCHECKED and both.unread == (3,) and not both.printed
+    # Printed on another page: printed, whatever the blank page it cites.
+    assert grounding.ground("Rivera Fabrication LLC", [3], PAGES) == grounding.Grounding(grounding.ON_OTHER_PAGE, (1,))
+    assert grounding.ground("$219,000", [2, 3], PAGES).status == grounding.ON_CITED_PAGE
+    # Every page it cites has text (or it cites one no page is): printed nowhere.
+    assert grounding.ground("Loss of Use", [1, 2], PAGES).status == grounding.NOT_PRINTED
+    assert grounding.ground("Loss of Use", [9], PAGES).status == grounding.NOT_PRINTED
+    assert grounding.ground("Loss of Use", [], PAGES).status == grounding.NOT_PRINTED
 
 
 def test_words_split_across_lines_or_columns_still_match():
@@ -40,13 +55,50 @@ def test_a_code_is_not_found_in_pieces_of_other_values():
     assert grounding.appears("HX-0000-0000", page)
 
 
+DECLARATIONS = ("POLICY DECLARATIONS\nPolicy Number: PAP-2026-0042\n"
+                "Policy Period: 04/01/2025 to 04/01/2026\nNamed Insured: Jon Smith\n"
+                "Agency Code 7781\nForm 5250 (rev)\nVeh 1  Year 2019  Honda Accord\n")
+
+
+def test_a_code_is_one_run_of_words_never_its_pieces_found_apart():
+    """H2: a code with letter and number segments is never a bag of words."""
+    for invented in ("PAP-2025-0042",     # another segment of the page: the policy period's year
+                     "PAP-2026-7781",     # the agency code as its last segment
+                     "PAP-0042-2026",     # its segments reordered
+                     "PAP-2026-0043"):    # one digit off
+        assert grounding.ground(invented, [1], {1: DECLARATIONS}).status == grounding.NOT_PRINTED, invented
+    assert grounding.appears("PAP-2026-0042", DECLARATIONS)
+    assert grounding.appears("PAP 2026-0042", "Policy PAP-2026-\n0042")         # broken across a line
+    # A phrase broken across lines or columns still matches, token by token.
+    assert grounding.appears("Honda Accord 2019", DECLARATIONS)
+
+
+def test_an_amount_matches_only_an_amount_and_a_figure_only_a_whole_one():
+    """H3: a figure is whole, and an amount is not a year, a code or a form number."""
+    page = {1: DECLARATIONS}
+    for invented in ("$2,019.00",   # the vehicle's year
+                     "$7,781",      # the agency code
+                     "$250.00",     # the end of "Form 5250"
+                     "$5,250.00"):  # the form number as an amount
+        assert grounding.ground(invented, [1], page).status == grounding.NOT_PRINTED, invented
+    assert grounding.ground("2019", [1], page).printed                         # the year itself
+    assert grounding.ground("7781", [1], page).printed
+    # Never a piece of a longer figure.
+    assert not grounding.appears("500", "Deductible $1,500.00")
+    assert not grounding.appears("$1.00", "VIN 1HGCV1F30KA000001")
+
+
 def test_an_amount_matches_the_same_figure_in_another_format():
     assert grounding.appears("$7,579.67", "TOTAL ANNUAL AUTO PREMIUM 7579.67")
     assert grounding.appears(18.0, "Personal Injury $18.00")
-    assert grounding.appears("$500", "Deductible 500")
+    assert grounding.appears("$500", "Deductible $ 500")
+    assert grounding.appears("$500", "Deductible 500.00")
+    assert grounding.appears("500", "Deductible $500")                           # a bare figure: any form
     assert grounding.appears("$25.00", "On-Water Towing (optional), $25 a year")
     assert not grounding.appears("$7,579.67", "TOTAL 7,579.76")
     assert not grounding.appears("$2.00", "Location: 2 TOWN RD  Page 2 of 3")    # a house number, a page
+    # Written as an amount, it needs one: a bare whole number is a count or a code.
+    assert not grounding.appears("$500", "Deductible 500")
 
 
 def test_the_ocr_feature_matches_on_word_boundaries_and_skips_short_values():
@@ -62,12 +114,13 @@ def test_a_value_is_looked_for_as_printed_not_as_reformatted():
     assert (report.opportunities, report.hits) == (1, 0)       # parsed 219000.0 is not on the page; raw is
 
 
-def test_an_invented_value_is_counted_and_a_short_one_is_left_out():
+def test_an_invented_value_is_counted_and_a_short_one_is_looked_for_as_a_whole_token():
     got = {"coverages": [{"coverage_name": _value("Debris Removal", "Debris Removal", [2]),
-                          "premium": _value("18", 18.0, [2])}]}
+                          "premium": _value("18", 18.0, [2]),          # two characters: a whole figure
+                          "limit_code": _value("7", "7", [2])}]}         # one: on every page, left out
     report = score_hallucinations([({}, got, PAGES)])
-    assert (report.opportunities, report.hits) == (1, 1)
-    assert report.instances[0]["field"] == "coverages[0].coverage_name"
+    assert (report.opportunities, report.hits) == (2, 2)
+    assert [hit["field"] for hit in report.instances] == ["coverages[0].coverage_name", "coverages[0].premium"]
 
 
 def test_printed_on_another_page_is_a_wrong_page_not_an_invention():

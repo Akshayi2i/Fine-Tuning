@@ -43,8 +43,15 @@ cap needs ``--images link``.
 
 The token for both servers is ``--token`` or ``$FIDEON_REMOTE_TOKEN``;
 ``--mineru-token`` when MinerU's differs (a serverless model's is the RunPod API
-key). Writes ``<out>/<document>.json`` (timings, window stats, accuracy and the
-served canonical JSON) and ``<out>/summary.json`` / ``summary.md``.
+key). Each ``--doc`` line is named as serving names it (``classic_auto`` is
+``personal_auto``) and a line with no schema is refused. The setup - the
+servers' addresses (HTTPS, or HTTP to this machine), the MinerU tier, the page
+links' login and token - is checked before the command detaches on the pod,
+against the environment the run will have (``scripts/pod_run.sh env``). Writes
+``<out>/<document>.json`` per document and run (timings, window stats,
+accuracy and the served canonical JSON; ``.fields-first.json`` for that run; a
+name used twice, or ``summary``, takes ``-2``) and ``<out>/summary.json`` /
+``summary.md``.
 """
 
 from __future__ import annotations
@@ -53,11 +60,16 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from testing.extract_server import positive_int, tier_problem, unique_names
 
 log = logging.getLogger(__name__)
 
@@ -73,11 +85,85 @@ SCAN_SUFFIX = "__scan"
 
 
 def parse_doc(value: str) -> tuple[Path, str]:
-    """``<pdf>=<line>`` - split at the last ``=``, since a path can hold one."""
+    """``<pdf>=<line>`` - split at the last ``=``, since a path can hold one.
+
+    The line is checked and named as serving names it
+    (``serving.vllm_entrypoint.request_lob``, as the job server does): a line
+    with no schema is refused here, not read against the fallback schema and
+    scored as if it were the line meant; ``classic_auto`` or ``Personal_Auto``
+    is ``personal_auto``."""
+    from serving.vllm_entrypoint import ServingError, request_lob
+
     path, sep, lob = value.rpartition("=")
     if not sep or not path or not lob.strip():
         raise argparse.ArgumentTypeError(f"--doc takes <pdf>=<line of business>, got {value!r}")
-    return Path(path), lob.strip()
+    try:
+        line = request_lob({"lob": lob.strip()})
+    except ServingError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r}: {exc}") from None
+    return Path(path), str(line)
+
+
+def run_environment(detaching: bool) -> dict[str, str]:
+    """The environment the run will have.
+
+    Detached on the pod, the run's settings are the repo's ``.env`` under the
+    caller's own (``scripts/pod_run.sh``): asked of the launcher itself
+    (``pod_run.sh env``), so a check made before the detach sees the storage
+    login the run will have. Anywhere else, the caller's own environment:
+    nothing loads ``.env`` off the pod."""
+    env = dict(os.environ)
+    if not detaching:
+        return env
+    from orchestration.detach import POD_RUN
+
+    try:
+        shown = subprocess.run(["bash", POD_RUN.as_posix(), "env"], capture_output=True, timeout=60, check=True)
+    except (OSError, subprocess.SubprocessError):    # no launcher to ask: the caller's, as before
+        return env
+    return dict(item.split("=", 1) for item in shown.stdout.decode("utf-8", "replace").split("\0") if "=" in item)
+
+
+@contextmanager
+def _environment(env: dict[str, str]) -> Iterator[None]:
+    """``os.environ`` as ``env`` for a moment (the storage login is read from it)."""
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def setup_problem(args: argparse.Namespace, env: dict[str, str]) -> str | None:
+    """Why the servers' addresses or the page links cannot work; None when they can.
+
+    Checked before the command detaches on the pod: the backend and the link
+    store refuse the same, but only once the run has started, in tmux, with the
+    operator's command already exited 0. ``env`` is the run's environment
+    (:func:`run_environment`). Nothing is sent or written."""
+    from common.transport import InsecureUrlError, assert_encrypted
+
+    try:
+        assert_encrypted(args.model_url, "the model server")
+        assert_encrypted(args.mineru_url, "the MinerU server")
+    except InsecureUrlError as exc:
+        return str(exc)
+    if args.images != "link":
+        return None
+    from artifact_registry.blob_client import BlobClient, BlobError
+    from inference_core.page_links import LINK_PREFIX, PageLinks
+
+    # --link-token's default was read from the caller's environment; the run reads its own.
+    token = args.link_token or env.get(LINK_TOKEN_ENV) or None
+    with _environment(env):
+        try:
+            PageLinks(BlobClient(), f"{LINK_PREFIX}/check", read_token=token).check()
+        except (BlobError, ValueError) as exc:
+            return f"--images link cannot make a page link: {exc}"
+    return None
 
 
 def find_gold(pdf: Path, gold_dir: Path | None = None) -> Path | None:
@@ -151,18 +237,20 @@ def _row(pdf: Path, lob: str, *, run: str, mode: str, backend: Any, result: Any,
 
 
 def time_document(pdf: Path, lob: str, *, backend: Any, model: Any, reader: Any, mode: str, work: Path,
-                  gold: Path | None = None, links: Any = None) -> dict[str, Any]:
+                  gold: Path | None = None, links: Any = None, key: str | None = None) -> dict[str, Any]:
     """One document through render and OCR, the routine and the scorer;
     with ``links`` (:class:`inference_core.page_links.PageLinks`) its pages go to
-    the model as links, published while MinerU reads the PDF."""
+    the model as links, published while MinerU reads the PDF. ``key`` names its
+    folder (default the PDF's stem; unique per run, :func:`main`)."""
     from data_pipeline.dataset_builder.policy_windows import pages_to_read, plan_windows
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import ExtractionRequest, extract
 
+    key = key or pdf.stem
     began = time.perf_counter()
     data = pdf.read_bytes()
-    publish = (lambda paths: links.publish(paths, folder=pdf.stem)) if links is not None else None
-    read = reader.read(data, work / pdf.stem / "pages", name=pdf.name, with_text=mode != "image_only",
+    publish = (lambda paths: links.publish(paths, folder=key)) if links is not None else None
+    read = reader.read(data, work / key / "pages", name=pdf.name, with_text=mode != "image_only",
                        publish_pages=publish)
     texts, paths = read["texts"], read["images"]
 
@@ -190,7 +278,8 @@ def time_document(pdf: Path, lob: str, *, backend: Any, model: Any, reader: Any,
 
 
 def time_fields_first(pdf: Path, lob: str, *, backend: Any, model: Any, reader: Any, work: Path,
-                      gold: Path | None = None, links: Any = None, verify: bool = True) -> dict[str, Any]:
+                      gold: Path | None = None, links: Any = None, verify: bool = True,
+                      key: str | None = None) -> dict[str, Any]:
     """One document fields first (``serving.fields_first``): the model reads the
     page images, the fields are held to the pages they cite, then MinerU's text
     of the rest holds them to the whole document and adds the full-text tier.
@@ -200,10 +289,11 @@ def time_fields_first(pdf: Path, lob: str, *, backend: Any, model: Any, reader: 
     from serving.doc_type_classifier import StaticClassifier
     from serving.fields_first import add_full_text, read_fields
 
+    key = key or f"{pdf.stem}.fields_first"
     began = time.perf_counter()
     data = pdf.read_bytes()
-    pages_dir = work / f"{pdf.stem}.fields_first" / "pages"
-    publish = (lambda paths: links.publish(paths, folder=f"{pdf.stem}.fields_first")) if links is not None else None
+    pages_dir = work / key / "pages"
+    publish = (lambda paths: links.publish(paths, folder=key)) if links is not None else None
     sent_before = backend.sent_bytes
     fields = read_fields(data, name=pdf.name, lob=lob, source_id=pdf.stem, model=model, reader=reader,
                          pages_dir=pages_dir, classifier=StaticClassifier("policy"),
@@ -299,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="leave each document's pages in Blob after it is read (they are deleted)")
     parser.add_argument("--color-pages", action="store_true",
                         help="send gray pages as rendered (RGB), not as grayscale PNGs (to compare)")
-    parser.add_argument("--concurrency", type=int, default=128,
+    parser.add_argument("--concurrency", type=positive_int, default=128,
                         help="requests in flight at most (lower it through a proxy: 16)")
     parser.add_argument("--no-repeat-stop", action="store_true",
                         help="let an answer that repeats itself run to its token limit (to compare)")
@@ -314,16 +404,22 @@ def main(argv: list[str] | None = None) -> int:
     unknown = [run for run in args.runs if run not in ("standard", "fields-first")]
     if unknown or not args.runs:
         parser.error(f"--runs takes standard and/or fields-first, got {args.runs}")
+    twice = sorted({run for run in args.runs if args.runs.count(run) > 1})
+    if twice:
+        # The second would be written over the first's file and counted twice in the table.
+        parser.error(f"--runs names {', '.join(twice)} more than once: each run is one row per document")
+    if problem := tier_problem(args.tier, args.any_mineru):
+        parser.error(problem)
     args.tier = args.tier or pin["tier"]
-    if args.tier != pin["tier"] and not args.any_mineru:
-        parser.error(f"--tier {args.tier} is not the pinned tier ({pin['tier']}): the model is trained on "
-                     "the pinned one's text. Add --any-mineru to time it anyway.")
     missing = [str(pdf) for pdf, _lob in args.docs if not pdf.is_file()]
     if missing:
         parser.error(f"no such PDF: {', '.join(missing)}")
 
-    from orchestration.detach import detach_module_if_needed
+    from orchestration.detach import detach_module_if_needed, should_detach
 
+    # Before the detach below: a refusal after it is seen by nobody.
+    if problem := setup_problem(args, run_environment(should_detach())):
+        parser.error(problem)
     if detach_module_if_needed("testing.latency_check", argv, "latency-check"):
         return 0
 
@@ -359,27 +455,31 @@ def main(argv: list[str] | None = None) -> int:
           f"{args.ocr_parts} part(s)); images {args.images}"
           f"{'' if args.color_pages else ', gray pages as grayscale PNG'}", flush=True)
 
+    # Each document's file per run, and its pages' folder: unique in the run (two
+    # folders can each hold a policy.pdf; a summary.pdf is not summary.json).
+    keys = iter(unique_names([pdf.stem + ("" if run == "standard" else f".{run}")
+                              for pdf, _lob in args.docs for run in args.runs]))
     rows: list[dict[str, Any]] = []
     for pdf, lob in args.docs:
         gold = find_gold(pdf, args.gold_dir)
         for run in args.runs:
+            key = next(keys)
             print(f"reading {pdf.name} ({lob}), {run}{'' if gold else ', no gold JSON found'} ...", flush=True)
             try:
                 if run == "fields-first":
                     row = time_fields_first(pdf, lob, backend=backend, model=model, reader=reader, work=out,
-                                            gold=gold, links=links, verify=not args.unverified_fields)
+                                            gold=gold, links=links, verify=not args.unverified_fields, key=key)
                 else:
                     row = time_document(pdf, lob, backend=backend, model=model, reader=reader, mode=args.mode,
-                                        work=out, gold=gold, links=links)
+                                        work=out, gold=gold, links=links, key=key)
             except Exception as exc:  # noqa: BLE001 - one document's failure is reported, the rest still run
                 log.exception("%s failed", pdf.name)
                 row = {"document": pdf.name, "lob": lob, "run": run, "error": f"{type(exc).__name__}: {exc}"}
             finally:
                 if links is not None and not args.keep_links:
                     links.discard()
-            suffix = "" if run == "standard" else f".{run}"
-            (out / f"{pdf.stem}{suffix}.json").write_text(json.dumps(row, ensure_ascii=False, indent=2),
-                                                          encoding="utf-8")
+            row = {**row, "pdf": str(pdf), "output": f"{key}.json"}
+            (out / f"{key}.json").write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
             rows.append(row)
             if "error" not in row:
                 t, w = row["timings_s"], row["windows"]

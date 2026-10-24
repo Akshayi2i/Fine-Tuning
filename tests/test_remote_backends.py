@@ -231,8 +231,9 @@ def test_a_link_carries_a_read_only_token_and_never_reaches_raw_documents():
         read_only_sas,
     )
 
-    assert read_only_sas("?sv=2024-11-04&sp=r&se=2026-10-24&sig=abc") == "sv=2024-11-04&sp=r&se=2026-10-24&sig=abc"
-    for token in ("sv=2024&sp=rw&sig=abc", "sv=2024&sp=racwdl&sig=abc", "sv=2024&sig=abc"):
+    assert (read_only_sas("?sv=2024-11-04&sr=c&sp=r&se=2026-10-24&sig=abc")
+            == "sv=2024-11-04&sr=c&sp=r&se=2026-10-24&sig=abc")
+    for token in ("sv=2024&sr=c&sp=rw&sig=abc", "sv=2024&sr=c&sp=racwdl&sig=abc", "sv=2024&sr=c&sig=abc"):
         with pytest.raises(BlobError, match="read only"):
             read_only_sas(token)
     client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
@@ -585,8 +586,12 @@ def test_text_from_another_minerU_than_the_pinned_one_is_refused(tmp_path):
     try:
         with pytest.raises(ServedOcrError, match="read by MinerU 4.0.12 .* trained on text from MinerU 3.4.5"):
             ServedOcr(url, render_workers=1, expected_version="3.4.5").read(_pdf(2), tmp_path / "a")
-        with pytest.raises(ServedOcrError, match="tier basic"):
-            ServedOcr(url, tier="flash", render_workers=1, expected_version="4.0.12").read(_pdf(2), tmp_path / "b")
+        # Another tier is asked for only with no pin: under one, it is refused before anything is read.
+        with pytest.raises(ServedOcrError, match="tier flash is asked of MinerU.*tier basic"):
+            ServedOcr(url, tier="flash", render_workers=1, expected_version="4.0.12")
+        with pytest.raises(ServedOcrError, match=r"tier basic\) at .*\(tier flash\)"):
+            ServedOcr(url, tier="flash", render_workers=1, expected_version="4.0.12",
+                      expected_tier="flash").read(_pdf(2), tmp_path / "b")
         read = ServedOcr(url, render_workers=1).read(_pdf(2), tmp_path / "c")    # a timing test: anything goes
         assert read["ocr"]["version"] == "4.0.12" and read["ocr"]["ocr_mode"] == "txt"
     finally:

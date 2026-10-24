@@ -16,7 +16,14 @@ read in two phases:
    ``<path>:pending_full_text`` - not yet "printed nowhere", since the model
    may have cited the wrong page - and every declarations field left empty
    while those pages print its label and a value is flagged ``likely_missed``.
-   So the fields served at the gate hold no value the PDF was not seen to print.
+   A value whose cited page MinerU read empty is served flagged
+   ``unverified_unread_page``, as the standard path serves it
+   (``serving.printed_values``). So the fields served at the gate hold no value
+   the PDF was not seen to print, nor one not said to be unverified. When no
+   page the fields cite has any text, nothing could be checked: nothing is
+   served before the full text. A row held back keeps the ids of the rows left
+   as they are - a served row's id and links are the same at the gate and at
+   the end - and a link to it is held back with it (``pending_full_text``).
 2. **Full text** (:func:`add_full_text`): MinerU reads the remaining pages, and
    the fields as the model wrote them are held to the whole document's text -
    a value printed on a page it did not cite comes back; one printed nowhere is
@@ -115,12 +122,14 @@ def cited_pages(extraction: Any, page_count: int) -> list[int]:
 
 
 def _pending(flag: str) -> str:
-    """A not-printed flag from a check on some pages only, as what it means then."""
+    """A not-printed flag from a check on some pages only - on a value, or on a
+    link to a row of such values - as what it means then."""
     from serving.conventions import NOT_PRINTED_FLAG
-    from serving.printed_values import REMOVED_FLAG
+    from serving.printed_values import LINK_REMOVED_FLAG, REMOVED_FLAG
 
     path, _, kind = flag.rpartition(":")
-    return f"{path}:{PENDING_FLAG}" if path and kind in (REMOVED_FLAG, NOT_PRINTED_FLAG) else flag
+    return (f"{path}:{PENDING_FLAG}" if path and kind in (REMOVED_FLAG, NOT_PRINTED_FLAG, LINK_REMOVED_FLAG)
+            else flag)
 
 
 def verify_fields(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, page_count: int) -> dict[str, Any]:
@@ -128,8 +137,10 @@ def verify_fields(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, 
 
     ``result`` is left as the model's answer, for the full text to hold to the
     whole document later; the served copy is returned. Returns ``{"served",
-    "texts", "pages", "ocr", "seconds"}`` - ``texts`` by page number, kept so
-    the full text does not read those pages again.
+    "verified", "texts", "pages", "ocr", "seconds"}`` - ``texts`` by page
+    number, kept so the full text does not read those pages again. ``verified``
+    is False when no page read has any text: nothing was checked, and the copy
+    must not be served.
     """
     from serving.pipeline import _likely_missed
     from serving.printed_values import hold_result_to_printed
@@ -145,8 +156,8 @@ def verify_fields(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, 
     served.review_flags = sorted(flags)
     if served.printed_check is not None:
         served.printed_check = {**served.printed_check, "pages_read": pages, "whole_document": False}
-    return {"served": served, "texts": text["texts"], "pages": pages, "ocr": text["info"],
-            "seconds": round(time.perf_counter() - started, 2)}
+    return {"served": served, "verified": served.printed_check is not None, "texts": text["texts"],
+            "pages": pages, "ocr": text["info"], "seconds": round(time.perf_counter() - started, 2)}
 
 
 def read_fields(pdf: bytes, *, name: str, lob: str, source_id: str, model: Any, reader: Any, pages_dir: Path,
@@ -157,9 +168,11 @@ def read_fields(pdf: bytes, *, name: str, lob: str, source_id: str, model: Any, 
 
     Returns ``{"result", "served", "verified", "cited_texts", "images",
     "timings_s"}``: ``result`` is the model's answer, kept for the full text;
-    ``served`` the fields to serve now. Should the verification fail, ``served``
-    is None: nothing is served before the full text. ``verify=False`` serves
-    the answer unchecked, flagged ``fields:unverified`` - for timing tests only.
+    ``served`` the fields to serve now. Should the verification fail - or the
+    pages the fields cite have no text, so that nothing could be checked -
+    ``served`` is None and ``verified`` False: nothing is served before the full
+    text. ``verify=False`` serves the answer unchecked, flagged
+    ``fields:unverified`` - for timing tests only.
     """
     from serving.pipeline import ExtractionRequest, extract
 
@@ -183,10 +196,15 @@ def read_fields(pdf: bytes, *, name: str, lob: str, source_id: str, model: Any, 
             try:
                 checked = verify_fields(pdf, result, name=name, lob=lob, reader=reader,
                                         page_count=len(read["images"]))
-                served = checked["served"]
             except Exception:  # noqa: BLE001 - nothing unchecked is served: the fields wait for the full text
                 log.exception("%s: the fields could not be checked against their pages; they are served with "
                               "the full text", source_id)
+            else:
+                if checked["verified"]:
+                    served = checked["served"]
+                else:
+                    log.warning("%s: no page the fields cite has text (pages %s); nothing was checked, so they "
+                                "are served with the full text", source_id, checked["pages"])
         else:
             served = copy.deepcopy(result)
             served.review_flags = sorted({*served.review_flags, UNVERIFIED_FLAG})
@@ -194,7 +212,7 @@ def read_fields(pdf: bytes, *, name: str, lob: str, source_id: str, model: Any, 
     return {
         "result": result,
         "served": served,
-        "verified": checked is not None,
+        "verified": checked is not None and checked["verified"],
         "cited_texts": checked["texts"] if checked else {},
         "cited_pages": checked["pages"] if checked else [],
         "images": read["images"],

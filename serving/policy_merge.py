@@ -15,7 +15,12 @@ Rules, in order:
 
 1. **Windows are merged in group order, then page order.** ``decl`` leads, so the
    declarations value wins any conflict by construction — the same rule
-   ``policy.jinja`` states to the model.
+   ``policy.jinja`` states to the model. Within its group the window the
+   declarations lead (``PolicyWindow.leads``) comes first: split by its text,
+   or retried in halves, the declarations window's piece holding page 1 - a
+   renewal notice printing the prior policy number - otherwise came before the
+   piece holding the declarations page, and won. Training teaches the
+   policy-level values in that piece (``PolicyWindowPlan.holds_unpaged``).
 2. **A value already present is kept.** A later window's differing value is a
    recorded conflict, never a silent overwrite.
 3. **Arrays concatenate**, then rows are de-duplicated. A table crossing a window
@@ -67,6 +72,9 @@ class PolicyWindow:
     extraction: dict[str, Any]
     spans: Mapping[str, Any] = field(default_factory=dict)
     latency_ms: float | None = None
+    #: The window its group's declarations lead (``PolicyWindowPlan.leads``):
+    #: merged first within its group, so its values win (rule 1).
+    leads: bool = False
 
 
 @dataclass
@@ -406,14 +414,22 @@ def _disagree(a: dict[str, Any], b: dict[str, Any], path: str) -> bool:
     return False
 
 
+def _merge_order(windows: list[PolicyWindow], groups: tuple[str, ...]) -> list[PolicyWindow]:
+    """``windows`` in the order they are merged (rule 1): by group, the window
+    the declarations lead first within its group, then by first page."""
+    rank = {name: index for index, name in enumerate(groups)}
+    return sorted(windows, key=lambda w: (rank.get(w.group, len(rank)), not w.leads, min(w.pages or [0])))
+
+
 def merge_policy_windows(
     windows: list[PolicyWindow], lob: str | list[str] | None = None
 ) -> MergedPolicy:
     """One canonical model-form document from a policy's windows.
 
-    ``windows`` must arrive in group order, then page order —
-    :func:`common.schema_sections.group_names` order, which puts ``decl`` first.
-    ``lob`` selects the common-model merge for a SPEC_21 line.
+    ``windows`` are merged in group order — :func:`common.schema_sections.group_names`
+    order, which puts ``decl`` first — the window the declarations lead first
+    within its group, then page order (:func:`_merge_order`), whatever order
+    they arrive in. ``lob`` selects the common-model merge for a SPEC_21 line.
     """
     from common.schema_sections import group_names
     from common.schemas import is_common_model
@@ -424,10 +440,7 @@ def merge_policy_windows(
 
     # The line named throughout: no line is the fallback, read with the
     # common-model profile, whose groups and row keys are not this line's.
-    rank = {name: index for index, name in enumerate(group_names(lob))}
-    ordered = sorted(
-        windows, key=lambda w: (rank.get(w.group, len(rank)), min(w.pages or [0]))
-    )
+    ordered = _merge_order(windows, group_names(lob))
 
     by_id: dict[int, Any] = {}
     report = MergedPolicy()
@@ -614,8 +627,7 @@ def _merge_common_model(windows: list[PolicyWindow], lob: str | list[str]) -> Me
     from common.schema_sections import group_names, references, structural_ids
     from common.structural_ids import renumber_structural_ids
 
-    rank = {name: index for index, name in enumerate(group_names(lob))}
-    ordered = sorted(windows, key=lambda w: (rank.get(w.group, len(rank)), min(w.pages or [0])))
+    ordered = _merge_order(windows, group_names(lob))
     ids, refs = structural_ids(lob), references(lob)
 
     by_id: dict[int, Any] = {}

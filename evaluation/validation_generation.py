@@ -432,8 +432,13 @@ def merged_windows(generations: Sequence[ValidationGeneration]) -> list[MergedDo
         members.sort(key=lambda g: (rank.get(g.row["sections"], len(rank)), int(g.row.get("window_index") or 0)))
 
         def window(g: ValidationGeneration, extraction: Any, spans: Any) -> Any:
+            # ``leads`` as serving keeps it (PolicyWindowPlan.leads): the window
+            # its group's declarations lead merges first in its group. Without
+            # it, a split declarations window was ordered by its first page here
+            # and by its lead in serving, so selection judged another merge.
             return PolicyWindow(group=g.row["sections"], pages=[int(p) for p in g.row["window_pages"]],
-                                extraction=extraction or {}, spans=spans or {})
+                                extraction=extraction or {}, spans=spans or {},
+                                leads=bool(g.row.get("window_leads")))
 
         gold = merge_policy_windows([window(g, g.golden, None) for g in members], lob=lob)
         answer = merge_policy_windows(

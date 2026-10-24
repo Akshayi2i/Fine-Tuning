@@ -9,6 +9,7 @@
 #   bash scripts/pod_run.sh tail <name>       follow the log (Ctrl-c stops following, not the run)
 #   bash scripts/pod_run.sh list              every run this pod knows about
 #   bash scripts/pod_run.sh stop <name>       the ONLY way this script ends a run
+#   bash scripts/pod_run.sh env               the environment a run started now gets (env -0)
 #
 # Example:
 #   bash scripts/pod_run.sh start finetune-v3 finetune --version v3 --corpus-version v1
@@ -28,6 +29,12 @@
 # What it does NOT survive: the pod itself stopping or restarting (a manual stop,
 # RunPod host maintenance, running out of credit). Then resume with
 # `--from-stage`; checkpoints and manifests on the volume and in Blob are kept.
+#
+# A run's settings: the repo's .env, under the caller's own. A setting .env (or
+# .env.example) names that the starting shell set - inline included,
+# `FIDEON_REMOTE_TOKEN=x python -m testing.extract_server` - is kept over .env's
+# value, empty or not. A value the pod gives every process is not the caller's:
+# .env still overrides it (HF_HUB_ENABLE_HF_TRANSFER=1 on RunPod images).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -56,6 +63,71 @@ valid_name() {
 
 running() { tmux has-session -t "=$(session_of "$1")" 2>/dev/null; }
 
+# Every setting the repo's .env or .env.example names.
+setting_names() {
+  local file
+  for file in "$REPO/.env" "$REPO/.env.example"; do
+    if [ -f "$file" ]; then
+      sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p' "$file"
+    fi
+  done | sort -u
+}
+
+# The value the pod itself gives a variable - its first process's - or nothing.
+pod_value() {
+  local entry
+  [ -r /proc/1/environ ] || return 0
+  while IFS= read -r -d '' entry; do
+    if [ "${entry%%=*}" = "$1" ]; then printf '%s' "${entry#*=}"; return 0; fi
+  done < /proc/1/environ
+}
+
+# The caller's own settings, as export lines to source after .env. A tmux session
+# takes its environment from the tmux server, not from the shell that starts the
+# run, and .env was sourced over it: `FIDEON_REMOTE_TOKEN=x python -m ...` lost
+# its token to .env's empty line the moment the command detached.
+callers_settings() {
+  local var
+  for var in $(setting_names); do
+    if [ -n "${!var:-}" ] && [ "${!var}" != "$(pod_value "$var")" ]; then
+      printf 'export %s=%q\n' "$var" "${!var}"
+    fi
+  done
+}
+
+# The start of a run's script: the repo, its .env, then the caller's settings from
+# $1 (owner-only, deleted once read: a token stays out of this script and the log),
+# then the caller's environment.
+prelude() {
+  local keep="$1"
+  echo '#!/usr/bin/env bash'
+  echo 'set -o pipefail'
+  printf 'cd %q\n' "$REPO"
+  # Credentials and settings from the repo's .env, as an interactive shell would have them.
+  echo 'if [ -f .env ]; then set -a; . ./.env; set +a; fi'
+  printf 'if [ -f %q ]; then . %q; rm -f %q; fi\n' "$keep" "$keep" "$keep"
+  echo 'export PYTHONUNBUFFERED=1'
+  # The caller's PATH and virtualenv. A tmux session takes its environment from
+  # the tmux server, started by whichever job came first — not from the shell
+  # that starts this run — so without these a job launched from the training
+  # venv would not find that venv's `swift`, and one from the OCR venv would
+  # run its tools from the wrong environment.
+  printf 'export PATH=%q\n' "$PATH"
+  if [ -n "${VIRTUAL_ENV:-}" ]; then printf 'export VIRTUAL_ENV=%q\n' "$VIRTUAL_ENV"; fi
+  # The caller's GPU selection, set or not - for the same reason. Sharded OCR
+  # gives each process its own CUDA_VISIBLE_DEVICES; inherited from the tmux
+  # server instead, all four shards landed on one card, and the first shard's
+  # single GPU leaked into every later job, so training ran on one GPU of four
+  # without saying so.
+  if [ -n "${CUDA_VISIBLE_DEVICES+x}" ]; then
+    printf 'export CUDA_VISIBLE_DEVICES=%q\n' "$CUDA_VISIBLE_DEVICES"
+  else
+    echo 'unset CUDA_VISIBLE_DEVICES'
+  fi
+  # Tells the command it is already detached, so it does not detach again.
+  echo 'export FIDEON_DETACHED=1'
+}
+
 cmd_start() {
   [ $# -ge 2 ] || die "usage: start <name> <orchestration.run arguments...>"
   local name="$1"; shift
@@ -75,34 +147,13 @@ cmd_start() {
   fi
   rm -f "$exit_file"
 
+  # The caller's own settings, for the run to read over .env.
+  local keep="${LOG_DIR}/$name.env"
+  (umask 077; callers_settings > "$keep")
   # The command the session runs, written to a file so its quoting survives tmux.
   local runner="${LOG_DIR}/$name.run.sh"
   {
-    echo '#!/usr/bin/env bash'
-    echo 'set -o pipefail'
-    printf 'cd %q\n' "$REPO"
-    # Credentials and settings from the repo's .env, as an interactive shell would have them.
-    echo 'if [ -f .env ]; then set -a; . ./.env; set +a; fi'
-    echo 'export PYTHONUNBUFFERED=1'
-    # The caller's PATH and virtualenv. A tmux session takes its environment from
-    # the tmux server, started by whichever job came first — not from the shell
-    # that starts this run — so without these a job launched from the training
-    # venv would not find that venv's `swift`, and one from the OCR venv would
-    # run its tools from the wrong environment.
-    printf 'export PATH=%q\n' "$PATH"
-    if [ -n "${VIRTUAL_ENV:-}" ]; then printf 'export VIRTUAL_ENV=%q\n' "$VIRTUAL_ENV"; fi
-    # The caller's GPU selection, set or not - for the same reason. Sharded OCR
-    # gives each process its own CUDA_VISIBLE_DEVICES; inherited from the tmux
-    # server instead, all four shards landed on one card, and the first shard's
-    # single GPU leaked into every later job, so training ran on one GPU of four
-    # without saying so.
-    if [ -n "${CUDA_VISIBLE_DEVICES+x}" ]; then
-      printf 'export CUDA_VISIBLE_DEVICES=%q\n' "$CUDA_VISIBLE_DEVICES"
-    else
-      echo 'unset CUDA_VISIBLE_DEVICES'
-    fi
-    # Tells the command it is already detached, so it does not detach again.
-    echo 'export FIDEON_DETACHED=1'
+    prelude "$keep"
     printf 'echo "=== %s started $(date -u +%%FT%%TZ) on $(hostname) ==="\n' "$name"
     if [ "$1" = "--" ]; then
       shift
@@ -121,7 +172,8 @@ cmd_start() {
   } > "$runner"
   chmod +x "$runner"
 
-  tmux new-session -d -s "$session" -x 220 -y 50 "bash $(printf %q "$runner")"
+  tmux new-session -d -s "$session" -x 220 -y 50 "bash $(printf %q "$runner")" \
+    || { rm -f "$keep"; die "tmux could not start the session for '$name'"; }
   echo "started '$name' in tmux session '$session'"
   echo "  log:    $log"
   echo "  watch:  bash scripts/pod_run.sh attach $name   (detach with Ctrl-b then d)"
@@ -176,6 +228,17 @@ cmd_list() {
   [ "$found" = 1 ] || echo "no runs in $LOG_DIR"
 }
 
+cmd_env() {
+  # What a run started now would have in its environment, NUL-separated: read by a
+  # command that checks its settings before it detaches (testing/latency_check.py).
+  local keep status=0
+  keep="$(mktemp)"
+  callers_settings > "$keep"
+  bash -c "$(prelude "$keep"); env -0" || status=$?
+  rm -f "$keep"
+  return "$status"
+}
+
 cmd_stop() {
   [ $# -eq 1 ] || die "usage: stop <name>"
   require_tmux
@@ -195,5 +258,6 @@ case "${1:-}" in
   tail)   shift; cmd_tail "$@" ;;
   list)   shift; cmd_list ;;
   stop)   shift; cmd_stop "$@" ;;
-  *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  env)    shift; cmd_env ;;
+  *) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

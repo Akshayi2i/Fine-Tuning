@@ -112,14 +112,27 @@ class SelectionReport:
 
     @property
     def margin(self) -> float:
-        """Field F1 of the winner minus the runner-up.
+        """Sample field F1 of the SELECTED checkpoint minus the best other
+        candidate's (the sample's leader before anything is selected).
 
         Worth recording rather than just the winner: a margin inside ordinary
         eval noise means the selection was close to arbitrary, and a later
         regression is better read against that than against a bare filename.
+
+        Of the selected checkpoint, not the sample's leader: whole validation
+        documents (:func:`choose_on_documents`) or the full split
+        (:func:`break_tie`) may pick one the sample ranks behind, and the
+        leader's lead recorded beside it read as the selected one's - "+0.02"
+        for a checkpoint 0.02 behind. Negative then: how far behind on the
+        sample the decision that chose it went.
         """
-        ranked = sorted((s.field_f1 for s in self.scores), reverse=True)
-        return round(ranked[0] - ranked[1], 4) if len(ranked) > 1 else 0.0
+        if len(self.scores) < 2:
+            return 0.0
+        chosen = next((s for s in self.scores if s.checkpoint == self.selected), None)
+        if chosen is None:
+            chosen = max(self.scores, key=lambda s: (s.field_f1, s.step))
+        best_other = max(s.field_f1 for s in self.scores if s is not chosen)
+        return round(chosen.field_f1 - best_other, 4)
 
     @property
     def loss_and_f1_disagreed(self) -> bool:
@@ -135,6 +148,8 @@ class SelectionReport:
         return {
             "selected": self.selected,
             "selection_metric": "field_normalized_match",
+            # The selected checkpoint's sample field F1 minus the best other
+            # candidate's: negative when a later decision chose one behind.
             "margin_over_runner_up": self.margin,
             "best_loss_checkpoint": self.best_loss_checkpoint,
             "loss_and_f1_disagreed": self.loss_and_f1_disagreed,
@@ -246,7 +261,7 @@ def select_best(
             "every token, so easy copy tokens dominate it (arch v2.1 §11.2).",
             report.best_loss_checkpoint, report.selected, report.margin,
         )
-    if report.margin and report.margin < 0.005:
+    if 0 < report.margin < 0.005:
         log.warning(
             "the selected checkpoint beat the runner-up by only %.4f field F1, which is inside "
             "ordinary eval noise — treat this selection as close to arbitrary.", report.margin,
@@ -765,10 +780,26 @@ def discover_checkpoints(output_dir: str) -> tuple[list[str], str | None]:
         # Candidates are the checkpoints an evaluation fell on, and the last one.
         # The others are resume points saved between evaluations (hourly): scoring
         # them all would multiply selection time without a loss to compare them by.
+        #
+        # Read from the evaluations the run logged, where it logged any: a run
+        # resumed on another GPU count was given another cadence
+        # (training.train._checkpoint_cadence), and a filter on the LAST
+        # cadence alone kept only the checkpoints that happened to be its
+        # multiples - dropping every earlier evaluation checkpoint. The
+        # recorded eval_steps is the fallback for a state with no log.
+        last = checkpoint_step(checkpoints[-1])
+        evaluated = {
+            int(entry["step"]) for entry in trainer_state.get("log_history") or []
+            if isinstance(entry, dict) and isinstance(entry.get("step"), int)
+            and any(str(key).startswith("eval_") for key in entry)
+        }
+        at_evaluations = [c for c in checkpoints if checkpoint_step(c) in evaluated]
         eval_steps = int(trainer_state.get("eval_steps") or 0)
         save_steps = int(trainer_state.get("save_steps") or 0)
-        if eval_steps and save_steps and eval_steps > save_steps:
-            last = checkpoint_step(checkpoints[-1])
+        if at_evaluations:
+            checkpoints = [c for c in checkpoints
+                           if checkpoint_step(c) in evaluated or checkpoint_step(c) == last]
+        elif eval_steps and save_steps and eval_steps > save_steps:
             checkpoints = [c for c in checkpoints
                            if checkpoint_step(c) % eval_steps == 0 or checkpoint_step(c) == last]
     return checkpoints, best_loss

@@ -39,13 +39,23 @@ class FaultReport:
     instances: list[dict[str, Any]] = field(default_factory=list)
 
     @property
-    def rate(self) -> float:
-        return self.hits / self.opportunities if self.opportunities else 0.0
+    def rate(self) -> float | None:
+        """Hits per opportunity; ``None`` when there was no opportunity.
+
+        Not 0.0: zero is the BEST false-null or invention rate, so an eval in
+        which nothing could be counted (no gold value, nothing checkable
+        written) read as a perfect score, and the gate passed it as measured.
+        Absent is "not measured", as elsewhere in the eval report (ECE, LoB
+        accuracy): ``build_report`` drops a None metric, and the gate blocks on
+        a gating metric it was not given.
+        """
+        return self.hits / self.opportunities if self.opportunities else None
 
     def as_dict(self) -> dict[str, Any]:
+        rate = self.rate
         return {
             "metric": self.name,
-            "rate": round(self.rate, 4),
+            "rate": round(rate, 4) if rate is not None else None,
             "hits": self.hits,
             "opportunities": self.opportunities,
             # Capped: the rate is the metric, the instances are for diagnosis,
@@ -138,20 +148,33 @@ def score_hallucinations(
         # Prepared once per document: a policy has hundreds of values to look up.
         pages = grounding.tolerant_pages({int(n): t for n, t in text.items()} if by_page else {1: text or ""})
 
-        for path, printed, cited in _written(got, bare_printed=not _has_envelope(got)):
-            if _is_empty(printed) or (overflow and not path.startswith("additional_fields")):
+        for path, forms, cited in _written(got, bare_printed=not _has_envelope(got)):
+            forms = tuple(form for form in forms if not _is_empty(form))
+            if not forms or (overflow and not path.startswith("additional_fields")):
                 continue
-            where = grounding.ground_tolerant(printed, cited if by_page else None, pages)
+            where = _first_printed(grounding, forms, cited if by_page else None, pages)
             if where.status == grounding.UNCHECKED:
                 continue
             report.opportunities += 1
             if where.status == grounding.NOT_PRINTED:
                 report.hits += 1
                 report.instances.append({
-                    "field": path, "emitted": str(printed)[:80],
+                    "field": path, "emitted": str(forms[0])[:80],
                     "reason": "printed on no page of the document",
                 })
     return report
+
+
+def _first_printed(grounding: Any, forms: tuple[Any, ...], cited: Any, pages: Any) -> Any:
+    """The verdict on a value printed in any of ``forms``: the first form a page
+    prints, else the first form's verdict - as serving's ``_grounded`` decides."""
+    verdicts = []
+    for form in forms:
+        found = grounding.ground_tolerant(form, cited, pages)
+        if found.printed:
+            return found
+        verdicts.append(found)
+    return verdicts[0]
 
 
 @dataclass
@@ -244,32 +267,35 @@ def _emitted(node: Any, prefix: str = "", *, bare_printed: bool = True) -> Any:
 
 
 def _written(node: Any, prefix: str = "", *, bare_printed: bool = True) -> Any:
-    """Each value written in the form a page prints it, as ``(path, printed,
-    cited pages)``: every envelope's ``raw`` - each of a list of envelopes, the
-    extra fields' too - as serving's printed-values check reads them (an
-    envelope with no ``raw`` prints nothing to look for), and in a flat answer
-    (``bare_printed``) each bare value itself. A canonical answer's bare values
-    are codes, ids, links and section hints, which no page prints; a list of
-    bare values is a set of codes, not a printed phrase."""
+    """Each value written, in the forms a page prints it, as ``(path, forms,
+    cited pages)``: every envelope's :func:`common.grounding.printed_forms` -
+    its ``raw``, or with ``raw`` blank the forms its ``parsed`` prints in, as
+    serving's printed-values check looks them up (an invented ``parsed`` behind
+    a blank ``raw`` is still invented, and served) - each of a list of
+    envelopes, the extra fields' too; and in a flat answer (``bare_printed``)
+    each bare value itself. A canonical answer's bare values are codes, ids,
+    links and section hints, which no page prints; a list of bare values is a
+    set of codes, not a printed phrase."""
     from common.canonical import is_field_value
+    from common.grounding import printed_forms
 
     for key, value in (node or {}).items():
         path = f"{prefix}{key}"
         if is_field_value(value):
-            yield path, value.get("raw"), value.get("page_ref") or []
+            yield path, printed_forms(value), value.get("page_ref") or []
         elif isinstance(value, dict):
             yield from _written(value, f"{path}.", bare_printed=bare_printed)
         elif isinstance(value, list):
             table = any(isinstance(item, dict) for item in value)
             for index, item in enumerate(value):
                 if is_field_value(item):
-                    yield f"{path}[{index}]", item.get("raw"), item.get("page_ref") or []
+                    yield f"{path}[{index}]", printed_forms(item), item.get("page_ref") or []
                 elif isinstance(item, dict):
                     yield from _written(item, f"{path}[{index}].", bare_printed=bare_printed)
                 elif table and bare_printed:
-                    yield f"{path}[{index}]", item, []
+                    yield f"{path}[{index}]", (item,), []
         elif bare_printed:
-            yield path, value, []
+            yield path, (value,), []
 
 
 def _has_envelope(node: Any) -> bool:

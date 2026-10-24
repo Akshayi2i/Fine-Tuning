@@ -53,6 +53,16 @@ val or test. Two small-N rules can still move a group the other way, and both
 say so in the log: the empty-split repair, and a line crossing
 :data:`MIN_DOCS_TO_MEASURE_LINE`. Cross-version comparability comes from the
 frozen golden eval set (§15.4), which no reassignment touches.
+
+**A cycle that continues an adapter** (decision 2026-10-23) cannot afford even
+those two moves: the continued adapter has memorised every document its chain
+of runs trained on, so one of them in val would be scored as unseen - in
+checkpoint selection, and in the calibration and threshold fits that read val
+- and every one of those numbers would come out optimistic. Such a build passes
+the documents the chain trained on (``trained``): their families are pinned to
+train whatever the rules above would draw, ahead of the carrier hold-out and
+the repair, and each is recorded with the split it would otherwise have taken
+(``pinned_to_train``).
 """
 
 from __future__ import annotations
@@ -60,6 +70,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import defaultdict
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -143,6 +154,14 @@ class GroupSplitAssignment:
     ratios_by_doc_type: dict[str, dict[str, float]] = field(default_factory=dict)
     counts_by_doc_type: dict[str, dict[str, int]] = field(default_factory=dict)
 
+    #: The run this corpus was built to continue (its adapter's chain trained
+    #: on the documents pinned below), or None for a corpus built from the base.
+    continues: str | None = None
+    #: Per doc type, the families the continued chain trained on that the rules
+    #: would have put outside train, and the split each would have taken: pinned
+    #: to train, so the continued adapter is never validated on what it memorised.
+    pinned_to_train: dict[str, dict[str, str]] = field(default_factory=dict)
+
     #: The split came with the data (``assign_delivered_splits``) rather than
     #: being drawn here. Synthetic documents may then sit in val and test: the
     #: delivery split by source document, so a test document's layout is one the
@@ -188,6 +207,9 @@ class GroupSplitAssignment:
             "held_out_source_ids": sorted(self.held_out_source_ids),
             "twin_cap": self.twin_cap,
             "twins_dropped": dict(sorted(self.twins_dropped.items())),
+            "continues": self.continues,
+            "pinned_to_train": {k: dict(sorted(v.items()))
+                                for k, v in sorted(self.pinned_to_train.items())},
         }
 
 
@@ -269,6 +291,7 @@ def assign_group_splits(
     ratios: SplitRatio | None = None,
     hold_out_carriers: bool = True,
     with_test: bool = True,
+    trained: Collection[str] = (),
 ) -> GroupSplitAssignment:
     """Assign each group to a split, per document type.
 
@@ -289,13 +312,22 @@ def assign_group_splits(
     line keeps a train and a validation family. A policy carrier with any
     synthetic family is never the one: that family trains whatever the split,
     so the carrier is one the model has seen.
+
+    ``trained``: source ids the adapter this cycle continues - and the runs it
+    continued - trained on. A family holding one trains, whatever the hash, the
+    line's size, the carrier hold-out or the empty-split repair would draw, and
+    is recorded in ``pinned_to_train`` with the split it would have taken: the
+    continued adapter memorised it, so in val it would make checkpoint
+    selection and the calibration fits optimistic (module docstring).
     """
     result = GroupSplitAssignment(seed=seed)
+    trained = frozenset(trained)
 
     for doc_type, records in sorted(groups_by_doc_type.items()):
         unique = sorted({r.group_id: r for r in records}.values(), key=lambda r: r.group_id)
         if not unique:
             continue
+        pinned = _pinned_groups(unique, trained)
 
         # Ratios are chosen on DOCUMENT count, not group count: the volume bands
         # in §8.2 describe how much data exists, and one group of forty
@@ -315,8 +347,13 @@ def assign_group_splits(
         held_by_line: dict[str, str] = {}
         if hold_out_carriers and with_test:
             real = [r for r in unique if not r.synthetic]
+            # A pinned family trains, so the choice must not count on it for
+            # the line's validation. (A continued cycle gates on a frozen set,
+            # which holds no carrier out, so the two rarely meet; where they
+            # do, the pin wins and the family trains.)
             provisional = {
-                r.group_id: _hash_split(r.group_id, seed, train_edge, val_edge) for r in real
+                r.group_id: "train" if r.group_id in pinned
+                else _hash_split(r.group_id, seed, train_edge, val_edge) for r in real
             }
             # A policy's synthetic families too: each trains below, before the
             # hold-out is looked at, so its carrier must not be the one held out
@@ -337,23 +374,26 @@ def assign_group_splits(
             line_documents = sum(r.size for r in members)
             measured = line_documents >= MIN_DOCS_TO_MEASURE_LINE
             for record in members:
+                held_out = False
                 if record.synthetic:
-                    line_buckets["train"].append(record.group_id)
-                    continue
-                if record.carrier and line is not None and held_by_line.get(line) == record.carrier:
-                    line_buckets["test"].append(record.group_id)
+                    split = "train"
+                elif record.carrier and line is not None and held_by_line.get(line) == record.carrier:
+                    split, held_out = "test", True
+                elif not measured and line is not None:
+                    split = "train"
+                else:
+                    split = _hash_split(record.group_id, seed, train_edge, val_edge)
+                if split != "train" and record.group_id in pinned:
+                    result.pinned_to_train.setdefault(doc_type, {})[record.group_id] = split
+                    split, held_out = "train", False
+                if held_out:
                     result.held_out_source_ids.extend(record.source_ids)
-                    continue
-                if not measured and line is not None:
-                    line_buckets["train"].append(record.group_id)
-                    continue
-                line_buckets[_hash_split(record.group_id, seed, train_edge, val_edge)].append(
-                    record.group_id)
+                line_buckets[split].append(record.group_id)
 
             if measured or line is None:
                 _repair_empty_splits(
                     line_buckets, members, f"{doc_type}/{line or '-'}", seed,
-                    starved=("test", "val") if with_test else ("val",),
+                    starved=("test", "val") if with_test else ("val",), pinned=pinned,
                 )
             elif not line_buckets["test"]:
                 result.train_only_lines.setdefault(doc_type, []).append(line)
@@ -390,6 +430,7 @@ def assign_group_splits(
         _assign_validation_halves(result, buckets["val"], seed)
 
         result.counts_by_doc_type[doc_type] = {s: len(m) for s, m in buckets.items()}
+        _log_pinned(result, doc_type)
 
         if document_count < 10:
             log.warning(
@@ -399,6 +440,27 @@ def assign_group_splits(
             )
 
     return result
+
+
+def _pinned_groups(records: list[GroupRecord], trained: frozenset[str]) -> set[str]:
+    """The families holding a document the continued chain trained on.
+
+    By family, not by document: a renewal that arrived since joins the family
+    of the document it renews, and the family is the unit that must not span
+    the split. Synthetic families train anyway."""
+    if not trained:
+        return set()
+    return {r.group_id for r in records if not r.synthetic and trained.intersection(r.source_ids)}
+
+
+def _log_pinned(result: GroupSplitAssignment, doc_type: str) -> None:
+    pinned = result.pinned_to_train.get(doc_type)
+    if pinned:
+        log.warning(
+            "%s: %d famil(ies) the continued adapter trained on would have moved out of train "
+            "(%s); pinned to train, so it is never validated on documents it memorised",
+            doc_type, len(pinned), dict(sorted(pinned.items())[:5]),
+        )
 
 
 def _hash_split(group_id: str, seed: int, train_edge: float, val_edge: float) -> str:
@@ -567,6 +629,7 @@ def assign_delivered_splits(
     with_test: bool = True,
     hold_out_carriers: bool = HOLD_OUT_CARRIER_PER_LINE,
     min_carriers: int = MIN_CARRIERS_PER_LINE_FOR_HELD_OUT,
+    trained: Collection[str] = (),
 ) -> GroupSplitAssignment:
     """Use the split the data arrived with, instead of drawing one.
 
@@ -588,15 +651,28 @@ def assign_delivered_splits(
     test documents measure a line layout the model has not seen, not a carrier
     it has never seen. Recorded per line (``held_out_carriers_by_line``), never
     as a carrier held out of the whole doc type (``held_out_carriers``).
+
+    The other exception: ``trained``, as for :func:`assign_group_splits`. A
+    family holding a document the continued chain trained on trains, whatever
+    split the delivery gave it this time, and is recorded in
+    ``pinned_to_train``: a delivery re-split since (prepare_bundles draws its
+    split per delivery) could otherwise put it in val.
     """
     result = GroupSplitAssignment(seed=seed, delivered=True)
+    trained = frozenset(trained)
     for doc_type, records in sorted(groups_by_doc_type.items()):
         unique = sorted({r.group_id: r for r in records}.values(), key=lambda r: r.group_id)
         if not unique:
             continue
+        pinned = _pinned_groups(unique, trained)
         held: dict[str, str] = {}
         if hold_out_carriers and with_test:
-            choice = held_out_carrier_per_line(unique, seed, split_of_group, min_carriers=min_carriers)
+            # A pinned family trains, so the choice must not count on it for
+            # the line's validation. (A continued cycle gates on a frozen set,
+            # which holds no carrier out, so the two rarely meet; where they
+            # do, the pin wins and the family trains.)
+            delivered = {**split_of_group, **dict.fromkeys(pinned, "train")}
+            choice = held_out_carrier_per_line(unique, seed, delivered, min_carriers=min_carriers)
             held = choice.held
             _record_hold_out(result, doc_type, choice)
         buckets: dict[str, list[str]] = {name: [] for name in DELIVERED_SPLITS}
@@ -606,7 +682,11 @@ def assign_delivered_splits(
             split = split_of_group.get(record.group_id)
             if split not in DELIVERED_SPLITS:
                 raise SplitError(f"group {record.group_id} has no delivered split (got {split!r})")
-            if record.line in held and record.carrier == held[record.line]:
+            if record.group_id in pinned:
+                if split != "train":
+                    result.pinned_to_train.setdefault(doc_type, {})[record.group_id] = split
+                split = "train"
+            elif record.line in held and record.carrier == held[record.line]:
                 if split != "test":
                     result.moved_to_test[doc_type] = result.moved_to_test.get(doc_type, 0) + 1
                 split = "test"
@@ -628,6 +708,7 @@ def assign_delivered_splits(
             for group_id in members:
                 result.assignment[group_id] = split  # type: ignore[assignment]
         _assign_validation_halves(result, buckets["val"], seed)
+        _log_pinned(result, doc_type)
         total = sum(documents.values())
         result.ratios_by_doc_type[doc_type] = {s: round(n / total, 4) for s, n in documents.items()}
         result.counts_by_doc_type[doc_type] = {s: len(m) for s, m in buckets.items()}
@@ -638,7 +719,7 @@ def assign_delivered_splits(
 
 def _repair_empty_splits(
     buckets: dict[str, list[str]], groups: list[GroupRecord], doc_type: str, seed: int,
-    starved: tuple[str, ...] = ("test", "val"),
+    starved: tuple[str, ...] = ("test", "val"), pinned: Collection[str] = (),
 ) -> None:
     """Move one group into a starved split rather than ship an unusable corpus.
 
@@ -648,11 +729,13 @@ def _repair_empty_splits(
 
     Synthetic groups are never moved out of train — that rule outranks this
     repair, because a test split made of generated documents measures the
-    generator and reports it as model accuracy.
+    generator and reports it as model accuracy. Nor are ``pinned`` families
+    (those a continued adapter trained on): moved to val, the continued model
+    would be validated on documents it memorised.
     """
     if len(groups) < MIN_GROUPS_TO_REPAIR:
         return
-    movable = {g.group_id for g in groups if not g.synthetic}
+    movable = {g.group_id for g in groups if not g.synthetic and g.group_id not in pinned}
     for split in starved:
         if buckets[split]:
             continue

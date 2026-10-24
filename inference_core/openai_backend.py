@@ -29,7 +29,12 @@ schema slices, answer limits and merge. Only the transport differs:
   an answer whose end has become one passage repeated over and over
   (:func:`repeating_tail`) is stopped there (``stop_repeats``) rather than left
   to write to its token limit, minutes for one window; the pipeline then splits
-  that window as it does one cut off at the limit.
+  that window as it does one cut off at the limit. So too an answer whose
+  stream ends before the server finished it (:data:`STREAM_CUT`: no finish
+  reason, no ``[DONE]`` - a proxy closed the connection mid-answer); a stream
+  that breaks off mid-chunk is a :class:`ModelRunnerError`, the window's failure;
+* a redirect is refused, not followed (``common.transport.open_url``): it
+  would send the request and its token to an address nobody checked.
 
 What only the server sets is the server's: its logprobs mode (raw, for
 calibration), xgrammar's no-whitespace rule and its context length. Start it as
@@ -40,6 +45,7 @@ depend on them.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import logging
 import threading
@@ -50,7 +56,13 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from inference_core.model_runner import STOPPED_REPEATING, Generation, ModelBackend, ModelRunnerError
+from inference_core.model_runner import (
+    STOPPED_REPEATING,
+    STREAM_CUT,
+    Generation,
+    ModelBackend,
+    ModelRunnerError,
+)
 from inference_core.runner_config import RunnerConfig
 
 log = logging.getLogger(__name__)
@@ -141,11 +153,17 @@ def repeating_tail(text: str, *, min_chars: int = 3000, min_repeats: int = 6,
 
 def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) -> dict[str, Any]:
     """One streamed chat completion (server-sent events), read to its end - or
-    to the point its answer was found repeating itself."""
+    to the point its answer was found repeating itself.
+
+    A stream that ends with no finish reason and no ``[DONE]`` was cut, not
+    finished - a proxy or the server closed it mid-answer - and its answer, the
+    start of one, is reported as :data:`STREAM_CUT` (cut off), never as a
+    ``stop``: a cut that happened to land after a closing brace would parse."""
     content: list[str] = []
     tokens: list[str] = []
     logprobs: list[float] = []
-    finish_reason = "stop"
+    finish_reason: str | None = None
+    done = False
     prompt_tokens: int | None = None
     first_token_ms: float | None = None
     length = checked_at = 0
@@ -155,6 +173,7 @@ def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) ->
             continue
         data = line[len("data:"):].strip()
         if data == "[DONE]":
+            done = True
             break
         chunk = json.loads(data)
         if "error" in chunk:
@@ -181,6 +200,11 @@ def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) ->
                             period, length)
                 finish_reason = STOPPED_REPEATING
                 break
+    if finish_reason is None:
+        finish_reason = "stop" if done else STREAM_CUT
+        if not done:
+            log.warning("an answer's stream ended after %d characters with no finish reason and no [DONE]; "
+                        "counted as cut off", length)
     return {"text": "".join(content), "tokens": tokens, "logprobs": logprobs,
             "finish_reason": finish_reason, "prompt_tokens": prompt_tokens, "first_token_ms": first_token_ms}
 
@@ -239,7 +263,13 @@ class OpenAIChatBackend(ModelBackend):
     def _request(self, path: str, body: bytes | None = None, *, stream: bool = False,
                  timeout: float | None = None) -> Any:
         """The JSON answer to ``path``; with ``stream``, one chat completion's
-        streamed chunks, read as :func:`_read_stream` reads them."""
+        streamed chunks, read as :func:`_read_stream` reads them.
+
+        A redirect is refused, and an answer that breaks off while it is read
+        (a chunked stream cut mid-chunk: ``IncompleteRead``; a reset; a
+        timeout) is a :class:`ModelRunnerError`, the window's own failure."""
+        from common.transport import RedirectRefusedError, open_url
+
         headers = {"User-Agent": "fideon-openai-backend/1", "Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
@@ -247,14 +277,19 @@ class OpenAIChatBackend(ModelBackend):
                                          method="POST" if body is not None else "GET")
         started = time.perf_counter()
         try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+            with open_url(request, timeout=timeout or self.timeout) as response:
                 if stream:
                     return _read_stream(response, started=started, stop_repeats=self.stop_repeats)
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raise ModelRunnerError(f"{exc.code} from {path}: {exc.read().decode('utf-8', 'replace')[:400]}") from exc
+        except RedirectRefusedError as exc:
+            raise ModelRunnerError(str(exc.reason)) from exc
         except urllib.error.URLError as exc:
             raise ModelRunnerError(f"could not reach {self.base_url}{path}: {exc.reason}") from exc
+        except (http.client.HTTPException, OSError) as exc:
+            raise ModelRunnerError(f"the answer from {self.base_url}{path} broke off after "
+                                   f"{time.perf_counter() - started:.1f} s: {type(exc).__name__}: {exc}") from exc
 
     def _served_model(self) -> str:
         served = self._request("/v1/models").get("data") or []

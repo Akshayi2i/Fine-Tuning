@@ -5,7 +5,8 @@ API served on the pod reads the training corpus (:class:`ServedMinerUEngine`,
 the OCR stage's engine) and every served document (:class:`ServedOcr`, for the
 extraction routine and its test runners) - one MinerU, one version, one tier,
 so the model is served the text it was trained on. Each task reports the
-version that read it, and a task read by another version is refused.
+version and tier that read it, and a task read by another is refused - every
+task of a PDF read as several, each also held to the pages it was sent.
 
 * the pages are rendered by the shared renderer at the resolution cap - the
   pixels training and serving use - in ``render_workers`` processes at once;
@@ -61,17 +62,35 @@ class ServedOcr:
     """Reads PDFs with a served MinerU; also an ``OcrCall`` for the job server.
 
     ``expected_version``: the MinerU version every task must report (the pin,
-    ``common.config.served_mineru``); None checks nothing (a timing test against
-    another MinerU). ``ocr_mode``: forced for every document; None decides per
-    document by the OCR stage's rule (:func:`ocr_mode_for`).
+    ``common.config.served_mineru``), and ``expected_tier`` the tier (the
+    pinned one unless given): both are the pin, since another tier reads a page
+    with other models. None checks nothing (a timing test against another
+    MinerU, ``--any-mineru``): only then may ``tier`` be another than the pin's.
+    ``ocr_mode``: forced for every document; None decides per document by the
+    OCR stage's rule (:func:`ocr_mode_for`).
     """
 
     def __init__(self, mineru_url: str, token: str | None = None, *, tier: str = "basic",
                  ocr_mode: str | None = None, ocr_parts: int = 1, render_workers: int | None = None,
-                 expected_version: str | None = None, run_pages: int | None = TURN_PAGES) -> None:
+                 expected_version: str | None = None, expected_tier: str | None = None,
+                 run_pages: int | None = TURN_PAGES) -> None:
         from common.transport import assert_encrypted
 
         assert_encrypted(mineru_url, "the MinerU server")
+        if expected_version is not None:
+            if expected_tier is None:
+                from common.config import served_mineru
+
+                expected_tier = served_mineru()["tier"]
+            if tier != expected_tier:
+                # Asked for, the other tier is what the server reads with: every
+                # document would be refused after its reading, or - a server
+                # that reports no tier - served text the model never saw.
+                raise ServedOcrError(
+                    f"tier {tier} is asked of MinerU, but the model is trained on text from MinerU "
+                    f"{expected_version} (tier {expected_tier}): another tier reads a page with other models "
+                    "(configs/shared/ocr.yaml). Another tier is for timing only, with no pin (--any-mineru)."
+                )
         self.mineru_url = mineru_url
         self.token = token
         self.tier = tier
@@ -79,6 +98,7 @@ class ServedOcr:
         self.ocr_parts = ocr_parts
         self.render_workers = render_workers or min(8, os.cpu_count() or 1)
         self.expected_version = expected_version
+        self.expected_tier = expected_tier if expected_version is not None else None
         #: Pages per run when MinerU takes turns with the model (``ocr_text``'s gate).
         self.run_pages = run_pages
 
@@ -91,6 +111,10 @@ class ServedOcr:
         without ``with_text``), what MinerU reported and how long each part took.
         ``publish_pages`` is given the rendered pages once the PDF is at MinerU
         (``PageLinks.publish``); what it returns is reported as ``links``.
+
+        When the rendering or ``publish_pages`` fails, MinerU's reading is
+        abandoned at once: nobody waits for the text, and the reader would
+        otherwise poll on for as long as a task may take (an hour).
         """
         from common.config import resolution_cap_px
         from data_pipeline.ocr.render_only import render_pdf_pages
@@ -98,13 +122,14 @@ class ServedOcr:
         pages_dir.mkdir(parents=True, exist_ok=True)
         read: dict[str, Any] = {}
         uploaded = threading.Event()
+        stop = threading.Event()
         mode = None
         if with_text:
             mode = ("ocr" if force_ocr else None) or ocr_mode or self.ocr_mode or ocr_mode_for(pdf)
 
         def ocr() -> None:
             try:
-                text = self.ocr_text(pdf, name=name, ocr_mode=mode, uploaded=uploaded)
+                text = self.ocr_text(pdf, name=name, ocr_mode=mode, uploaded=uploaded, stop=stop)
                 read["pages"], read["info"], read["seconds"] = text["pages"], text["info"], text["seconds"]
             except Exception as exc:  # noqa: BLE001 - raised below, once the rendering is done
                 read["error"] = exc
@@ -113,21 +138,25 @@ class ServedOcr:
         reader = threading.Thread(target=ocr, name="served-ocr", daemon=True) if with_text else None
         if reader is not None:
             reader.start()
-        images = render_pdf_pages(pdf, resolution_cap_px(), workers=self.render_workers)
-        paths = []
-        for number, image in enumerate(images, start=1):
-            path = pages_dir / f"page_{number:03d}.png"
-            path.write_bytes(image)
-            paths.append(str(path))
-        rendered = time.perf_counter() - began
-
         links: dict[str, Any] | None = None
-        if publish_pages is not None:
-            # Not while the PDF is still going up: the two would share the
-            # connection, and MinerU, which everything waits for, would start later.
-            while reader is not None and reader.is_alive() and not uploaded.wait(0.2):
-                pass
-            links = publish_pages(paths)
+        try:
+            images = render_pdf_pages(pdf, resolution_cap_px(), workers=self.render_workers)
+            paths = []
+            for number, image in enumerate(images, start=1):
+                path = pages_dir / f"page_{number:03d}.png"
+                path.write_bytes(image)
+                paths.append(str(path))
+            rendered = time.perf_counter() - began
+
+            if publish_pages is not None:
+                # Not while the PDF is still going up: the two would share the
+                # connection, and MinerU, which everything waits for, would start later.
+                while reader is not None and reader.is_alive() and not uploaded.wait(0.2):
+                    pass
+                links = publish_pages(paths)
+        except BaseException:
+            stop.set()                               # MinerU's runs stop polling: the document has failed
+            raise
 
         texts: dict[int, str] = {}
         if reader is not None:
@@ -156,12 +185,15 @@ class ServedOcr:
 
     def ocr_text(self, pdf: bytes, *, name: str = "document.pdf", page_count: int | None = None,
                  ocr_mode: str | None = None, force_ocr: bool = False, uploaded: threading.Event | None = None,
-                 gate: Callable[[], None] | None = None, pages: list[int] | None = None) -> dict[str, Any]:
+                 gate: Callable[[], None] | None = None, pages: list[int] | None = None,
+                 stop: threading.Event | None = None) -> dict[str, Any]:
         """MinerU's text of ``pdf`` alone, no rendering: ``{"pages", "texts", "info", "seconds"}``
         - ``pages`` the texts in order, ``texts`` by page number.
 
-        Checked against the pin (``expected_version``) and, given ``page_count``,
-        against the pages rendered. ``gate`` is called before each run of pages
+        Checked against the pin (``expected_version``, ``expected_tier``) run by
+        run, each run against the pages it was sent (``ocr_via_api``) and, given
+        ``page_count``, against the pages rendered. ``stop``, once set, abandons
+        the reading (``ocr_via_api``). ``gate`` is called before each run of pages
         is sent, the runs then read one at a time, none longer than
         ``run_pages`` pages (``ocr_via_api``): the full text of a document whose
         fields are out, read in the GPU's idle turns, each turn short.
@@ -179,7 +211,7 @@ class ServedOcr:
         started = time.perf_counter()
         read, info = ocr_via_api(sent, self.mineru_url, self.token, filename=name, tier=self.tier,
                                  ocr_mode=mode, parts=self.ocr_parts, uploaded=uploaded, gate=gate,
-                                 run_pages=self.run_pages if gate is not None else None)
+                                 run_pages=self.run_pages if gate is not None else None, stop=stop)
         self._assert_version(info, name)
         expected = len(numbers) if numbers is not None else page_count
         if expected is not None and len(read) != expected:
@@ -189,16 +221,27 @@ class ServedOcr:
                 "seconds": time.perf_counter() - started}
 
     def _assert_version(self, info: dict[str, Any], name: str) -> None:
-        """Refuse text from a MinerU other than the pinned one, tier included."""
+        """Refuse text from a MinerU other than the pinned one, tier included.
+
+        Every run of pages is checked (``version_parts``, ``tier_parts``): a
+        PDF read as several tasks may meet a server restarted with another
+        MinerU between them. The tier is held to the pin, not to the tier asked
+        for, and a reply that names none is refused: the pin cannot be seen.
+        """
         if self.expected_version is None:
             return
-        version, tier = info.get("version"), info.get("tier")
-        if version != self.expected_version or (tier and tier != self.tier):
+        versions = info.get("version_parts") or [info.get("version")]
+        tiers = info.get("tier_parts") or [info.get("tier")]
+        for run, (version, tier) in enumerate(zip(versions, tiers, strict=True), start=1):
+            if version == self.expected_version and tier == self.expected_tier:
+                continue
+            where = f" (run {run} of {len(versions)})" if len(versions) > 1 else ""
             raise ServedOcrError(
-                f"{name} was read by MinerU {version} (tier {tier}) at {self.mineru_url}, but the model is "
-                f"trained on text from MinerU {self.expected_version} (tier {self.tier}): its text is "
-                "formatted differently, input the model never saw (arch §8a). Serve the pinned MinerU, or "
-                "re-OCR the corpus with this one and retrain (configs/shared/ocr.yaml)."
+                f"{name} was read by MinerU {version} (tier {tier or 'not reported'}){where} at "
+                f"{self.mineru_url}, but the model is trained on text from MinerU {self.expected_version} "
+                f"(tier {self.expected_tier}): its text is formatted differently, input the model never saw "
+                "(arch §8a). Serve the pinned MinerU, or re-OCR the corpus with this one and retrain "
+                "(configs/shared/ocr.yaml)."
             )
 
     def __call__(self, pdf: Path, out: Path, *, force_ocr: bool = False) -> dict[str, Any]:
@@ -232,7 +275,8 @@ class ServedMinerUEngine:
         self.version = version or pin["version"]
         self.tier = tier or pin["tier"]
         self.reader = ServedOcr(mineru_url, token, tier=self.tier, ocr_parts=parts,
-                                render_workers=render_workers, expected_version=self.version)
+                                render_workers=render_workers, expected_version=self.version,
+                                expected_tier=self.tier)
 
     @classmethod
     def from_environment(cls) -> ServedMinerUEngine | None:

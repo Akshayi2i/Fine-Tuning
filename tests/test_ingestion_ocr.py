@@ -994,3 +994,34 @@ def test_a_reading_whose_recheck_cannot_run_is_kept_and_checked_again_next_time(
     run_mineru.process_document("policy", "policy_0001", ocr_client, engine)
     assert len(engine.calls) == 1                                          # kept
     assert "ocr_rules" not in ocr_client.read_json(meta_key)              # not recorded as checked
+
+
+class _ServedStub(StubEngine):
+    """A served MinerU as the OCR stage sees one (``ServedMinerUEngine``): it says
+    its version and records its tier."""
+
+    def __init__(self, tier: str):
+        super().__init__()
+        self.tier = tier
+
+    def environment(self) -> mv.OcrEnvironment:
+        return mv.OcrEnvironment("4.0.12", "cuda")
+
+    def meta(self) -> dict:
+        return {"mineru_backend": "api", "mineru_tier": self.tier}
+
+
+def test_a_reading_at_another_tier_of_the_served_minerU_is_read_again(ocr_client):
+    """The tier is part of the pin: another tier reads a page with other models,
+    so a document read at it is another distribution, not an unchanged one."""
+    _seed_raw_document(ocr_client)
+    run_mineru.process_document("policy", "policy_0001", ocr_client, _ServedStub("flash"))
+    assert run_mineru.find_unprocessed(ocr_client, "policy", mineru_version="4.0.12") == ["policy_0001"]
+    assert run_mineru.find_unprocessed(ocr_client, "policy", mineru_version="4.0.12", mineru_tier="flash") == []
+
+    pinned = _ServedStub("basic")                                          # the pinned tier
+    meta = run_mineru.process_document("policy", "policy_0001", ocr_client, pinned)
+    assert meta["_reprocessed"] is True and meta["mineru_tier"] == "basic" and len(pinned.calls) == 1
+    assert run_mineru.find_unprocessed(ocr_client, "policy", mineru_version="4.0.12") == []
+    run_mineru.process_document("policy", "policy_0001", ocr_client, pinned)
+    assert len(pinned.calls) == 1                                          # the same tier: skipped

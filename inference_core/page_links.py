@@ -42,7 +42,10 @@ LINK_PREFIX = "transient/page-links"
 
 def sent_png(image: str | Path, *, gray: bool = True) -> bytes:
     """The bytes a page image is sent as: an RGB PNG whose channels are equal
-    everywhere as an 8-bit grayscale PNG, anything else as it is on disk."""
+    everywhere as an 8-bit grayscale PNG, anything else as it is on disk - an
+    image with transparency information (a ``tRNS`` colour) included: its
+    transparent colour is an RGB triple a grayscale PNG cannot carry, and the
+    server would composite it differently."""
     path = Path(image)
     if not gray or path.suffix.lower() != ".png":
         return path.read_bytes()
@@ -63,7 +66,7 @@ def _gray_png(path: str, _mtime_ns: int, _size: int) -> bytes:
     except Exception:  # noqa: BLE001 - not an image PIL reads: sent as it is, the server decides
         return data
     with image:
-        if image.mode != "RGB":
+        if image.mode != "RGB" or "transparency" in image.info:
             return data
         red, green, blue = image.split()
         if ImageChops.difference(red, green).getbbox() or ImageChops.difference(red, blue).getbbox():

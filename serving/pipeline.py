@@ -27,7 +27,7 @@ import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, NamedTuple
 
 from calibration.apply_calibration import CalibratedField, CalibratedResult, apply_calibration
 from calibration.features import shown_ocr_text
@@ -41,6 +41,7 @@ from calibration.logprob_confidence import field_confidences
 from common.canonical import (
     collapse_spans,
     envelope,
+    is_field_value,
     values_view,
     with_output_dates,
     with_system_fields,
@@ -246,6 +247,42 @@ def _image_for(request: ExtractionRequest, page: int) -> str:
 _EMPTY_PAGE = EMPTY_PAGE_TEXT
 
 
+def _numbered_pages(request: ExtractionRequest) -> ExtractionRequest:
+    """``request`` with one page text per image, numbered 1..n, or :class:`PipelineError`.
+
+    The endpoint checks this (``vllm_entrypoint``); a caller of :func:`extract`
+    itself - fields first, the golden eval, the test harness - was not checked.
+    Three texts for four images planned three pages: page 4 was read by no
+    window and the document served as whole. No image at all was refused as "a
+    single joined ocr_text". A key written as a digit string is read as the
+    page number it is (a copy of the request; the caller's is not changed).
+    """
+    images = len(request.image_paths)
+    if not images:
+        raise PipelineError(
+            f"{request.source_id} supplies no page images, so there is no page to read: both "
+            "modes read each page's image (image_only has nothing else, ocr_plus_image reads its "
+            "text beside it). Send one image per page."
+        )
+    if not request.page_texts:
+        return request
+    numbered: dict[int, str] = {}
+    for key, text in request.page_texts.items():
+        page = key if isinstance(key, int) and not isinstance(key, bool) else (
+            int(key) if isinstance(key, str) and key.strip().isdigit() else None)
+        if page is None:
+            raise PipelineError(f"{request.source_id}: page_texts key {key!r} is not a page number")
+        numbered[page] = text
+    if sorted(numbered) != list(range(1, images + 1)):
+        raise PipelineError(
+            f"{request.source_id}: page_texts covers pages {sorted(numbered)} but {images} page "
+            f"image(s) were sent; it must hold exactly pages 1..{images}, one text per image (an "
+            "empty string for a page with none). A page with no text entry would be read by no "
+            "window, or against another page's image."
+        )
+    return request if numbered == request.page_texts else replace(request, page_texts=numbered)
+
+
 def _all_page_texts(request: ExtractionRequest) -> list[str]:
     """One markdown string per image, in page order.
 
@@ -335,8 +372,9 @@ def _parse_generation(
     """
     if refuse_truncated and result.truncated():
         raise PipelineError(
-            f"the {route_.schema_doc_type} generation hit the token limit, so its output is "
-            "incomplete"
+            f"the {route_.schema_doc_type} generation was cut off (finish {result.finish_reason}: the "
+            "token limit, an answer stopped for repeating itself, or a stream that broke off), so its "
+            "output is incomplete"
         )
     # Parse and span-map together: both fail for the same underlying reason — the
     # model did not return JSON — and reporting that as two different errors from
@@ -439,14 +477,21 @@ def _extract_policy_windows(
     (:func:`_batch_in_halves`), and only the window that caused it fails.
 
     **One bad window does not lose the document.** A window whose output is not
-    parseable JSON, or was cut off - at the token limit, the usual cause on a
-    dense schedule page, or stopped repeating itself - is split in half and
+    parseable JSON, answers a section in a shape its schema refuses (a bare
+    string for an object), or was cut off - at the token limit, the usual cause
+    on a dense schedule page, or stopped repeating itself - is split in half and
     retried, since fewer pages means less to write. Retrying it unchanged would
     be pointless: decoding is greedy, so it would write the same thing again. A
     window that still fails at a single page is dropped and flagged
     ``window_failed``, so the document comes back with everything else and a
     person is told which pages it could not read. Only when no window at all
-    succeeds is the request an error.
+    succeeds is the request an error. The declarations lead the half holding
+    their page, as they led the window (:func:`_halves`).
+
+    **A window cites only the pages it was shown.** A page reference to any
+    other page - past the end of the document, page 0, a page of another
+    window - is dropped from the value and the value flagged
+    (:data:`PAGE_REF_OUTSIDE_WINDOW_FLAG`), as training's targets never cite one.
     """
     from data_pipeline.dataset_builder.policy_windows import pages_to_read, plan_windows
     from inference_core.model_runner import can_submit
@@ -459,12 +504,19 @@ def _extract_policy_windows(
         texts = dict(request.page_texts) or dict(enumerate(_all_page_texts(request), start=1))
 
     # Every page, with the declarations found, and each window sized, from the
-    # same text by the same rule as the training rows were.
+    # same text by the same rule as the training rows were - and the window its
+    # declarations lead marked as training marks it (PolicyWindowPlan.leads):
+    # the merge keeps that window's values first within its group.
     every_page, declarations_page = pages_to_read(texts or None, page_count)
-    plan: list[tuple[str, list[int]]] = [
-        (window.group, list(window.pages))
+    plan: list[_Planned] = [
+        _Planned(window.group, list(window.pages), window.leads)
         for window in plan_windows(lob, every_page, declarations_page, None if image_only else texts)
     ]
+    shapes = {group: _section_shapes(route_, lob, group) for group in {window.group for window in plan}}
+
+    def settle(window: _Planned, result: Any, attempt: int) -> _Settled:
+        return _settle(request.source_id, route_, window, result, attempt,
+                       declarations_page=declarations_page, shapes=shapes[window.group])
 
     def window_request(group: str, pages: list[int]) -> tuple[Any, ...]:
         return (*_build_request(
@@ -477,7 +529,7 @@ def _extract_policy_windows(
         ), _window_answer_cap(group, route_.schema_doc_type))
 
     read_with = _read_as_answered if can_submit(model) else _read_in_rounds
-    read = read_with(request, model, route_, plan, window_request)
+    read = read_with(request, model, route_, plan, window_request, settle)
     if latencies is not None:
         latencies.extend(read.calls_ms)
     if stats is not None:
@@ -490,7 +542,8 @@ def _extract_policy_windows(
         )
 
     merged = merge_policy_windows(read.windows, lob=lob)
-    flags = merged.review_flags + [f"{WINDOW_FAILED_FLAG}:{entry}" for entry in read.failed]
+    flags = (merged.review_flags + [f"{WINDOW_FAILED_FLAG}:{entry}" for entry in read.failed]
+             + sorted(set(read.flags)))
     log.info(
         "%s read in %d window(s) over %d page(s) in %d round(s); %d duplicate row(s) "
         "collapsed, %d conflict(s), %d window(s) unreadable", request.source_id, len(read.windows),
@@ -512,6 +565,17 @@ class _WindowsRead:
     #: windows were answered one by one (``window_latencies_ms``).
     calls_ms: list[float] = field(default_factory=list)
     stats: list[dict[str, Any]] = field(default_factory=list)
+    #: Review flags the windows' answers raised (:data:`PAGE_REF_OUTSIDE_WINDOW_FLAG`).
+    flags: list[str] = field(default_factory=list)
+
+
+class _Planned(NamedTuple):
+    """One window to read: a section group over pages, and whether its group's
+    declarations lead it (``PolicyWindowPlan.leads``)."""
+
+    group: str
+    pages: list[int]
+    leads: bool = False
 
 
 @dataclass
@@ -520,33 +584,155 @@ class _Settled:
 
     stat: dict[str, Any]
     window: Any = None
-    retry: list[tuple[str, list[int]]] = field(default_factory=list)
+    retry: list[_Planned] = field(default_factory=list)
     failed: str | None = None
     cause: str | None = None
+    flags: list[str] = field(default_factory=list)
 
 
-def _settle(source_id: str, route_: Route, group: str, pages: list[int], result: Any,
-            attempt: int) -> _Settled:
-    """What one window's answer comes to (see :func:`_extract_policy_windows`)."""
+#: The review flag on a value whose page reference named a page its window was
+#: not shown - past the document's end, page 0, another window's page - or no
+#: page number at all. That reference is dropped; the value is kept, flagged.
+PAGE_REF_OUTSIDE_WINDOW_FLAG = "page_ref_outside_window"
+
+
+def _settle(source_id: str, route_: Route, window: _Planned, result: Any, attempt: int, *,
+            declarations_page: int | None = None,
+            shapes: Mapping[str, str] | None = None) -> _Settled:
+    """What one window's answer comes to (see :func:`_extract_policy_windows`).
+
+    ``shapes`` is the JSON type each section of the window's schema must be
+    (:func:`_section_shapes`); an answer giving another is refused as one that
+    does not parse is.
+    """
     from serving.policy_merge import PolicyWindow
 
+    group, pages = window.group, window.pages
     try:
         if isinstance(result, Exception):
             raise PipelineError(str(result))
         extraction, spans = _parse_generation(result, route_, refuse_truncated=True)
+        _check_section_shapes(extraction, shapes or {}, route_)
     except PipelineError as exc:
         if len(pages) > 1:
-            half = len(pages) // 2
             log.warning("%s: %s window over pages %s failed (%s); retrying as two smaller windows",
                         source_id, group, pages, exc)
             return _Settled(_window_stat(group, pages, attempt, result, "split", str(exc)),
-                            retry=[(group, pages[:half]), (group, pages[half:])], cause=str(exc))
+                            retry=_halves(window, declarations_page), cause=str(exc))
         log.warning("%s: %s window over page %s failed even alone (%s); dropped and flagged for review",
                     source_id, group, pages[0], exc)
         return _Settled(_window_stat(group, pages, attempt, result, "failed", str(exc)),
                         failed=f"{group}:p{pages[0]}", cause=str(exc))
+    outside = _cite_shown_pages(extraction, pages)
+    if outside:
+        log.warning("%s: %s window over pages %s cited pages it was not shown at %s; those "
+                    "references dropped and flagged", source_id, group, pages, ", ".join(outside[:6]))
     return _Settled(_window_stat(group, pages, attempt, result, "read"),
-                    window=PolicyWindow(group, pages, extraction, spans, result.latency_ms))
+                    window=PolicyWindow(group, pages, extraction, spans, result.latency_ms,
+                                        leads=window.leads),
+                    flags=[f"{path}:{PAGE_REF_OUTSIDE_WINDOW_FLAG}" for path in outside])
+
+
+def _halves(window: _Planned, declarations_page: int | None) -> list[_Planned]:
+    """A failed window as two smaller ones, in page order.
+
+    The declarations lead the half holding their page - the first half when
+    neither does - as they led the window: the rule training marks its windows
+    by (``policy_windows._home_window``). Led by neither, a declarations window
+    cut off on the declarations page lost its place to the half holding page 1,
+    and a renewal notice's prior policy number was served.
+    """
+    half = len(window.pages) // 2
+    pieces = [window.pages[:half], window.pages[half:]]
+    home = next((index for index, pages in enumerate(pieces) if declarations_page in pages), 0)
+    return [_Planned(window.group, pages, window.leads and index == home)
+            for index, pages in enumerate(pieces)]
+
+
+def _section_shapes(route_: Route, lob: str | list[str] | None, group: str) -> dict[str, str]:
+    """Each top-level section of a window's schema slice and the JSON type its
+    answer must be: ``object`` or ``array``. A section given by reference
+    (``#/$defs/policy``, on a common-model line) is looked up."""
+    schema = resolved_schema(route_.schema_doc_type, route_.schema_acord_form, lob, group)
+    defs = schema.get("$defs") or {}
+    shapes: dict[str, str] = {}
+    for name, node in (schema.get("properties") or {}).items():
+        ref = node.get("$ref") if isinstance(node, dict) else None
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            node = defs.get(ref.rsplit("/", 1)[-1])
+        kind = node.get("type") if isinstance(node, dict) else None
+        kinds = {kind} if isinstance(kind, str) else set(kind or ())
+        shape = next((k for k in ("object", "array") if k in kinds), None)
+        if shape:
+            shapes[name] = shape
+    return shapes
+
+
+def _check_section_shapes(extraction: dict[str, Any], shapes: Mapping[str, str], route_: Route) -> None:
+    """Refuse an answer that gives a section in another JSON type than its schema's.
+
+    Structured decoding cannot write one; without it a model can, and a policy
+    section answered as a bare string (``"policy": "WC-1"``) passed the merge
+    and failed the request with a TypeError where the system fields are written
+    into it. The same generation failure as an answer that does not parse.
+    """
+    wrong = [
+        f"{name} ({type(value).__name__}, not an {shape})"
+        for name, shape in shapes.items()
+        if (value := extraction.get(name)) is not None
+        and not isinstance(value, dict if shape == "object" else list)
+    ]
+    if wrong:
+        raise PipelineError(
+            f"the model answered {route_.schema_doc_type} section(s) in a shape their schema does "
+            f"not allow: {', '.join(wrong)}"
+        )
+
+
+def _cite_shown_pages(extraction: dict[str, Any], pages: list[int]) -> list[str]:
+    """Every ``page_ref`` in a window's answer held to the pages it was shown,
+    in place; the paths of the values whose references named another.
+
+    A reference written as a string or a bare number is read as the page it
+    names (``"12"`` is page 12, never pages 1 and 2, as iterating the string
+    made it); any reference that names no page the window shows is dropped.
+    Structured decoding bounds references to the window's pages
+    (``with_page_bounds``); without it nothing did, and ``[99]`` on an
+    eight-page policy was served as valid.
+    """
+    shown = set(pages)
+    outside: list[str] = []
+
+    def number(page: Any) -> int | None:
+        if isinstance(page, bool):
+            return None
+        if isinstance(page, int):
+            return page
+        if isinstance(page, str) and page.strip().isdigit():
+            return int(page.strip())
+        return None
+
+    def walk(node: Any, path: str) -> None:
+        if is_field_value(node):
+            cited = node.get("page_ref")
+            if cited is None:
+                return
+            listed = cited if isinstance(cited, list) else [cited]
+            numbers = [number(page) for page in listed]
+            dropped = any(page not in shown for page in numbers)
+            if dropped:
+                outside.append(path)
+            if dropped or listed is not cited or numbers != listed:
+                node["page_ref"] = list(dict.fromkeys(page for page in numbers if page in shown))
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{path}.{key}" if path else key)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, f"{path}[]")
+
+    walk(extraction, "")
+    return sorted(set(outside))
 
 
 def _window_stat(group: str, pages: list[int], attempt: int, result: Any, outcome: str,
@@ -578,9 +764,11 @@ def _window_stat(group: str, pages: list[int], attempt: int, result: Any, outcom
 
 
 def _read_in_rounds(request: ExtractionRequest, model: LoadedModel, route_: Route,
-                    plan: list[tuple[str, list[int]]], window_request: Any) -> _WindowsRead:
+                    plan: list[_Planned], window_request: Any, settle: Any) -> _WindowsRead:
     """Every window in calls of up to :data:`MAX_WINDOWS_PER_BATCH`; the failed
-    ones' halves in the next round, once the whole round has finished."""
+    ones' halves in the next round, once the whole round has finished.
+    ``settle(window, result, attempt)`` is what one answer comes to
+    (:func:`_settle`)."""
     read = _WindowsRead()
     pending = plan
     while pending:
@@ -590,7 +778,8 @@ def _read_in_rounds(request: ExtractionRequest, model: LoadedModel, route_: Rout
         order = _sending(request, pending, route_.schema_doc_type)
         for start in range(0, len(order), MAX_WINDOWS_PER_BATCH):
             positions = order[start:start + MAX_WINDOWS_PER_BATCH]
-            requests = [window_request(*pending[position]) for position in positions]
+            requests = [window_request(pending[position].group, pending[position].pages)
+                        for position in positions]
             batch, batches = _batch_in_halves(model, requests, route_.adapter, request.source_id)
             for position, result in zip(positions, batch, strict=True):
                 results[position] = result
@@ -599,22 +788,28 @@ def _read_in_rounds(request: ExtractionRequest, model: LoadedModel, route_: Rout
             # each the call's wall time, so one per window would count it n times.
             read.calls_ms.extend(round(ms, 1) for ms in batches)
 
-        retry: list[tuple[str, list[int]]] = []
-        for (group, pages), result in zip(pending, results, strict=True):
-            settled = _settle(request.source_id, route_, group, pages, result, read.rounds)
-            read.stats.append(settled.stat)
-            read.first_cause = read.first_cause or settled.cause
-            if settled.window is not None:
-                read.windows.append(settled.window)
-            if settled.failed:
-                read.failed.append(settled.failed)
+        retry: list[_Planned] = []
+        for window, result in zip(pending, results, strict=True):
+            settled = settle(window, result, read.rounds)
+            _record(read, settled)
             retry += settled.retry
         pending = retry
     return read
 
 
+def _record(read: _WindowsRead, settled: _Settled) -> None:
+    """One settled window, added to what the reading came to."""
+    read.stats.append(settled.stat)
+    read.first_cause = read.first_cause or settled.cause
+    if settled.window is not None:
+        read.windows.append(settled.window)
+    if settled.failed:
+        read.failed.append(settled.failed)
+    read.flags.extend(settled.flags)
+
+
 def _read_as_answered(request: ExtractionRequest, model: LoadedModel, route_: Route,
-                      plan: list[tuple[str, list[int]]], window_request: Any) -> _WindowsRead:
+                      plan: list[_Planned], window_request: Any, settle: Any) -> _WindowsRead:
     """Every window sent at once and taken as it is answered; a failed window's
     halves sent the moment it fails.
 
@@ -628,40 +823,35 @@ def _read_as_answered(request: ExtractionRequest, model: LoadedModel, route_: Ro
     from inference_core.model_runner import submit_generation
 
     started = time.perf_counter()
-    running: dict[Any, tuple[tuple[int, ...], str, list[int]]] = {}
+    running: dict[Any, tuple[tuple[int, ...], _Planned]] = {}
 
-    def send(path: tuple[int, ...], group: str, pages: list[int]) -> None:
-        future = submit_generation(model, window_request(group, pages), adapter=route_.adapter)
-        running[future] = (path, group, pages)
+    def send(path: tuple[int, ...], window: _Planned) -> None:
+        future = submit_generation(model, window_request(window.group, window.pages), adapter=route_.adapter)
+        running[future] = (path, window)
 
     for position in _sending(request, plan, route_.schema_doc_type):
-        send((position,), *plan[position])
+        send((position,), plan[position])
 
     settled_at: list[tuple[tuple[int, tuple[int, ...]], _Settled]] = []
     while running:
         finished, _ = wait(list(running), return_when=FIRST_COMPLETED)
         for future in finished:
-            path, group, pages = running.pop(future)
-            settled = _settle(request.source_id, route_, group, pages, future.result(), len(path))
+            path, window = running.pop(future)
+            settled = settle(window, future.result(), len(path))
             settled_at.append(((len(path), path), settled))
-            for half, (retry_group, retry_pages) in enumerate(settled.retry):
-                send((*path, half), retry_group, retry_pages)
+            for half, retry in enumerate(settled.retry):
+                send((*path, half), retry)
 
     settled_at.sort(key=lambda item: item[0])
     wall_ms = (time.perf_counter() - started) * 1000
     read = _WindowsRead(rounds=max(place[0] for place, _ in settled_at) if settled_at else 0,
                         wall_ms=wall_ms, calls_ms=[round(wall_ms, 1)])
     for _place, settled in settled_at:
-        read.stats.append(settled.stat)
-        read.first_cause = read.first_cause or settled.cause
-        if settled.window is not None:
-            read.windows.append(settled.window)
-        if settled.failed:
-            read.failed.append(settled.failed)
+        _record(read, settled)
     return read
 
 
-def _send_order(pending: list[tuple[str, list[int]]], doc_type: str | None) -> list[int]:
+def _send_order(pending: list[Any], doc_type: str | None) -> list[int]:
     """The positions of ``pending``, in the order they go to the model.
 
     The windows expected to write the longest answers first: the larger answer
@@ -671,12 +861,12 @@ def _send_order(pending: list[tuple[str, list[int]]], doc_type: str | None) -> l
     same way (evaluation.validation_generation), by the gold answer's length,
     which serving does not have. A wrong guess costs speed, never an answer.
     """
-    caps = {group: _window_answer_cap(group, doc_type) for group, _pages in pending}
+    caps = {window[0]: _window_answer_cap(window[0], doc_type) for window in pending}
     return sorted(range(len(pending)),
                   key=lambda position: (-caps[pending[position][0]], -len(pending[position][1])))
 
 
-def _sending(request: ExtractionRequest, pending: list[tuple[str, list[int]]],
+def _sending(request: ExtractionRequest, pending: list[Any],
              doc_type: str | None) -> list[int]:
     """:func:`_send_order`, reversed when the request asks (``send_order``)."""
     order = _send_order(pending, doc_type)
@@ -1376,6 +1566,7 @@ def extract(
             and schema with no flag. Off, such a policy is refused, or read
             against the fallback when the caller asked.
     """
+    request = _numbered_pages(request)
     route_ = _resolve_route(
         request, classifier,
         confidence_threshold=classifier_threshold,
@@ -1392,7 +1583,7 @@ def extract(
         route_ = replace(route_, review_flags=[*route_.review_flags, *resolution.flags])
 
     release = None
-    lob_fallback_used = False
+    lob_fallback_used = fallback = False
     if plan is not None:
         from serving.release_router import UnservedDocType
 
@@ -1407,25 +1598,37 @@ def extract(
         except UnservedDocType as exc:
             raise PipelineError(str(exc)) from exc
         release = routed.release
-        if routed.lob_fallback_used:
-            if not base_model_loaded:
-                # The engine is one release's merged model: reading with "no
-                # adapter" would be that release, against a schema it never
-                # trained on, reported as the base model.
-                raise PipelineError(
-                    f"{request.source_id} would be read by the base model against the fallback "
-                    "schema, but this endpoint's engine is the release's merged model, not the base: "
-                    "the release covers every known line, so the engine holds no base model. A "
-                    "policy with no line, a package or an undetected line cannot be read here; send "
-                    "its single line of business.")
-            # The base model, no LoRA, against the canonical _fallback.json:
-            # no adapter trained on this line's layout is promoted.
-            lob_fallback_used = True
-            from inference_core.model_runner import NO_ADAPTER
+        fallback = routed.lob_fallback_used
+    elif route_.doc_type == "policy" and resolution.lob:
+        # No serving plan - fields first, the golden eval, compare_models: a
+        # line no schema has is refused as the plan refuses it, or read against
+        # the fallback, flagged, when the caller asked. It used to be read
+        # against the fallback with whatever adapter was routed, unflagged.
+        from serving.release_router import _unroutable
 
-            route_ = replace(route_, adapter=NO_ADAPTER)
-            # A release's calibrators were fitted to its adapter, not the base.
-            calibrators = thresholds = None
+        problem = _unroutable(resolution.lob)
+        if problem and not request.allow_lob_fallback:
+            raise PipelineError(f"{request.source_id}: {problem}")
+        fallback = bool(problem)
+    if fallback:
+        if not base_model_loaded:
+            # The engine is one release's merged model: reading with "no
+            # adapter" would be that release, against a schema it never
+            # trained on, reported as the base model.
+            raise PipelineError(
+                f"{request.source_id} would be read by the base model against the fallback "
+                "schema, but this endpoint's engine is the release's merged model, not the base: "
+                "the release covers every known line, so the engine holds no base model. A "
+                "policy with no line, a package or an undetected line cannot be read here; send "
+                "its single line of business.")
+        # The base model, no LoRA, against the canonical _fallback.json: no
+        # adapter trained on this line's layout is promoted.
+        lob_fallback_used = True
+        from inference_core.model_runner import NO_ADAPTER
+
+        route_ = replace(route_, adapter=NO_ADAPTER)
+        # A release's calibrators were fitted to its adapter, not the base.
+        calibrators = thresholds = None
 
     # Serve THROUGH the release the plan chose: its adapter and its calibrators.
     # The choice used to be a yes/no check and was then thrown away, so a

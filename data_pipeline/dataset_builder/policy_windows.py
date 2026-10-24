@@ -54,7 +54,13 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
-from common.canonical import CanonicalLabelError, in_schema_order, is_field_value, to_model_target
+from common.canonical import (
+    CanonicalLabelError,
+    in_schema_order,
+    is_field_value,
+    page_numbers,
+    to_model_target,
+)
 from common.model_view import PRINTED_STRING_FIELDS
 
 #: Never in an assistant target: attached at inference by the section builder
@@ -106,6 +112,11 @@ class PolicyWindowPlan:
         from common.schema_sections import task_for
 
         return task_for(self.group)
+
+
+def _pages(refs: Any) -> set[int]:
+    """The pages a ``page_ref`` names (:func:`common.canonical.page_numbers`)."""
+    return set(page_numbers(refs))
 
 
 @dataclass
@@ -165,9 +176,12 @@ def pages_to_read(
 #: its corpus was built with (``assert_window_plan``). "2": every page read, each
 #: window sized by its pages' own text (decisions 2026-10-19 and 2026-10-22).
 #: "3": a split keeps its runs' shared pages, and the declarations-led window is
-#: the one holding the declarations page. Bump it whenever the rule changes;
+#: the one holding the declarations page. "4": a run split by its text shares
+#: its pages whatever split it - a window its page count kept whole too - and a
+#: window that could hold no page beyond the shared ones starts after them
+#: (``expand_tasks.fit_windows_to_text``). Bump it whenever the rule changes;
 #: changes to the planner's inputs are caught by :func:`window_plan_id`.
-WINDOW_PLAN_VERSION = "3"
+WINDOW_PLAN_VERSION = "4"
 
 
 def window_plan_id() -> str:
@@ -680,7 +694,7 @@ def _on_pages(
     cached per document and read by every window and mode, so trimming it in
     place would trim it for the windows after this one.
     """
-    refs = {int(p) for p in node.get("page_ref") or []}
+    refs = _pages(node.get("page_ref"))
     if not refs:
         if plan.holds_unpaged:
             return node
@@ -752,8 +766,8 @@ def _entry_on_pages(
     and its value's, both trimmed to the window's: a value printed on pages 1
     and 30 is cited as [1] by the window showing page 1."""
     value = entry.get("value")
-    entry_refs = {int(p) for p in entry.get("page_ref") or []}
-    value_refs = {int(p) for p in (value.get("page_ref") if isinstance(value, dict) else None) or []}
+    entry_refs = _pages(entry.get("page_ref"))
+    value_refs = _pages(value.get("page_ref") if isinstance(value, dict) else None)
     refs = entry_refs | value_refs
     if not refs:
         if plan.holds_unpaged:
@@ -848,7 +862,7 @@ def _home_pages(node: Any, fields: frozenset[str]) -> set[int]:
         for key, value in node.items():
             if is_field_value(value):
                 if key in fields and (value.get("raw") is not None or value.get("parsed") is not None):
-                    pages.update(int(p) for p in value.get("page_ref") or [])
+                    pages.update(_pages(value.get("page_ref")))
             else:
                 pages |= _home_pages(value, fields)
     elif isinstance(node, list):
@@ -893,7 +907,7 @@ def _cited_only_here(node: Any, pages: set[int], plan: PolicyWindowPlan) -> bool
     if is_field_value(node):
         if node.get("raw") is None and node.get("parsed") is None:
             return False
-        refs = {int(p) for p in node.get("page_ref") or []}
+        refs = _pages(node.get("page_ref"))
         return refs <= pages if refs else plan.holds_unpaged
     if isinstance(node, dict):
         return any(_cited_only_here(value, pages, plan) for value in node.values())
@@ -927,7 +941,7 @@ def unread_values(
 
 def _collect_unread(node: Any, path: str, read: set[int], out: list[str]) -> None:
     if is_field_value(node):
-        refs = {int(p) for p in node.get("page_ref") or []}
+        refs = _pages(node.get("page_ref"))
         stated = node.get("raw") is not None or node.get("parsed") is not None
         if stated and refs and not refs & read:
             out.append(path)

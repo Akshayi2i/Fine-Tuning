@@ -22,11 +22,16 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from common.canonical import CanonicalLabelError, has_envelopes, training_target
+from common.canonical import CanonicalLabelError, has_envelopes, is_field_value, training_target
 from common.constants import MODALITY_MODES, TRAINER_SPECIAL_TAGS
 from common.schemas import is_canonical
 from data_pipeline.dataset_builder.cap_check import CapReport, estimate_row, evaluate
-from data_pipeline.dataset_builder.label_verification import VerificationReport, verified_label
+from data_pipeline.dataset_builder.label_verification import (
+    VerificationReport,
+    paths_after_removal,
+    verified_label,
+    without_paths,
+)
 from data_pipeline.dataset_builder.noisy_ocr_augment import corrupt_ocr_pages
 from data_pipeline.dataset_builder.policy_windows import (
     TargetReport,
@@ -129,7 +134,8 @@ class BuildResult:
     #: read over several windows. The same values are unreachable at serving, so
     #: this is where a page rule that misses real content becomes visible.
     window_notes: dict[str, list[str]] = field(default_factory=dict)
-    #: Documents set aside, by reason: ``budget``, ``trainer_tag``, ``expansion``.
+    #: Documents set aside, by reason: ``budget``, ``trainer_tag``, ``expansion``,
+    #: ``empty_label`` (a canonical label whose every value is null).
     #: Every document that does not reach the corpus is counted here, so a stage
     #: summary can say how many were lost and why rather than a log line alone.
     set_aside: Counter = field(default_factory=Counter)
@@ -183,6 +189,14 @@ def expand_document(
         raise CanonicalLabelError(
             f"{document.source_id} is a policy with a flat, pre-canonical label. Convert it to "
             "the canonical schema before it enters the corpus."
+        )
+    if windowed and states_nothing(document.golden_label):
+        # The same failure in the canonical shape: every value null, every
+        # window's target empty sections. build_corpus sets these aside before
+        # expansion (``empty_label``); refused here for any other caller.
+        raise CanonicalLabelError(
+            f"{document.source_id}: every value of its canonical label is null, so every window's "
+            "target would be empty sections. Label it before it enters the corpus."
         )
 
     golden_json = ""
@@ -284,7 +298,9 @@ def _policy_window_rows(
     printed = getattr(document, "_printed_pages", None)
     if printed is None and document.ocr_pages:
         printed = document._printed_pages = printed_pages_in(document.ocr_pages)
-    unprinted = _unprinted_values(label, document.unprinted_values)
+    # Recorded against the gold, read on the verified label: a rule-added list
+    # member verification dropped renumbers the members after it.
+    unprinted = _unprinted_values(label, paths_after_removal(document.unprinted_values, checked.dropped))
     # A value no page prints and none is recorded for, in a section read over
     # several windows: taught nowhere, as before every page was read. The
     # declarations-led window takes values with no page, and holding this one
@@ -339,6 +355,11 @@ def _policy_window_rows(
         row["task"] = plan.task
         row["window_index"] = plan.window_index
         row["window_pages"] = list(plan.pages)
+        # Whether the group's declarations lead this window: the validation
+        # merge (validation_generation.merged_windows) merges it first within
+        # its group, as serving does (PolicyWindow.leads), so a split
+        # declarations window's lead piece wins there too.
+        row["window_leads"] = plan.leads
         rows.append(row)
 
     notes = [f"window {mode}: unread {path}" for path in unread_values(
@@ -376,6 +397,39 @@ def _policy_window_rows(
     return rows
 
 
+def states_nothing(label: Any) -> bool:
+    """Whether a canonical label states no value at all: it has envelopes, and
+    each one's ``raw`` and ``parsed`` are null or blank.
+
+    The flat-label guard (:func:`has_envelopes`) passes such a label - it IS in
+    the canonical shape - and every window's target came out as empty sections
+    (``{"carrier": {}, ...}``), teaching the model that the policy prints
+    nothing. Bare values beside the envelopes (row ids, bookkeeping) are not
+    values the model is asked to read and do not count. A flat label is not
+    judged here: it has no envelopes, and the flat-label guard refuses it for a
+    policy.
+    """
+    return has_envelopes(label) and not _any_envelope_value(label)
+
+
+def _any_envelope_value(node: Any) -> bool:
+    if is_field_value(node):
+        return any(not _blank(node.get(key)) for key in ("raw", "parsed"))
+    if isinstance(node, dict):
+        return any(_any_envelope_value(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_any_envelope_value(value) for value in node)
+    return False
+
+
+def _blank(value: Any) -> bool:
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict)):
+        return not value
+    return value is None
+
+
 def _unprinted_values(label: dict[str, Any], paths: list[str]) -> list[tuple[str, str, set[int]]]:
     """``(path, section, pages it cites)`` for each label value no page prints."""
     import re
@@ -398,22 +452,14 @@ def _unprinted_values(label: dict[str, Any], paths: list[str]) -> list[tuple[str
 
 def _without_paths(label: dict[str, Any], paths: list[str]) -> dict[str, Any]:
     """A copy of ``label`` without the values at ``paths`` (``policy.term``,
-    ``coverages[2].limit``); a path that leads nowhere is skipped."""
-    import copy
-    import re
+    ``coverages[2].limit``, ``named_insured.additional_names[1]``); a path that
+    leads nowhere is skipped.
 
-    out = copy.deepcopy(label)
-    for path in paths:
-        steps = [int(index) if index else key for key, index in re.findall(r"([^.\[\]]+)|\[(\d+)\]", path)]
-        node: Any = out
-        try:
-            for step in steps[:-1]:
-                node = node[step]
-        except (KeyError, IndexError, TypeError):
-            continue
-        if isinstance(node, dict):
-            node.pop(steps[-1], None)
-    return out
+    A list member too: only a dict key was removed before, so an unprinted
+    member of a list (an additional name) stayed in the label - and, taken off
+    the unprinted list as "removed", was taught with nothing holding its window.
+    """
+    return without_paths(label, paths)
 
 
 def _held_unprinted(plan: Any, lob: Any, unprinted: list[tuple[str, str, set[int]]]) -> list[str]:
@@ -538,6 +584,20 @@ def build_corpus(
             split = assignment.split_of(document.family)
         except Exception as exc:
             result.skipped.append((document.source_id, str(exc)))
+            continue
+
+        if states_nothing(document.golden_label):
+            # Before expansion, and its own reason: an empty gold is a labelling
+            # gap to fill, not a target builder to debug, so it is not counted
+            # among a common-model line's expansion failures.
+            reason = (
+                f"{document.source_id}: every value of its canonical label is null, so every "
+                "target built from it would be empty sections and teach 'this document states "
+                "nothing'. Label it, or leave it out of the delivery."
+            )
+            result.skipped.append((document.source_id, reason))
+            result.set_aside["empty_label"] += 1
+            log.warning("setting aside %s", reason)
             continue
 
         # Train draws ONE mode per epoch (§6.1); val and test keep all three so

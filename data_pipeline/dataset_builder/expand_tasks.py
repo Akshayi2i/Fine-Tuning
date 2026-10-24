@@ -493,12 +493,18 @@ def fit_windows_to_text(
     ``overlap`` pages of the one before (:func:`_fit_overlapping`). Fitted window
     by window, a dense personal-auto schedule became twelve calls where seven
     were planned, five page breaks covered by no window.
+
+    With ``overlap``, a run is split with shared pages whatever split it: a
+    window its page count kept whole and its text splits shares them too, where
+    the cut falls between consecutive pages. Only a run one page longer than a
+    window used to: three dense pages read as ``[1, 2], [3]``, four as
+    ``[1, 2], [2, 3], [3, 4]``.
     """
     out: list[list[int]] = []
     for chain in _overlap_chains(windows):
         if all(sum(cost(page) for page in window) <= room for window in chain):
             out.extend(chain)
-        elif overlap and len(chain) > 1:
+        elif overlap:
             run = sorted({page for window in chain for page in window})
             out.extend(_fit_overlapping(run, cost, room, overlap))
         else:
@@ -520,10 +526,11 @@ def _overlap_chains(windows: list[list[int]]) -> list[list[list[int]]]:
 
 
 def _fit_overlapping(run: list[int], cost: Callable[[int], int], room: int, overlap: int) -> list[list[int]]:
-    """A run in page order as windows that fit ``room``, each after the first
-    opening on the last ``overlap`` pages of the one before. A window that
-    could hold no page beyond the shared ones starts after them, as
-    :func:`_split_overlapping` does."""
+    """Pages in page order as windows that fit ``room``, each after the first
+    opening on the last ``overlap`` pages of the one before where it is cut
+    between consecutive pages. A window that could hold no page beyond the
+    shared ones starts after them, as :func:`_split_overlapping` does: opened
+    on them, it would read only pages already read (``[1, 2], [2], [3]``)."""
     out: list[list[int]] = []
     start = 0
     while start < len(run):
@@ -534,7 +541,15 @@ def _fit_overlapping(run: list[int], cost: Callable[[int], int], room: int, over
         out.append(run[start:end])
         if end >= len(run):
             break
-        start = end - overlap if end - overlap > start else end
+        shared = end - overlap
+        opens_on_shared = (
+            shared > start
+            # Cut inside a run of consecutive pages, not between two runs a
+            # window packed together.
+            and run[end] - run[shared] == overlap
+            and sum(cost(page) for page in run[shared:end]) + cost(run[end]) <= room
+        )
+        start = shared if opens_on_shared else end
     return out
 
 

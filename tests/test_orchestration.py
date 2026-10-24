@@ -567,6 +567,7 @@ def test_the_gate_reads_an_existing_eval_report_when_no_provider_is_given(client
     from artifact_registry import paths
 
     seed_corpus(client)
+    freeze_as_scored(client)
     client.write_json(paths.eval_report("v1", scope="policy"), {"gate_metrics": dict(PASSING_METRICS),
                                                 "eval_set": _scored_on()})
 
@@ -632,6 +633,7 @@ def test_per_document_scores_in_both_reports_gate_on_a_paired_bootstrap(client, 
     seed_corpus(client)
     run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
     promote_in_index(client, "v1")
+    freeze_as_scored(client)
     same = {f"doc_{i:02d}": 0.9 for i in range(20)}
     per_document = {"field_normalized_match": same, "list_field_recall": same}
     for version in ("v1", "v1.1", "v1.2"):
@@ -688,12 +690,23 @@ def _scored_on(tenant: str | None = None, frozen_at: str = "2026-10-01T00:00:00+
             "documents_by_doc_type": documents, "real_documents_by_doc_type": documents}
 
 
+def freeze_as_scored(client: BlobClient, tenant: str | None = None,
+                     frozen_at: str = "2026-10-01T00:00:00+00:00") -> None:
+    """The tenant's frozen set as ``_scored_on`` records it. An eval report is
+    reused for the gate only when it was scored on the set as it stands now:
+    one scored on a set frozen since, or on none, is scored again (H6)."""
+    from evaluation.freeze_eval_set import manifest_key
+
+    client.write_json(manifest_key(tenant_id=tenant), {"frozen_at": frozen_at, "frozen_from_corpus": "v1"})
+
+
 def _promoted_and_candidate(client, controller, promoted: dict, candidate: dict) -> None:
     """Release v1 promoted with ``promoted`` as its eval report, and ``candidate``
     as v1.1's."""
     seed_corpus(client)
     run_stages(make_context(client, controller, out_version="v1"), stages_for("all"), command="all")
     promote_in_index(client, "v1")
+    freeze_as_scored(client)
     client.write_json(paths.eval_report("v1", scope="policy"), promoted)
     client.write_json(paths.eval_report("v1.1", scope="policy"), candidate)
 
@@ -2226,6 +2239,7 @@ def test_the_gate_reads_the_policy_adapter_s_eval_report(client, controller):
     from orchestration.pipeline_dag import eval_report_metrics
 
     seed_corpus(client)
+    freeze_as_scored(client)
     ctx = make_context(client, controller)
 
     client.write_json(paths.eval_report("v1"), {"gate_metrics": {"field_exact_match": 0.10},

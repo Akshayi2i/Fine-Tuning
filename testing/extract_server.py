@@ -30,7 +30,12 @@ taken as it is answered (:mod:`inference_core.openai_backend`). Only the PDF
 crosses the proxy - from a laptop, sending the page images with every window
 was most of the time. ``--images file`` sends each image's path, not its
 bytes; start vLLM with ``--allowed-local-media-path`` covering ``--work-dir``.
-Give this server a port of its own (``--port 8002``) and expose it.
+Give this server a port of its own (``--port 8002``) and expose it. Their
+token is ``--remote-token`` or ``$FIDEON_REMOTE_TOKEN``, read at start - on the
+pod an inline ``FIDEON_REMOTE_TOKEN=... python -m ...`` reaches the detached
+server (``scripts/pod_run.sh`` keeps it over ``.env``). MinerU's tier is the
+pinned one (``configs/shared/ocr.yaml``): another ``--tier`` is refused unless
+``--any-mineru`` (timing only), before the command detaches.
 
 **Jobs, not one long request.** The RunPod proxy closes a request that has not
 been answered within about 100 seconds, and an 85-page policy takes minutes. A
@@ -43,7 +48,7 @@ at a time, in the order posted, so each one's timings are its own.
 pod's volume under ``<work dir>/<job>/`` - the result JSON always, the PDF and
 pages only with ``--keep-files`` - and their content is never logged.
 
-    GET  /health                                       ready, model, jobs
+    GET  /health                                       ready, model, jobs, the largest PDF taken
     POST /jobs?lob=personal_auto&mode=ocr_plus_image&name=a.pdf   body: the PDF -> 202 {"job": ...}
     GET  /jobs                                         every job, summarised
     GET  /jobs/<id>                                    one job: status, then its summary and timings
@@ -99,6 +104,51 @@ OcrCall = Callable[..., dict[str, Any]]
 
 class RequestError(ValueError):
     """A request this server refuses, with the reason the caller is told."""
+
+
+def positive_int(value: str) -> int:
+    """An argparse type: a whole number of at least 1 (``--concurrency 0`` would
+    start no request and wait for ever)."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, got {value!r}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, got {number}")
+    return number
+
+
+#: The files a run of the client or the timing runner writes beside its documents' own.
+RUN_FILES = frozenset({"summary"})
+
+
+def unique_names(names: list[str], taken: frozenset[str] = RUN_FILES) -> list[str]:
+    """``names`` made unique for files in one folder: a name already used, or one
+    of the run's own files (``summary.pdf`` would be written over by
+    ``summary.json``), takes ``-2``, ``-3`` ... - two folders can each hold a
+    ``policy.pdf``. Compared ignoring case, as Windows compares file names."""
+    used = {name.lower() for name in taken}
+    out = []
+    for name in names:
+        unique, number = name, 2
+        while unique.lower() in used:
+            unique, number = f"{name}-{number}", number + 1
+        used.add(unique.lower())
+        out.append(unique)
+    return out
+
+
+def tier_problem(tier: str | None, any_mineru: bool) -> str | None:
+    """Why ``--tier`` cannot be used without ``--any-mineru``; None when it can.
+    Checked before a command detaches on the pod: :class:`ServedOcr` refuses
+    the same tier, but only once the run has started, unseen, in tmux."""
+    from common.config import served_mineru
+
+    pinned = served_mineru()["tier"]
+    if tier is None or tier == pinned or any_mineru:
+        return None
+    return (f"--tier {tier} is not the pinned tier ({pinned}): the model is trained on the pinned one's "
+            "text. Add --any-mineru to time it anyway.")
 
 
 # --------------------------------------------------------------------------
@@ -206,6 +256,9 @@ class ExtractService:
         #: Fields first serves fields unchecked (timing tests only).
         self.unverified_fields = unverified_fields
         self.jobs: dict[str, Job] = {}
+        #: Held while ``jobs`` is changed or listed: request threads insert into it
+        #: while others list it (a dict changed while iterated raises).
+        self.jobs_lock = threading.Lock()
         self.queue: queue.Queue[Job] = queue.Queue()
         #: Fields-first jobs whose fields are out, waiting for MinerU's text.
         self.text_queue: queue.Queue[Job] = queue.Queue()
@@ -236,13 +289,23 @@ class ExtractService:
         folder = self.work_dir / job.id
         folder.mkdir(parents=True)
         (folder / "document.pdf").write_bytes(pdf)
-        self.jobs[job.id] = job
+        with self.jobs_lock:
+            self.jobs[job.id] = job
         self.queue.put(job)
         log.info("job %s queued: %d bytes, lob %s, mode %s", job.id, len(pdf), job.lob, mode)
         return job
 
     def result_path(self, job: Job) -> Path:
         return self.work_dir / job.id / "result.json"
+
+    def job_list(self) -> list[Job]:
+        """Every job, in the order posted: a copy, safe to read while jobs are posted."""
+        with self.jobs_lock:
+            return list(self.jobs.values())
+
+    def job(self, job_id: str) -> Job | None:
+        with self.jobs_lock:
+            return self.jobs.get(job_id)
 
     def _worker(self) -> None:
         while True:
@@ -522,7 +585,10 @@ def handler_for(service: ExtractService, token: str) -> type[BaseHTTPRequestHand
 
         def _authorised(self) -> bool:
             sent = self.headers.get("Authorization", "")
-            if sent.startswith("Bearer ") and hmac.compare_digest(sent[7:].strip(), token):
+            # As bytes: compare_digest raises on a str holding anything but ASCII
+            # (a header is read as Latin-1), and the connection was dropped unanswered.
+            if sent.startswith("Bearer ") and hmac.compare_digest(
+                    sent[7:].strip().encode("utf-8", "surrogatepass"), token.encode("utf-8")):
                 return True
             self._send(401, {"error": "send Authorization: Bearer <token> (see token.txt on the pod)"})
             return False
@@ -530,16 +596,19 @@ def handler_for(service: ExtractService, token: str) -> type[BaseHTTPRequestHand
         def do_GET(self) -> None:  # noqa: N802 - the stdlib's name
             parts = [p for p in urlparse(self.path).path.split("/") if p]
             if parts == ["health"]:
+                jobs = service.job_list()
                 self._send(200, {"status": "ready", "model": service.model.tag,
-                                 "jobs": {s: sum(1 for j in service.jobs.values() if j.status == s)
+                                 # The largest PDF taken: the client checks before it uploads.
+                                 "max_pdf_bytes": MAX_PDF_BYTES,
+                                 "jobs": {s: sum(1 for j in jobs if j.status == s)
                                           for s in ("queued", "running", "fields_ready", "done", "failed")}})
                 return
             if not self._authorised():
                 return
+            job = service.job(parts[1]) if len(parts) in (2, 3) and parts[0] == "jobs" else None
             if parts == ["jobs"]:
-                self._send(200, [job.view() for job in service.jobs.values()])
-            elif len(parts) in (2, 3) and parts[0] == "jobs" and parts[1] in service.jobs:
-                job = service.jobs[parts[1]]
+                self._send(200, [each.view() for each in service.job_list()])
+            elif job is not None:
                 if len(parts) == 2:
                     self._send(200, job.view())
                 elif parts[2] == "result" and job.status in ("fields_ready", "done"):
@@ -558,7 +627,11 @@ def handler_for(service: ExtractService, token: str) -> type[BaseHTTPRequestHand
                 return
             if not self._authorised():
                 return
-            length = int(self.headers.get("Content-Length") or 0)
+            sent = (self.headers.get("Content-Length") or "0").strip()
+            if not (sent.isascii() and sent.isdigit()):     # "abc", "-5": not a length at all
+                self._send(400, {"error": f"Content-Length must be the body's size in bytes, got {sent!r}"})
+                return
+            length = int(sent)
             if not 0 < length <= MAX_PDF_BYTES:
                 self._send(413 if length else 411, {"error": f"send the PDF as the body, up to "
                                                              f"{MAX_PDF_BYTES // 2**20} MB"})
@@ -666,7 +739,7 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"their bearer token (default ${REMOTE_TOKEN_ENV})")
     served.add_argument("--images", default="inline", choices=["inline", "file"],
                         help="page images in each request, or by path (vLLM needs --allowed-local-media-path)")
-    served.add_argument("--concurrency", type=int, default=128, help="windows in flight at most")
+    served.add_argument("--concurrency", type=positive_int, default=128, help="windows in flight at most")
     served.add_argument("--tier", default=None, help="the MinerU tier (default the pinned one, "
                         "configs/shared/ocr.yaml)")
     served.add_argument("--any-mineru", action="store_true",
@@ -691,6 +764,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.model_url and args.adapter:
         parser.error("with --model-url the adapter is vLLM's to serve: start it with --lora-modules "
                      "<name>=<path> and pass --served-model <name>")
+    # Before the detach below: refused after it, in tmux, nobody would see why.
+    if problem := tier_problem(args.tier, args.any_mineru):
+        parser.error(problem)
+    from common.transport import InsecureUrlError, assert_encrypted
+
+    try:
+        if args.model_url:
+            assert_encrypted(args.model_url, "the model server")
+        if args.mineru_url:
+            assert_encrypted(args.mineru_url, "the MinerU server")
+    except InsecureUrlError as exc:
+        parser.error(str(exc))
 
     from orchestration.detach import POD_ENV, detach_module_if_needed
 

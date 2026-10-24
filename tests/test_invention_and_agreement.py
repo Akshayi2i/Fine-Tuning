@@ -104,7 +104,7 @@ def test_the_validation_count_is_servings_count():
         "named_insured": {"primary_name": _env("Rivera Fabrication LLC")},
         "policy": {"policy_number": _env("NIP0115"),                    # an O read for a 0: printed
                    "program_name": _env("Nowhere Agency"),             # printed nowhere
-                   "state": _env("NY"),                                # too short to settle
+                   "state": _env("NY"),                                # printed nowhere (now checked)
                    "agent": _env("Somebody Else", 3)},                 # cites a page with no text
         "coverages": [{"coverage_name": _env("Dwelling", 2), "limit": _env("$219,000", 2),
                        "premium": _env("$9,999.00", 2)}],              # printed nowhere
@@ -113,7 +113,7 @@ def test_the_validation_count_is_servings_count():
     }
     record = hold_to_printed(copy.deepcopy(answer), {}, pages).record   # strict mode edits its input
     report = score_hallucinations([({}, answer, pages)])
-    assert (report.opportunities, report.hits) == (record["checked"], len(record["not_printed"])) == (7, 3)
+    assert (report.opportunities, report.hits) == (record["checked"], len(record["not_printed"])) == (8, 4)
 
 
 def test_a_policys_windows_are_looked_up_on_every_page_of_the_document():

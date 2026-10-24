@@ -11,37 +11,68 @@ does to a scan (``common.grounding.ground_tolerant``). On scans too: the label
 rules never judge a scan's text (``data_pipeline.ingestion.label_rules``), but a
 value must be found to be served.
 
-* **printed** on some page - kept;
-* **unchecked** - too short to look for, a reading such as a yes/no, or a cited
-  page with no text - kept, and counted;
-* **printed nowhere** - in ``strict`` mode, the default, taken out of the JSON:
-  its key stays, null; an extra field leaves its list; a table row goes once no
-  value in it is still printed, the rows after it move up and the structural
-  ids are numbered again as the merge numbers them. Each is flagged
-  ``<path>:not_printed_removed``. In ``flag`` mode it is kept and flagged
-  ``<path>:not_printed``. The mode is ``printed_values.mode`` in
-  ``configs/inference/vllm_serving.yaml``.
+What is looked for is what the value prints: its ``raw``; or - a ``raw`` empty
+or a placeholder ("", "-") while ``parsed`` holds a value - the forms ``parsed``
+is printed in (``common.grounding.printed_forms``): no ``parsed`` is served
+unchecked behind a blank ``raw``.
 
-Paths are the answer's as the model wrote it: a flag and the record name where
-a removed value was, before the rows after it moved up.
+Where it is looked for, and what each outcome does:
+
+1. the pages it cites that have text, then every other page with text - a
+   blank page among those it cites stops nothing;
+2. **printed** on some page - kept;
+3. **printed nowhere** - on no page with text, and every page it cites has text
+   (or it cites none) - in ``strict`` mode, the default, taken out of the JSON:
+   its key stays, null; an extra field leaves its list; a table row goes once no
+   value in it is still printed and the rows after it move up. Each is flagged
+   ``not_printed_removed``. In ``flag`` mode it is kept and flagged
+   ``not_printed``. The mode is ``printed_values.mode`` in
+   ``configs/inference/vllm_serving.yaml``;
+4. **on an unread page** - on no page with text, but a page it cites has none:
+   usually an image MinerU could not read, which may well print it, so taking
+   it out would lose true fields. Kept, and flagged
+   ``<path>:unverified_unread_page`` - never silent - and counted unchecked;
+5. **unchecked** - a reading (a yes/no, a ``bool``), a single character, or no
+   page given has any text - kept, and counted.
+
+Fields first holds its fields to the pages they cite before the rest are read
+(``serving.fields_first``): there 3 means "not found yet", and the value is held
+back as pending; 4 applies only where a page it cites read empty.
+
+A row taken out never renumbers the rows left: a structural id names one row
+from the merge to the served JSON, and the same row at both of fields first's
+phases (``veh_2`` stays ``veh_2`` while ``veh_1`` is held back). A link to the
+row taken out goes as the merge drops a link naming no row - a list keeps the
+rest, a single link goes - flagged ``<path>:link_to_removed_row``.
+
+A flag names a value by the path it is served at. A value taken out with its
+row, or out of a list, has no such path: it is named by the list it left and
+its place there in the answer as the model wrote it, marked ``#`` -
+``vehicles[#0].vin:not_printed_removed`` is the vin of the answer's first
+vehicle, whichever vehicle is served at ``vehicles[0]`` now. No flag names a
+served path that holds another value. A value made null keeps its own path.
 
 What was found is the record (``ExtractionResult.printed_check``, read by the
 evaluation)::
 
     {"mode": "strict"|"flag", "checked": int, "unchecked": int,
      "not_printed": [{"path": str, "raw": str, "pages": [int, ...]}],
-     "removed": bool}
+     "removed": bool, "unread_page": int}
 
 ``checked`` counts the values found printed or printed nowhere, ``not_printed``
-lists the latter (before removal) with the pages they cite, ``removed`` is True
-in strict mode. With no page text - an image-only read - nothing is checked:
-the answer is unchanged, the record is None and the flag
+lists the latter with the pages they cite (``raw`` is what was looked for, and
+``path`` names it as its flag does), ``removed`` is True in strict mode.
+``unchecked`` counts 4 and 5, ``unread_page`` the values of 4 among them:
+``not_printed / checked`` is the invented rate, so a value the text could not
+settle is in neither. With no page text at all - an image-only read - nothing
+is checked: the answer is unchanged, the record is None and the flag
 ``printed_values:no_page_text`` says so. Fields first checks it when MinerU's
 text arrives (:func:`hold_result_to_printed`).
 """
 
 from __future__ import annotations
 
+import copy
 import re
 from bisect import bisect_left
 from collections.abc import Callable, Iterable, Mapping
@@ -55,6 +86,10 @@ MODES = (STRICT, FLAG)
 
 #: A value no page prints, taken out of the served JSON (strict mode).
 REMOVED_FLAG = "not_printed_removed"
+#: A value printed on no page with text while a page it cites has none: kept.
+UNREAD_PAGE_FLAG = "unverified_unread_page"
+#: A link to a row taken out, dropped with it (strict mode).
+LINK_REMOVED_FLAG = "link_to_removed_row"
 #: A policy whose pages carry no text to check it against.
 NO_PAGE_TEXT_FLAG = "printed_values:no_page_text"
 #: Serving's flag for an answer that fails the client's schema (``extract``).
@@ -118,11 +153,37 @@ class _Edits:
                 return None
         return "".join(new)
 
+    def named(self, old: str) -> str:
+        """How a flag names what was at ``old``: by the path it is served at -
+        a value made null keeps its own - or, taken out with its row or out of
+        its list, by the list it left and its place there in the answer as the
+        model wrote it, marked ``#`` (``vehicles[#0].vin``). Never by a served
+        path that now holds another row's value."""
+        if not self.dropped:
+            return old
+        new: list[str] = []
+        prefix = ""
+        for step in _STEP.finditer(old):
+            index, name = step.groups()
+            if name:
+                prefix = f"{prefix}.{name}" if prefix else name
+                new.append(f".{name}" if new else name)
+                continue
+            at = int(index)
+            gone = self.dropped.get(prefix, ())
+            before = bisect_left(gone, at)
+            if before < len(gone) and gone[before] == at:
+                return f"{''.join(new)}[#{at}]{old[step.end():]}"
+            prefix = f"{prefix}[{at}]"
+            new.append(f"[{at - before}]")
+        return "".join(new)
+
     def flag(self, flag: str) -> str | None:
         """``flag`` on the path its value now has; None when the value was taken
-        out. A flag that names no path (``window_failed:...``) is unchanged."""
+        out. A flag that names no path (``window_failed:...``), or a value
+        already taken out (``[#0]``), is unchanged."""
         head, colon, rest = flag.partition(":")
-        if "[" not in head and head not in self.nulled:
+        if "[#" in head or "[" not in head and head not in self.nulled:
             return flag
         moved = self.path(head)
         return None if moved is None else f"{moved}{colon}{rest}"
@@ -153,27 +214,77 @@ def _at(tree: Any, path: str) -> Any:
     return node
 
 
-def _apply(tree: dict[str, Any], edits: _Edits, null: Callable[[dict[str, Any], str], None]) -> bool:
+def _apply(tree: dict[str, Any], edits: _Edits, null: Callable[[dict[str, Any], str], None]) -> dict[str, set[str]]:
     """Make ``edits`` to ``tree`` in place, a null written by ``null(parent,
-    key)``. Whether a row taken out carried a structural id, so the ids must be
-    numbered again."""
+    key)``. Returns the structural ids of the rows taken out, by table: the
+    links to them go too (:func:`_drop_links`).
+
+    The rows left keep their ids. Numbered again, the row after one taken out
+    would take its id - and fields first would serve ``veh_1`` for one vehicle
+    while another is held back, and for another once it is back."""
     from common.schema_sections import structural_ids
 
     for path in edits.nulled:
         head, _, key = path.rpartition(".")
         null(_at(tree, head) if head else tree, key)
     ids = structural_ids(None)       # a common-model line's; no line is the fallback, which is one
-    renumber = False
+    taken: dict[str, set[str]] = {}
     # The deepest lists first: their paths still hold the positions of the rows
     # above them, which have not moved yet.
     for head in sorted(edits.dropped, key=lambda path: -len(_STEP.findall(path))):
         items = _at(tree, head)
         gone = set(edits.dropped[head])
-        spec = ids.get(head)
-        renumber = renumber or bool(spec) and any(
-            isinstance(items[at], dict) and spec["field"] in items[at] for at in gone)
+        if spec := ids.get(head):
+            taken.setdefault(head, set()).update(
+                row[spec["field"]] for at, row in enumerate(items)
+                if at in gone and isinstance(row, dict) and isinstance(row.get(spec["field"]), str))
         items[:] = [item for at, item in enumerate(items) if at not in gone]
-    return renumber
+    return taken
+
+
+def _drop_links(tree: Any, taken: Mapping[str, set[str]]) -> list[str]:
+    """Every link in ``tree`` to a row taken out (``taken``: table -> its ids),
+    dropped as the merge drops a link naming no row: a list keeps the links
+    left and goes when none is, a single link goes. Returns the paths, in
+    ``tree`` as it is now, of the fields that lost one."""
+    from common.schema_sections import references
+
+    if not any(taken.values()):
+        return []
+    refs = references(None)
+    lost: list[str] = []
+
+    def gone(value: Any, tables: tuple[str, ...]) -> bool:
+        return isinstance(value, str) and any(value in taken.get(table, ()) for table in tables)
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                walk(item, f"{path}[{index}]")
+            return
+        if not isinstance(node, dict):
+            return
+        for name in [name for name in node if name in refs]:
+            value, where = node[name], f"{path}.{name}" if path else name
+            if isinstance(value, list):
+                kept = [item for item in value if not gone(item, refs[name])]
+                if len(kept) == len(value):
+                    continue
+                if kept:
+                    node[name] = kept
+                else:
+                    del node[name]
+            elif gone(value, refs[name]):
+                del node[name]
+            else:
+                continue
+            lost.append(where)
+        for key, value in node.items():
+            if key not in refs:
+                walk(value, f"{path}.{key}" if path else str(key))
+
+    walk(tree, "")
+    return lost
 
 
 # --------------------------------------------------------------------------
@@ -199,82 +310,98 @@ def _prepared(page_texts: Mapping[int, str] | None) -> dict[int, Any] | None:
     return pages if any(page.has_text for page in pages.values()) else None
 
 
-def _grounded(raw: Any, cited: Iterable[Any], pages: Mapping[int, Any]) -> Any:
+def _grounded(forms: tuple[Any, ...], cited: Iterable[Any], pages: Mapping[int, Any]) -> Any:
     """``ground_tolerant`` over every page - searched first on the pages the
-    value cites, where nearly every printed value is. Only a value not found
-    there is looked for on the whole document: searched there for every value,
-    a 200-page policy's few hundred values took seconds. The verdict is the
-    same, as printed is printed on any page."""
+    value cites that have text, where nearly every printed value is. Only a
+    value not found there is looked for on the whole document: searched there
+    for every value, a 200-page policy's few hundred values took seconds. The
+    verdict is the same, as printed is printed on any page; and a blank page it
+    cites is judged on the whole document, never on the cited pages alone.
+
+    ``forms``: what the value prints (``common.grounding.printed_forms``) -
+    printed when any of them is."""
     from common.grounding import ground_tolerant
 
     wanted = {int(page) for page in cited if str(page).lstrip("-").isdigit()}
-    on_cited = {page: pages[page] for page in wanted if page in pages}
+    on_cited = {page: pages[page] for page in wanted if page in pages and pages[page].has_text}
     if on_cited:
-        found = ground_tolerant(raw, cited, on_cited)
+        for form in forms:
+            found = ground_tolerant(form, cited, on_cited)
+            if found.printed:
+                return found
+    verdicts = []
+    for form in forms:
+        found = ground_tolerant(form, cited, pages)
         if found.printed:
             return found
-    return ground_tolerant(raw, cited, pages)
+        verdicts.append(found)
+    return verdicts[0]
 
 
 def _check(extraction: Mapping[str, Any], pages: Mapping[int, Any], mode: str) -> _Checked:
     """Every printed value of ``extraction`` looked up on ``pages``, and what
     ``mode`` makes of those no page prints."""
     from common import grounding
-    from data_pipeline.ingestion.label_rules import _SYSTEM, _envelopes, _pages, _printed
+    from data_pipeline.ingestion.label_rules import _SYSTEM, _envelopes, _pages
     from serving.conventions import NOT_PRINTED_FLAG
 
     checked = unchecked = 0
-    not_printed: list[dict[str, Any]] = []
-    unprinted: list[str] = []
+    # Path -> what was looked for, for a value printed nowhere, with its pages.
+    unprinted: dict[str, tuple[Any, list[int]]] = {}
+    unread: list[str] = []
     # Row path -> [its values printed nowhere, its values still served with a printed form].
     rows: dict[str, list[int]] = {}
     # A table repeats its values ("Included", "$500"): each is looked up once per citation.
     looked_up: dict[tuple[Any, ...], grounding.Grounding] = {}
     for path, envelope in _envelopes(extraction):
-        raw = _printed(envelope)
-        if raw is None or path in _SYSTEM:
+        forms = grounding.printed_forms(envelope)
+        if not forms or path in _SYSTEM:
             continue
         cited = envelope.get("page_ref") or []
-        key = (type(raw).__name__, raw, tuple(map(str, cited)))
+        key = (tuple((type(form).__name__, form) for form in forms), tuple(map(str, cited)))
         if key not in looked_up:
-            looked_up[key] = _grounded(raw, cited, pages)
-        status = looked_up[key].status
-        if status == grounding.UNCHECKED:
+            looked_up[key] = _grounded(forms, cited, pages)
+        where = looked_up[key]
+        if where.status == grounding.UNCHECKED:
             unchecked += 1
+            if where.unread:
+                unread.append(path)
         else:
             checked += 1
-        missing = status == grounding.NOT_PRINTED
+        missing = where.status == grounding.NOT_PRINTED
         if missing:
-            unprinted.append(path)
-            not_printed.append({"path": path, "raw": raw if isinstance(raw, str) else str(raw),
-                                "pages": _pages(envelope)})
+            unprinted[path] = (forms[0], _pages(envelope))
         for row in _rows_of(path):
             rows.setdefault(row, [0, 0])[0 if missing else 1] += 1
 
-    record = {"mode": mode, "checked": checked, "unchecked": unchecked, "not_printed": not_printed,
-              "removed": mode == STRICT}
-    if mode == FLAG:
-        return _Checked(_Edits(), [f"{path}:{NOT_PRINTED_FLAG}" for path in unprinted], record)
-
     edits = _Edits()
-    # A row goes once no value in it is still printed: one with a value found,
-    # or one too short to look for, stays with what it has.
-    taken = {row for row, (out, kept) in rows.items() if out and not kept}
-    for row in taken:
-        if not any(up in taken for up in _rows_of(row)):
-            head, at = _list_and_position(row)
-            edits.dropped.setdefault(head, []).append(at)
-    for path in unprinted:
-        if any(up in taken for up in _rows_of(path)):
-            continue                                    # its row goes
-        if path.endswith("]"):
-            head, at = _list_and_position(path)         # one of a list of values
-            edits.dropped.setdefault(head, []).append(at)
-        else:
-            edits.nulled.add(path)
-    for positions in edits.dropped.values():
-        positions.sort()
-    return _Checked(edits, [f"{path}:{REMOVED_FLAG}" for path in unprinted], record)
+    if mode == STRICT:
+        # A row goes once no value in it is still printed: one with a value
+        # found, or one the text could not settle, stays with what it has.
+        taken = {row for row, (out, kept) in rows.items() if out and not kept}
+        for row in taken:
+            if not any(up in taken for up in _rows_of(row)):
+                head, at = _list_and_position(row)
+                edits.dropped.setdefault(head, []).append(at)
+        for path in unprinted:
+            if any(up in taken for up in _rows_of(path)):
+                continue                                    # its row goes
+            if path.endswith("]"):
+                head, at = _list_and_position(path)         # one of a list of values
+                edits.dropped.setdefault(head, []).append(at)
+            else:
+                edits.nulled.add(path)
+        for positions in edits.dropped.values():
+            positions.sort()
+
+    record = {"mode": mode, "checked": checked, "unchecked": unchecked,
+              "not_printed": [{"path": edits.named(path), "raw": form if isinstance(form, str) else str(form),
+                               "pages": cites} for path, (form, cites) in unprinted.items()],
+              "removed": mode == STRICT, "unread_page": len(unread)}
+    kind = REMOVED_FLAG if mode == STRICT else NOT_PRINTED_FLAG
+    flags = [f"{edits.named(path)}:{kind}" for path in unprinted]
+    flags += [f"{edits.named(path)}:{UNREAD_PAGE_FLAG}" for path in unread]
+    return _Checked(edits, flags, record)
 
 
 # --------------------------------------------------------------------------
@@ -319,7 +446,8 @@ def hold_to_printed(extraction: dict[str, Any], spans: Mapping[str, Any],
     A value taken out is null where the client's schema allows it, and left out
     where it does not - on a self-contained line, whose values are never null:
     the every-key fill serves either as the same null. Its span goes, and the
-    spans of the rows after a row taken out move up with them.
+    spans of the rows after a row taken out move up with them. The rows left
+    keep their ids; a link to a row taken out goes (:func:`_drop_links`).
     """
     mode = configured_mode()
     pages = _prepared(page_texts)
@@ -327,16 +455,13 @@ def hold_to_printed(extraction: dict[str, Any], spans: Mapping[str, Any],
         return Held(extraction, dict(spans), [NO_PAGE_TEXT_FLAG])
     checked = _check(extraction, pages, mode)
     edits = checked.edits
+    flags = list(checked.flags)
     if edits:
         null = _set_none if _nullable(extraction, lob) else _leave_out
-        if _apply(extraction, edits, null):
-            from common.structural_ids import renumber_structural_ids
-
-            # As the merge numbers them: in row order, every reference rewritten,
-            # one to a row taken out dropped. In place, as there.
-            renumber_structural_ids(extraction, None, assign=("coverage_id",), in_place=True)
+        lost = _drop_links(extraction, _apply(extraction, edits, null))
+        flags += [f"{path}:{LINK_REMOVED_FLAG}" for path in lost]
         spans = {moved: span for key, span in spans.items() if (moved := edits.path(key)) is not None}
-    held = Held(extraction, dict(spans), checked.flags, checked.record)
+    held = Held(extraction, dict(spans), flags, checked.record)
     held._edits = edits
     return held
 
@@ -427,33 +552,41 @@ def _hold_served(result: Any, edits: _Edits, flags: list[str]) -> list[str]:
     def served_null(parent: dict[str, Any], key: str) -> None:
         parent[key] = empty_field_value()
 
-    if _apply(result.extraction, edits, served_null) and common_model:
-        from common.structural_ids import renumber_structural_ids
-
-        renumber_structural_ids(result.extraction, None, assign=("coverage_id",), in_place=True)
-        # Renumbering drops each empty reference the fill wrote (`applies_to: []`):
-        # filled again, the JSON has every key of its schema once more.
+    taken = _apply(result.extraction, edits, served_null)
+    lost = _drop_links(result.extraction, taken)
+    if lost and common_model:
+        # A link list left empty goes, as the merge drops one: filled again, the
+        # JSON has every key of its schema once more.
         result.extraction = _every_key(result.extraction, result.doc_type, None, lob)
 
     flags = [flag for flag in (edits.flag(flag) for flag in flags) if flag is not None]
+    flags += [f"{path}:{LINK_REMOVED_FLAG}" for path in lost]
     result.fields = {path: value for path, value in result.fields.items() if edits.path(path) is not None}
     for path in result.fields.keys() & edits.dropped.keys():        # a list of values, shorter
         result.fields[path] = {**result.fields[path], "value": values_view(_at(result.extraction, path))}
 
+    # The rows of list_fields are the answer's values as extract reads them
+    # (values_view of the model form): the same edits made to them, and the same
+    # links dropped, they are what extract serves for the answer held.
     row_null = _set_none if common_model else _leave_out
     for name, entry in list(result.list_fields.items()):
         within = edits.within(name)
-        if not within:
-            continue
         rows = entry.get("rows")
+        if not within and not any(taken.values()):
+            continue
         try:
             if not isinstance(rows, list) or len(rows) != rows_before[name]:
                 raise LookupError(name)
+            rows = copy.deepcopy(rows)
             _apply({name: rows}, within, row_null)
+            _drop_links({name: rows}, taken)
         except (LookupError, TypeError):
             # Not the served table row for row (an empty row the verdict dropped):
             # read again off what is served.
             rows = values_view(result.extraction.get(name) or [])
+        if not within:
+            result.list_fields[name] = {**entry, "rows": rows}      # its links only
+            continue
         signal = check_completeness(name, len(rows), stated_count=entry.get("stated_count"),
                                     detected_rows=entry.get("detected_rows"))
         result.list_fields[name] = {"rows": rows, **signal.as_output()}

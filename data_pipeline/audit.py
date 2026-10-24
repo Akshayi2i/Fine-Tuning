@@ -331,8 +331,10 @@ def audit_document(folder: Path, report: AuditReport, checksums: dict[str, str])
         elif refs and not any(has_text[r - 1] for r in refs) or not refs and not audit.text_pages:
             record.result = "needs_ocr"
         else:
-            value = normalise(raw)
-            on = [i + 1 for i, page in enumerate(pages) if has_text[i] and _appears(value, page)]
+            # The raw value, not a normalised copy: normalised, a code's pieces
+            # become words, and "PAP-2025-0042" would be found on a page that
+            # prints "PAP-2026-0042" beside a 2025 and a 0042 (appears_on).
+            on = [i + 1 for i, page in enumerate(pages) if has_text[i] and _appears(raw, page)]
             record.found_on = ",".join(map(str, on[:5]))
             if not refs:
                 record.result = "no_page_ref" if on else "not_found"

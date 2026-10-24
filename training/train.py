@@ -210,6 +210,37 @@ def _checkpoint_cadence(interval: int, evaluation: dict[str, Any], *, gpus: int 
     }
 
 
+def resumed_cadence(checkpoint: str | Path, evaluation: dict[str, Any]) -> dict[str, int] | None:
+    """The save and evaluation cadence of the run ``checkpoint`` belongs to,
+    for resuming it; None when its ``trainer_state.json`` records none.
+
+    On resume the HF Trainer restores ``save_steps`` and ``eval_steps`` from the
+    checkpoint's trainer state - it overrides the arguments, with a warning - so
+    a run resumed on another GPU count keeps saving and evaluating on the
+    cadence it started with. ``save_total_limit`` is the one it takes from the
+    arguments, and :func:`_checkpoint_cadence` sizes it from the NEW GPU count's
+    saves per evaluation: resumed on more GPUs it shrank (17 -> 5 for 1 -> 4
+    GPUs) while saves came as often as before, and rotation deleted the earlier
+    evaluation checkpoints that checkpoint selection compares. From the
+    checkpoint, all three agree with what the trainer does.
+    """
+    import json
+
+    try:
+        state = json.loads((Path(checkpoint) / "trainer_state.json").read_text(encoding="utf-8"))
+        save_steps, eval_steps = int(state.get("save_steps") or 0), int(state.get("eval_steps") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if save_steps <= 0 or eval_steps <= 0:
+        return None
+    per_eval = max(1, -(-eval_steps // save_steps))
+    return {
+        "save_steps": save_steps,
+        "eval_steps": eval_steps,
+        "save_total_limit": int(evaluation["save_total_limit"]) * per_eval + 1,
+    }
+
+
 #: Written beside the adapter checkpoints when ms-swift returns successfully.
 #: The pipeline's "trained" means this file, never the directory: ms-swift
 #: creates the directory when training STARTS, so a crashed run looked finished
@@ -1026,6 +1057,16 @@ def train(
         # The checkpoint holds the weights; loading the parent's adapter as well
         # would start the resumed run from two places.
         swift.args.pop("adapters", None)
+        # The cadence the run started with, which the trainer restores anyway:
+        # sized for this pod's GPU count, save_total_limit rotated away the
+        # earlier evaluation checkpoints selection compares.
+        cadence = resumed_cadence(resumed, training_config(ADAPTER.training_config)["evaluation"])
+        if cadence is not None:
+            changed = {k: (swift.args.get(k), v) for k, v in cadence.items() if swift.args.get(k) != v}
+            if changed:
+                log.info("resuming on the run's own checkpoint cadence (this pod's would be "
+                         "otherwise): %s", changed)
+            swift.args.update(cadence)
         log.info("resuming the unfinished run from %s", resumed)
 
 

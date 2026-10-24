@@ -16,6 +16,7 @@ number the promotion gate reads — but each answers a different question:
 
 from __future__ import annotations
 
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -219,6 +220,45 @@ def _model_view_validator(doc_type: str, acord_form: str | None, lob: Any, secti
 # Expected Calibration Error
 # --------------------------------------------------------------------------
 
+#: How far outside [0, 1] a confidence may sit and still be read as the edge:
+#: float rounding of a probability (the exp of a logprob an engine rounds a
+#: hair above zero), not a value that is no probability.
+CONFIDENCE_TOLERANCE = 1e-6
+
+
+def probabilities(confidences: list[float]) -> list[float]:
+    """``confidences`` as probabilities in [0, 1], refused when one is not.
+
+    A confidence above 1, below 0 or NaN fell in no bin of
+    :func:`expected_calibration_error` yet counted in its total, so each one
+    pulled ECE toward 0 - the best score - by its share, and a broken
+    confidence read as better calibration. Refused with a ``ValueError``
+    rather than clipped: such a value is a defect upstream (a NaN feature, a
+    calibrator or a logprob conversion gone wrong), and clipped it would be
+    scored as a confident, measured probability. Within
+    :data:`CONFIDENCE_TOLERANCE` of the range it is float rounding and is read
+    as the edge.
+    """
+    out: list[float] = []
+    bad: list[Any] = []
+    for confidence in confidences:
+        value = float(confidence)
+        if (not math.isfinite(value) or value < -CONFIDENCE_TOLERANCE
+                or value > 1.0 + CONFIDENCE_TOLERANCE):
+            bad.append(confidence)
+            continue
+        out.append(min(max(value, 0.0), 1.0))
+    if bad:
+        raise ValueError(
+            f"{len(bad)} of {len(confidences)} confidence(s) are not probabilities in [0, 1] "
+            f"(e.g. {bad[:5]}). A confidence outside the range or NaN falls in no calibration "
+            "bin, and counted in the total it would make the calibration error look smaller "
+            "than it is. Find where it was produced (a NaN feature, the calibrator, the logprob "
+            "conversion) rather than scoring it."
+        )
+    return out
+
+
 def expected_calibration_error(
     confidences: list[float],
     correctness: list[bool],
@@ -231,6 +271,10 @@ def expected_calibration_error(
     question from whether the extractions are right. A model can be 95% accurate
     and badly calibrated, and the review routing built on its confidence would
     then send the wrong documents to humans.
+
+    Every confidence must be a probability (:func:`probabilities`): one outside
+    [0, 1] or NaN is refused, never left out of the bins while counted in the
+    total.
     """
     if len(confidences) != len(correctness):
         raise ValueError(
@@ -238,6 +282,7 @@ def expected_calibration_error(
         )
     if not confidences:
         return 0.0
+    confidences = probabilities(confidences)
 
     total = len(confidences)
     error = 0.0
@@ -262,12 +307,16 @@ def reliability_bins(
 
     Useful because the direction matters: over-confidence routes too little to
     review, under-confidence routes too much, and one ECE value cannot say which.
+    Binned as :func:`expected_calibration_error` bins (a 0.0 in the first bin),
+    on the same probabilities.
     """
     out: list[dict[str, float]] = []
+    confidences = probabilities(confidences)
     for index in range(bins):
         low, high = index / bins, (index + 1) / bins
         members = [
-            (c, ok) for c, ok in zip(confidences, correctness, strict=True) if low < c <= high
+            (c, ok) for c, ok in zip(confidences, correctness, strict=True)
+            if (low < c <= high) or (index == 0 and c == 0.0)
         ]
         if not members:
             continue

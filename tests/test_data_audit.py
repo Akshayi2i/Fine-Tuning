@@ -71,6 +71,15 @@ def test_matching_ignores_case_punctuation_and_line_breaks():
 # --------------------------------------------------------------------------
 
 
+def test_a_code_is_found_whole_never_from_pieces_printed_apart(tmp_path):
+    # Page 1 prints "WC-8842317-01" and, in its dates, "2026": a gold policy
+    # number made of those pieces is printed nowhere.
+    golden = copy.deepcopy(GOLDEN)
+    golden["policy"]["policy_number"]["raw"] = "WC-8842317-2026"
+    _document(tmp_path, "pieces", golden=golden)
+    assert _results(audit_folder(tmp_path), "pieces")["policy.policy_number"] == "not_found"
+
+
 def test_a_correct_document_has_no_blockers_and_its_values_are_found(tmp_path):
     _document(tmp_path, "good")
     report = audit_folder(tmp_path)

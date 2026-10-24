@@ -73,14 +73,16 @@ class Generation:
             )
 
     def truncated(self) -> bool:
-        """Whether the answer was cut off: at the token limit, or stopped by the
-        backend because it had started repeating itself (:data:`STOPPED_REPEATING`).
+        """Whether the answer was cut off: at the token limit, stopped by the
+        backend because it had started repeating itself (:data:`STOPPED_REPEATING`),
+        or ended by a stream that broke off before the server finished it
+        (:data:`STREAM_CUT`).
 
         Worth surfacing: on a long Loss Run, truncation silently drops claim rows
         — a recall failure that per-field confidence cannot see, because the
         missing rows produced no tokens.
         """
-        return self.finish_reason in ("length", "max_tokens", STOPPED_REPEATING)
+        return self.finish_reason in ("length", "max_tokens", STOPPED_REPEATING, STREAM_CUT)
 
 
 #: The finish reason of an answer a backend stopped because its end had become
@@ -88,6 +90,12 @@ class Generation:
 #: Left to run, such an answer writes to the token limit - minutes for one
 #: window - and is then refused as cut off anyway.
 STOPPED_REPEATING = "repetition"
+
+#: The finish reason of a streamed answer whose stream ended before the server
+#: said it was done - no finish reason, no ``[DONE]``: a proxy or the server
+#: closed the connection mid-answer. Its text is the start of an answer, so it
+#: counts as cut off, and the window is read again over fewer pages.
+STREAM_CUT = "stream_cut"
 
 
 # --------------------------------------------------------------------------

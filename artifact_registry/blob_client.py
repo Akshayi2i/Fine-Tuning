@@ -100,19 +100,46 @@ class BlobBackend(ABC):
 
 
 def read_only_sas(token: str) -> str:
-    """``token`` without its leading ``?``, once it is seen to grant reading only.
+    """``token`` without its leading ``?``, once it is seen to grant reading
+    one container or one blob, and nothing else.
 
     A link carries its token to whoever is sent it - a served model, its logs -
-    so a token that may also write, delete or list is refused, not trimmed.
+    so a token that may also write, delete or list is refused, not trimmed. So
+    is an account SAS (``ss``/``srt``), however read-only: it reads every
+    container of the account, ``raw-documents/`` - the unredacted originals -
+    included. Only a service SAS for a container (``sr=c``) or a blob
+    (``sr=b``) passes. A key given twice is refused too: which of the two
+    Azure would honour is not this check's to guess. Keys are compared
+    ignoring case.
     """
-    from urllib.parse import parse_qs
+    from urllib.parse import parse_qsl
 
     token = token.strip().lstrip("?")
-    permissions = (parse_qs(token).get("sp") or [""])[0]
+    fields: dict[str, list[str]] = {}
+    for key, value in parse_qsl(token, keep_blank_values=True):
+        fields.setdefault(key.lower(), []).append(value)
+    doubled = sorted(key for key, values in fields.items() if len(values) > 1)
+    if doubled:
+        raise BlobError(f"a link's SAS token gives {', '.join(doubled)} more than once: refused, since what it "
+                        "grants cannot be told. Make a read-only SAS for the container.")
+    if "ss" in fields or "srt" in fields:
+        raise BlobError(
+            "a link's SAS token is an account SAS (it has ss/srt): it reads every container of the storage "
+            "account, the raw documents' too, and the link hands it to the model server. Make a read-only "
+            "SAS for the main container (sr=c, sp=r)."
+        )
+    permissions = (fields.get("sp") or [""])[0]
     if permissions != "r":
         raise BlobError(
             f"a link's SAS token must grant read only (sp=r), this one grants sp={permissions or '(none)'}: "
             "the link hands it to the model server. Make a read-only SAS for the container."
+        )
+    resource = (fields.get("sr") or [""])[0]
+    if resource not in ("c", "b"):
+        raise BlobError(
+            f"a link's SAS token must be for one container (sr=c) or one blob (sr=b), this one is for "
+            f"sr={resource or '(none)'}: the link hands it to the model server. Make a read-only SAS for "
+            "the main container."
         )
     return token
 
