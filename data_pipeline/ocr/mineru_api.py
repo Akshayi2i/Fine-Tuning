@@ -24,6 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 from data_pipeline.ocr.run_mineru import _PAGE_FOOT, _PAGE_HEAD
@@ -96,13 +97,28 @@ def _call(url: str, token: str | None, *, data: bytes | None = None, timeout: fl
         raise MinerUApiError(f"could not reach {url}: {exc.reason}") from exc
 
 
-def split_pdf(pdf: bytes, parts: int) -> list[tuple[int, bytes]]:
-    """``pdf`` as up to ``parts`` PDFs of consecutive pages, in order: ``(pages, bytes)`` each."""
+def select_pages(pdf: bytes, pages: list[int]) -> bytes:
+    """A PDF of ``pdf``'s pages ``pages`` (1-based), in that order, and nothing else."""
+    import pymupdf
+
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+        missing = [page for page in pages if not 1 <= page <= doc.page_count]
+        if missing:
+            raise MinerUApiError(f"pages {missing} are not in a {doc.page_count}-page PDF")
+        doc.select([page - 1 for page in pages])
+        return doc.tobytes()
+
+
+def split_pdf(pdf: bytes, parts: int, *, run_pages: int | None = None) -> list[tuple[int, bytes]]:
+    """``pdf`` as up to ``parts`` PDFs of consecutive pages, in order: ``(pages, bytes)`` each;
+    with ``run_pages``, as many as it takes for none to hold more pages than that."""
     import pymupdf
 
     out: list[tuple[int, bytes]] = []
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         count = doc.page_count
+        if run_pages:
+            parts = max(parts, -(-count // run_pages))
         parts = max(1, min(parts, count))
         bounds = [count * part // parts for part in range(parts + 1)]
         for start, stop in zip(bounds, bounds[1:], strict=False):
@@ -115,7 +131,8 @@ def split_pdf(pdf: bytes, parts: int) -> list[tuple[int, bytes]]:
 def ocr_via_api(
     pdf: bytes, base_url: str, token: str | None = None, *, filename: str = "document.pdf",
     tier: str = "basic", ocr_mode: str = "auto", poll_s: float = 2.0, timeout_s: float = 3600,
-    parts: int = 1, uploaded: threading.Event | None = None,
+    parts: int = 1, uploaded: threading.Event | None = None, gate: Callable[[], None] | None = None,
+    run_pages: int | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """``(one markdown string per page, what the server reports)`` for ``pdf``.
 
@@ -135,14 +152,34 @@ def ocr_via_api(
 
     ``uploaded``, when given, is set once the whole PDF is at the server (the
     caller can start sending something else then without slowing this upload).
+
+    ``gate``, when given, is called before each run is sent, and the runs are
+    then read one after another, each to its end: MinerU's GPU work comes in
+    turns of one run that the caller can hold back. On one GPU shared with the
+    model, the model's turn - a document's fields - comes first
+    (``serving.fields_first.GpuTurns``). A turn is as long as its run: with
+    ``run_pages`` no run holds more pages than that, however long the PDF, so
+    a document arriving meanwhile waits for at most that many pages' reading.
     """
-    pieces = split_pdf(pdf, parts) if parts > 1 else []
+    pieces = split_pdf(pdf, parts, run_pages=run_pages) if parts > 1 or run_pages else []
     if len(pieces) <= 1:
+        if gate is not None:
+            gate()
         return _ocr_task(pdf, base_url, token, filename=filename, tier=tier, ocr_mode=ocr_mode,
                          poll_s=poll_s, timeout_s=timeout_s, uploaded=uploaded)
+    stem = filename.rsplit(".", 1)[0]
+    if gate is not None:
+        done = []
+        for index, (count, piece) in enumerate(pieces):
+            gate()
+            task_id = _submit(piece, base_url, token, filename=f"{stem}.part{index + 1}.pdf", tier=tier,
+                              ocr_mode=ocr_mode)
+            done.append(_finish(task_id, base_url, token, poll_s=poll_s, timeout_s=timeout_s, page_count=count))
+        if uploaded is not None:
+            uploaded.set()
+        return _joined(done, overlapped=False)
     from concurrent.futures import ThreadPoolExecutor
 
-    stem = filename.rsplit(".", 1)[0]
     stop = threading.Event()
     with ThreadPoolExecutor(max_workers=len(pieces), thread_name_prefix="mineru-run") as pool:
         try:
@@ -159,13 +196,20 @@ def ocr_via_api(
         except BaseException:
             stop.set()                                    # the other runs stop polling: the PDF has failed
             raise
+    return _joined(done, overlapped=True)
+
+
+def _joined(done: list[tuple[list[str], dict[str, Any]]], *, overlapped: bool) -> tuple[list[str], dict[str, Any]]:
+    """The runs' pages in order, and what the server reported for them together."""
     pages = [page for part_pages, _info in done for page in part_pages]
     infos = [info for _pages, info in done]
+    seconds = [info["server_seconds"] for info in infos]
     return pages, {
-        "task_id": [info["task_id"] for info in infos], "pages": len(pages), "parts": len(pieces),
-        # The runs overlap: the slowest is the nearest to how long the server took.
-        "server_seconds": max(info["server_seconds"] for info in infos),
-        "server_seconds_parts": [info["server_seconds"] for info in infos],
+        "task_id": [info["task_id"] for info in infos], "pages": len(pages), "parts": len(done),
+        # Overlapping runs: the slowest is the nearest to how long the server
+        # took; runs one after another: their sum.
+        "server_seconds": max(seconds) if overlapped else round(sum(seconds), 2),
+        "server_seconds_parts": seconds,
         "version": infos[0]["version"], "tier": infos[0]["tier"],
     }
 

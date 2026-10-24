@@ -86,7 +86,10 @@ REMOTE_TOKEN_ENV = "FIDEON_REMOTE_TOKEN"
 #: at about 100 MB, and the 114-page scan in the data is 84 MB.
 MAX_PDF_BYTES = 150 * 1024 * 1024
 
-MODES = ("ocr_plus_image", "image_only")
+MODES = ("ocr_plus_image", "image_only", "fields_first")
+#: The model reads the page images first, MinerU's text joins after (serving.fields_first): the
+#: one-GPU production path. Needs the served MinerU (--mineru-url).
+FIELDS_FIRST = "fields_first"
 
 #: What the server runs MinerU with, in the OCR environment.
 OCR_WORKER_COMMAND = "import sys; from data_pipeline.ocr.ocr_worker import serve; sys.exit(serve())"
@@ -148,7 +151,9 @@ class Job:
     lob: str
     mode: str
     submitted: float = field(default_factory=time.time)
-    status: str = "queued"          # queued -> running -> done | failed
+    status: str = "queued"          # queued -> running -> (fields_ready ->) done | failed
+    #: Seconds from submission to the fields (fields_first: what the gate holds the job to).
+    fields_s: float | None = None
     started: float | None = None
     finished: float | None = None
     error: str | None = None
@@ -162,6 +167,8 @@ class Job:
             out["waiting_s"] = round(time.time() - self.submitted, 1)
         if self.status == "running" and self.started is not None:
             out["running_s"] = round(time.time() - self.started, 1)
+        if self.fields_s is not None:
+            out["fields_s"] = self.fields_s
         if self.error:
             out["error"] = self.error
         if self.summary is not None:
@@ -169,27 +176,55 @@ class Job:
         return out
 
 
+def write_whole(path: Path, text: str) -> None:
+    """``text`` into ``path`` at once: a reader sees the old file or the new one,
+    never half of one (a fields-first result is rewritten while it is served)."""
+    part = path.with_name(path.name + ".part")
+    part.write_text(text, encoding="utf-8")
+    for _ in range(40):
+        try:
+            os.replace(part, path)
+            return
+        except PermissionError:                  # Windows: a reader holds the old file for a moment
+            time.sleep(0.05)
+    os.replace(part, path)
+
+
 class ExtractService:
     """Runs posted PDFs through OCR and :func:`serving.pipeline.extract`, one at a time."""
 
     def __init__(self, model: Any, ocr: OcrCall, work_dir: Path, *, keep_files: bool = False,
-                 start: bool = True) -> None:
+                 start: bool = True, default_mode: str = "ocr_plus_image",
+                 text_max_wait_s: float | None = None, unverified_fields: bool = False) -> None:
+        from serving.fields_first import GpuTurns
+
         self.model = model
         self.ocr = ocr
         self.work_dir = work_dir
         self.keep_files = keep_files
+        self.default_mode = default_mode
+        #: Fields first serves fields unchecked (timing tests only).
+        self.unverified_fields = unverified_fields
         self.jobs: dict[str, Job] = {}
         self.queue: queue.Queue[Job] = queue.Queue()
+        #: Fields-first jobs whose fields are out, waiting for MinerU's text.
+        self.text_queue: queue.Queue[Job] = queue.Queue()
+        self.turns = GpuTurns() if text_max_wait_s is None else GpuTurns(text_max_wait_s)
+        self._fields: dict[str, Any] = {}
         if start:
             threading.Thread(target=self._worker, name="extract-jobs", daemon=True).start()
+            threading.Thread(target=self._text_worker, name="full-text", daemon=True).start()
 
-    def submit(self, pdf: bytes, *, name: str, lob: str, mode: str = "ocr_plus_image") -> Job:
+    def submit(self, pdf: bytes, *, name: str, lob: str, mode: str | None = None) -> Job:
         from serving.vllm_entrypoint import ServingError, request_lob
 
+        mode = mode or self.default_mode
         if not pdf.startswith(b"%PDF"):
             raise RequestError("the body is not a PDF (it does not start with %PDF)")
         if mode not in MODES:
             raise RequestError(f"mode must be one of {list(MODES)}, got {mode!r}")
+        if mode == FIELDS_FIRST and not hasattr(self.ocr, "ocr_text"):
+            raise RequestError("fields_first needs the served MinerU: start the server with --mineru-url")
         if not lob:
             raise RequestError("lob is required (e.g. lob=personal_auto): a policy is read against "
                                "its line's schema")
@@ -213,20 +248,119 @@ class ExtractService:
         while True:
             self.run(self.queue.get())
 
+    def _text_worker(self) -> None:
+        while True:
+            self.add_text(self.text_queue.get())
+
     def run(self, job: Job) -> None:
         job.status, job.started = "running", time.time()
+        handed_on = False
         try:
-            job.summary = self._extract(job)
-            job.status = "done"
+            if job.mode == FIELDS_FIRST:
+                job.summary = self._read_fields(job)
+                if job.summary.get("fields_served"):
+                    job.status, job.fields_s = "fields_ready", round(time.time() - job.submitted, 2)
+                # Otherwise the fields could not be checked against their pages:
+                # nothing is served until the full text has checked them.
+                self.text_queue.put(job)
+                handed_on = True
+            else:
+                job.summary = self._extract(job)
+                job.status = "done"
         except Exception as exc:  # noqa: BLE001 - a failed job is reported, the server stays up
             job.status, job.error = "failed", f"{type(exc).__name__}: {exc}"
             log.exception("job %s failed", job.id)
         finally:
-            job.finished = time.time()
-            if not self.keep_files:
-                folder = self.work_dir / job.id
-                (folder / "document.pdf").unlink(missing_ok=True)
-                shutil.rmtree(folder / "pages", ignore_errors=True)
+            if not handed_on:
+                self._finish(job)
+
+    def add_text(self, job: Job) -> None:
+        """A fields-first job's second phase: MinerU's text, in the GPU's idle turns."""
+        from serving.fields_first import add_full_text
+
+        result, count, known = self._fields.pop(job.id)
+        folder = self.work_dir / job.id
+        status = "done"
+        try:
+            full = add_full_text((folder / "document.pdf").read_bytes(), result, name=job.name, lob=job.lob,
+                                 reader=self.ocr, pages_dir=folder / "pages", page_count=count, turns=self.turns,
+                                 known_texts=known)
+            timings = {**(job.summary or {}).get("timings_s", {}), **full["timings_s"],
+                       "total": round(time.time() - job.submitted, 2)}
+            job.summary = {**(job.summary or {}), **self._outcome(result), "timings_s": timings, "ocr": full["ocr"]}
+            self._write(job, result)
+        except Exception as exc:  # noqa: BLE001 - checked fields stand; the full text is reported missing
+            job.error = f"full text: {type(exc).__name__}: {exc}"
+            log.exception("job %s: the full text failed", job.id)
+            if not (job.summary or {}).get("fields_served"):
+                status = "failed"                       # nothing checked was ever served
+        finally:
+            job.status = status
+            self._finish(job)
+
+    def _finish(self, job: Job) -> None:
+        job.finished = time.time()
+        if not self.keep_files:
+            folder = self.work_dir / job.id
+            (folder / "document.pdf").unlink(missing_ok=True)
+            shutil.rmtree(folder / "pages", ignore_errors=True)
+
+    def _read_fields(self, job: Job) -> dict[str, Any]:
+        """A fields-first job's first phase: the model reads the page images."""
+        from calibration.fit_calibration import CalibrationParams
+        from data_pipeline.dataset_builder.policy_windows import pages_to_read, plan_windows
+        from serving.doc_type_classifier import StaticClassifier
+        from serving.fields_first import read_fields
+
+        folder = self.work_dir / job.id
+        fields = read_fields(
+            (folder / "document.pdf").read_bytes(), name=job.name, lob=job.lob, source_id=job.id, model=self.model,
+            reader=self.ocr, pages_dir=folder / "pages", classifier=StaticClassifier("policy"),
+            calibration=CalibrationParams(method="temperature", doc_type="policy", model_version=self.model.tag,
+                                          temperature=1.0),
+            turns=self.turns, verify=not self.unverified_fields)
+        result, served, count = fields["result"], fields["served"], len(fields["images"])
+        every_page, declarations_page = pages_to_read(None, count)
+        summary = {
+            "job": job.id, "document": job.name, "lob": job.lob, "mode": job.mode, "model": self.model.tag,
+            "pages": count, "windows_planned": len(plan_windows(job.lob, every_page, declarations_page, None)),
+            "model_calls": len(result.window_latencies_ms),
+            "timings_s": {**fields["timings_s"], "queued": round((job.started or job.submitted) - job.submitted, 2)},
+            "windows": window_summary(result.window_stats),
+            # Served now only once held to the text of the pages they cite.
+            "fields_served": served is not None,
+            "fields_verified": fields["verified"],
+            "cited_pages": len(fields["cited_pages"]),
+            **self._outcome(served if served is not None else result),
+        }
+        job.summary = summary
+        if served is not None:
+            self._write(job, served)
+        # The model's own answer, for the full text to hold to the whole document.
+        self._fields[job.id] = (result, count, fields["cited_texts"])
+        log.info("job %s: fields of %d pages in %.1f s (%s); the full text follows", job.id, count,
+                 fields["timings_s"]["fields"],
+                 f"checked on {len(fields['cited_pages'])} cited page(s)" if fields["verified"]
+                 else "not served: their pages could not be read" if served is None else "UNVERIFIED")
+        return summary
+
+    @staticmethod
+    def _outcome(result: Any) -> dict[str, Any]:
+        return {
+            "schema_valid": result.schema_valid,
+            "validation_errors": list(result.validation_errors)[:20],
+            "review_flags": len(result.review_flags),
+            "review_flag_kinds": _flag_kinds(result.review_flags),
+            "text_coverage": result.text_coverage,
+            "overall_confidence": result.overall_confidence,
+            "extracted": _extracted_counts(result.extraction),
+        }
+
+    def _write(self, job: Job, result: Any) -> None:
+        write_whole(self.result_path(job), json.dumps(
+            {**(job.summary or {}), "review_flags_all": result.review_flags,
+             "window_stats": result.window_stats, "extraction": result.extraction},
+            ensure_ascii=False, indent=2))
 
     def _extract(self, job: Job) -> dict[str, Any]:
         from calibration.fit_calibration import CalibrationParams
@@ -289,10 +423,9 @@ class ExtractService:
             "overall_confidence": result.overall_confidence,
             "extracted": _extracted_counts(result.extraction),
         }
-        self.result_path(job).write_text(
-            json.dumps({**summary, "review_flags_all": result.review_flags, "window_stats": result.window_stats,
-                        "extraction": result.extraction}, ensure_ascii=False, indent=2),
-            encoding="utf-8")
+        write_whole(self.result_path(job), json.dumps(
+            {**summary, "review_flags_all": result.review_flags, "window_stats": result.window_stats,
+             "extraction": result.extraction}, ensure_ascii=False, indent=2))
         log.info("job %s done: %d pages, %d windows, OCR %.1f s, model %.1f s",
                  job.id, count, windows, ocr_s, done - read_from)
         return summary
@@ -317,7 +450,22 @@ def window_summary(stats: list[dict[str, Any]]) -> dict[str, Any]:
         "slowest_window": ({k: slowest.get(k) for k in ("group", "pages", "attempt", "seconds",
                                                           "first_token_s", "answer_tokens", "finish")}
                            if slowest else None),
+        # Long waits for a first token: windows queued, or put back and read again for want of memory.
+        "first_token_s_max": max((s["first_token_s"] for s in stats if s.get("first_token_s") is not None),
+                                 default=None),
+        # What each job writes - what its answer limit should be set from.
+        "by_group": _answers_by_group(answered),
     }
+
+
+def _answers_by_group(answered: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Each job's answer lengths: windows, median, 95th percentile and longest."""
+    out: dict[str, dict[str, Any]] = {}
+    for group in sorted({s["group"] for s in answered}):
+        tokens = sorted(s["answer_tokens"] for s in answered if s["group"] == group)
+        out[group] = {"windows": len(tokens), "median": tokens[len(tokens) // 2],
+                      "p95": tokens[min(len(tokens) - 1, round(0.95 * (len(tokens) - 1)))], "max": tokens[-1]}
+    return out
 
 
 #: Flags about the document rather than one field (``window_failed:arrays:p7``,
@@ -384,7 +532,7 @@ def handler_for(service: ExtractService, token: str) -> type[BaseHTTPRequestHand
             if parts == ["health"]:
                 self._send(200, {"status": "ready", "model": service.model.tag,
                                  "jobs": {s: sum(1 for j in service.jobs.values() if j.status == s)
-                                          for s in ("queued", "running", "done", "failed")}})
+                                          for s in ("queued", "running", "fields_ready", "done", "failed")}})
                 return
             if not self._authorised():
                 return
@@ -394,7 +542,8 @@ def handler_for(service: ExtractService, token: str) -> type[BaseHTTPRequestHand
                 job = service.jobs[parts[1]]
                 if len(parts) == 2:
                     self._send(200, job.view())
-                elif parts[2] == "result" and job.status == "done":
+                elif parts[2] == "result" and job.status in ("fields_ready", "done"):
+                    # fields_ready: the fields, with the full-text tier still to come.
                     self._send(200, json.loads(service.result_path(job).read_text(encoding="utf-8")))
                 elif parts[2] == "result":
                     self._send(409, {"error": f"job {job.id} is {job.status}", **job.view()})
@@ -418,7 +567,7 @@ def handler_for(service: ExtractService, token: str) -> type[BaseHTTPRequestHand
             body = self.rfile.read(length)
             try:
                 job = service.submit(body, name=query.get("name", "document.pdf"), lob=query.get("lob", ""),
-                                     mode=query.get("mode", "ocr_plus_image"))
+                                     mode=query.get("mode", service.default_mode))
             except RequestError as exc:
                 self._send(400, {"error": str(exc)})
                 return
@@ -522,9 +671,23 @@ def main(argv: list[str] | None = None) -> int:
                         "configs/shared/ocr.yaml)")
     served.add_argument("--any-mineru", action="store_true",
                         help="accept a MinerU version or tier other than the pinned one (timing only)")
-    served.add_argument("--ocr-parts", type=int, default=1, help="a PDF to MinerU as this many runs of pages at once")
+    served.add_argument("--ocr-parts", type=int, default=1,
+                        help="a PDF to MinerU as this many runs of pages (fields first: the turns MinerU waits for)")
     served.add_argument("--render-workers", type=int, default=None, help="processes rendering pages at once")
+    served.add_argument("--run-pages", type=int, default=20,
+                        help="fields first: pages per MinerU run - a document arriving while another's text is "
+                             "read waits for at most this many pages' reading")
+    served.add_argument("--text-max-wait", type=float, default=600.0,
+                        help="fields first: seconds a MinerU run waits for its turn before it goes anyway")
+    served.add_argument("--unverified-fields", action="store_true",
+                        help="fields first: serve the fields before any page text has checked them "
+                             "(flagged fields:unverified) - timing tests only")
+    served.add_argument("--fields-first", action="store_true",
+                        help="jobs read fields first by default: the model reads the page images, then MinerU's "
+                             "text adds the full-text tier in the GPU's idle turns (one GPU for both)")
     args = parser.parse_args(argv)
+    if args.fields_first and not args.mineru_url:
+        parser.error("--fields-first needs the served MinerU (--mineru-url): its text comes in a second phase")
     if args.model_url and args.adapter:
         parser.error("with --model-url the adapter is vLLM's to serve: start it with --lora-modules "
                      "<name>=<path> and pass --served-model <name>")
@@ -549,11 +712,14 @@ def main(argv: list[str] | None = None) -> int:
         pin = served_mineru()
         ocr: Any = ServedOcr(args.mineru_url, args.remote_token, tier=args.tier or pin["tier"],
                              ocr_parts=args.ocr_parts, render_workers=args.render_workers,
+                             run_pages=args.run_pages,
                              expected_version=None if args.any_mineru else pin["version"])
     else:
         ocr = OcrWorker(args.ocr_python)
     warm_ocr(ocr, args.work_dir)
-    service = ExtractService(model, ocr, args.work_dir, keep_files=args.keep_files)
+    service = ExtractService(model, ocr, args.work_dir, keep_files=args.keep_files,
+                             default_mode="fields_first" if args.fields_first else "ocr_plus_image",
+                             text_max_wait_s=args.text_max_wait, unverified_fields=args.unverified_fields)
 
     server = ThreadingHTTPServer((args.host, args.port), handler_for(service, token))
     pod = os.environ.get(POD_ENV)

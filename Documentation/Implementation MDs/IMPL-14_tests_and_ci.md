@@ -109,7 +109,7 @@ A unit test proves a module is self-consistent. Only a test that runs both sides
 
 ## Current implementation (2026-10-21)
 
-3,335 tests collected in 135 test modules (`pytest --collect-only -q`), CPU-only, no live Azure; the `gpu`
+3,459 tests collected in 140 test modules (`pytest --collect-only -q`), CPU-only, no live Azure; the `gpu`
 tests skip off the pod. Test files added since this spec, each guarding a failure that was real:
 
 | Test | Guards |
@@ -213,6 +213,15 @@ Tests changed for incremental training (decision 2026-10-23):
 | `test_purge_chain.py` | a run continued from a parent no longer in the registry, from another tenant's run, or in a loop is checked by hand with every run continued from it; one continued from a clean parent is left out; a per-type adapter whose Foundation is gone is checked by hand; both plans name the staged parent adapters and the serving cache; each run names the run it continued and where it started from |
 | `test_training_continuation.py` | an adapter saved with other LoRA settings than the config (rank, alpha, dropout, rsLoRA, bias, targets) is named, and refused by `train()`, as is an unreadable `adapter_config.json`, while a dry run reads no adapter; the fingerprint names the starting weights, so a checkpoint of another start, or one fingerprinted before the start was recorded, is not resumed, and `--fresh` does not resume a by-hand continued run's checkpoint; a bad `continued_training` block is refused, by `validate_all` before any work |
 
+Tests added for printed values only and consistent output (decisions 2026-10-24):
+
+| Test | Guards |
+|---|---|
+| `test_grounding_tolerant.py` | `ground_tolerant`: what OCR misread is still printed (a digit lookalike in a code or a date, a "$" read as a 5, misread separators, one letter in a long word), an invention is not (a moved decimal point, one digit changed, another word or date, a word with no digit folded to digits); a leading 5 only where the figure shows no "$"; printed on another page is printed; what the text cannot settle is unchecked; it agrees with `ground` on clean text |
+| `test_printed_values.py` | strict is the default and an unknown mode is refused; strict takes out a value no page prints and keeps its key, flag mode keeps and flags it; an extra field leaves its list; a row with nothing printed goes and the rows after it move up, one with a printed value stays; unchecked values kept and counted; system fields not checked; no page text changes nothing; a self-contained answer leaves a value out; earlier flags follow their values; `extract` takes out what the model invented; fields first holds the fields to the text when it arrives |
+| `test_invention_and_agreement.py` | `hallucination_rate` read from serving's record and weighted by the values checked, validation counting as serving counts, over every page of the document; agreement both ways with nulls in both left out, weighted by fields compared; the golden eval's reversed repeat of the main mode, on by default; both gating with their margins and no threshold; a baseline that never measured them compared on floors only, with a warning; checkpoint selection: close on field match the finalist inventing less wins, further behind it does not, the agreement and false-null guards, the repeat pass |
+| `test_audit_label_consistency.py` | the audit's label-consistency warnings: dates, whole numbers written two ways, a number beside text, an enum value spelt two ways; a value another check reports left to it; a placeholder beside a null; `raw` against `parsed` per value; full text, notes and system fields not read; a consistent folder warns nothing; each kind in the report |
+
 Contract tests also check that `.env.example` documents every variable the code reads (and nothing it
 does not), and that `IMPL_ALL_COMBINED.md` is regenerated, never hand-edited
 (`python -m scripts.combine_specs --write`).
@@ -269,3 +278,7 @@ real vLLM engines (the tests fake the engine), and a real upload.
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (printed values only and consistency)
+
+- *Current implementation*: 3,459 tests in 140 modules; a table for the new `test_grounding_tolerant.py`, `test_printed_values.py`, `test_invention_and_agreement.py` and `test_audit_label_consistency.py` (the user's decisions of 2026-10-24: nothing invented in the served JSON, consistent output).

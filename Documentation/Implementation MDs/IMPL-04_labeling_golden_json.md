@@ -187,6 +187,7 @@ Once a model version exists (arch §7 step 6, §13 step 11):
 - [ ] A value with figures no page prints is listed in `unprinted_values`, never changed, and the corpus build leaves out the windows holding it; the OCR text over a scanned page never settles that a value is missing.
 - [ ] A coverage code in no list of its line is re-coded (code file's `replaces_codes`, then the repository's table, which wins); a package policy filed under one common-model line is left out with the reason.
 - [ ] `split_form_edition` moves "CG 00 01 04 13" to number `CG 00 01` and `edition_date` `04/13`, and a bracketed edition after a form code likewise; a filled `edition_date` is never overwritten; "HO 04 35" and "CG 20 10 04" are left alone, the second warned on at import; on a common-model policy line a bundle still carrying a movable edition is refused at import and audit, a self-contained line's numbers are left as printed, and a gold stored before the rule is read under it by the corpus build (`load_golden_label`) as by the gate.
+- [ ] The audit warns, never blocks, on a typed field written in more than one shape across the labels, a placeholder beside nulls in the same field, and a date's or an amount's `raw` that contradicts its `parsed`; a value another check already reports is left to that check.
 
 ---
 
@@ -309,7 +310,7 @@ LOB enum, which rejected `flood`, `cyber`, `professional_eo`, `gl`, `wc` and fai
 
 **Pre-upload data audit** (`python -m data_pipeline.audit [--input <folder>] [--lines a,b]`, default
 input `data/bundles`, the `prepare_bundles` output; every line unless `--lines` names some): read-only, on
-the laptop, before anything is uploaded. Five layers — structure
+the laptop, before anything is uploaded. Six layers — structure
 (one PDF + `golden.json` + `metadata.json` per folder, PDF opens, no duplicate PDFs), label shape (the
 importer's own `check_bundle` (so a form's edition left in its number on a common-model line and a gold with
 no review record block here too), `lob` has a schema (and is one of `--lines` when given), `page_ref` inside the PDF, a delivered
@@ -318,7 +319,14 @@ self-contained lines are the blocker `output shape` (`audit.output_shape_finding
 `prepare_bundles --lines` before import, since training would refuse the tenant afterwards), values against
 the PDF (each `raw` found on the page its `page_ref` names, with the `common.grounding` matcher the label rules
 and the evaluation also use; wrong page / not found / needs OCR for scans),
-formats (readable dates — the build rewrites them MM/DD/YYYY — amounts agreeing with `raw`, period order) and
+formats (readable dates — the build rewrites them MM/DD/YYYY — amounts agreeing with `raw`, period order),
+label consistency (warnings only, `label_consistency`, decision 2026-10-24: a typed field — date, money,
+number, percent, boolean, enum — written in more than one shape across the labels, such as an enum value
+spelt two ways; a placeholder — N/A, NA, None, Not Applicable, -, --, TBD, Unknown, Nil, trimmed and case
+aside — beside nulls in the same field; a date's or an amount's `raw` that contradicts its `parsed`; listed
+in `warnings.csv`, the report's "Label consistency" section and `summary()`'s `label_consistency` and
+`label_consistency_fields`. A field written two ways teaches the model to pick one at random; which way is the
+convention is the user's choice) and
 totals (documents per line, digital vs scanned, page spread, lines under 5, whether the test split reaches the
 150 needed to freeze), plus a 5%-per-line spot-check sample. Output in `data/audit_report/` (git-ignored: the
 CSVs quote label values); the command exits non-zero while blockers remain.
@@ -371,3 +379,7 @@ row per value. Page text is normalised once per page.
 ## Changes of 2026-10-23 (architecture v2.6)
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
+
+## Changes of 2026-10-24 (printed values only and consistency)
+
+- Audit: a sixth layer, label consistency (the user's decision of 2026-10-24: consistent output), warnings only: a typed field written in more than one shape, a placeholder beside nulls in the same field, a date's or an amount's `raw` contradicting its `parsed`; in `warnings.csv`, the report and `summary()`. Run it on the new training set before the first cycle. New acceptance item.

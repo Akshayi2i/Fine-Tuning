@@ -94,7 +94,7 @@ The page numbers in the markers are the document's real numbers, so a window's n
 - Never returns raw (uncalibrated) confidence as if calibrated — IMPL-09 raises when calibration is missing.
 
 ### 6. `serving/pipeline.py` (request orchestrator)
-Per request: classify (or take the caller's `doc_type`) → route adapter/prompt/schema → resolve the policy's line (caller's; detected only with `detect_lob` on) → route through the serving plan (the promoted release, or base model + `_fallback.json`) → read: policy windows / Loss Run windows / one call → merge → serving guards (common-model lines) → IMPL-09 confidence → list completeness → canonical envelope → schema validation → every-key fill → final JSON.
+Per request: classify (or take the caller's `doc_type`) → route adapter/prompt/schema → resolve the policy's line (caller's; detected only with `detect_lob` on) → route through the serving plan (the promoted release, or base model + `_fallback.json`) → read: policy windows / Loss Run windows / one call → merge → serving guards (common-model lines) → printed values only (every policy) → IMPL-09 confidence → list completeness → canonical envelope → schema validation → every-key fill → final JSON.
 
 **This is the canonical pipeline the testing harness (IMPL-12) reuses**, which is what guarantees test == prod. Testing must call it, never re-implement it. The golden eval (IMPL-08) reads through it too, and checkpoint selection's whole-document pass merges its windows with the same `serving/policy_merge.py`.
 
@@ -119,6 +119,7 @@ Per request: classify (or take the caller's `doc_type`) → route adapter/prompt
 - [ ] Nothing in serving's config or a release selects pages: there is no page threshold and no `long_doc_types`.
 - [ ] A window that fails (unparseable, or cut at the token limit) is split in half and retried; one that still fails alone is dropped and flagged `window_failed:<group>:p<page>`, and the rest of the document is returned.
 - [ ] A served policy JSON carries every key of its line's schema, `null` where nothing was extracted.
+- [ ] In strict mode a value no page prints is taken out of a served policy JSON (its key null; an extra field, or a row with nothing printed, leaves its list, the rows after it renumbered) and flagged `<path>:not_printed_removed`; flag mode keeps and flags it `<path>:not_printed`; an unknown mode is refused; with no page text nothing is checked and the result is flagged `printed_values:no_page_text`.
 - [ ] A served common-model policy with page text carries `text_sections` from the section builder, valid against the client's schema, with every word of its page text somewhere in the JSON (`text_coverage` 1.0 on the test fixtures); one with none is flagged `text_sections:no_page_text`. The copied builder matches `SOURCE.json`.
 - [ ] A policy with no line, detection off, is refused unless the caller sends `allow_lob_fallback`; a known line the promoted release did not train on, and a package even of lines it trained on, is read by the base model against `_fallback.json`, flagged `route:lob_fallback_used`.
 - [ ] One promoted release serves a tenant; if the index holds several, the newest that can be served serves, with a warning naming it. Cold start reads the release's `window_plan_version` (`ServedRelease`), and refuses a config still holding `routing.release_pins` or `routing.lob_family_threshold`. It also refuses a `lora_on_base` release whose adapter trained on another base than the configured `model_id@revision`; an older merged release is not checked.
@@ -139,7 +140,7 @@ every section group × page window planned by `data_pipeline/dataset_builder/pol
 over every page (`pages_to_read`: every page, and the declarations page `serving.page_router.plan_pages`
 finds in the same text the training rows were planned on), whatever the document's length. The routed
 single-call branch, the page threshold and `long_doc_types` are gone from `extract`. Each round's windows
-go to vLLM in **calls of at most 96** (`MAX_WINDOWS_PER_BATCH`, the validation's `validation_batch_rows`; not yet measured in serving; `generate_batch`), the longest expected answers first (`_send_order`: the larger answer reservation, then more pages) and read back in planned order, so a
+go to vLLM in **calls of at most 96** (`MAX_WINDOWS_PER_BATCH`, the validation's `validation_batch_rows`; not yet measured in serving; `generate_batch`), the longest expected answers first (`_send_order`: the larger answer reservation, then more pages; `ExtractionRequest.send_order="reversed"` sends them the other way, as the golden eval's repeat pass does) and read back in planned order, so a
 69-page policy's 81 windows are one call and a 200-page policy's page images are not all decoded at once. vLLM fails every prompt of a call when it refuses one, so a call whose windows all failed with one error is read again in halves (`_batch_in_halves`) until the window that caused it is alone, and only that window fails. Each window's answer limit is its section task's reserved budget
 (`common.config.answer_cap(task_for(group))`), its page references are bounded to its own pages
 (`common.schemas.with_page_bounds`), and an answer cut at the token limit is refused even if it parses. A
@@ -171,7 +172,9 @@ page was read.
   page's text: each value once, citing every page that prints it; an extra field moved into its own empty
   field. A value no page prints is flagged `<path>:not_printed`; on a born-digital document
   (`ocr_meta.modality` native) an extra field no page prints is dropped, flagged
-  `additional_fields:not_printed_dropped`. A scan's OCR text settles nothing, so on a scan every value stays.
+  `additional_fields:not_printed_dropped`. A scan's OCR text settles nothing for the label rules, so here a
+  scan's values all stay; the printed-values check below judges scans too, and in strict mode its
+  `not_printed_removed` replaces `not_printed`.
 - `conform` also moves a form's edition left inside its form number to the form's empty `edition_date`, as the
   labels now do (`label_rules.split_form_edition`): only an unambiguous shape — ISO's `AA 99 99 MM YY`, or a
   month and year in brackets after the number — parsed `MM/YY`, the number kept without it; a filled
@@ -183,6 +186,33 @@ page was read.
 - `unit_link_flags` flags `coverages[i].applies_to:unit_link_unknown` for a coverage served without its unit
   when the answer holds two or more vehicles, boats or buildings, or another row of its code does carry a link.
 - Empty optional objects and empty rows are dropped from the answer (`_without_empty`).
+
+**Printed values only** (`serving/printed_values.py`, decision 2026-10-24). After the merge and `conform`,
+every canonical policy's values are looked up on the document's pages with
+`common.grounding.ground_tolerant` (IMPL-08 §1), on scans too: each envelope with a non-empty `raw`, extra
+fields and table rows included; system fields are skipped.
+- Printed on some page: kept. Unchecked (too short, a yes/no reading, a cited page with no text): kept and
+  counted.
+- Printed nowhere, `strict` mode (the default; `printed_values.mode` in `configs/inference/vllm_serving.yaml`,
+  read by `configured_mode`, which refuses an unknown mode): taken out of the JSON. Its key stays, null on a
+  common-model line; on a self-contained line it is left out, and the every-key fill serves it as null
+  (`hold_to_printed(..., lob=)`). An extra field leaves its list. A table row goes when nothing in it is
+  found printed (a value too short to check keeps it); the rows after it move up, and the structural ids are
+  numbered again as the merge numbers them. Spans go, or move, with their values. Each value is flagged
+  `<path>:not_printed_removed`, on the path it had in the model's answer; that flag replaces `conform`'s
+  `<path>:not_printed`, and other flags follow their values or go with them.
+- Printed nowhere, `flag` mode: kept and flagged `<path>:not_printed`.
+
+The record is `ExtractionResult.printed_check`: `{mode, checked, unchecked, not_printed: [{path, raw, pages}],
+removed}`, `not_printed` listed before removal. It is not in `as_dict()`; the golden eval reads it (IMPL-08).
+With no page text (image only) nothing is checked: `printed_check` is None and the result is flagged
+`printed_values:no_page_text`. Fields first serves its fields only once held to the pages they cite
+(`serving.fields_first.verify_fields`: `hold_result_to_printed` on a copy, over those pages' text; a value
+not found yet is held back, `pending_full_text`), and checks the whole result once MinerU's full text arrives
+(`attach_full_text` → `hold_result_to_printed`): for every policy, before the full-text tier, only when no
+check has run yet; `fields`, `list_fields`, `overall_confidence`, the flags and the schema verdict follow
+the JSON. The trade-off the user accepted: a value MinerU misread beyond what the search forgives is removed
+too, and comes back null with the flag.
 
 **Long Loss Runs** (`lossrun_windows`, `_extract_lossrun_windows`): windowed only when the estimated rows of
 the whole document overflow one answer (`answer_cap("lossrun_rows")`, 8,192 tokens), with the same split-and-
@@ -341,3 +371,16 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - The routine runs on Azure and RunPod serves only a stock vLLM and the MinerU 4 API (no code of ours there). Every served document's text comes from the pinned MinerU (`configs/shared/ocr.yaml`, IMPL-03): `ServedOcr(expected_version=)` refuses a task another version or tier read.
 - `OpenAIChatBackend(model=name)` checks at start that the server lists `name` and, for a LoRA, that its `parent` is our base model (`configs/base_model.yaml`); a server that cannot list its models is not checked. `scripts/served_adapter.py` makes the promoted release's adapter ready for the pod's network volume: it refuses a release not served as `lora_on_base`, one whose OCR pin is not the served MinerU's, and an adapter vLLM cannot serve (LoRA on the vision side, `modules_to_save`, a rank above 512), downloads it as `policy-<version>`, and prints the copy command and the vLLM flags (`--enable-lora --max-lora-rank --max-loras 1 --lora-modules`).
 - Model and MinerU URLs must be HTTPS, or HTTP to this machine only (`common.transport.assert_encrypted`); page links expire after an hour. Outside the code: the Azure region near the RunPod data centre, RunPod Secure Cloud under a data processing agreement, vLLM's request logging off.
+
+## Changes of 2026-10-24 (fields first)
+
+- One H100 serves both the model and MinerU, and the gate is a 200-page scan in 2 minutes (decision 2026-10-24); MinerU alone takes 4-5 minutes for it. `serving/fields_first.py` reads a document in two phases: `read_fields` renders the pages and the model reads their images (`image_only`) - the fields, served flagged `text_sections:no_page_text` - and `add_full_text` has MinerU read the PDF afterwards and adds the full-text tier (`serving.pipeline.attach_full_text`: Fideon's section builder over the page text, the result checked against the client's schema with it, `text_coverage` measured; a tier that fails the schema is left out, flagged `text_sections:invalid`). Only a result flagged `no_page_text` gets one: `extract` flags exactly the documents that have the tier and were read without text.
+- `GpuTurns` orders the one GPU: MinerU starts a run of pages only while no document's fields are being read (`ocr_via_api(gate=)`: the runs then read one at a time, each to its end), so a document arriving while another's text is read waits at most one run.
+- Whether image-only fields are accurate enough is measured before relying on them (IMPL-12, `latency_check --runs standard,fields-first`); the training changes that bring a 200-page scan under 2 minutes (page images first with the same windows for every job, a compact prompt, smaller images, a compact answer) wait for the next cycle.
+- Code review of 2026-10-24: MinerU's turns are runs of at most 20 pages whatever the PDF's length (`ServedOcr.run_pages`, `split_pdf(run_pages=)`), so a document arriving mid full text waits about 25 s, not a whole document's OCR; a run waits for its turn at most `text_max_wait_s` (600 s) and then goes regardless (`GpuTurns.overdue_runs`), so fields arriving back to back cannot hold full texts back for ever. The turn is held from the start of a document's fields, rendering included: a run started while the pages render would still be reading when the model starts. `attach_full_text` judges the tier by the schema errors it adds, so fields that already break the schema keep their full text.
+- Printed values only, at the gate too (requirement of 2026-10-24: no value the PDF does not print is served): before fields first serves the fields, MinerU reads only the pages they cite (`cited_pages`, `ServedOcr.ocr_text(pages=)`, `select_pages`; a few dozen of a 200-page policy, ~15-40 s, within the document's own GPU turn) and `verify_fields` holds a copy of the result to that text (`serving.printed_values.hold_result_to_printed`): a value not found there is held back as `<path>:pending_full_text`, not removed as printed nowhere - the model may have cited the wrong page - and `likely_missed` flags declarations fields left empty that those pages print. The model's own answer is kept, and when the remaining pages are read (the cited ones are not read again) it is held to the whole document: a held-back value printed elsewhere comes back, one printed nowhere is removed (`not_printed_removed`), as on the standard path. `attach_full_text` looks an image-only read over for missed fields too. Should the cited pages fail to be read, nothing is served before the full text; `verify=False` (`--unverified-fields`) serves unchecked fields flagged `fields:unverified`, for timing tests only.
+
+## Changes of 2026-10-24 (printed values only and consistency)
+
+- Printed values only (the user's decision of 2026-10-24: nothing invented in the served JSON): `serving/printed_values.py` holds every canonical policy to its pages after the merge and `conform`, with the OCR-tolerant `common.grounding.ground_tolerant`, on scans too. `printed_values.mode` in `configs/inference/vllm_serving.yaml`: `strict` (the default) takes a value printed nowhere out and flags it `<path>:not_printed_removed`, replacing `conform`'s `<path>:not_printed`; `flag` keeps it and flags it `<path>:not_printed`; any other value is refused. The record is `ExtractionResult.printed_check`; with no page text nothing is checked, flagged `printed_values:no_page_text`. Fields first runs the check in `attach_full_text` (`hold_result_to_printed`) once MinerU's text arrives (*Current implementation*, §6, acceptance).
+- `ExtractionRequest.send_order` (`planned`, the default, or `reversed`; anything else is refused): the order a policy's windows go to the model, on both reading paths. The merge keeps planned order. The golden eval's repeat pass uses `reversed` to measure `run_to_run_agreement` (IMPL-08).

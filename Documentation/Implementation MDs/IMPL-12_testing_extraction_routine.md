@@ -207,7 +207,7 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 - Both entries run the extraction: `python -m testing.run_extraction …` and
   `python -m orchestration.run extract …`, which passes the same arguments to `run_extraction.main`. Extraction
   goes through `serving.pipeline.extract` — windows and the window merge for policies, the serving guards,
-  every-key output, dates in `MM/DD/YYYY` — so test output is production output.
+  the printed-values check, every-key output, dates in `MM/DD/YYYY` — so test output is production output.
 - **Every page is read** (decision 2026-10-19, IMPL-11 §4): a policy of any length is read in windows over
   all its pages, never on selected pages, so `pages_used` lists every page and a long policy takes more
   windows than it did. Results written before 2026-10-21 read a policy longer than five pages on its selected
@@ -296,3 +296,16 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 ## Changes of 2026-10-24 (one served MinerU)
 
 - `testing/latency_check.py` and `testing/extract_server.py` read with the pinned MinerU (`configs/shared/ocr.yaml`): `--tier` defaults to the pinned tier, every task's version and tier are checked, and `--any-mineru` accepts another (timing only); `latency_check` refuses a `--tier` other than the pinned one without it. `--ocr-mode` defaults to the OCR stage's rule, per document, rather than MinerU's `auto`.
+
+## Changes of 2026-10-24 (fields first)
+
+- `testing/latency_check.py --runs standard,fields-first` reads each document both ways, one row each (`time_fields_first`): `fields` (the gate) and `full_text` (when the tier joined) next to the standard run's time, with exact match against gold for both - the measurement that decides whether image-only fields can be the production path.
+- `testing/extract_server.py --fields-first` (needs `--mineru-url`): a job becomes `fields_ready` once the model has read the page images (its result already written, `/result` answers), and a second worker adds MinerU's text in the GPU's idle turns before `done`; a failed full text leaves the fields standing, reported as the job's error. `ExtractService.submit` takes the server's default mode. `testing/extract_client.py` waits through `fields_ready`, says when each document's fields came, and reports `Fields s`.
+- The window summary adds `first_token_s_max` (windows queued, or put back for want of memory) and `by_group`: each job's answer lengths (median, p95, longest), to set the answer limits from.
+- Code review of 2026-10-24: `latency_check` scores a fields-first document twice - when the fields come (`accuracy_at_fields`, the `Exact match at fields` column: what the gate serves) and as finally served, after the page text could change it. The job server writes each result whole (`write_whole`: a temporary file swapped in), since a `fields_ready` result is served while its full text is added; takes `--run-pages` (20) and `--text-max-wait` (600 s); keeps a job's fields for its second phase only once its first has succeeded. The client reports a document whose fields came but whose full text failed, and exits 1 for it. From the laptop with `--images link`, fields first puts the page upload before the model (nothing to hide it behind, unlike OCR): about 1.5-2 minutes for 114 pages at 1 MB/s; negligible on Azure.
+- Fields first serves its fields only once held to the pages they cite (IMPL-11): the job server reports `fields_served`, `fields_verified` and `cited_pages`, becomes `fields_ready` only with checked fields, and a job whose full text then fails is `done` with its checked fields, or `failed` when none were served. `latency_check` scores the fields as served at the gate (held-back values included) and the final result, counts `fields_check.held_back`, and times `verify` inside `fields`; `--unverified-fields` scores unchecked fields, for timing only. Tests: a value cited on the wrong page is held back, then served once found; an invented value is never served; fields whose pages cannot be read are not served before the full text.
+
+## Changes of 2026-10-24 (printed values only and consistency)
+
+- Test outputs are served outputs, so they hold printed values only (IMPL-11; the user's decision of 2026-10-24): in strict mode, the default, a value no page prints is null in `extraction` and in `all_fields`, flagged `<path>:not_printed_removed`; against gold, a removed value the gold holds counts as missed. `printed_values.mode: flag` in `configs/inference/vllm_serving.yaml` keeps such values and flags them `<path>:not_printed` instead. What the check found (`ExtractionResult.printed_check`) is not written to the results JSON.
+- Fields first: the fields served at `fields_ready` are held to the pages they cite (`serving.fields_first.verify_fields`, IMPL-11); a value not found on them yet is held back (`pending_full_text`), and the whole document is checked when MinerU's full text arrives, before the full-text tier. So `latency_check`'s `Exact match at fields` scores the fields as first served, and its final score the fully checked ones.

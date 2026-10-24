@@ -35,6 +35,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+#: Pages per MinerU run when it takes turns with the model on one GPU: a
+#: document arriving while another's full text is read waits for at most this
+#: many pages' reading (~1.3 s a page on the H100: about 25 s).
+TURN_PAGES = 20
+
 #: Where the served MinerU is, for the OCR stage: its base URL and bearer token.
 MINERU_URL_ENV = "MINERU_URL"
 MINERU_TOKEN_ENV = "MINERU_TOKEN"
@@ -63,7 +68,7 @@ class ServedOcr:
 
     def __init__(self, mineru_url: str, token: str | None = None, *, tier: str = "basic",
                  ocr_mode: str | None = None, ocr_parts: int = 1, render_workers: int | None = None,
-                 expected_version: str | None = None) -> None:
+                 expected_version: str | None = None, run_pages: int | None = TURN_PAGES) -> None:
         from common.transport import assert_encrypted
 
         assert_encrypted(mineru_url, "the MinerU server")
@@ -74,6 +79,8 @@ class ServedOcr:
         self.ocr_parts = ocr_parts
         self.render_workers = render_workers or min(8, os.cpu_count() or 1)
         self.expected_version = expected_version
+        #: Pages per run when MinerU takes turns with the model (``ocr_text``'s gate).
+        self.run_pages = run_pages
 
     def read(self, pdf: bytes, pages_dir: Path, *, name: str = "document.pdf", with_text: bool = True,
              force_ocr: bool = False, ocr_mode: str | None = None,
@@ -86,7 +93,6 @@ class ServedOcr:
         (``PageLinks.publish``); what it returns is reported as ``links``.
         """
         from common.config import resolution_cap_px
-        from data_pipeline.ocr.mineru_api import ocr_via_api
         from data_pipeline.ocr.render_only import render_pdf_pages
 
         pages_dir.mkdir(parents=True, exist_ok=True)
@@ -97,14 +103,11 @@ class ServedOcr:
             mode = ("ocr" if force_ocr else None) or ocr_mode or self.ocr_mode or ocr_mode_for(pdf)
 
         def ocr() -> None:
-            started = time.perf_counter()
             try:
-                read["pages"], read["info"] = ocr_via_api(
-                    pdf, self.mineru_url, self.token, filename=name, tier=self.tier,
-                    ocr_mode=mode, parts=self.ocr_parts, uploaded=uploaded)
+                text = self.ocr_text(pdf, name=name, ocr_mode=mode, uploaded=uploaded)
+                read["pages"], read["info"], read["seconds"] = text["pages"], text["info"], text["seconds"]
             except Exception as exc:  # noqa: BLE001 - raised below, once the rendering is done
                 read["error"] = exc
-            read["seconds"] = time.perf_counter() - started
 
         began = time.perf_counter()
         reader = threading.Thread(target=ocr, name="served-ocr", daemon=True) if with_text else None
@@ -131,7 +134,6 @@ class ServedOcr:
             reader.join()
             if "error" in read:
                 raise read["error"]
-            self._assert_version(read["info"], name)
             if len(read["pages"]) != len(images):
                 raise ServedOcrError(f"{name}: MinerU read {len(read['pages'])} pages, the renderer {len(images)}")
             for number, text in enumerate(read["pages"], start=1):
@@ -140,7 +142,7 @@ class ServedOcr:
         return {
             "images": paths,
             "texts": texts,
-            "ocr": {**(read.get("info") or {}), "ocr_mode": mode} if reader is not None else {},
+            "ocr": read.get("info") or {},
             "links": links,
             "timings_s": {
                 "render": round(rendered, 2),
@@ -151,6 +153,40 @@ class ServedOcr:
                 "pages_and_text": round(time.perf_counter() - began, 2),
             },
         }
+
+    def ocr_text(self, pdf: bytes, *, name: str = "document.pdf", page_count: int | None = None,
+                 ocr_mode: str | None = None, force_ocr: bool = False, uploaded: threading.Event | None = None,
+                 gate: Callable[[], None] | None = None, pages: list[int] | None = None) -> dict[str, Any]:
+        """MinerU's text of ``pdf`` alone, no rendering: ``{"pages", "texts", "info", "seconds"}``
+        - ``pages`` the texts in order, ``texts`` by page number.
+
+        Checked against the pin (``expected_version``) and, given ``page_count``,
+        against the pages rendered. ``gate`` is called before each run of pages
+        is sent, the runs then read one at a time, none longer than
+        ``run_pages`` pages (``ocr_via_api``): the full text of a document whose
+        fields are out, read in the GPU's idle turns, each turn short.
+
+        ``pages`` (1-based) reads those pages alone - the pages a document's
+        fields cite, to check them against before they are served
+        (``serving.fields_first.verify_fields``) - in OCR or text mode as the
+        whole document is read.
+        """
+        from data_pipeline.ocr.mineru_api import ocr_via_api, select_pages
+
+        mode = ("ocr" if force_ocr else None) or ocr_mode or self.ocr_mode or ocr_mode_for(pdf)
+        numbers = sorted(set(pages)) if pages is not None else None
+        sent = select_pages(pdf, numbers) if numbers is not None else pdf
+        started = time.perf_counter()
+        read, info = ocr_via_api(sent, self.mineru_url, self.token, filename=name, tier=self.tier,
+                                 ocr_mode=mode, parts=self.ocr_parts, uploaded=uploaded, gate=gate,
+                                 run_pages=self.run_pages if gate is not None else None)
+        self._assert_version(info, name)
+        expected = len(numbers) if numbers is not None else page_count
+        if expected is not None and len(read) != expected:
+            raise ServedOcrError(f"{name}: MinerU read {len(read)} pages, the renderer {expected}")
+        texts = dict(zip(numbers or range(1, len(read) + 1), read, strict=True))
+        return {"pages": read, "texts": texts, "info": {**info, "ocr_mode": mode},
+                "seconds": time.perf_counter() - started}
 
     def _assert_version(self, info: dict[str, Any], name: str) -> None:
         """Refuse text from a MinerU other than the pinned one, tier included."""

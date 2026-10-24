@@ -430,6 +430,129 @@ def test_pages_are_rendered_while_minerU_reads_them_and_land_where_the_pipeline_
 # --------------------------------------------------------------------------
 
 
+def test_minerU_waits_while_a_documents_fields_are_read():
+    from serving.fields_first import GpuTurns
+
+    turns, order = GpuTurns(), []
+    text = threading.Thread(target=lambda: (turns.wait_for_text_turn(), order.append("text")))
+    with turns.fields():
+        text.start()
+        time.sleep(0.2)
+        order.append("fields read")
+    text.join(timeout=5)
+    assert order == ["fields read", "text"]
+    turns.wait_for_text_turn()                                       # nobody's fields: no wait
+
+
+class _RecordingMinerU(_MinerU):
+    events: list = []
+
+    def do_POST(self):  # noqa: N802
+        _RecordingMinerU.events.append(("post", time.perf_counter()))
+        super().do_POST()
+
+    def do_GET(self):  # noqa: N802
+        if self.path.endswith("result?response_format=json"):
+            _RecordingMinerU.events.append(("result", time.perf_counter()))
+        super().do_GET()
+
+
+def test_gated_runs_of_pages_are_read_one_at_a_time_each_after_its_turn():
+    _RecordingMinerU.events, _MinerU.polls = [], 0
+    turns = []
+    httpd, url = _serve(_RecordingMinerU)
+    try:
+        pages, info = ocr_via_api(_pdf(6), url, "tok", filename="a.pdf", poll_s=0.01, parts=3,
+                                  gate=lambda: turns.append(len(_RecordingMinerU.events)))
+    finally:
+        httpd.shutdown()
+    assert len(pages) == 6 and info["parts"] == 3 and len(turns) == 3
+    kinds = [kind for kind, _ in _RecordingMinerU.events]
+    # Each run is sent only once the one before it has been read to its end.
+    assert kinds == ["post", "result", "post", "result", "post", "result"]
+    assert info["server_seconds"] == round(3 * 8.25, 2)                 # one after another: their sum
+
+
+def test_the_pages_a_documents_fields_cite_can_be_read_alone():
+    import pymupdf
+
+    from data_pipeline.ocr.mineru_api import select_pages
+    from data_pipeline.ocr.served_ocr import ServedOcr
+
+    with pymupdf.open(stream=select_pages(_pdf(4), [2, 4]), filetype="pdf") as picked:
+        assert [page.get_text().split(".")[0] for page in picked] == ["Page 2", "Page 4"]
+    with pytest.raises(MinerUApiError, match="not in a 2-page PDF"):
+        select_pages(_pdf(2), [3])
+    _MinerU.posted, _MinerU.polls = [], 0
+    httpd, url = _serve(_MinerU)
+    try:
+        text = ServedOcr(url).ocr_text(_pdf(4), pages=[4, 2])            # the fake reads any PDF as 2 pages
+    finally:
+        httpd.shutdown()
+    assert list(text["texts"]) == [2, 4] and text["texts"][4].startswith("## Conditions")
+    assert len(_MinerU.posted) == 1
+
+
+def test_minerU_turns_are_short_runs_however_long_the_pdf():
+    from data_pipeline.ocr.mineru_api import split_pdf
+    from data_pipeline.ocr.served_ocr import ServedOcr
+
+    assert [count for count, _ in split_pdf(_pdf(5), 1, run_pages=2)] == [1, 2, 2]
+    assert [count for count, _ in split_pdf(_pdf(5), 1)] == [5]
+    _MinerU.posted, _MinerU.polls = [], 0
+    httpd, url = _serve(_MinerU)
+    gated = []
+    try:
+        reader = ServedOcr(url, run_pages=1)
+        text = reader.ocr_text(_pdf(3), page_count=3, gate=lambda: gated.append(1))
+        assert len(text["pages"]) == 3 and len(gated) == 3 and len(_MinerU.posted) == 3   # one run a page
+        reader.ocr_text(_pdf(2), page_count=2)                     # no turns to take: one task (the fake's 2 pages)
+        assert len(_MinerU.posted) == 4
+    finally:
+        httpd.shutdown()
+
+
+def test_a_document_arriving_mid_full_text_waits_one_run_not_the_whole_pdf():
+    from serving.fields_first import GpuTurns
+
+    _SlowUploadMinerU.events, _MinerU.polls = [], 0
+    httpd, url = _serve(_SlowUploadMinerU)
+    turns, done = GpuTurns(), {}
+    text = threading.Thread(target=lambda: done.update(pages=ocr_via_api(
+        _pdf(3), url, "tok", filename="a.pdf", poll_s=0.01, run_pages=1, gate=turns.wait_for_text_turn)[0]))
+    try:
+        text.start()
+        while not any(kind == "post" for kind, *_ in _SlowUploadMinerU.events):
+            time.sleep(0.01)
+        with turns.fields():                                          # a new document's fields, mid-run
+            time.sleep(0.8)
+            released = time.perf_counter()
+        text.join(timeout=10)
+    finally:
+        httpd.shutdown()
+    posts = [start for kind, start, _ in _SlowUploadMinerU.events if kind == "post"]
+    assert len(done["pages"]) == 3 and len(posts) == 3
+    assert posts[0] < released <= min(posts[1:])                       # the run in flight ran on; no new one
+
+
+def test_a_full_text_waits_for_its_turn_only_so_long():
+    from serving.fields_first import GpuTurns
+
+    turns = GpuTurns(text_max_wait_s=0.2)
+    busy = threading.Event()
+
+    def fields_one_after_another():
+        with turns.fields():
+            busy.set()
+            time.sleep(1.5)
+
+    threading.Thread(target=fields_one_after_another, daemon=True).start()
+    busy.wait(5)
+    started = time.perf_counter()
+    turns.wait_for_text_turn()
+    assert time.perf_counter() - started < 1.0 and turns.overdue_runs == 1
+
+
 def test_the_corpus_is_read_by_the_served_minerU_and_records_its_pin(tmp_path):
     from artifact_registry import paths
     from artifact_registry.blob_client import BlobClient, InMemoryBackend

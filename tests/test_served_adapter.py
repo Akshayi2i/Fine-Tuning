@@ -78,3 +78,7 @@ def test_the_runner_refuses_a_minerU_tier_the_model_was_not_trained_on(tmp_path,
         latency_check.main(["--model-url", "https://m", "--mineru-url", "https://o", "--tier", "flash",
                             "--doc", f"{tmp_path / 'a.pdf'}=personal_auto"])
     assert "not the pinned tier (basic)" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        latency_check.main(["--model-url", "https://m", "--mineru-url", "https://o", "--runs", "standard,fast",
+                            "--doc", f"{tmp_path / 'a.pdf'}=personal_auto"])
+    assert "--runs takes standard and/or fields-first" in capsys.readouterr().err

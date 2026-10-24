@@ -110,16 +110,54 @@ def score(result: Any, gold_path: Path, lob: str) -> dict[str, Any]:
     }
 
 
+def _calibration(model: Any) -> Any:
+    from calibration.fit_calibration import CalibrationParams
+
+    return CalibrationParams(method="temperature", doc_type="policy", model_version=model.tag, temperature=1.0)
+
+
+def _row(pdf: Path, lob: str, *, run: str, mode: str, backend: Any, result: Any, pages: int, windows: int,
+         timings: dict[str, Any], sent: dict[str, float], ocr: dict[str, Any], gold: Path | None,
+         accuracy_at_fields: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One document's line in the report: timings, windows, accuracy and the served JSON.
+
+    ``accuracy`` is the result as finally served; ``accuracy_at_fields`` the
+    fields as served when they came (fields first: before the page text could
+    change them), else the same."""
+    from testing.extract_server import _extracted_counts, _flag_kinds, window_summary
+
+    accuracy = score(result, gold, lob) if gold else None
+    return {
+        "document": pdf.name, "lob": lob, "run": run, "mode": mode, "model": backend.model, "pages": pages,
+        "windows_planned": windows, "model_calls": len(result.window_latencies_ms),
+        "timings_s": {**timings, "calls": [round(ms / 1000, 2) for ms in result.window_latencies_ms]},
+        "sent_mb": round(sum(sent.values()), 1),
+        "sent_mb_parts": sent,
+        "images": backend.images,
+        "ocr": ocr,
+        "windows": window_summary(result.window_stats),
+        "schema_valid": result.schema_valid,
+        "validation_errors": list(result.validation_errors)[:20],
+        "review_flags": len(result.review_flags),
+        "review_flag_kinds": _flag_kinds(result.review_flags),
+        "text_coverage": result.text_coverage,
+        "overall_confidence": result.overall_confidence,
+        "accuracy": accuracy,
+        "accuracy_at_fields": accuracy_at_fields if run == "fields_first" else accuracy,
+        "extracted": _extracted_counts(result.extraction),
+        "window_stats": result.window_stats,
+        "extraction": result.extraction,
+    }
+
+
 def time_document(pdf: Path, lob: str, *, backend: Any, model: Any, reader: Any, mode: str, work: Path,
                   gold: Path | None = None, links: Any = None) -> dict[str, Any]:
     """One document through render and OCR, the routine and the scorer;
     with ``links`` (:class:`inference_core.page_links.PageLinks`) its pages go to
     the model as links, published while MinerU reads the PDF."""
-    from calibration.fit_calibration import CalibrationParams
     from data_pipeline.dataset_builder.policy_windows import pages_to_read, plan_windows
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import ExtractionRequest, extract
-    from testing.extract_server import _extracted_counts, _flag_kinds, window_summary
 
     began = time.perf_counter()
     data = pdf.read_bytes()
@@ -136,61 +174,85 @@ def time_document(pdf: Path, lob: str, *, backend: Any, model: Any, reader: Any,
     windows = len(plan_windows(lob, every_page, declarations_page, texts or None))
     sent_before = backend.sent_bytes
     model_started = time.perf_counter()
-    result = extract(
-        request, model, StaticClassifier("policy"),
-        CalibrationParams(method="temperature", doc_type="policy", model_version=model.tag, temperature=1.0),
-        strict_schema=False,
-    )
+    result = extract(request, model, StaticClassifier("policy"), _calibration(model), strict_schema=False)
     done = time.perf_counter()
     sent = {
         "pdf": round(len(data) / 2**20, 1) if mode != "image_only" else 0.0,
         "page_links": (read.get("links") or {}).get("mb", 0.0),
         "model_requests": round((backend.sent_bytes - sent_before) / 2**20, 1),
     }
-    return {
-        "document": pdf.name, "lob": lob, "mode": mode, "model": backend.model, "pages": len(paths),
-        "windows_planned": windows, "model_calls": len(result.window_latencies_ms),
-        "timings_s": {
-            **read["timings_s"],
-            "model": round(done - model_started, 2),
-            "calls": [round(ms / 1000, 2) for ms in result.window_latencies_ms],
-            "total": round(done - began, 2),
-        },
-        "sent_mb": round(sum(sent.values()), 1),
-        "sent_mb_parts": sent,
-        "images": backend.images,
-        "ocr": read["ocr"],
-        "windows": window_summary(result.window_stats),
-        "schema_valid": result.schema_valid,
-        "validation_errors": list(result.validation_errors)[:20],
-        "review_flags": len(result.review_flags),
-        "review_flag_kinds": _flag_kinds(result.review_flags),
-        "text_coverage": result.text_coverage,
-        "overall_confidence": result.overall_confidence,
-        "accuracy": score(result, gold, lob) if gold else None,
-        "extracted": _extracted_counts(result.extraction),
-        "window_stats": result.window_stats,
-        "extraction": result.extraction,
+    total = round(done - began, 2)
+    timings = {**read["timings_s"], "model": round(done - model_started, 2),
+               # Fields and full text come together on this path.
+               "fields": total, "full_text": total, "total": total}
+    return _row(pdf, lob, run="standard", mode=mode, backend=backend, result=result, pages=len(paths),
+                windows=windows, timings=timings, sent=sent, ocr=read["ocr"], gold=gold)
+
+
+def time_fields_first(pdf: Path, lob: str, *, backend: Any, model: Any, reader: Any, work: Path,
+                      gold: Path | None = None, links: Any = None, verify: bool = True) -> dict[str, Any]:
+    """One document fields first (``serving.fields_first``): the model reads the
+    page images, the fields are held to the pages they cite, then MinerU's text
+    of the rest holds them to the whole document and adds the full-text tier.
+    ``fields`` is the time the gate counts (verification included);
+    ``full_text`` how long the rest came after."""
+    from data_pipeline.dataset_builder.policy_windows import pages_to_read, plan_windows
+    from serving.doc_type_classifier import StaticClassifier
+    from serving.fields_first import add_full_text, read_fields
+
+    began = time.perf_counter()
+    data = pdf.read_bytes()
+    pages_dir = work / f"{pdf.stem}.fields_first" / "pages"
+    publish = (lambda paths: links.publish(paths, folder=f"{pdf.stem}.fields_first")) if links is not None else None
+    sent_before = backend.sent_bytes
+    fields = read_fields(data, name=pdf.name, lob=lob, source_id=pdf.stem, model=model, reader=reader,
+                         pages_dir=pages_dir, classifier=StaticClassifier("policy"),
+                         calibration=_calibration(model), publish_pages=publish, verify=verify)
+    result, count = fields["result"], len(fields["images"])
+    served = fields["served"]
+    every_page, declarations_page = pages_to_read(None, count)
+    windows = len(plan_windows(lob, every_page, declarations_page, None))
+    # What the gate serves, scored now: the page text that comes next may change it.
+    at_fields = score(served, gold, lob) if gold and served is not None else None
+    full = add_full_text(data, result, name=pdf.name, lob=lob, reader=reader, pages_dir=pages_dir,
+                         page_count=count, known_texts=fields["cited_texts"])
+    done = time.perf_counter()
+    sent = {
+        "pdf": round(len(data) / 2**20, 1),
+        "page_links": (fields.get("links") or {}).get("mb", 0.0),
+        "model_requests": round((backend.sent_bytes - sent_before) / 2**20, 1),
     }
+    timings = {**fields["timings_s"], "ocr": full["timings_s"]["ocr"],
+               "full_text": full["timings_s"]["full_text"], "total": round(done - began, 2)}
+    row = _row(pdf, lob, run="fields_first", mode="image_only", backend=backend, result=result, pages=count,
+               windows=windows, timings=timings, sent=sent, ocr=full["ocr"], gold=gold,
+               accuracy_at_fields=at_fields)
+    held = [flag for flag in (served.review_flags if served is not None else []) if flag.endswith(":pending_full_text")]
+    row["fields_check"] = {"verified": fields["verified"], "served": served is not None,
+                           "cited_pages": len(fields["cited_pages"]), "held_back": len(held),
+                           "served_flags": sorted(served.review_flags) if served is not None else []}
+    return row
 
 
 def table(rows: list[dict[str, Any]]) -> str:
-    head = ("| Document | Line | Pages | Windows | Pages+text s | Model s | Total s | Rounds | Splits | "
-            "Answer tokens | Slowest window s | Sent MB | Schema valid | Text coverage | Exact match |\n"
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    head = ("| Document | Run | Pages | Windows | Fields s | Full text s | Model s | Rounds | Splits | "
+            "Answer tokens | Slowest window s | Sent MB | Schema valid | Text coverage | Exact match at fields | "
+            "Exact match |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     out = [head]
     for row in rows:
         if "error" in row:
-            out.append(f"| {row['document']} | {row['lob']} | FAILED: {row['error'][:90]} |"
-                       + " |" * 12)
+            out.append(f"| {row['document']} | {row.get('run', '')} | FAILED: {row['error'][:90]} |"
+                       + " |" * 13)
             continue
-        t, w, accuracy = row["timings_s"], row["windows"], row["accuracy"] or {}
+        t, w = row["timings_s"], row["windows"]
+        accuracy, at_fields = row["accuracy"] or {}, row.get("accuracy_at_fields") or {}
         slowest = (w["slowest_window"] or {}).get("seconds")
-        out.append(f"| {row['document']} | {row['lob']} | {row['pages']} | {row['windows_planned']} | "
-                   f"{t['pages_and_text']:.1f} | {t['model']:.1f} | {t['total']:.1f} | {w['rounds']} | "
+        out.append(f"| {row['document']} | {row['run']} | {row['pages']} | {row['windows_planned']} | "
+                   f"{t['fields']:.1f} | {t['full_text']:.1f} | {t['model']:.1f} | {w['rounds']} | "
                    f"{w['split']} | {w['answer_tokens']} | {slowest} | {row['sent_mb']} | "
                    f"{row['schema_valid']} | {row['text_coverage']} | "
-                   f"{accuracy.get('field_exact_match_rate', '')} |")
+                   f"{at_fields.get('field_exact_match_rate', '')} | {accuracy.get('field_exact_match_rate', '')} |")
     return "\n".join(out)
 
 
@@ -206,10 +268,18 @@ def main(argv: list[str] | None = None) -> int:
                         help="MinerU's bearer token, when it is not --token's (default --token)")
     parser.add_argument("--doc", dest="docs", action="append", type=parse_doc, required=True, metavar="PDF=LOB")
     parser.add_argument("--mode", default="ocr_plus_image", choices=["ocr_plus_image", "image_only"])
+    parser.add_argument("--runs", type=lambda v: [r.strip() for r in v.split(",") if r.strip()],
+                        default=["standard"], metavar="RUN[,RUN]",
+                        help="how each document is read, one row each: standard (OCR then the model, --mode) "
+                             "and/or fields-first (the model reads the images, MinerU's text after: "
+                             "serving.fields_first). E.g. --runs standard,fields-first to compare")
     parser.add_argument("--tier", default=None,
                         help="the MinerU tier (default the pinned one, configs/shared/ocr.yaml)")
     parser.add_argument("--ocr-mode", default=None, choices=["auto", "txt", "ocr"],
                         help="force MinerU's mode (default: decided per document as the OCR stage does)")
+    parser.add_argument("--unverified-fields", action="store_true",
+                        help="fields first: score the fields before any page text has checked them "
+                             "(timing only; production serves them checked against the pages they cite)")
     parser.add_argument("--any-mineru", action="store_true",
                         help="accept text from a MinerU version or tier other than the pinned one "
                              "(timing only: the model is trained on the pinned one's text)")
@@ -241,6 +311,9 @@ def main(argv: list[str] | None = None) -> int:
     from common.config import served_mineru
 
     pin = served_mineru()
+    unknown = [run for run in args.runs if run not in ("standard", "fields-first")]
+    if unknown or not args.runs:
+        parser.error(f"--runs takes standard and/or fields-first, got {args.runs}")
     args.tier = args.tier or pin["tier"]
     if args.tier != pin["tier"] and not args.any_mineru:
         parser.error(f"--tier {args.tier} is not the pinned tier ({pin['tier']}): the model is trained on "
@@ -289,26 +362,33 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[dict[str, Any]] = []
     for pdf, lob in args.docs:
         gold = find_gold(pdf, args.gold_dir)
-        print(f"reading {pdf.name} ({lob}){'' if gold else ', no gold JSON found'} ...", flush=True)
-        try:
-            row = time_document(pdf, lob, backend=backend, model=model, reader=reader, mode=args.mode,
-                                work=out, gold=gold, links=links)
-        except Exception as exc:  # noqa: BLE001 - one document's failure is reported, the rest still run
-            log.exception("%s failed", pdf.name)
-            row = {"document": pdf.name, "lob": lob, "error": f"{type(exc).__name__}: {exc}"}
-        finally:
-            if links is not None and not args.keep_links:
-                links.discard()
-        (out / f"{pdf.stem}.json").write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
-        rows.append(row)
-        if "error" not in row:
-            t, w = row["timings_s"], row["windows"]
-            accuracy = row["accuracy"] or {}
-            print(f"  {row['pages']} pages, {row['windows_planned']} windows: pages and text "
-                  f"{t['pages_and_text']:.1f} s, model {t['model']:.1f} s, total {t['total']:.1f} s; "
-                  f"{w['split']} split, {w['failed']} failed, {w['stopped_repeating']} stopped repeating; "
-                  f"sent {row['sent_mb']} MB"
-                  + (f"; exact match {accuracy['field_exact_match_rate']}" if accuracy else ""), flush=True)
+        for run in args.runs:
+            print(f"reading {pdf.name} ({lob}), {run}{'' if gold else ', no gold JSON found'} ...", flush=True)
+            try:
+                if run == "fields-first":
+                    row = time_fields_first(pdf, lob, backend=backend, model=model, reader=reader, work=out,
+                                            gold=gold, links=links, verify=not args.unverified_fields)
+                else:
+                    row = time_document(pdf, lob, backend=backend, model=model, reader=reader, mode=args.mode,
+                                        work=out, gold=gold, links=links)
+            except Exception as exc:  # noqa: BLE001 - one document's failure is reported, the rest still run
+                log.exception("%s failed", pdf.name)
+                row = {"document": pdf.name, "lob": lob, "run": run, "error": f"{type(exc).__name__}: {exc}"}
+            finally:
+                if links is not None and not args.keep_links:
+                    links.discard()
+            suffix = "" if run == "standard" else f".{run}"
+            (out / f"{pdf.stem}{suffix}.json").write_text(json.dumps(row, ensure_ascii=False, indent=2),
+                                                          encoding="utf-8")
+            rows.append(row)
+            if "error" not in row:
+                t, w = row["timings_s"], row["windows"]
+                accuracy = row["accuracy"] or {}
+                print(f"  {row['pages']} pages, {row['windows_planned']} windows: fields {t['fields']:.1f} s "
+                      f"(model {t['model']:.1f} s), full text {t['full_text']:.1f} s, total {t['total']:.1f} s; "
+                      f"{w['split']} split, {w['failed']} failed, {w['stopped_repeating']} stopped repeating; "
+                      f"sent {row['sent_mb']} MB"
+                      + (f"; exact match {accuracy['field_exact_match_rate']}" if accuracy else ""), flush=True)
 
     backend.close()
     summaries = [{k: v for k, v in row.items() if k not in ("extraction", "window_stats")} for row in rows]

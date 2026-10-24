@@ -4,13 +4,13 @@
 
 > **Purpose of this file.** This is the shared context every other spec assumes. When you run any individual spec (IMPL-01 … IMPL-15) in Claude Code, that spec references this file for global conventions. Read this once; each module spec then adds only what's specific to it.
 >
-> **Source of truth.** This spec set and the architecture document **`Documentation/finetuning-architecture-v2.6.docx`** are **in sync** as of this revision (v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only). Where a spec cites a section like "(arch §4)", it refers to that document.
+> **Source of truth.** This spec set and the architecture document **`Documentation/finetuning-architecture-v2.6.docx`** are **in sync** as of this revision (v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only), except for the decisions of 2026-10-24, which the architecture does not record yet. Where a spec cites a section like "(arch §4)", it refers to that document.
 >
 > **Precedence.** The architecture carries the *why* — design rationale, trade-offs, the reasoning behind each decision. These specs carry the *how* — module boundaries, file paths, function signatures, acceptance criteria. Neither outranks the other: they describe the same system at different altitudes. **If they disagree, that is a bug in one of them.** Fix the disagreement rather than picking a winner, and say which one you changed.
 >
 > Anything genuinely build-level — a CLI flag, a module name, a test — lives here and is not expected to appear in the architecture.
 >
-> **Revision:** aligned to **`finetuning-architecture-v2.6.docx`** (its Revision v2.6, 2026-10-23), which records the decisions of 2026-10-19, 2026-10-22 and 2026-10-23 below. The section numbers are unchanged from v2.1; §4 is now the one policy adapter (§4.1) trained incrementally (§4.2), §13a the serving format (the adapter on the bf16 base), and §13b is not applied.
+> **Revision:** aligned to **`finetuning-architecture-v2.6.docx`** (its Revision v2.6, 2026-10-23), which records the decisions of 2026-10-19, 2026-10-22 and 2026-10-23 below. It does not record the decisions of 2026-10-24 yet, among them printed values only and consistent output (§2, §13). The section numbers are unchanged from v2.1; §4 is now the one policy adapter (§4.1) trained incrementally (§4.2), §13a the serving format (the adapter on the bf16 base), and §13b is not applied.
 >
 > **Current target.** **One adapter, for policy documents, one version per cycle** (decisions 2026-10-22). Each fine-tuning cycle trains one LoRA (`common/adapter.py`) over all the policy data so far, new and existing. It **continues the tenant's promoted adapter**, on the original bf16 base, unless it has to start from the base (decision 2026-10-23, §12). Nothing is merged or quantized: the release is the adapter, and serving loads the base and applies it. The cycle takes the next version number (`v1`, `v2`, …), and that number names its run (`policy-v3`), its adapter and its release. There are no training scopes and no layout families. The code for ACORD and Loss Run documents is kept, unchanged, but not trained. A new training set and canonical schema are to be delivered, and the corpus, the frozen eval set and the adapter are rebuilt from them.
 >
@@ -232,6 +232,7 @@ The same real-world field appears under many surface labels across documents. Th
 | Prompt template | Versioned alongside the schema registry; **training-time and inference-time prompts must render identically**; a template change forces a corpus rebuild (arch §7). |
 | Page reading | **Every page, chunk by chunk, never selected pages** (decision 2026-10-19). A policy is read as section group × page window over all its pages, planned by one function in training and serving; the declarations group's first window is pages 1–5 plus the detected declarations page, read together (§13.1). |
 | Gold and training data | **No frontier model, ever** (decision 2026-10-19): drafts come from the self-hosted Qwen3-VL only, and every gold needs a review record to train, be frozen or score — `reviewer_id` and `review_date` in its metadata, a twin's inherited from its seed (decision 2026-10-22; IMPL-04). |
+| Printed values only | **A served policy holds no value its pages do not print** (decision 2026-10-24). Every value the model wrote is looked up on the document's pages, scans included, with a search that forgives OCR misreads (`common.grounding.ground_tolerant`); in strict mode, the default, one printed nowhere is taken out of the JSON, null and flagged (`serving/printed_values.py`, `printed_values.mode`). **The output must be consistent**: `hallucination_rate` and `run_to_run_agreement` (the same document read twice) are gating metrics, checkpoint selection picks the finalist inventing the fewest values, and the audit warns on labels that write one kind of value two ways (§13.2, §13.3, §13.5). |
 | Latency | Recorded per release (P95 per adapter, peak GPU memory), **not gated**: no latency SLA is agreed (decision 2026-10-19). |
 | Release tier | **production** at field match ≥ 0.92 (kept, decision 2026-10-19), **interim** below that or when the release was scored on fewer than 150 real frozen policies, twins not counted (IMPL-08). A baseline on another yardstick (frozen set, tenant or scoring code) is judged on floors alone. |
 | Versions and promotion | A fresh cycle takes the **next version**: one more than the highest used by the adapter's runs or by any tenant's corpora and releases (`registry_utils.releases.next_cycle_version`): one sequence for every tenant, because runs, weights and eval reports are not kept per tenant. The release is named by it (`releases/{tenant}/v3/`). **One promoted release per tenant** (decision 2026-10-22): `package` promotes a release whose gate passed and archives the one it replaces, and refuses a version already released; `promote --version vK` rolls back. Serving reads the promoted release and the gate compares the next candidate with it (IMPL-08, 11, 13). |
@@ -526,7 +527,7 @@ Insurance documents contain PII (names, TINs/SSNs, addresses, financials).
 }
 ```
 
-`ExtractionResult.as_dict()` in `serving/pipeline.py` is this contract. `extraction` is the served JSON: for a policy the client's canonical JSON with every key of the line's schema (a post-process that fills absent keys, never trained), values in `{raw, parsed, confidence, page_ref, flagged}` envelopes; `fields` and `list_fields` summarise it. Policy review flags include `<path>:not_printed` and `<path>:likely_missed` from the serving conventions (§13.5). The testing routine adds `all_fields` to each results JSON: every field the document's schema declares, with its value, status and, against gold, its result (`testing.comparison.field_report`).
+`ExtractionResult.as_dict()` in `serving/pipeline.py` is this contract. `extraction` is the served JSON: for a policy the client's canonical JSON with every key of the line's schema (a post-process that fills absent keys, never trained), values in `{raw, parsed, confidence, page_ref, flagged}` envelopes; `fields` and `list_fields` summarise it. Policy review flags include `<path>:not_printed_removed` (a value no page prints, taken out; `<path>:not_printed` in flag mode) and `<path>:likely_missed` (§13.5). What the printed-values check found is `ExtractionResult.printed_check`, not part of `as_dict()`. The testing routine adds `all_fields` to each results JSON: every field the document's schema declares, with its value, status and, against gold, its result (`testing.comparison.field_report`).
 
 **Run manifest (registry, per training run):** see IMPL-02 for the full schema.
 
@@ -747,6 +748,11 @@ What the build does now that the sections above did not describe. Each module sp
   have a schema — not against the 12-value LOB enum, which is for labels that carry `line_of_business`.
 - Render-only and zero-page documents are skipped from training; a build with no train rows is refused,
   and a real build with no val rows, or no test rows while the eval set is not yet frozen.
+- **The pre-upload audit warns on inconsistent labels** (`data_pipeline.audit.label_consistency`, decision
+  2026-10-24): a typed field written in more than one shape across the labels, a placeholder ("N/A", "TBD"
+  …) beside nulls in one field, a date's or an amount's `raw` contradicting its `parsed`. Warnings only: a
+  field written two ways teaches the model to pick one at random, and the convention is the user's to
+  choose. Run it on the new training set before the first cycle (IMPL-04).
 - **Purge plans** report and never delete (`python -m data_pipeline.ingestion.pull_raw_pdfs --purge-plan
   SOURCE_ID`, `--tenant-purge-plan`): a document's raw, processed, label and frozen-eval-set prefixes, the
   tenant's exports, the delivered copies in `intake/` (found by every folder and batch it was imported from)
@@ -772,9 +778,11 @@ What the build does now that the sections above did not describe. Each module sp
 - **Checkpoint selection** (`evaluation/checkpoint_eval.py`): every saved candidate generates on the fixed
   validation sample (`validation_sample_rows: 400`, all three modes); the best two
   (`selection_document_finalists: 2`) are then scored on **whole validation documents** — windows merged by
-  the serving merge — in `selection_document_modes: [ocr_plus_image]` only, and the best document accuracy
-  wins among finalists whose rates of invented values and of printed values left empty are within
-  `selection_guard_margin: 0.02` of the best finalist's (`choose_on_documents`). With two or more GPUs each
+  the serving merge — in `selection_document_modes: [ocr_plus_image]` only, and decided in three steps
+  (`choose_on_documents`, decision 2026-10-24): a finalist more than `selection_guard_margin: 0.02` worse
+  than the best finalist on printed values left empty, or on run-to-run agreement (the pass generated again
+  in reverse order, `selection_run_to_run_check: true`), cannot win; of the rest, those within the margin of
+  the best document accuracy go on; and the one inventing the fewest values wins. With two or more GPUs each
   candidate scores in its own worker and vLLM engine (`evaluation/checkpoint_score_worker.py`).
 - **Generating a split** (`evaluation/validation_generation.py`): `generation.validation_batch_rows: 96` rows
   per vLLM call, longest expected answer first; a call that fails is retried in halves until the bad row is
@@ -791,7 +799,9 @@ What the build does now that the sections above did not describe. Each module sp
   nothing is promoted, or when the parent's run manifest cannot be read, it trained on another base model,
   it has another LoRA rank, alpha or target modules, its adapter is not in Blob, or its release was packaged
   with another prompt hash or window plan, or its eval report is missing or on another yardstick (the set
-  frozen again, or other scoring code), which the line rule would block only after training. The reason is
+  frozen again, or other scoring code), which the line rule would block only after training. The scoring
+  code changed on 2026-10-24, so a cycle continuing a release scored before then starts from the base
+  instead; none is promoted yet. The reason is
   logged and recorded (`fresh_reason`, on the run manifest and in the stage result); the parent is
   `parent_run_id` (also in the registry index row), and its adapter is copied to staging
   (`parent-adapters/policy/vN`). A continued run uses the non-null values of `continued_training` in
@@ -885,10 +895,11 @@ What the build does now that the sections above did not describe. Each module sp
 - **Typed scoring**: a field is compared by the type its schema declares
   (`evaluation.metrics.field_accuracy.values_agree`, `scoring_kind`); two numbers compare as numbers.
   **Grounding** (`common/grounding.py`) is one matcher for whether a value is printed and on which pages,
-  shared by the label rules, the audit, the OCR-agreement feature and the hallucination metric, which looks
-  for the printed value on the pages it cites. Reported, not gated: `page_ref` exact rate, an "invented"
-  error class, `error_summary` (errors by class, line and field), `hallucination_rate` and
-  `additional_fields_hallucination_rate`.
+  shared by the label rules, the audit and the OCR-agreement feature. Its OCR-tolerant search
+  (`ground_tolerant`: digit lookalikes, one letter in a long word, a figure's separators, a "$" read as a 5;
+  every page searched; decision 2026-10-24) is what serving's printed-values check and the hallucination
+  metric use. Reported, not gated: `page_ref` exact rate, an "invented" error class, `error_summary` (errors
+  by class, line and field) and `additional_fields_hallucination_rate`.
 - **Common-model lines** are scored through `common.structural_ids.comparable_view`
   (`evaluation/metrics/common_model.py`): rows
   paired by what the page prints, values inside rows counted, plus `reference_accuracy`,
@@ -909,15 +920,25 @@ What the build does now that the sections above did not describe. Each module sp
   the all-digital CGL originals, is not blocked on it; one the frozen baseline measured is required). The
   report adds a `real_only` section and the held-out carriers apart (`held_out_carrier_match`, not gated).
   The pilot's criteria take their thresholds from the same floors (`PILOT_FLOORS`, IMPL-15). A merged answer's
-  schema validity is judged as serving returns it (`serving.pipeline.served_schema_verdict`). No ceiling on
-  invented values is gated: `hallucination_rate` is reported, no spec states a ceiling, and the gate path does
-  not measure it — an open item.
+  schema validity is judged as serving returns it (`serving.pipeline.served_schema_verdict`).
+  `hallucination_rate` (lower is better, δ 0.010: values no page prints, of those checked, read from
+  serving's own record before strict mode removes any) and `run_to_run_agreement` (higher is better, δ 0.015:
+  the main mode read again with its windows sent in reverse order, `ExtractionRequest.send_order`) are gating
+  metrics (decision 2026-10-24), conditional until a promoted release has measured them, with no ceiling or
+  floor yet: the user sets them after the first measured run. A gating metric a comparable baseline does not
+  measure is judged on its floor alone, with a warning.
 - **Serving guards**: `page_ref` is bounded to the pages a request shows (`common.schemas.with_page_bounds`);
   on a common-model line `serving/conventions.py` holds the merged answer to the label conventions against every page's text — a
   value no page prints is flagged `<path>:not_printed` (an extra field like it dropped on a born-digital
   document), a form's edition left in its number is moved to `edition_date` with the number's span, and an
   empty declarations field whose own label and a value of its type open a line of any page is flagged
-  `<path>:likely_missed`. A coverage that may have lost its unit is flagged.
+  `<path>:likely_missed`. A coverage that may have lost its unit is flagged. Then every canonical policy is
+  held to **printed values only** (`serving/printed_values.py`, decision 2026-10-24): each value the model
+  wrote, extra fields and table rows included, is looked up with `ground_tolerant`, scans included. In
+  `strict` mode (the default, `printed_values.mode`) a value printed nowhere is taken out — its key stays,
+  null; an extra field, or a row with nothing printed, leaves its list, the ids renumbered — and flagged
+  `<path>:not_printed_removed`, which replaces `not_printed`; `flag` mode keeps and flags it. With no page
+  text nothing is checked (`printed_values:no_page_text`); fields first checks when MinerU's text arrives.
 - **Confidence** reads the printed value: a string's own tokens (not its quotes), `raw`'s span, and OCR
   agreement on the page it cites (`calibration.features.page_agreement`: 1.0 there, 0.5 printed only
   elsewhere, 0.0 nowhere).
@@ -991,3 +1012,11 @@ What the build does now that the sections above did not describe. Each module sp
 
 - Header: aligned with `finetuning-architecture-v2.6.docx`, which now records the one policy adapter, one version per cycle, incremental training and no merge or quantization.
 - Header: a table of what v2.6 records; the Revision line no longer lists decisions missing from the architecture.
+
+## Changes of 2026-10-24 (printed values only and consistency)
+
+- The user's decisions of 2026-10-24: nothing invented in the served JSON, and consistent output. Header: the architecture does not record them yet (Revision line and source of truth). §2: a row for them.
+- §9 and §13.5: a served policy holds printed values only (`serving/printed_values.py`): every value the model wrote is looked up on the pages with the OCR-tolerant `common.grounding.ground_tolerant`, scans included; in strict mode (the default, `printed_values.mode`) one printed nowhere is taken out and flagged `<path>:not_printed_removed`; flag mode keeps and flags it. The record is `ExtractionResult.printed_check`. Fields first checks when MinerU's text arrives.
+- §13.5: `hallucination_rate` (from that record, before removal) and the new `run_to_run_agreement` (the main mode read twice, the second time with its windows reversed, `ExtractionRequest.send_order`) are gating metrics, conditional until a promoted release has measured them, with no ceiling or floor yet; the "no ceiling on invented values" item is replaced.
+- §13.3: checkpoint selection guards on printed values left empty and on run-to-run agreement, keeps the finalists close on field match, and picks the one inventing the fewest values. The scoring code changed, so a cycle continuing a release scored before 2026-10-24 starts from the base; none is promoted yet.
+- §13.2: the pre-upload audit warns on labels that write one kind of value two ways (`label_consistency`).

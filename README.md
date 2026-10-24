@@ -27,8 +27,8 @@ be delivered, and the corpus, the frozen eval set and the adapter are rebuilt fr
 | `Documentation/Implementation MDs/IMPL-00` .. `IMPL-15` | Module specs and acceptance criteria - the *how*; IMPL-00 §13 indexes what the code does now |
 | `Documentation/Implementation MDs/IMPL_ALL_COMBINED.md` | All specs in one file |
 
-The two are in sync. **If they disagree, that is a bug in one of them** - fix the
-disagreement rather than picking a winner.
+The two are in sync, except that v2.6 does not record the decisions of 2026-10-24 yet. **If they disagree,
+that is a bug in one of them** - fix the disagreement rather than picking a winner.
 
 ## Two production modes, one model
 
@@ -37,6 +37,28 @@ disagreement rather than picking a winner.
 
 The second is why a rule-based label mapper cannot serve this system: on a
 scanned page there is no text for a rule to read.
+
+## Printed values only, and the same answer twice
+
+Two decisions of 2026-10-24: nothing invented in the served JSON, and consistent output.
+
+- **Printed values only** (`serving/printed_values.py`). After the merge, every value the model wrote (each
+  `raw`, extra fields and table rows included) is looked up on the document's pages, on scans too, with a
+  search that forgives what OCR does to a scan (`common.grounding.ground_tolerant`: a digit lookalike such as
+  `NIPO115` for `NIP0115`, one wrong letter in a long word, a figure's separators, a "$" read as a 5). In
+  `strict` mode, the default (`printed_values.mode` in `configs/inference/vllm_serving.yaml`), a value printed
+  nowhere is taken out: its key stays, null, flagged `<path>:not_printed_removed`; a table row goes once
+  nothing in it is found. `flag` keeps the value and flags it `<path>:not_printed`. The price, accepted: a
+  value MinerU misread beyond what the search forgives is removed too, and comes back null with the flag.
+  With no page text (image only) nothing is checked (`printed_values:no_page_text`). With fields first, the
+  fields served at `fields_ready` are first held to the pages they cite (a value not found there yet is
+  held back, `pending_full_text`), and the whole document is checked when MinerU's full text arrives.
+- **Gated.** `hallucination_rate` (of the values checked, the share no page prints, counted before removal so
+  it measures the model) and `run_to_run_agreement` (the golden eval reads each document's main mode a second
+  time, its windows sent in reverse order, and counts the fields that agree) are gating metrics, each held to
+  non-inferiority with the promoted release. No ceiling or floor is set yet; the user sets them after the
+  first measured run. Checkpoint selection takes, of the finalists close on field match, the one inventing
+  the fewest values; a finalist that reads the same document differently twice cannot win.
 
 ## Operator commands (IMPL-13)
 
@@ -302,9 +324,17 @@ placeholder carrier ("N/A", "Unknown", "Unknown Insurance Company", "Not Stated"
 
 It reports blockers (one PDF + `golden.json` + `metadata.json` per folder, PDF readable, `lob` valid (and in
 `--lines` when given), `page_ref` inside the PDF, a review record, no form edition left inside a form number on a common-model line),
-checks each labelled value against the text on its page, checks formats and
+checks each labelled value against the text on its page, checks formats, label consistency and
 totals, and draws a 5% spot-check sample per line. Fix and re-run until it exits 0. The report and CSVs go to
 `data/audit_report/`, which is git-ignored: they quote label values.
+
+**Each kind of value written one way** (decision 2026-10-24). The audit warns, and never blocks, when the
+labels write a field more than one way: a typed field (date, money, number, percent, boolean, enum) in more
+than one shape; a placeholder (N/A, NA, None, Not Applicable, -, --, TBD, Unknown, Nil) beside nulls in the
+same field; a date's or an amount's `raw` that contradicts its `parsed`. A field written two ways teaches the
+model to pick one at random. The warnings are in `warnings.csv` and the report's "Label consistency"
+section; which way is the convention is yours to choose. Run it on the new training set before the first
+cycle.
 
 ## Getting the data to the pod: through Blob, not git
 
@@ -448,6 +478,39 @@ python -m testing.latency_check --model-url https://<pod id>-8000.proxy.runpod.n
 A RunPod serverless vLLM endpoint is a `--model-url` too (`https://api.runpod.ai/v2/<endpoint id>/openai`, not yet
 tried): `--token` is then the RunPod API key, `--mineru-token` the pod's, and `--images link` is needed, since
 the serverless API caps a request's size.
+
+### Fields first: one H100 for the model and MinerU
+
+The production gate is a 200-page scan in 2 minutes, on ONE H100 serving both the model and MinerU. MinerU alone
+reads 200 pages in 4-5 minutes, so it cannot stand before the model. Fields first (`serving/fields_first.py`)
+reads a document in two phases: the model reads the page **images** (`image_only`, a mode it trains on) with the
+GPU to itself; MinerU then reads **only the pages the fields cite** (a few dozen of 200, ~15-40 s) and the fields
+are held to that text before anything is served (`fields_ready`): a value found there is served, one not found
+there is held back (`<path>:pending_full_text`), and a declarations field the model left empty while those pages
+print its label and a value is flagged `likely_missed`. So no value the PDF was not seen to print is ever served.
+Then MinerU reads the remaining pages - a run at a time, only while no document's fields are being read
+(`GpuTurns`) - the model's answer is held to the whole document (a held-back value printed on another page comes
+back; one printed nowhere is removed, `not_printed_removed`) and the full-text tier joins it (`done`). Should the
+cited pages fail to be read, nothing is served before `done`. The job server takes `--fields-first` (it needs
+`--mineru-url`); `/result` answers from `fields_ready` on; `--unverified-fields` serves unchecked fields, for
+timing tests only.
+
+Before relying on it, compare it with the standard path on the same PDFs, accuracy and time in one table:
+
+```bash
+python -m testing.latency_check --model-url <vllm> --mineru-url <mineru> --runs standard,fields-first \
+    --ocr-parts 4 --doc <pdf>=<line> ...
+# MinerU's faster tier, timing only (the model is trained on the pinned tier's text):
+python -m testing.latency_check ... --runs standard --tier flash --any-mineru
+```
+
+MinerU's turns are runs of at most 20 pages (`--run-pages`), so a document arriving mid full text waits about 25 s; a run waits at most `--text-max-wait` (600 s) for its turn. `latency_check` scores fields first when the fields come (`Exact match at fields`) and at the end. From the laptop with `--images link`, fields first puts the page upload before the model (1.5-2 min for 114 pages); on Azure it is seconds.
+
+On the pod's vLLM, besides the flags above: `--max-num-seqs` small enough that the running windows fit in memory
+(`first_token_s_max` in the window summary jumps when vLLM puts windows back and reads them again). Each window
+summary now gives every job's answer lengths (`by_group`: median, p95, longest): set the answer limits from them.
+Reaching 2 minutes also needs the next training cycle: page images first with the same windows for every job,
+a compact prompt, smaller page images and a compact answer.
 
 ### Production on Azure
 
@@ -608,8 +671,8 @@ process, which is why CI covers this much without a pod.
   access control and encryption, and that is stated to the compliance owner
   (IMPL-05 section 1).
 - **No latency SLA is agreed.** Latency is recorded per release, not gated.
-- **No ceiling on invented values is gated.** No spec states one, and the gate
-  path does not measure it yet.
+- **No ceiling on invented values, and no floor on run-to-run agreement, yet.** Both
+  are gated against the promoted release; the user sets the thresholds after the first measured run.
 - **The every-word `text_sections` tier is built from Fideon's section builder**, copied into
   `common/section_builder/` (served since 2026-10-23, never generated by the model). The copy drops
   every MinerU markdown table, which our wrapper works around; the fix belongs in FideonSLM.

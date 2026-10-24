@@ -69,19 +69,25 @@ def call(url: str, token: str, *, data: bytes | None = None, timeout: float = CA
         raise ClientError(f"could not reach {url}: {exc.reason}") from exc
 
 
-def submit(base: str, token: str, pdf: Path, lob: str, mode: str) -> dict[str, Any]:
-    query = urllib.parse.urlencode({"lob": lob, "mode": mode, "name": pdf.name})
+def submit(base: str, token: str, pdf: Path, lob: str, mode: str | None) -> dict[str, Any]:
+    query = urllib.parse.urlencode({"lob": lob, "name": pdf.name, **({"mode": mode} if mode else {})})
     return call(f"{base}/jobs?{query}", token, data=pdf.read_bytes(), timeout=UPLOAD_TIMEOUT_S)
 
 
 def wait(base: str, token: str, jobs: list[str], poll_s: float) -> dict[str, dict[str, Any]]:
     """Each job's final view, polling until none is queued or running."""
     views: dict[str, dict[str, Any]] = {}
+    announced: set[str] = set()
     while True:
         for job in jobs:
             if views.get(job, {}).get("status") not in ("done", "failed"):
                 views[job] = call(f"{base}/jobs/{job}", token)
-        pending = [v for v in views.values() if v["status"] in ("queued", "running")]
+        for job, view in views.items():
+            if view["status"] == "fields_ready" and job not in announced:
+                announced.add(job)
+                print(f"  fields of {view['name']} ready after {view.get('fields_s')} s; its full text follows",
+                      flush=True)
+        pending = [v for v in views.values() if v["status"] in ("queued", "running", "fields_ready")]
         if not pending:
             return views
         running = next((v for v in pending if v["status"] == "running"), None)
@@ -93,18 +99,19 @@ def wait(base: str, token: str, jobs: list[str], poll_s: float) -> dict[str, dic
 
 def table(views: list[dict[str, Any]]) -> str:
     """The run as a markdown table, one row per document."""
-    head = ("| Document | Line | Pages | Windows | Calls | OCR s | Model s | Total s | Schema valid "
-            "| Review flags | Text coverage |\n|---|---|---|---|---|---|---|---|---|---|---|")
+    head = ("| Document | Line | Pages | Windows | Calls | OCR s | Model s | Fields s | Total s | Schema valid "
+            "| Review flags | Text coverage |\n|---|---|---|---|---|---|---|---|---|---|---|---|")
     rows = []
     for view in views:
         s = view.get("summary")
         if s is None:
             rows.append(f"| {view['name']} | {view['lob']} | FAILED: {view.get('error', '')[:80]} "
-                        "| | | | | | | | |")
+                        "| | | | | | | | | |")
             continue
         t = s["timings_s"]
         rows.append(f"| {s['document']} | {s['lob']} | {s['pages']} | {s['windows_planned']} | {s['model_calls']} "
-                    f"| {t['ocr']:.1f} | {t['model']:.1f} | {t['total']:.1f} | {s['schema_valid']} "
+                    f"| {t.get('ocr', 0):.1f} | {t['model']:.1f} | {view.get('fields_s') or t['total']:.1f} "
+                    f"| {t['total']:.1f} | {s['schema_valid']} "
                     f"| {s['review_flags']} | {s['text_coverage']} |")
     return "\n".join([head, *rows])
 
@@ -116,7 +123,9 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"the server's token (default ${TOKEN_ENV}); on the pod in token.txt")
     parser.add_argument("--doc", dest="docs", action="append", type=parse_doc, required=True,
                         metavar="PDF=LOB", help="a PDF and its line of business; repeat per document")
-    parser.add_argument("--mode", default="ocr_plus_image", choices=["ocr_plus_image", "image_only"])
+    parser.add_argument("--mode", default=None, choices=["ocr_plus_image", "image_only", "fields_first"],
+                        help="how the server reads each PDF (default the server's: fields_first when it was "
+                             "started with --fields-first)")
     parser.add_argument("--poll", type=float, default=15.0, help="seconds between polls")
     parser.add_argument("--out", type=Path, default=None,
                         help="where results go (default testing/results/proxy_check/<time>)")
@@ -151,11 +160,14 @@ def main(argv: list[str] | None = None) -> int:
             result = call(f"{base}/jobs/{view['job']}/result", args.token)
             (out / f"{Path(view['name']).stem}.json").write_text(
                 json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    for view in ordered:
+        if view["status"] == "done" and view.get("error"):
+            print(f"  {view['name']}: fields served, but {view['error']}", flush=True)
     report = table(ordered)
     (out / "summary.json").write_text(json.dumps(ordered, indent=2), encoding="utf-8")
     (out / "summary.md").write_text(report + "\n", encoding="utf-8")
     print("\n" + report + f"\n\nresults in {out}")
-    return 0 if all(v["status"] == "done" for v in ordered) else 1
+    return 0 if all(v["status"] == "done" and not v.get("error") for v in ordered) else 1
 
 
 if __name__ == "__main__":

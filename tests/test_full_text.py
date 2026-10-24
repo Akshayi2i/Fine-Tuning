@@ -116,6 +116,51 @@ def test_a_served_policy_carries_its_full_text_and_it_is_valid():
     assert result.as_dict()["text_coverage"] == 1.0
 
 
+def test_the_full_text_tier_can_join_the_fields_after_them(monkeypatch):
+    """Fields first: the fields are served before MinerU has read the PDF, and its
+    text adds the tier afterwards - as extract would have built it."""
+    import serving.pipeline as pipeline
+    from serving.pipeline import FULL_TEXT_INVALID_FLAG, attach_full_text
+
+    served, _backend, _answers = _serve_replay(_compact_auto(), 3, strict=True)
+    texts = {1: "Declarations", 2: "Schedule page 2", 3: "Schedule page 3"}      # what _serve_replay read
+
+    def fields_only():
+        result, _b, _a = _serve_replay(_compact_auto(), 3, strict=True)
+        result.extraction = {**result.extraction, "text_sections": None}
+        result.review_flags = sorted({*result.review_flags, NO_FULL_TEXT_FLAG})
+        result.text_coverage = None
+        return result
+
+    joined = attach_full_text(fields_only(), texts, lob="personal_auto")
+    assert joined.extraction["text_sections"] == served.extraction["text_sections"]
+    assert NO_FULL_TEXT_FLAG not in joined.review_flags and joined.text_coverage == served.text_coverage == 1.0
+    assert list(iter_validation_errors(joined.extraction, "policy", None, "personal_auto")) == []
+
+    # A tier that fails the client's schema is left out: the fields stand, flagged.
+    later = fields_only()
+    monkeypatch.setattr(pipeline, "build_text_sections", lambda pages: {"bad": {"raw_text": 7}})
+    refused = attach_full_text(later, texts, lob="personal_auto")
+    assert refused.extraction["text_sections"] is None and FULL_TEXT_INVALID_FLAG in refused.review_flags
+    # No text: nothing changes.
+    assert attach_full_text(refused, {}, lob="personal_auto").extraction["text_sections"] is None
+
+
+def test_fields_that_already_break_the_schema_still_get_their_full_text():
+    """The tier is judged by the errors it brings, not by the fields' own."""
+    from serving.pipeline import FULL_TEXT_INVALID_FLAG, attach_full_text
+
+    result, _b, _a = _serve_replay(_compact_auto(), 3, strict=False)
+    fields = {k: v for k, v in result.extraction.items() if k != "text_sections"}
+    fields["policy"] = {**fields["policy"], "policy_number": 12345}          # not a field object
+    result.extraction, result.text_coverage, result.printed_check = fields, None, {}
+    result.review_flags = sorted({*result.review_flags, NO_FULL_TEXT_FLAG, "schema:invalid"})
+    errors_before = list(iter_validation_errors(fields, "policy", None, "personal_auto"))
+    attach_full_text(result, {1: "Declarations", 2: "Schedule page 2", 3: "Schedule page 3"}, lob="personal_auto")
+    assert result.extraction["text_sections"] and FULL_TEXT_INVALID_FLAG not in result.review_flags
+    assert list(iter_validation_errors(result.extraction, "policy", None, "personal_auto")) == errors_before
+
+
 def test_a_request_with_no_page_text_is_flagged_and_not_measured(monkeypatch):
     """An image-only request carries no page text: there is nothing to section,
     and its wording is in no part of the JSON - said, not served as complete."""
