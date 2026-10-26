@@ -180,6 +180,14 @@ az acr build -r $ACR -f azure_service/Dockerfile --target worker -t extraction-w
 Everything the pipeline reads at run time (configs, schemas, prompts) must be
 committed: an untracked file is not in the image.
 
+The image installs exactly `requirements-service.lock` (`pip install --no-deps`): every
+package pinned for Linux x86-64 and Python 3.11, with the training lock's pillow and
+PyMuPDF (the worker renders the pages the model reads), so two builds a month apart are
+the same. After changing a dependency in `pyproject.toml`, regenerate the locks from any
+machine with `uv` and commit them: `bash scripts/lock_requirements.sh`.
+`tests/test_dependency_locks.py` fails when the service lock no longer satisfies
+`pyproject.toml` or its pixel stack drifts from training's.
+
 ## 6. Container Apps
 
 ```bash

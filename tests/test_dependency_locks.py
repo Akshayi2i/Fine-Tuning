@@ -94,3 +94,45 @@ def test_setup_installs_through_the_lock_and_caps_flash_attn():
 def test_the_release_records_the_training_lock():
     text = (ROOT / "orchestration" / "pipeline_dag.py").read_text(encoding="utf-8")
     assert 'lock = root / "requirements-train.lock"' in text
+
+
+# --------------------------------------------------------------------------
+# The Azure service's image (requirements-service.lock): no torch, so not one of
+# the pod ROLES above, but locked the same way.
+# --------------------------------------------------------------------------
+
+
+def test_the_service_lock_has_no_local_paths_and_no_gpu_stack():
+    text = (ROOT / "requirements-service.lock").read_text(encoding="utf-8")
+    assert "-e " not in text and "file:" not in text and ":\\" not in text and ":/" not in text
+    pins = _pins("service")
+    assert len(pins) > 30
+    assert not {"torch", "vllm", "transformers", "ms-swift", "mineru"} & set(pins)
+
+
+def test_the_service_lock_satisfies_what_pyproject_declares():
+    """Fails when pyproject changes and the service lock was not regenerated."""
+    pins = _pins("service")
+    specs = list(PYPROJECT["project"]["dependencies"])
+    for group in _groups("service"):
+        specs += PYPROJECT["project"]["optional-dependencies"][group]
+    stale = [f"{Requirement(spec)}: locked {pins.get(canonicalize_name(Requirement(spec).name))}"
+             for spec in specs
+             if (version := pins.get(canonicalize_name(Requirement(spec).name))) is None
+             or not Requirement(spec).specifier.contains(version, prereleases=True)]
+    assert not stale, f"requirements-service.lock is stale (bash scripts/lock_requirements.sh): {stale}"
+
+
+def test_the_service_renders_pages_with_the_training_pixel_stack():
+    """The Azure worker renders the pages the model reads: the pillow and PyMuPDF
+    training resized and drew the training pages with."""
+    train, service = _pins("train"), _pins("service")
+    assert {package: (train[package], service[package]) for package in ("pillow", "pymupdf")
+            if train[package] != service[package]} == {}
+
+
+def test_the_service_image_installs_exactly_its_lock():
+    dockerfile = (ROOT / "azure_service" / "Dockerfile").read_text(encoding="utf-8")
+    assert "pip install --no-deps -r requirements-service.lock" in dockerfile
+    for ignore in (ROOT / ".dockerignore", ROOT / "azure_service" / "Dockerfile.dockerignore"):
+        assert "!requirements-service.lock" in ignore.read_text(encoding="utf-8").splitlines()

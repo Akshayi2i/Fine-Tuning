@@ -2,6 +2,7 @@
 # (az acr build, the classic builder): the same list as azure_service/Dockerfile.dockerignore.
 *
 !pyproject.toml
+!requirements-service.lock
 !common/
 !artifact_registry/
 !registry_utils/

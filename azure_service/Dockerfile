@@ -21,12 +21,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# The dependencies, from pyproject.toml alone (versions live there): the core list,
-# [data] (Blob, PyMuPDF, pillow) and [service] (FastAPI, uvicorn, the queue, identity).
-COPY pyproject.toml ./
-RUN python -c "import tomllib; p = tomllib.load(open('pyproject.toml', 'rb'))['project']; e = p['optional-dependencies']; print('\n'.join(p['dependencies'] + e['data'] + e['service']))" > /tmp/requirements.txt \
-    && pip install -r /tmp/requirements.txt \
-    && rm /tmp/requirements.txt
+# The dependencies, pinned: requirements-service.lock holds every package of the core
+# list, [data] (Blob, PyMuPDF, pillow) and [service] (FastAPI, uvicorn, the queue,
+# identity), resolved for Linux x86-64 and Python 3.11 (bash scripts/lock_requirements.sh),
+# with the training lock's pillow and PyMuPDF - the worker renders the pages the model
+# reads. Two builds a month apart install the same versions.
+COPY pyproject.toml requirements-service.lock ./
+RUN pip install --no-deps -r requirements-service.lock
 
 # The code the API and the worker import, and the configs, schemas and prompts the
 # pipeline reads (common.config resolves them next to the code). Not training/,

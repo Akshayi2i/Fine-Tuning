@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerate the lock file for each pod environment.
+# Regenerate the lock file for each pod environment, and the Azure service's image.
 #
 #   bash scripts/lock_requirements.sh          (needs uv: pip install uv)
 #
@@ -27,3 +27,13 @@ for role in train ocr serve quantize; do
     -o "requirements-$role.lock"
   echo "requirements-$role.lock: $(grep -c '==' "requirements-$role.lock") packages"
 done
+
+# The Azure service's image (azure_service/Dockerfile): no torch, so not inside the
+# training lock as a whole - but its pillow and PyMuPDF are the training lock's,
+# because the worker renders the pages the model reads (one renderer, one set of pixels).
+# A relative name: the lock's "via" notes name the constraint file, and must name no machine's path.
+render_pins=".render-pins.txt"
+trap 'rm -f "$render_pins"' EXIT
+grep -iE '^(pillow|pymupdf)==' requirements-train.lock > "$render_pins"
+uv pip compile requirements-service.txt -c "$render_pins"   --python-platform x86_64-manylinux_2_28 --python-version 3.11   --no-emit-package insurance-extraction-finetuning   --no-header --quiet   -o requirements-service.lock
+echo "requirements-service.lock: $(grep -c '==' requirements-service.lock) packages"

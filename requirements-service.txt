@@ -1,0 +1,10 @@
+# The Azure extraction service's image (azure_service/Dockerfile): the HTTPS API
+# and the queue worker.
+#
+#   docker buildx build -f azure_service/Dockerfile --target worker -t $ACR.azurecr.io/extraction-worker:$TAG .
+#
+# No torch, no vLLM, no MinerU: the model and MinerU are served on RunPod and
+# reached over HTTPS. Versions live in pyproject.toml; requirements-service.lock
+# pins every package for the image (bash scripts/lock_requirements.sh), with the
+# training lock's pillow and PyMuPDF: the worker renders the pages the model reads.
+-e .[data,service]

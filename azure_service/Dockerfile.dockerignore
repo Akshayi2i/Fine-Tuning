@@ -3,6 +3,7 @@
 # holds client documents and labels that must never be sent to a builder.
 *
 !pyproject.toml
+!requirements-service.lock
 !common/
 !artifact_registry/
 !registry_utils/
