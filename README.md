@@ -527,8 +527,31 @@ MinerU's turns are runs of at most 20 pages (`--run-pages`), so a document arriv
 On the pod's vLLM, besides the flags above: `--max-num-seqs` small enough that the running windows fit in memory
 (`first_token_s_max` in the window summary jumps when vLLM puts windows back and reads them again). Each window
 summary now gives every job's answer lengths (`by_group`: median, p95, longest): set the answer limits from them.
-Reaching 2 minutes also needs the next training cycle: page images first with the same windows for every job,
-a compact prompt, smaller page images and a compact answer.
+Reaching 2 minutes also needs the next training cycle in the fast format profile (below).
+
+### The fast format profile
+
+`configs/shared/format.yaml` holds one switch, `profile: standard | fast`, read by the dataset build, training and
+serving alike. **`fast` is the shipped profile since 2026-10-26**: the new training set is built, trained and served
+in it. `standard` is the earlier format, unchanged, kept for a corpus or adapter built in it. What `fast` changes:
+
+- **Page images first, the same windows for every job.** One system instruction shared by every section group; the
+  window's pages; the group's own request last. Every group of a document reads the same windows, so vLLM's prefix
+  cache reads each window's pages once for all its groups (a 114-page scan: 60 requests instead of 109, each page
+  prefilled about once instead of 3.9 times).
+- **A compact prompt.** The group's fields as `key: kind - meaning` lines in place of the schema JSON (63-91% shorter);
+  the decoding grammar still enforces the schema.
+- **Smaller page images.** 1,254,400 px, 1,225 tokens a page instead of 2,425.
+- **A compact answer.** `{"r": printed, "v": value, "p": [pages]}`, `r` only when the printed text differs from the
+  value (about 29% shorter). Serving expands every answer to `raw`/`parsed`/`page_ref` before the merge, so the
+  printed-values check, confidence and the output are unchanged.
+- **Mostly image-only training.** 70% of the rows `image_only` (`ocr_plus_image` 0.25, `noisy_ocr_image` 0.05;
+  back to 0.4 / 0.1 / 0.5 if the pod run reads image-only more than 2-3 points worse), and checkpoint
+  selection reads `image_only` as well as `ocr_plus_image`.
+
+The profile is part of the prompt hash and the window plan id (`4+fast.aligned-1.compact-1:...`): a corpus or adapter
+of one profile is refused by the other at training, packaging, promote and serving. The figures above are measured on
+synthetic documents; the speed on the H100 is measured on the pod.
 
 ### Production on Azure
 
@@ -549,6 +572,21 @@ things hold that together:
   code, but needed: put the Azure region and the RunPod data centre near each other; use RunPod's Secure Cloud
   under a data processing agreement that covers insurance documents; keep vLLM's request logging off (its
   default; never `--enable-log-requests`).
+
+**The service** is `azure_service/` (install `pip install -e ".[data,service]"`; deploy with
+`azure_service/DEPLOY.md`): an HTTPS API app and one worker app per GPU on Azure Container Apps, jobs on an Azure
+Storage Queue, job state and results as JSON in Blob.
+
+- `POST /v1/extractions?lob=<line>[&webhook_url=https://...]` with the PDF as the body (or multipart `file`) and
+  `Authorization: Bearer <key>` answers `202 {job_id, status_url, result_url}`.
+- `GET /v1/extractions/<id>`: `queued`, `running`, `fields_ready`, `done` or `failed`, with timings.
+- `GET /v1/extractions/<id>/result`: the checked fields from `fields_ready` (`final: false`), the final JSON at
+  `done` (`final: true`); 409 before.
+- A webhook, if given, is posted at `fields_ready`, `done` and `failed`, with no document content and the header
+  `X-Extraction-Signature: sha256=<HMAC-SHA256 of the body with the tenant's secret>`.
+
+One worker per GPU, because the worker holds the GPU's turns between the model and MinerU. A worker restart loses
+no job: the queue delivers it again, and phase 2 resumes from the saved fields. Not yet run against real Azure.
 
 ## Versions and the registry
 
@@ -708,9 +746,11 @@ process, which is why CI covers this much without a pod.
   vLLM multi-LoRA, MinerU on GPU and its determinism. `scripts/pod_bootstrap.sh`
   runs it; the base model is pinned to `0c351dd01ed87e9c1b53cbc748cba10e6187ff3b`
   (the Hub commit of 2025-10-15).
-- **Where serving-time OCR runs is open.** The endpoint does no OCR: requests carry page texts,
-  which must come from MinerU at the corpus pin, on a GPU. MinerU cannot share an environment with
-  vLLM 0.11, so it cannot simply be added to the serving worker; training is unaffected.
+- **The Azure service has not run on Azure.** `azure_service/` is tested with in-memory stand-ins for the queue,
+  Blob and the model; the queue, managed identity, ingress limits, the Docker build and the 2-minute timing are
+  checked on the first deployment (`azure_service/DEPLOY.md`).
+- **The fast format profile is unmeasured on a GPU.** Its sizes are measured on synthetic documents; its speed and
+  accuracy come from the first training cycle run in it.
 - **The pilot protocol is unrun.** `python -m pilot.pilot_report` reports
   `INCOMPLETE` until Experiments A, B and C have each written a report, and a
   missing experiment blocks rather than passing.

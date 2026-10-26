@@ -318,3 +318,7 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-26 (fast format shipped)
+
+- `testing.render_prompts` renders a fast-format window's reference file as what the model reads: the shared system prompt, a line standing for the window's pages, then the group's request (`render_group_block`). The policy window references under `testing/prompts/` are regenerated in the fast format.

@@ -213,6 +213,12 @@ change are not comparable with new ones.
   `order="reversed"` sends the same calls in reverse order, so the engine batches the rows differently; the
   results come back in row order (run-to-run agreement's second pass).
 - Answers are parsed as serving parses them (`collapse_spans(map_field_spans(...))`, `with_output_dates`). A
+  fast-format row (`row["answer_format"] == common.canonical.COMPACT_ANSWER_FORMAT`, the fast format
+  profile) is read as serving reads it: its gold expanded from the compact envelope (`split_prompt`,
+  `expand_answer`), its decoding schema compact (`compact_schema`), its answer's spans mapped by
+  `map_compact_field_spans` and the answer expanded before anything scores it; its OCR text is the pages'
+  alone, without the window's request block that follows them (`ValidationGeneration.page_text`). Every one
+  is a no-op on a standard row. A
   row with nothing usable back is a `setup` failure; an answer that is not a JSON object is an `output` failure,
   scored as a wrong answer, with how generation ended recorded.
 - `assert_generations_usable` refuses a pass in which more than **10%** of rows had a setup failure
@@ -404,3 +410,17 @@ extra.
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-25 (fast format, validation)
+
+- `evaluation/validation_generation.py` reads a fast-format row as serving does: the gold and the answer expanded from the compact envelope, the decoding schema compact, the spans keyed as the full answer's, the OCR text the pages' only (*Current implementation*, validation-based scoring). No-ops on standard rows.
+- Not measured yet: an image_only reading carries no page text, so checkpoint selection scores no invented values on it; under the fast profile both modes read every validation document, and the text could be borrowed from the document's ocr_plus_image rows (offered to the user).
+
+## Changes of 2026-10-26 (image-only invention scoring)
+
+- An `image_only` reading carries no page text, so its invented values went uncounted. It now borrows its document's page text, page by page, from the same document's `ocr_plus_image` readings: in validation and checkpoint selection from the readings of the same scored pass (`run_eval._invention_text`, fed by `_document_pages`), in the release gate from the document's frozen page text, checked by `serving.printed_values.hold_to_printed` on a copy of the answer (`golden_eval.borrowed_printed_check`, the reading marked `printed_text: borrowed`). `noisy_ocr_image` text is never lent. The same rule feeds `hallucination_rate` and `additional_fields_hallucination_rate`.
+- Fail closed: a reading that wrote values with no text of its own and none to borrow is counted unscored, never clean; a value citing a page no reading has text for is unchecked, not invented, and the page is counted. A rate nothing could check is left out of the report, never written as 0. Each subset's `printed_values` carries `borrowed_text` and `unscored`; `EvalReport.invention_coverage()` and the golden report's `invention_coverage` give the three counts.
+- Checkpoint selection: the finalists' pass pools both modes in `document_hallucination_rate`, so an image_only finalist is held to the lowest-invention rule; `choose_on_documents` lists each finalist's counts and warns when a reading was unscored; `rows_in_modes` warns when the modes hold `image_only` without `ocr_plus_image` (nothing to borrow). `score_generations` adds `hallucination_*` counts only when above zero, so a standard-profile pass returns the metrics it did.
+- The gate's run-to-run repeat reads `image_only`, the production mode (fields first): `evaluation.run_to_run_mode` in `configs/training/unified.yaml` (default `image_only`, before `ocr_plus_image`; an unknown mode is refused), recorded in the report (`run_to_run_mode`) and the eval set record (`run_eval.yardstick_settings()`). `scoring_fingerprint()` hashes it with the scoring code, so a report made on another repeat mode is another yardstick: never reused, never compared as like for like.
+- The gate's `hallucination_rate` now includes image_only readings (before, they were left out).
+- The gate scores an image_only reading as production serves it (decision 2026-10-26): `golden_eval.borrowed_printed_check` holds a copy of the result to the document's page text with production's own fields-first check (`serving.printed_values.hold_result_to_printed`), so under strict mode a value no page prints is taken out - its confidence, rows and links with it - before accuracy, completeness and calibration are scored. Invention is counted from the record made before anything was taken out. The repeat answer is held the same way, so run-to-run agreement compares the two as served.

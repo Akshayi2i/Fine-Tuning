@@ -150,3 +150,8 @@ A clean, low-level inference engine: given a resolved model version + a prepared
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-25 (fast format profile, Azure service)
+
+- `build_messages` appends the group's request as the last user text part under the fast format profile (`common.prompts.render_group_block`, `GROUP_BLOCK_SEPARATOR`) and records `BuiltMessages.answer_format`; `build_training_row` writes such a row's target compact and adds `answer_format`. Standard rows are byte-identical to before.
+- `span_map.map_compact_field_spans`: a compact answer's spans keyed as the same answer written in full (`r` as `raw`, `v` as `parsed`, `p[i]` as `page_ref[i]`), so confidence reads the printed text's tokens where `r` was written and `v`'s where it was not.

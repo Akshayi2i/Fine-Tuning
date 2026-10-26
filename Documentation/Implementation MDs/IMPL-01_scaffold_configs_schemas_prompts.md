@@ -329,3 +329,14 @@ not yet read by the model view).
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-25 (fast format profile, Azure service)
+
+- `configs/shared/format.yaml` (`profile: standard | fast`, default `standard`): how a policy window is written to the model and how it answers, read by the dataset build, training and serving alike (`common.config.format_profile()`, `fast_profile()`; an unknown value is refused). Changing it means rebuilding the corpus and retraining: each refuses the other's corpus and adapter.
+- `configs/shared/vision.yaml` `profiles.fast`: `max_pixels` 1,254,400 (1,225 visual tokens of 32x32 px a page, about half the standard 2,425), applied by `vision_for_task` to every full-resolution task under the fast profile, so the corpus sizing, the trainer and the serving engine take the same budget.
+- Training configs may carry `format_profiles.<profile>` overlays, laid over the config by `training_config()` under that profile and dropped under `standard` (`unified.yaml`: the fast modality mix and selection modes, IMPL-05/06).
+- Prompts: `prompts/fast/system.jinja` - one instruction every section group of a line shares - and `prompts/fast/group.jinja` - the group's request, written after the pages: its top-level keys and a compact field list, one `key: kind - meaning` line per field, derived from the decoding schema (`common.prompts.compact_fields_for_prompt`), never hand-written. The decoding grammar still enforces the schema. Under `fast` the prompt hash adds these templates, `format.yaml` and `format_identity()` (profile, layout version, answer format, pixel budget); under `standard` it is unchanged (same inputs, same digest).
+
+## Changes of 2026-10-26 (fast format shipped)
+
+- `configs/shared/format.yaml` ships `profile: fast` (user decision): the new training set is built, trained and served in it. No adapter was trained in `standard` on window plan 4, so nothing served is lost. `standard` stays for a corpus or adapter built in it; each refuses the other's.

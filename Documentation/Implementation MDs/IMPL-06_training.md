@@ -383,3 +383,7 @@ reviewed before it trains again.
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-25 (fast format profile, Azure service)
+
+- Under the fast format profile (`configs/shared/format.yaml`, IMPL-01) the trainer resizes pages to 1,254,400 px (the trainer env reads `vision_for_task`), the corpus is drawn with 70% of its rows `image_only` (IMPL-05), and checkpoint selection reads `ocr_plus_image` and `image_only` (`selection_document_modes`). Validation decodes compact rows against the compact schema and expands them before scoring (`evaluation.validation_generation`, IMPL-08). An adapter trained in one profile is refused by promote and serving in the other.

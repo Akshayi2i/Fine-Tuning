@@ -1371,6 +1371,17 @@ not yet read by the model view).
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
 
+## Changes of 2026-10-25 (fast format profile, Azure service)
+
+- `configs/shared/format.yaml` (`profile: standard | fast`, default `standard`): how a policy window is written to the model and how it answers, read by the dataset build, training and serving alike (`common.config.format_profile()`, `fast_profile()`; an unknown value is refused). Changing it means rebuilding the corpus and retraining: each refuses the other's corpus and adapter.
+- `configs/shared/vision.yaml` `profiles.fast`: `max_pixels` 1,254,400 (1,225 visual tokens of 32x32 px a page, about half the standard 2,425), applied by `vision_for_task` to every full-resolution task under the fast profile, so the corpus sizing, the trainer and the serving engine take the same budget.
+- Training configs may carry `format_profiles.<profile>` overlays, laid over the config by `training_config()` under that profile and dropped under `standard` (`unified.yaml`: the fast modality mix and selection modes, IMPL-05/06).
+- Prompts: `prompts/fast/system.jinja` - one instruction every section group of a line shares - and `prompts/fast/group.jinja` - the group's request, written after the pages: its top-level keys and a compact field list, one `key: kind - meaning` line per field, derived from the decoding schema (`common.prompts.compact_fields_for_prompt`), never hand-written. The decoding grammar still enforces the schema. Under `fast` the prompt hash adds these templates, `format.yaml` and `format_identity()` (profile, layout version, answer format, pixel budget); under `standard` it is unchanged (same inputs, same digest).
+
+## Changes of 2026-10-26 (fast format shipped)
+
+- `configs/shared/format.yaml` ships `profile: fast` (user decision): the new training set is built, trained and served in it. No adapter was trained in `standard` on window plan 4, so nothing served is lost. `standard` stays for a corpus or adapter built in it; each refuses the other's.
+
 ---
 
 # IMPL-02_blob_io_and_run_registry
@@ -2917,6 +2928,14 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
 
+## Changes of 2026-10-25 (fast format profile, Azure service)
+
+- Under the fast profile every section group of a document reads the same windows (`policy_windows._plan_aligned`, `expand_tasks.plan_aligned_windows`, rule `ALIGNED_WINDOW_PLAN = "aligned-1"`): the declarations lead opens the document; a window holds the smallest page count (`pages_per_extraction_call`) and the smallest text room (`window_page_room`) of the line's groups; runs overlap as the line's map says, across the lead too. Only `decl`/`dtd` mark `leads`. A function of the line, the page count, the declarations page and the text, never of a gold, as the standard plan is.
+- The window plan id names the profile: `4+fast.aligned-1.compact-1:<digest>`. A corpus built under one profile neither trains nor packages under the other.
+- Fast rows put the group's request last, after the pages (a final text part starting `"\n\n# Request: "`), so every group's request of a window is the same tokens up to it; their targets are compact (`common.canonical.to_compact_answer`: `{"r", "v", "p"}`, `r` written only when the printed text differs from `v` as written) and they carry `answer_format: "compact-1"`.
+- The fast modality mix: `ocr_plus_image` 0.25, `noisy_ocr_image` 0.05, `image_only` 0.7 (`unified.yaml` `format_profiles.fast`; user decision 2026-10-26): production serves fields first, so every served field is an image_only read. Back to 0.4 / 0.1 / 0.5 if the pod run reads image_only more than 2-3 points below ocr_plus_image. A corpus drawn under another mix is refused.
+- Measured on synthetic fixtures, not yet on a GPU: the group's own prompt text 63-91% shorter (the shared system message is prefix-cached); compact answers about 29% shorter; image tokens a page 49% fewer; a 114-page personal auto document 60 requests instead of 109, each window's pages prefilled once for its three groups instead of each page about 3.9 times. The answer reservations (`sequence.yaml`) are unchanged and are what holds fast windows to 7 pages: lower them after measuring compact answers on the new data.
+
 ---
 
 # IMPL-06_training
@@ -3307,6 +3326,10 @@ reviewed before it trains again.
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
 
+## Changes of 2026-10-25 (fast format profile, Azure service)
+
+- Under the fast format profile (`configs/shared/format.yaml`, IMPL-01) the trainer resizes pages to 1,254,400 px (the trainer env reads `vision_for_task`), the corpus is drawn with 70% of its rows `image_only` (IMPL-05), and checkpoint selection reads `ocr_plus_image` and `image_only` (`selection_document_modes`). Validation decodes compact rows against the compact schema and expands them before scoring (`evaluation.validation_generation`, IMPL-08). An adapter trained in one profile is refused by promote and serving in the other.
+
 ---
 
 # IMPL-07_inference_core
@@ -3463,6 +3486,11 @@ A clean, low-level inference engine: given a resolved model version + a prepared
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-25 (fast format profile, Azure service)
+
+- `build_messages` appends the group's request as the last user text part under the fast format profile (`common.prompts.render_group_block`, `GROUP_BLOCK_SEPARATOR`) and records `BuiltMessages.answer_format`; `build_training_row` writes such a row's target compact and adds `answer_format`. Standard rows are byte-identical to before.
+- `span_map.map_compact_field_spans`: a compact answer's spans keyed as the same answer written in full (`r` as `raw`, `v` as `parsed`, `p[i]` as `page_ref[i]`), so confidence reads the printed text's tokens where `r` was written and `v`'s where it was not.
 
 ---
 
@@ -3683,6 +3711,12 @@ change are not comparable with new ones.
   `order="reversed"` sends the same calls in reverse order, so the engine batches the rows differently; the
   results come back in row order (run-to-run agreement's second pass).
 - Answers are parsed as serving parses them (`collapse_spans(map_field_spans(...))`, `with_output_dates`). A
+  fast-format row (`row["answer_format"] == common.canonical.COMPACT_ANSWER_FORMAT`, the fast format
+  profile) is read as serving reads it: its gold expanded from the compact envelope (`split_prompt`,
+  `expand_answer`), its decoding schema compact (`compact_schema`), its answer's spans mapped by
+  `map_compact_field_spans` and the answer expanded before anything scores it; its OCR text is the pages'
+  alone, without the window's request block that follows them (`ValidationGeneration.page_text`). Every one
+  is a no-op on a standard row. A
   row with nothing usable back is a `setup` failure; an answer that is not a JSON object is an `output` failure,
   scored as a wrong answer, with how generation ended recorded.
 - `assert_generations_usable` refuses a pass in which more than **10%** of rows had a setup failure
@@ -3874,6 +3908,20 @@ extra.
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-25 (fast format, validation)
+
+- `evaluation/validation_generation.py` reads a fast-format row as serving does: the gold and the answer expanded from the compact envelope, the decoding schema compact, the spans keyed as the full answer's, the OCR text the pages' only (*Current implementation*, validation-based scoring). No-ops on standard rows.
+- Not measured yet: an image_only reading carries no page text, so checkpoint selection scores no invented values on it; under the fast profile both modes read every validation document, and the text could be borrowed from the document's ocr_plus_image rows (offered to the user).
+
+## Changes of 2026-10-26 (image-only invention scoring)
+
+- An `image_only` reading carries no page text, so its invented values went uncounted. It now borrows its document's page text, page by page, from the same document's `ocr_plus_image` readings: in validation and checkpoint selection from the readings of the same scored pass (`run_eval._invention_text`, fed by `_document_pages`), in the release gate from the document's frozen page text, checked by `serving.printed_values.hold_to_printed` on a copy of the answer (`golden_eval.borrowed_printed_check`, the reading marked `printed_text: borrowed`). `noisy_ocr_image` text is never lent. The same rule feeds `hallucination_rate` and `additional_fields_hallucination_rate`.
+- Fail closed: a reading that wrote values with no text of its own and none to borrow is counted unscored, never clean; a value citing a page no reading has text for is unchecked, not invented, and the page is counted. A rate nothing could check is left out of the report, never written as 0. Each subset's `printed_values` carries `borrowed_text` and `unscored`; `EvalReport.invention_coverage()` and the golden report's `invention_coverage` give the three counts.
+- Checkpoint selection: the finalists' pass pools both modes in `document_hallucination_rate`, so an image_only finalist is held to the lowest-invention rule; `choose_on_documents` lists each finalist's counts and warns when a reading was unscored; `rows_in_modes` warns when the modes hold `image_only` without `ocr_plus_image` (nothing to borrow). `score_generations` adds `hallucination_*` counts only when above zero, so a standard-profile pass returns the metrics it did.
+- The gate's run-to-run repeat reads `image_only`, the production mode (fields first): `evaluation.run_to_run_mode` in `configs/training/unified.yaml` (default `image_only`, before `ocr_plus_image`; an unknown mode is refused), recorded in the report (`run_to_run_mode`) and the eval set record (`run_eval.yardstick_settings()`). `scoring_fingerprint()` hashes it with the scoring code, so a report made on another repeat mode is another yardstick: never reused, never compared as like for like.
+- The gate's `hallucination_rate` now includes image_only readings (before, they were left out).
+- The gate scores an image_only reading as production serves it (decision 2026-10-26): `golden_eval.borrowed_printed_check` holds a copy of the result to the document's page text with production's own fields-first check (`serving.printed_values.hold_result_to_printed`), so under strict mode a value no page prints is taken out - its confidence, rows and links with it - before accuracy, completeness and calibration are scored. Invention is counted from the record made before anything was taken out. The repeat answer is held the same way, so run-to-run agreement compares the two as served.
 
 ---
 
@@ -4733,6 +4781,14 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
 
+## Changes of 2026-10-25 (fast format profile, Azure service)
+
+- Fast format profile: requests decode against the compact schema (`common.canonical.compact_schema`), and `_parse_generation` expands every answer to full `raw`/`parsed`/`page_ref` envelopes (`expand_answer`) before the shape check, the page check, the merge, the printed-values check and calibration, which never see the compact form; an invented value is removed as before. A window's groups are sent together (`_send_order`), so each after the first finds the pages' prefill in vLLM's prefix cache (on by default in vLLM V1; `generation.repeatable: true` turns it off). `send_order="reversed"` still merges in plan order. A release of the other profile is refused (`assert_prompt_hash`, `assert_window_plan_served`).
+- `fields_first.read_fields(extract_options=)`: phase 1 reads with the release's calibrators and thresholds. `vllm_entrypoint.load_release_calibration(release, client)`: a release's calibrators without its adapter, used by `load_release_runtimes` and the Azure worker.
+- The production service, `azure_service/` (`DEPLOY.md`): Azure Container Apps, an HTTPS API app and one worker app per GPU. `POST /v1/extractions` (PDF body or multipart, `lob`, optional HTTPS `webhook_url`) answers 202 with a job id; `GET /v1/extractions/{id}` the status and timings; `GET /v1/extractions/{id}/result` the checked fields from `fields_ready` (`final: false`) and the final JSON at `done`, 409 before. API keys per tenant (stored as digests, compared in constant time); size, page, PDF, line and webhook checks before anything is stored.
+- Jobs: the Storage Queue message holds only the job id and tenant; status, result and the phase-1 checkpoint are whole-object JSON blobs in a jobs container (the PDF and page images are deleted when a job ends). The lease is renewed while a job runs; after `MAX_ATTEMPTS` deliveries a job fails and never loops; a restart resumes phase 2 from the checkpoint, or reads the document again when the worker died in phase 1. Webhooks on `fields_ready`, `done` and `failed`, signed `X-Extraction-Signature: sha256=<HMAC>` with a per-tenant secret, and carrying no document content.
+- One worker replica per GPU: `GpuTurns` lives in the worker's process, so a second replica on the same GPU would run MinerU beside the other's fields. At start the worker checks the promoted release (`lora_on_base`, the MinerU pin, the prompt hash, the window plan, the base model) and that vLLM serves `policy-<release>`; the base-model fallback is off unless `ALLOW_BASE_FALLBACK` is set. `serving/vllm_entrypoint.py` is no longer the production entry point; its cold-start checks are reused. Not yet run against real Azure or a pod.
+
 ---
 
 # IMPL-12_testing_extraction_routine
@@ -5057,6 +5113,10 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-26 (fast format shipped)
+
+- `testing.render_prompts` renders a fast-format window's reference file as what the model reads: the shared system prompt, a line standing for the window's pages, then the group's request (`render_group_block`). The policy window references under `testing/prompts/` are regenerated in the fast format.
 
 ---
 
@@ -5844,6 +5904,7 @@ Tests added for printed values only and consistent output (decisions 2026-10-24)
 |---|---|
 | `test_grounding_tolerant.py` | `ground_tolerant`: what OCR misread is still printed (a digit lookalike in a code or a date, a "$" read as a 5, misread separators, one letter in a long word), an invention is not (a moved decimal point, one digit changed, another word or date, a word with no digit folded to digits); a leading 5 only where the figure shows no "$"; printed on another page is printed; what the text cannot settle is unchecked; it agrees with `ground` on clean text |
 | `test_printed_values.py` | strict is the default and an unknown mode is refused; strict takes out a value no page prints and keeps its key, flag mode keeps and flags it; an extra field leaves its list; a row with nothing printed goes and the rows after it move up, one with a printed value stays; unchecked values kept and counted; system fields not checked; no page text changes nothing; a self-contained answer leaves a value out; earlier flags follow their values; `extract` takes out what the model invented; fields first holds the fields to the text when it arrives |
+| `test_validation_compact.py` | a fast-format (compact) row is read as serving reads it: its gold expanded, decoded against the compact schema (`r`/`v`/`p`) while a standard row keeps `raw`/`parsed`/`page_ref`, its answer expanded with its spans keyed as the full answer's, its OCR text without the request block |
 | `test_invention_and_agreement.py` | `hallucination_rate` read from serving's record and weighted by the values checked, validation counting as serving counts, over every page of the document; agreement both ways with nulls in both left out, weighted by fields compared; the golden eval's reversed repeat of the main mode, on by default; both gating with their margins and no threshold; a baseline that never measured them compared on floors only, with a warning; checkpoint selection: close on field match the finalist inventing less wins, further behind it does not, the agreement and false-null guards, the repeat pass |
 | `test_audit_label_consistency.py` | the audit's label-consistency warnings: dates, whole numbers written two ways, a number beside text, an enum value spelt two ways; a value another check reports left to it; a placeholder beside a null; `raw` against `parsed` per value; full text, notes and system fields not read; a consistent folder warns nothing; each kind in the report |
 
@@ -5911,6 +5972,15 @@ real vLLM engines (the tests fake the engine), and a real upload.
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-25 (fast format, validation)
+
+- A row for `test_validation_compact.py`.
+
+## Changes of 2026-10-26 (fast format shipped)
+
+- The suite runs in the shipped format profile (`fast`). A test of the standard format's own windows, prompts or answers carries `@pytest.mark.format_profile("standard")` (`tests/conftest.py`, an autouse fixture setting `common.config.shared_format_config`); `tests/test_old_style_prompts_frozen.py` is pinned whole. The replay model of `tests/test_schema2_serving.py` finds a window by its system prompt, its own request (`_request_of`) and its pages, and `_full_answer` gives a row's target in the full form, so the end-to-end replay tests - the printed-values removal of an invented value, fields first, the full-text tier - run in the fast profile. `test_fast_profile.py::test_fast_is_the_shipped_profile` records the decision. The thumbnail checks ask for classify at least 4x below extraction's pixels (~4.8x under fast).
+- `tests/test_image_only_invention.py` (12 tests): an image_only invention counted on borrowed text; no text to borrow is unscored, not clean; a cited page with no text is unchecked and counted; selection picks the finalist inventing less across both modes; the gate's repeat reads image_only and records it; another repeat mode is another yardstick. `tests/test_invention_and_agreement.py`: the golden repeat tests expect the image_only repeat.
 
 ---
 
