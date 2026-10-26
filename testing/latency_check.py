@@ -52,6 +52,14 @@ against the environment the run will have (``scripts/pod_run.sh env``). Writes
 accuracy and the served canonical JSON; ``.fields-first.json`` for that run; a
 name used twice, or ``summary``, takes ``-2``) and ``<out>/summary.json`` /
 ``summary.md``.
+
+``--repeat`` reads every document twice on the server path: all of them once,
+then all again (``<document>.repeat.json``), so other documents' windows sit
+between a document's two readings as they would on a busy server. Serving
+decodes greedily with ``repeatable: false``, and a near tie can still flip with
+the batch around it; ``run_to_run.json`` and the summary give each document's
+run-to-run agreement (the golden eval's ``run_to_run_agreement``) and the
+overall one, pooled by fields compared.
 """
 
 from __future__ import annotations
@@ -324,6 +332,63 @@ def time_fields_first(pdf: Path, lob: str, *, backend: Any, model: Any, reader: 
     return row
 
 
+#: The key a document's second reading is filed under (``--repeat``).
+REPEAT_SUFFIX = ".repeat"
+
+
+def agreement(first: Any, second: Any, lob: str) -> tuple[float, float] | None:
+    """How alike two served answers to one document are: ``(share of fields
+    equal, fields compared)``, or None when neither wrote a field - the golden
+    eval's ``run_to_run_agreement``, on the answers as it scores them."""
+    from common.lob import merge_line
+    from evaluation.run_eval import _is_common_model_document, _scored_view, run_to_run_agreement
+
+    common_model = _is_common_model_document("policy", {"lob": lob})
+    line = merge_line(lob) if common_model else None
+    selectors = ("policy", None, lob)
+    return run_to_run_agreement(_scored_view(first or {}, selectors, line, common_model),
+                                _scored_view(second or {}, selectors, line, common_model),
+                                common_model=common_model, line=line)
+
+
+def run_to_run(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Each document read twice (``--repeat``): per document and run, the share
+    of its fields the two readings agree on; overall, pooled by fields compared.
+    A reading that failed leaves its document out, counted in ``unpaired``."""
+    readings: dict[tuple[str, str, str], dict[int, dict[str, Any]]] = {}
+    for row in rows:
+        document = (row.get("pdf") or row["document"], row.get("lob", ""), row.get("run", ""))
+        readings.setdefault(document, {})[row.get("pass", 1)] = row
+    documents: list[dict[str, Any]] = []
+    agreed = compared = 0.0
+    unpaired = 0
+    for (pdf, _lob, run), passes in readings.items():
+        first, second = passes.get(1), passes.get(2)
+        if first is None or second is None or "error" in first or "error" in second:
+            unpaired += 1
+            continue
+        result = agreement(first.get("extraction"), second.get("extraction"), first["lob"])
+        entry = {"document": first["document"], "pdf": pdf, "run": run, "agreement": None, "fields_compared": 0}
+        if result is not None:
+            share, count = result
+            entry.update(agreement=round(share, 4), fields_compared=round(count, 1))
+            agreed += share * count
+            compared += count
+        documents.append(entry)
+    return {"documents": documents, "overall": round(agreed / compared, 4) if compared else None,
+            "fields_compared": round(compared, 1), "unpaired": unpaired}
+
+
+def agreement_table(report: dict[str, Any]) -> str:
+    out = ["| Document | Run | Run-to-run agreement | Fields compared |", "|---|---|---|---|"]
+    for entry in report["documents"]:
+        out.append(f"| {entry['document']} | {entry['run']} | {entry['agreement']} | {entry['fields_compared']} |")
+    out.append(f"| **overall** | | {report['overall']} | {report['fields_compared']} |")
+    if report["unpaired"]:
+        out.append(f"\n{report['unpaired']} document(s) not read twice (a reading failed): left out.")
+    return "\n".join(out)
+
+
 def table(rows: list[dict[str, Any]]) -> str:
     head = ("| Document | Run | Pages | Windows | Fields s | Full text s | Model s | Rounds | Splits | "
             "Answer tokens | Slowest window s | Sent MB | Schema valid | Text coverage | Exact match at fields | "
@@ -393,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="requests in flight at most (lower it through a proxy: 16)")
     parser.add_argument("--no-repeat-stop", action="store_true",
                         help="let an answer that repeats itself run to its token limit (to compare)")
+    parser.add_argument("--repeat", action="store_true",
+                        help="read every document twice - all documents once, then all again, so other "
+                             "documents' windows sit between a document's two readings, as on a busy server "
+                             "- and report each document's run-to-run agreement and the overall one "
+                             "(repeatable: false decodes greedily, yet a near tie can flip with the batch)")
     parser.add_argument("--gold-dir", type=Path, default=None,
                         help="where gold JSONs are (default: the Gold_json folder beside each PDF's)")
     parser.add_argument("--out", type=Path, default=None,
@@ -457,14 +527,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # Each document's file per run, and its pages' folder: unique in the run (two
     # folders can each hold a policy.pdf; a summary.pdf is not summary.json).
+    # --repeat: every document once, then every document again - the second pass
+    # filed under <key>.repeat - so a document's two readings are apart, with the
+    # other documents' windows between them.
+    passes = (1, 2) if args.repeat else (1,)
     keys = iter(unique_names([pdf.stem + ("" if run == "standard" else f".{run}")
-                              for pdf, _lob in args.docs for run in args.runs]))
+                              + ("" if attempt == 1 else REPEAT_SUFFIX)
+                              for attempt in passes for pdf, _lob in args.docs for run in args.runs]))
     rows: list[dict[str, Any]] = []
-    for pdf, lob in args.docs:
+    for attempt, pdf, lob in ((attempt, pdf, lob) for attempt in passes for pdf, lob in args.docs):
         gold = find_gold(pdf, args.gold_dir)
         for run in args.runs:
             key = next(keys)
-            print(f"reading {pdf.name} ({lob}), {run}{'' if gold else ', no gold JSON found'} ...", flush=True)
+            print(f"reading {pdf.name} ({lob}), {run}{'' if gold else ', no gold JSON found'}"
+                  f"{f', reading {attempt} of 2' if args.repeat else ''} ...", flush=True)
             try:
                 if run == "fields-first":
                     row = time_fields_first(pdf, lob, backend=backend, model=model, reader=reader, work=out,
@@ -478,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 if links is not None and not args.keep_links:
                     links.discard()
-            row = {**row, "pdf": str(pdf), "output": f"{key}.json"}
+            row = {**row, "pdf": str(pdf), "output": f"{key}.json", "pass": attempt}
             (out / f"{key}.json").write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
             rows.append(row)
             if "error" not in row:
@@ -493,6 +569,10 @@ def main(argv: list[str] | None = None) -> int:
     backend.close()
     summaries = [{k: v for k, v in row.items() if k not in ("extraction", "window_stats")} for row in rows]
     report = table(rows)
+    if args.repeat:
+        repeated = run_to_run(rows)
+        (out / "run_to_run.json").write_text(json.dumps(repeated, indent=2), encoding="utf-8")
+        report += "\n\n### Run-to-run agreement\n\n" + agreement_table(repeated)
     (out / "summary.json").write_text(json.dumps(summaries, indent=2), encoding="utf-8")
     (out / "summary.md").write_text(report + "\n", encoding="utf-8")
     print("\n" + report + f"\n\nresults in {out}")

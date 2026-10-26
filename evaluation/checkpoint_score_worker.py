@@ -8,7 +8,14 @@ each ``--checkpoint`` in turn, and writes ``{checkpoint: {"metrics": ...}}`` (or
 
     python -m evaluation.checkpoint_score_worker --val-path <key> --sample-rows 400 \\
         --images-root <dir> --checkpoint <dir> [--checkpoint <dir> ...] --out scores.json \\
-        [--full [--full-mode ocr_plus_image ...]] [--repeat]
+        [--full [--full-mode ocr_plus_image ...]] [--repeat [--repeat-mode image_only ...]] \\
+        [--save-dir <dir>]
+
+With ``--shard K --shards N`` it scores nothing: it generates shard K of N of
+each checkpoint's calls and writes the answers beside ``--out``
+(:func:`evaluation.checkpoint_eval.generate_shard`), for the parent to put the
+pass back together and score (``generate_sharded``). ``--only-keys`` narrows
+the pass to the readings a JSON list names (calibration's rows no saved answer covers).
 """
 
 from __future__ import annotations
@@ -31,6 +38,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="narrow --full to this reading mode (repeatable; none = all modes)")
     parser.add_argument("--repeat", action="store_true",
                         help="read the finalists' pass twice, for run-to-run agreement")
+    parser.add_argument("--repeat-mode", dest="repeat_modes", action="append", default=[],
+                        help="read only this mode's rows twice (repeatable; none = every row)")
+    parser.add_argument("--save-dir", type=Path, default=None,
+                        help="save each finalist's answers and error tallies here")
+    parser.add_argument("--shard", type=int, default=None, help="generate this shard of each pass's calls")
+    parser.add_argument("--shards", type=int, default=None, help="...of this many")
+    parser.add_argument("--only-keys", type=Path, default=None,
+                        help="a JSON list of the readings to generate (with --shard)")
+    parser.add_argument("--prepare-adapter", action="store_true",
+                        help="a --checkpoint that is no local directory is a Blob prefix: copy it down first")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     # Started by ParallelScorer with FIDEON_NO_DETACH=1, it scores in place; run by
@@ -44,10 +61,28 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(logging.INFO)
 
     from artifact_registry.blob_client import BlobClient
-    from evaluation.checkpoint_eval import vllm_scorer
+    from evaluation import checkpoint_eval
 
-    scorer = vllm_scorer(client=BlobClient(), val_path=args.val_path, images_root=args.images_root,
-                         sample_rows=args.sample_rows, full_modes=args.full_modes, repeat=args.repeat)
+    if args.shards is not None:
+        if args.shard is None:
+            parser.error("--shards needs --shard")
+        only_keys = json.loads(args.only_keys.read_text(encoding="utf-8")) if args.only_keys else None
+        checkpoint_eval.generate_shard(
+            client=BlobClient(), val_path=args.val_path, images_root=args.images_root,
+            sample_rows=args.sample_rows, full=args.full, full_modes=args.full_modes,
+            checkpoints=args.checkpoint, shard=args.shard, shards=args.shards, out=args.out,
+            repeat=args.repeat, repeat_modes=args.repeat_modes, only_keys=only_keys,
+            prepare_adapters=args.prepare_adapter)
+        return 0
+
+    extras = {}
+    if args.repeat_modes:
+        extras["repeat_modes"] = args.repeat_modes
+    if args.save_dir is not None:
+        extras["save_dir"] = args.save_dir
+    scorer = checkpoint_eval.vllm_scorer(client=BlobClient(), val_path=args.val_path, images_root=args.images_root,
+                                         sample_rows=args.sample_rows, full_modes=args.full_modes,
+                                         repeat=args.repeat, **extras)
     target = (getattr(scorer, "full", None) or scorer) if args.full else scorer
     results: dict[str, dict] = {}
     try:

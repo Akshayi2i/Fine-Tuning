@@ -137,7 +137,8 @@ def test_calibrate_collects_its_own_samples_per_format(client):
     samples = collect_calibration_samples(ctx)
 
     assert loaded == ["bf16"]
-    assert samples["bf16"]["calibration"] and samples["bf16"]["threshold"]
+    # By reading mode (calibration.population.samples_by_mode); these rows are ocr_plus_image.
+    assert samples["bf16"]["ocr_plus_image"]["calibration"] and samples["bf16"]["ocr_plus_image"]["threshold"]
 
 
 def test_rows_go_to_the_backend_in_batches_not_one_by_one(client):

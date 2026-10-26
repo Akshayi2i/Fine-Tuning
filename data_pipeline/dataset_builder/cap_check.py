@@ -120,6 +120,12 @@ class CapReport:
     #: 25% rejected when 100% of the document is gone.
     documents_accepted: int = 0
     documents_rejected: int = 0
+    #: Windows whose answer overran its reservation and were read as two halves
+    #: instead, as serving retries them (``build_jsonl``, review item 38), and
+    #: the rows those halves made. A document is set aside for an answer only
+    #: when a single page's still overruns.
+    windows_halved: int = 0
+    rows_from_halves: int = 0
 
     @property
     def rejection_rate(self) -> float:
@@ -155,6 +161,8 @@ class CapReport:
             "rejections_recorded": len(self.rejected),
             "documents_accepted": self.documents_accepted,
             "documents_rejected": self.documents_rejected,
+            "windows_halved": self.windows_halved,
+            "rows_from_halves": self.rows_from_halves,
             "rejection_rate": round(self.rejection_rate, 4),
             "max_tokens_seen_by_task": dict(sorted(self.max_seen.items())),
             "rejections": self.rejected[:20],
@@ -286,6 +294,14 @@ def evaluate(estimate: TokenEstimate) -> tuple[bool, int, str | None]:
     if estimate.total_tokens > cap:
         return False, cap, estimate.explain(cap)
     return True, cap, None
+
+
+def answer_overflows(task: str, answer: str | None, doc_type: str | None = None) -> bool:
+    """Whether an answer runs past its task's reserved output - the case
+    :func:`evaluate` refuses first, and the one serving meets as an answer cut
+    off at the token limit and retries in halves (``serving.pipeline._halves``).
+    Counted as :func:`estimate_row` counts it (:func:`target_tokens`)."""
+    return target_tokens(answer) > int(sequence_for_task(task, doc_type)["max_output_tokens"])
 
 
 def check_row(

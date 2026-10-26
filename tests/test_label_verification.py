@@ -110,5 +110,9 @@ def test_the_window_rows_carry_only_values_the_document_prints():
     details: list[str] = []
     rows = _policy_window_rows(document, "train", "ocr_plus_image", list(PAGES), details)
     answers = " ".join(row["messages"][-1]["content"] for row in rows)
-    assert "Granite State Insurance" not in answers and "Lakeside Agency" in answers
+    # Listed, never deleted (review 2026-10-26): the window holding the value
+    # no page prints is left out - with Lakeside Agency, which it also holds -
+    # rather than taught to skip a value it may show.
+    assert "Granite State Insurance" not in answers
+    assert any("left out" in d and "carrier.company_name" in d for d in details), details
     assert any("not printed on the page" in d for d in details)

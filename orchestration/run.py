@@ -5,14 +5,23 @@ the next version number, which names its run, adapter and release::
 
     python -m orchestration.run all      --input ./intake          # the next version, e.g. v3
     python -m orchestration.run finetune --input ./intake          # stages 1-6 of a new version
-    python -m orchestration.run package  --version v3              # stages 7-9 of that version
-    python -m orchestration.run promote  --version v2 --by "Name"  # a rollback to v2
+    python -m orchestration.run package  --version v3              # stages 7-9: the release, gated
+    python -m orchestration.run shadow   --version v3 --model-url URL --mineru-url URL  # on the server path
+    python -m orchestration.run promote  --version v3 --by "Name"  # needs v3's passing shadow report
+    python -m orchestration.run promote  --version v2 --by "Name"  # a rollback to v2 (no shadow)
     python -m orchestration.run versions                           # the registry, per version
     python -m orchestration.run extract  --model v2 --split test --corpus v1
     python -m orchestration.run extract  --model base --adapter ./checkpoint-400 --source-ids policy_0001
 
 A fresh ``finetune`` or ``all`` takes the next version itself; ``--version``
 names one only to resume a cycle (``--from-stage``) or rerun one that failed.
+
+``package`` never promotes (decision 2026-10-26, #44): the release is left
+``gated`` and the run summary prints the next steps. ``shadow`` reads it on the
+real server path beside the promoted release (``orchestration.shadow``), and
+``promote`` serves it once that passed - or with ``--skip-shadow --reason``,
+recorded with the person's name; an interim-tier release also needs
+``--accept-interim``.
 
 ``all`` is ``finetune`` then ``package``. **It never runs ``extract``** —
 extraction is run against a chosen model version whenever you want, including
@@ -79,6 +88,8 @@ def build_context(args: argparse.Namespace, *, client: BlobClient | None = None,
         "gpu_class": getattr(args, "gpu", None),
         "dry_run": getattr(args, "dry_run", False),
         "skip_ingest": getattr(args, "skip_ingest", False),
+        "ocr_workers": int(getattr(args, "ocr_workers", None) or defaults().get("ocr_workers", 1) or 1),
+        "allow_dirty": getattr(args, "allow_dirty", False),
         "train_vit": getattr(args, "train_vit", False),
         "min_labels_per_type": getattr(args, "min_labels_per_type", DAY_ZERO_MIN_LABELS_PER_TYPE),
         "push_adapters": getattr(args, "push_adapters", False),
@@ -242,10 +253,18 @@ def _add_finetune_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--from-stage", dest="from_stage", default=None,
                         help="resume at this stage; earlier stages are not re-run")
     parser.add_argument("--skip-ingest", dest="skip_ingest", action="store_true")
+    parser.add_argument("--ocr-workers", dest="ocr_workers", type=int, default=None,
+                        help="documents the OCR stage reads at once against the served MinerU "
+                             "($MINERU_URL); default pipeline.yaml defaults.ocr_workers (1). 4 is a good "
+                             "start against a dedicated MinerU 4.0.12/basic")
     parser.add_argument("--fresh", action="store_true",
                         help="train from the base model, not the promoted adapter (after a data "
                              "deletion, or to reset drift); a cycle continues the promoted one "
                              "by default")
+    parser.add_argument("--allow-dirty", dest="allow_dirty", action="store_true",
+                        help="train on a working tree with uncommitted changes (a real training run refuses "
+                             "one otherwise: the manifest's commit would not be the code that ran). Same as "
+                             "FIDEON_ALLOW_DIRTY_TREE=1")
     parser.add_argument("--train-vit", dest="train_vit", action="store_true",
                         help="LoRA on the vision encoder; never a full fine-tune (arch §3)")
     parser.add_argument("--min-labels-per-type", dest="min_labels_per_type", type=int,
@@ -304,7 +323,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "is staged. Continues the promoted adapter unless --fresh"))
 
     package = sub.add_parser(
-        "package", help="stages 7-9: calibrate, gate, push the adapter and promote the release")
+        "package", help="stages 7-9: calibrate, gate, push the adapter and write the release, gated "
+                        "(never promoted: shadow, then promote)")
     _add_package_flags(package)
     parser_all = sub.add_parser("all", help="finetune then package. Never runs extract.")
     _add_finetune_flags(parser_all)
@@ -330,13 +350,45 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--limit", type=int, default=None)
     extract.add_argument("--tenant", default=None)
 
+    shadow = sub.add_parser(
+        "shadow", help="read a gated release on the real server path (fields first, the pod's vLLM and "
+                       "MinerU 4) beside the promoted one, score both against the frozen golds and write "
+                       "shadow_report.json; promote asks for a passing one")
+    shadow.add_argument("--version", required=True, help="the gated release to read, e.g. v3")
+    shadow.add_argument("--model-url", dest="model_url", required=True,
+                        help="the pod's vLLM (OpenAI API), serving policy-vN and the promoted policy-vK "
+                             "together (--max-loras 2)")
+    shadow.add_argument("--mineru-url", dest="mineru_url", required=True, help="the served MinerU 4 API")
+    shadow.add_argument("--documents", type=int, default=None,
+                        help="frozen eval documents to read (default 50): stratified by line, real first")
+    shadow.add_argument("--tenant", default=None)
+
     promote = sub.add_parser(
-        "promote", help="make a version the tenant's promoted release (a rollback); the one "
-                        "promoted now is archived")
+        "promote", help="make a version the tenant's promoted release; the one promoted now is "
+                        "archived. A gated release needs its passing shadow report (or --skip-shadow "
+                        "--reason); a rollback to one promoted before does not")
     promote.add_argument("--version", required=True, help="the version to serve, e.g. v2")
     promote.add_argument("--by", dest="promoted_by", required=True,
                          help="the person accountable for the change (not a system identity)")
+    promote.add_argument("--skip-shadow", dest="skip_shadow", action="store_true",
+                         help="promote a gated release without a passing shadow report; needs --reason, "
+                              "recorded in the release with --by")
+    promote.add_argument("--reason", dest="skip_reason", default=None,
+                         help="with --skip-shadow: why, in 20 characters or more")
+    promote.add_argument("--accept-interim", dest="accept_interim", action="store_true",
+                         help="promote an interim-tier release (field match below the production bar, or "
+                              "an eval set accepted small) knowingly")
     promote.add_argument("--tenant", default=None)
+
+    noise = sub.add_parser(
+        "label-noise",
+        help="read a release's train documents with its adapter and queue the golds that lack a value "
+             "the page prints, for a person to review (GPU; no gold is changed)")
+    noise.add_argument("--version", required=True, help="the release whose adapter reads, e.g. v4")
+    noise.add_argument("--corpus-version", dest="corpus_version", default=None,
+                       help="the corpus whose train documents are read; default the one the version trained on")
+    noise.add_argument("--limit", type=int, default=None, help="read at most this many train documents")
+    noise.add_argument("--tenant", default=None)
 
     versions = sub.add_parser("versions", help="the registry: every version, its run and release")
     versions.add_argument("--tenant", default=None)
@@ -399,11 +451,19 @@ def flag_problem(args: argparse.Namespace) -> str | None:
             return "freeze-eval-set needs --corpus (or --mark-held-out / --mark-reviewed on a frozen set)"
         return None
     if args.command == "promote":
-        from registry_utils.releases import is_named_person
+        from registry_utils.releases import SKIP_SHADOW_MIN_CHARS, is_named_person
 
         if not is_named_person(args.promoted_by):
             return "promote --by must name the person accountable for it, not a system identity"
+        reason = (args.skip_reason or "").strip()
+        if args.skip_shadow and len(reason) < SKIP_SHADOW_MIN_CHARS:
+            return (f"promote --skip-shadow needs --reason \"<why>\", {SKIP_SHADOW_MIN_CHARS} characters or "
+                    "more: it is recorded in the release with --by")
+        if args.skip_reason is not None and not args.skip_shadow:
+            return "promote --reason is the written reason for --skip-shadow; give both or neither"
         return None
+    if args.command == "shadow":
+        return shadow_flag_problem(args)
     if args.command == "extract":
         # testing.run_extraction refuses these too, but only once it runs: inside
         # tmux on the pod, with this command already exited 0. Its words, here.
@@ -412,6 +472,14 @@ def flag_problem(args: argparse.Namespace) -> str | None:
         if args.adapter and args.model != "base":
             return "extract --adapter applies a LoRA to the base model: use --model base with it"
         return None
+    if args.command == "label-noise":
+        if args.limit is not None and args.limit < 1:
+            return "label-noise --limit is 1 or more"
+        if paths.version_number(str(args.version)) is None:
+            return f"label-noise --version names a release, vN; got {args.version!r}"
+        return None
+    if getattr(args, "ocr_workers", None) is not None and args.ocr_workers < 1:
+        return "--ocr-workers is 1 or more"
     if args.command not in ("finetune", "package", "all"):
         return None
     from_stage = getattr(args, "from_stage", None)
@@ -434,6 +502,62 @@ def flag_problem(args: argparse.Namespace) -> str | None:
     except (FixesDefectError, GateOverrideError) as exc:
         return str(exc)
     return None
+
+
+def shadow_flag_problem(args: argparse.Namespace) -> str | None:
+    """Why ``shadow``'s flags cannot make a run; ``None`` when they can. Before
+    the detach, from the flags alone: the release itself is checked by the
+    run (``orchestration.shadow.run_shadow``), first thing."""
+    from common.transport import InsecureUrlError, assert_encrypted
+
+    if paths.version_number(str(args.version)) is None:
+        return f"shadow --version names a release, vN; got {args.version!r}"
+    if args.documents is not None and args.documents < 1:
+        return "shadow --documents is 1 or more"
+    try:
+        assert_encrypted(args.model_url, "the model server")
+        assert_encrypted(args.mineru_url, "the MinerU server")
+    except InsecureUrlError as exc:
+        return f"shadow: {exc}"
+    return None
+
+
+def run_shadow_command(args: argparse.Namespace, *, client: BlobClient | None = None) -> int:
+    """``shadow``: the check, its table, and 0 when it passed."""
+    from orchestration.shadow import SHADOW_DOCUMENTS, ShadowError, render, run_shadow
+
+    try:
+        report = run_shadow(client or BlobClient(), args.version, model_url=args.model_url,
+                            mineru_url=args.mineru_url, documents=args.documents or SHADOW_DOCUMENTS,
+                            tenant_id=args.tenant)
+    except ShadowError as exc:
+        print(f"shadow {args.version}: {exc}", file=sys.stderr)
+        return 1
+    print(render(report))
+    if report["passed"]:
+        tenant = f" --tenant {args.tenant}" if args.tenant else ""
+        interim = " --accept-interim" if (report.get("candidate") or {}).get("tier") == "interim" else ""
+        print(f"  next: python -m orchestration.run promote --version {args.version} --by \"<person>\""
+              f"{tenant}{interim}")
+    return 0 if report["passed"] else 1
+
+
+def promotion_evidence(client: BlobClient, version: str, tenant: str | None) -> str | None:
+    """What the release's last promotion rests on, as recorded in its bundle."""
+    key = paths.release_bundle(version, tenant)
+    promotions = (client.read_json(key).get("promotions") or []) if client.exists(key) else []
+    if not promotions:
+        return None
+    last = promotions[-1]
+    if last.get("rollback"):
+        how = "a rollback to a release promoted before (no shadow check asked)"
+    elif last.get("shadow_report"):
+        how = f"shadow report {last['shadow_report']}"
+    else:
+        how = f"shadow check skipped by {last.get('promoted_by')}: {last.get('shadow_skipped_reason')}"
+    tier = f"; tier {last['tier']}" if last.get("tier") else ""
+    accepted = " (accepted as interim)" if last.get("accepted_interim") else ""
+    return f"promoted by {last.get('promoted_by')} at {last.get('promoted_at')} on {how}{tier}{accepted}"
 
 
 #: Stages removed from the pipeline, and why. Named by ``--from-stage`` they are
@@ -555,15 +679,33 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 0
 
     if args.command == "promote":
-        from registry_utils.releases import ReleaseError, promote_release
+        from registry_utils.releases import ReleaseError, promote
 
+        client = BlobClient()
         try:
-            archived = promote_release(BlobClient(), args.version, args.tenant,
-                                       promoted_by=args.promoted_by.strip())
+            archived = promote(client, args.version, args.tenant, promoted_by=args.promoted_by.strip(),
+                               skip_shadow_reason=args.skip_reason if args.skip_shadow else None,
+                               accept_interim=args.accept_interim)
         except ReleaseError as exc:
             print(exc, file=sys.stderr)
             return 1
         print(f"{args.version} is promoted" + (f"; archived {', '.join(archived)}" if archived else ""))
+        if evidence := promotion_evidence(client, args.version, args.tenant):
+            print(f"  {evidence}")
+        return 0
+
+    if args.command == "shadow":
+        return run_shadow_command(args)
+
+    if args.command == "label-noise":
+        from orchestration.label_noise import LabelNoiseError, main_from_args
+
+        try:
+            summary = main_from_args(args)
+        except LabelNoiseError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
         return 0
 
     if args.command == "versions":
@@ -587,8 +729,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         parser.error(str(exc))
     # The raw-documents login too: only ingestion and OCR may reach raw-documents/
     # (arch §18a), and an injected client would otherwise stand in for both.
-    report = run_command(args.command, build_context(args, client=client, raw_client=for_ingestion()),
-                         from_stage=getattr(args, "from_stage", None))
+    ctx = build_context(args, client=client, raw_client=for_ingestion())
+    report = run_command(args.command, ctx, from_stage=getattr(args, "from_stage", None))
+    # One post saying how the command ended (orchestration.notify; a no-op without a webhook).
+    from orchestration.notify import run_complete
+
+    run_complete(report, ctx)
 
 
     print(report.render())

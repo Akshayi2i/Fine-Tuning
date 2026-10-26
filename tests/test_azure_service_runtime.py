@@ -169,3 +169,34 @@ def test_the_release_calibrators_reach_extract_once_read_fields_passes_them_on(t
     assert seen and seen[0]["calibrators"] is calibrators
     assert service.status(job_id)["calibration"] == "release"
     assert json.loads(json.dumps(service.status(job_id)))["status"] == "fields_ready"
+
+
+def test_phase_two_scores_confidence_again_with_the_release_calibrators(tmp_path, monkeypatch):
+    """The full text arrives in phase 2, read from the phase-1 checkpoint: the
+    result restored from it does not carry the calibrators, so the worker hands
+    the release's own to add_full_text, which scores confidence again on the
+    text (serving.fields_first.rescore_on_text). The checkpoint holds no
+    calibrator, not even as a repr."""
+    import serving.fields_first as fields_first
+    from tests.test_azure_service import Service
+
+    original, read_fields = fields_first.add_full_text, fields_first.read_fields
+    seen = []
+
+    def add_full_text(pdf, result, **kwargs):
+        seen.append((kwargs.pop("calibrators"), kwargs.pop("thresholds"), result.calibrated_with))
+        return original(pdf, result, **kwargs)        # stand-in calibrators: not applied
+
+    monkeypatch.setattr(fields_first, "read_fields",
+                        lambda pdf, *, extract_options=None, **kwargs: read_fields(pdf, **kwargs))
+
+    service = Service(tmp_path)
+    job_id = service.submit()["job_id"]
+    runtime = service.runtime.tenants["default"].release_runtime
+    runtime.calibrators, runtime.thresholds = calibrators, thresholds = object(), object()
+    monkeypatch.setattr(fields_first, "add_full_text", add_full_text)
+    worker = service.worker()
+    worker.poll_once()
+    worker.text_once()
+    assert seen == [(calibrators, thresholds, None)]
+    assert service.status(job_id)["status"] == "done"

@@ -154,11 +154,20 @@ def commands(*, batch_dir: Path, subset_dir: Path, tenant: str, version: str,
     keeps the build - there it is the point.
     """
     py = sys.executable
+    # Through the served MinerU when MINERU_URL names one - the OCR pin the corpus
+    # build and promotion hold every reading to (configs/shared/ocr.yaml) - from
+    # this environment, several documents at once. Otherwise the OCR
+    # environment's MinerU, whose reading the corpus build refuses unless it is
+    # the pinned version.
+    served = (os.environ.get("MINERU_URL") or "").strip()
+    ocr = ([py, "-m", "data_pipeline.ocr.run_mineru", "--doc-type", "policy", "--all-unprocessed",
+            "--tenant", tenant, "--mineru-url", served, "--workers", "4"] if served else
+           [str(OCR_PYTHON), "-m", "data_pipeline.ocr.run_mineru", "--doc-type", "policy",
+            "--all-unprocessed", "--tenant", tenant])
     return {
         "import": [py, "-m", "data_pipeline.ingestion.import_labeled_pdfs", "--input", str(subset_dir),
                    "--doc-type", "policy", "--tenant", tenant],
-        "ocr": [str(OCR_PYTHON), "-m", "data_pipeline.ocr.run_mineru", "--doc-type", "policy",
-                "--all-unprocessed", "--tenant", tenant],
+        "ocr": ocr,
         "check": [py, "-m", "data_pipeline.ocr_check", "--doc-type", "policy", "--tenant", tenant,
                   "--out", str(check_out)],
         # --min-labels-per-type 1: the 25-document floor is for a real run. A

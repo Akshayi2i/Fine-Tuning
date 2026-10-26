@@ -53,6 +53,12 @@ class Generation:
     #: Milliseconds until the first answer token arrived - time queued plus time
     #: reading the prompt - when the backend streams; the rest is writing.
     first_token_ms: float | None = None
+    #: Per token, the best logprob of a token other than the one written (the
+    #: second-best when the written one was the model's first choice), None
+    #: where the backend gave none; empty when it gave none at all. The margin
+    #: between the two says how near another value was
+    #: (``span_map.FieldSpan.top2_margin``). Requested as ``top_logprobs: 2``.
+    token_top2_logprobs: list[float | None] = field(default_factory=list)
 
     @property
     def has_logprobs(self) -> bool:
@@ -230,6 +236,55 @@ class EchoBackend(ModelBackend):
 #: scope's schema is inside what it supports (tests/test_vllm_patches.py).
 STRUCTURED_OUTPUTS_ENGINE = {"backend": "xgrammar", "disable_any_whitespace": True}
 
+#: The sampling settings left at their neutral values on every request, in
+#: process and to a served model alike (``openai_backend.OpenAIChatBackend.payload``).
+#: A stock ``vllm serve`` fills what a request leaves out from the model's own
+#: generation config (``--generation-config auto``, its default): Qwen3-VL's
+#: ships a top_k and could ship a repetition penalty, and a repetition penalty
+#: changes greedy decoding - a schedule's repeated "$500" made less likely each
+#: time. Sent explicitly, so no server setting moves them; start the server with
+#: ``--generation-config vllm`` as well (configs/inference/vllm_serving.yaml).
+PINNED_SAMPLING: dict[str, Any] = {
+    "repetition_penalty": 1.0,
+    "top_k": -1,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+}
+
+
+def structured_outputs_params() -> tuple[str, Any]:
+    """``(SamplingParams keyword, class)`` for a request's JSON schema:
+    ``structured_outputs=StructuredOutputsParams`` (vLLM 0.11), else the
+    deprecated ``guided_decoding=GuidedDecodingParams``.
+
+    Neither importable is a :class:`ModelRunnerError`, never a warning: an
+    evaluation that asked for a schema and decoded without one measured an
+    unconstrained model as the constrained one serving runs.
+    """
+    try:
+        from vllm.sampling_params import StructuredOutputsParams
+    except ImportError:
+        pass
+    else:
+        return "structured_outputs", StructuredOutputsParams
+    try:
+        from vllm.sampling_params import GuidedDecodingParams
+    except ImportError as exc:
+        raise ModelRunnerError(
+            "structured outputs are configured (a JSON schema per request), but this vLLM exposes "
+            "neither StructuredOutputsParams nor GuidedDecodingParams: generating without the schema "
+            "would measure an unconstrained model as the constrained one serving runs (arch v2.1 "
+            "§13). Install the pinned vLLM (0.11)."
+        ) from exc
+    return "guided_decoding", GuidedDecodingParams
+
+
+def second_best(alternatives: Any, chosen: Any) -> float | None:
+    """The best logprob among ``alternatives`` (key -> logprob) other than
+    ``chosen``'s; None when there is no other."""
+    others = [float(logprob) for key, logprob in alternatives if key != chosen]
+    return max(others) if others else None
+
 
 def to_vllm_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Chat messages with ms-swift image parts rewritten for ``LLM.chat``.
@@ -359,6 +414,8 @@ class VLLMBackend(ModelBackend):
         # Checked where the engine is built, which is the only place the mode can
         # still be changed. The comment below used to claim this and nothing did.
         config.assert_logprobs_are_the_models_own()
+        if config.structured_outputs:
+            structured_outputs_params()           # refused here, not on the first request
         model_path = self.resolved.get("merged_model") or self.resolved.get("base_model")
         if not model_path:
             raise ModelRunnerError(
@@ -412,9 +469,14 @@ class VLLMBackend(ModelBackend):
             "top_p": config.top_p,
             "max_tokens": config.max_new_tokens,
             # Requested per token, not per sequence: confidence is per field, and
-            # a sequence-level score cannot be attributed to one.
+            # a sequence-level score cannot be attributed to one. Two: the second
+            # best gives each value its near-tie margin.
             "logprobs": config.top_logprobs if config.logprobs else None,
             "seed": config.seed,
+            # Pinned as the served model's requests pin them
+            # (``openai_backend.PINNED_SAMPLING``): the model's own generation
+            # config must not decide them on one path and not the other.
+            **PINNED_SAMPLING,
         }
 
         # Structured decoding against the target schema (arch v2.1 §13).
@@ -429,16 +491,8 @@ class VLLMBackend(ModelBackend):
         # asserted at load, not a per-request one — a calibrator fitted on masked
         # logprobs describes a distribution the model never produced.
         if getattr(config, "json_schema", None):
-            try:
-                from vllm.sampling_params import GuidedDecodingParams
-
-                sampling["guided_decoding"] = GuidedDecodingParams(json=config.json_schema)
-            except ImportError:  # pragma: no cover - older vLLM
-                log.warning(
-                    "this vLLM build exposes no GuidedDecodingParams, so schema validity is "
-                    "NOT guaranteed at decode time and the IMPL-07 audit gate is the only "
-                    "thing catching an invalid extraction (arch v2.1 §13)."
-                )
+            key, params = structured_outputs_params()
+            sampling[key] = params(json=config.json_schema)
         return SamplingParams(**{k: v for k, v in sampling.items() if v is not None})
 
     @staticmethod
@@ -455,6 +509,7 @@ class VLLMBackend(ModelBackend):
         completion = output.outputs[0]
 
         tokens, logprobs = [], []
+        seconds: list[float | None] = []
         token_ids = list(getattr(completion, "token_ids", None) or [])
         for index, step in enumerate(completion.logprobs or []):
             # Each step maps token_id -> Logprob. The sampled token is looked up
@@ -462,13 +517,17 @@ class VLLMBackend(ModelBackend):
             # structured decoding the sampled token is the best VALID one, which
             # need not be rank 1 in the unmasked distribution — picking rank 1
             # recorded a token that was never emitted and broke reconstruction.
-            chosen = step.get(token_ids[index]) if index < len(token_ids) else None
+            chosen_id = token_ids[index] if index < len(token_ids) else None
+            chosen = step.get(chosen_id) if chosen_id is not None else None
             if chosen is None:
-                chosen = next((lp for lp in step.values() if getattr(lp, "rank", 1) == 1), None)
+                chosen_id, chosen = next(((tid, lp) for tid, lp in step.items() if getattr(lp, "rank", 1) == 1),
+                                         (None, None))
             if chosen is None:
                 continue
             tokens.append(chosen.decoded_token)
             logprobs.append(float(chosen.logprob))
+            # The step holds the top `logprobs` tokens and the sampled one.
+            seconds.append(second_best(((tid, lp.logprob) for tid, lp in step.items()), chosen_id))
 
         text = completion.text
         if tokens and "".join(tokens) != text and "".join(tokens[:-1]) == text:
@@ -477,7 +536,7 @@ class VLLMBackend(ModelBackend):
             # carries no field, so it is dropped - only it, and only when the rest
             # reconstructs the text exactly. Left in, every completed answer
             # failed the check below and was scored as empty.
-            tokens, logprobs = tokens[:-1], logprobs[:-1]
+            tokens, logprobs, seconds = tokens[:-1], logprobs[:-1], seconds[:-1]
         if tokens:
             assert_tokens_reconstruct(text, tokens, "vLLM")
 
@@ -490,6 +549,7 @@ class VLLMBackend(ModelBackend):
             generation_fingerprint=config.fingerprint(),
             latency_ms=round(latency_ms, 1),
             prompt_tokens=len(prompt_ids) if prompt_ids is not None else None,
+            token_top2_logprobs=seconds if any(value is not None for value in seconds) else [],
         )
 
     def generate(self, messages, config, adapter=None) -> Generation:
@@ -651,15 +711,17 @@ class HFBackend(ModelBackend):
 
         tokens: list[str] = []
         logprobs: list[float] = []
+        seconds: list[float | None] = []
         if config.logprobs and getattr(out, "scores", None):
             for step, token_id in zip(out.scores, generated_ids, strict=False):
                 token = processor.decode([token_id], skip_special_tokens=True)
                 if not token:
                     continue      # a special token contributes no text
                 tokens.append(token)
-                logprobs.append(
-                    float(torch.log_softmax(step[0].float(), dim=-1)[token_id])
-                )
+                distribution = torch.log_softmax(step[0].float(), dim=-1)
+                logprobs.append(float(distribution[token_id]))
+                values, ids = torch.topk(distribution, 2)
+                seconds.append(second_best(zip(ids.tolist(), values.tolist(), strict=True), int(token_id)))
 
         if tokens:
             assert_tokens_reconstruct(text, tokens, "Transformers")
@@ -672,6 +734,7 @@ class HFBackend(ModelBackend):
             finish_reason="length" if finished else "stop",
             generation_fingerprint=config.fingerprint(),
             latency_ms=round(latency_ms, 1),
+            token_top2_logprobs=seconds,
         )
 
 

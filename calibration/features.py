@@ -25,9 +25,19 @@ Four logprob features, and five that have nothing to do with logprobs:
   while quietly halving a form's usefulness. Calibrated as its own class.
 * **Field type.** Selects the calibrator. An identifier and a free-text
   description miscalibrate differently and should not share a curve.
-* **Cross-mode agreement.** Optional, for fields the owner marks high-value:
-  does the image-only run agree with the OCR+image one? Disagreement predicts
-  error better than either run's own confidence does.
+* **Raw written.** Whether the answer wrote the printed text (``r``, ``raw``)
+  apart from the value: the fast profile's compact answer writes ``r`` only
+  when the page's text differs from the value, so a value read with a
+  reformatting step is told from one copied as printed.
+* **Near tie.** How close the runner-up token came, at the value's most
+  contested token (``FieldSpan.top2_margin``): a value decided by a near tie is
+  one the model could as well have written otherwise.
+
+Cross-mode agreement (does the image-only reading agree with the OCR one) was
+in the vector and never filled - no caller passed it, so its two columns were
+constants that taught the calibrators nothing. It is out of the vector; a
+calibrator fitted with it still loads and reads it as the constant it always
+was (:data:`LEGACY_FEATURES`).
 """
 
 from __future__ import annotations
@@ -40,9 +50,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from common.normalize import values_match
-
-log = logging.getLogger(__name__)
+log =logging.getLogger(__name__)
 
 #: Field types, each with its own calibrator (arch v2.1 §5.2). Identifiers and
 #: money are exact-match and unforgiving; names and addresses are fuzzy-matched;
@@ -84,13 +92,30 @@ class FieldFeatures:
     ocr_agreement: float | None = None
     rule_checks_passed: bool | None = None
     is_null: bool = False
-    cross_mode_agreement: float | None = None
+    #: Whether the answer wrote the printed text apart from the value (a
+    #: compact answer's ``r``, a full one's ``raw``): its span is the raw one,
+    #: not the parsed one (``common.canonical.collapse_spans``). ``None`` when
+    #: the span says nothing (a bare list of logprobs, a flat document).
+    r_written: bool | None = None
+    #: The smallest top-1 minus top-2 logprob over the value's tokens
+    #: (``inference_core.span_map.FieldSpan.top2_margin``); ``None`` when the
+    #: engine reported no runner-up.
+    top2_margin: float | None = None
 
     #: Set when the span could not be located in the generation. Such a field
     #: gets no confidence at all rather than a default one — a default here is a
     #: number nobody measured, presented as if it were measured.
     mapped: bool = True
     reason: str | None = None
+
+    # --- not features: what the text-dependent ones are computed from ----
+    #: The value as the page prints it (an envelope's ``raw``), the pages its
+    #: envelope cites, and the reading mode it came from. Kept so text agreement
+    #: can be computed again once the page text arrives (fields first,
+    #: ``calibration.post_text``) or is borrowed for an image-only reading.
+    printed_value: Any = None
+    page_ref: list[Any] | None = None
+    modality_mode: str | None = None
 
     @property
     def is_usable(self) -> bool:
@@ -105,19 +130,32 @@ class FieldFeatures:
         learn to distrust every field in image-only mode — where OCR agreement
         cannot be computed at all.
         """
-        return [
-            self.min_logprob,
-            self.mean_logprob,
-            self.first_token_logprob,
-            math.log1p(max(self.token_count, 0)),
-            self.ocr_agreement if self.ocr_agreement is not None else 0.5,
-            1.0 if self.ocr_agreement is not None else 0.0,
-            float(bool(self.rule_checks_passed)) if self.rule_checks_passed is not None else 0.5,
-            1.0 if self.rule_checks_passed is not None else 0.0,
-            1.0 if self.is_null else 0.0,
-            self.cross_mode_agreement if self.cross_mode_agreement is not None else 0.5,
-            1.0 if self.cross_mode_agreement is not None else 0.0,
-        ]
+        values = self.named_values()
+        return [values[name] for name in self.feature_names()]
+
+    def named_values(self) -> dict[str, float]:
+        """Every feature by name: those of :meth:`feature_names`, and the
+        retired ones (:data:`LEGACY_FEATURES`) at the constants they always
+        were, so a calibrator fitted with them still reads its own vector."""
+        return {
+            "min_logprob": self.min_logprob,
+            "mean_logprob": self.mean_logprob,
+            "first_token_logprob": self.first_token_logprob,
+            "log_token_count": math.log1p(max(self.token_count, 0)),
+            "ocr_agreement": self.ocr_agreement if self.ocr_agreement is not None else 0.5,
+            "ocr_agreement_present": 1.0 if self.ocr_agreement is not None else 0.0,
+            "rule_checks_passed": (float(bool(self.rule_checks_passed))
+                                   if self.rule_checks_passed is not None else 0.5),
+            "rule_checks_present": 1.0 if self.rule_checks_passed is not None else 0.0,
+            "is_null": 1.0 if self.is_null else 0.0,
+            "r_written": float(bool(self.r_written)) if self.r_written is not None else 0.5,
+            # exp(-margin): 1.0 at an exact tie, toward 0 as the runner-up falls
+            # away - bounded, so one decisive token cannot swamp the fit.
+            "near_tie": (math.exp(-max(float(self.top2_margin), 0.0))
+                         if self.top2_margin is not None else 0.5),
+            "near_tie_present": 1.0 if self.top2_margin is not None else 0.0,
+            **LEGACY_FEATURES,
+        }
 
     @staticmethod
     def feature_names() -> list[str]:
@@ -126,8 +164,14 @@ class FieldFeatures:
             "ocr_agreement", "ocr_agreement_present",
             "rule_checks_passed", "rule_checks_present",
             "is_null",
-            "cross_mode_agreement", "cross_mode_present",
+            "r_written",
+            "near_tie", "near_tie_present",
         ]
+
+    @staticmethod
+    def known_feature_names() -> list[str]:
+        """The features a stored calibrator may name: today's, then the retired."""
+        return FieldFeatures.feature_names() + list(LEGACY_FEATURES)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -138,6 +182,17 @@ class FieldFeatures:
             "reason": self.reason,
             **dict(zip(self.feature_names(), self.vector(), strict=True)),
         }
+
+
+#: Retired features, at the constant every vector carried for them. Cross-mode
+#: agreement was never filled by any caller, so it was 0.5 with its presence
+#: flag 0 on every row; a calibrator fitted before it was retired still names
+#: them, and reads them as they were.
+LEGACY_FEATURES: dict[str, float] = {"cross_mode_agreement": 0.5, "cross_mode_present": 0.0}
+
+#: The features computed from page text: what changes once the text of a page
+#: read from its image alone arrives (``calibration.post_text``).
+TEXT_FEATURES: tuple[str, ...] = ("ocr_agreement", "ocr_agreement_present")
 
 
 @cache
@@ -353,13 +408,15 @@ def build_features(
     logprobs: list[float] | None,
     document: dict[str, Any],
     page_text: str | None = None,
-    cross_mode_value: Any = None,
     mapped: bool = True,
     reason: str | None = None,
     printed_value: Any = None,
     common_model: bool = False,
     page_ref: Any = None,
     page_texts: dict[int, str] | None = None,
+    r_written: bool | None = None,
+    top2_margin: float | None = None,
+    modality_mode: str | None = None,
 ) -> FieldFeatures:
     """Assemble one field's feature vector.
 
@@ -402,28 +459,54 @@ def build_features(
             if page_texts else ocr_agreement(value if printed_value is None else printed_value, page_text)
         ),
         rule_checks_passed=None if is_null else rule_checks(field_path, value, document),
+        # A null wrote no tokens: nothing was written raw or decided by a tie.
+        r_written=None if is_null else r_written,
+        top2_margin=None if is_null or top2_margin is None else float(top2_margin),
+        printed_value=printed_value,
+        page_ref=list(page_ref) if isinstance(page_ref, (list, tuple)) else page_ref,
+        modality_mode=modality_mode,
     )
     if spans:
         features.min_logprob = min(spans)
         features.mean_logprob = sum(spans) / len(spans)
         features.first_token_logprob = spans[0]
-    if cross_mode_value is not None and not is_null:
-        features.cross_mode_agreement = float(
-            values_match(cross_mode_value, value, field_path=field_path)
-        )
+    return features
+
+
+def refresh_text_features(features: FieldFeatures, page_texts: dict[int, str] | None) -> FieldFeatures:
+    """``features`` with its text agreement computed on ``page_texts`` (each
+    page's text by number), as :func:`build_features` computes it: on the pages
+    the value cites, against what the page prints. In place; returned.
+
+    For a value read from the page images alone whose page text arrives later
+    (fields first, ``calibration.post_text``), or that borrows its document's
+    text to be fitted as production serves it (``calibration.population``).
+    A null has nothing to agree; no text leaves it absent, never 0."""
+    if features.is_null:
+        features.ocr_agreement = None
+        return features
+    printed = features.value if features.printed_value is None else features.printed_value
+    texts = {int(page): str(text or "") for page, text in (page_texts or {}).items()}
+    features.ocr_agreement = page_agreement(printed, features.page_ref, texts) if texts else None
     return features
 
 
 def build_document_features(
     *,
     extraction: dict[str, Any],
-    spans: dict[str, list[float]],
+    spans: dict[str, Any],
     page_text: str | None = None,
-    cross_mode: dict[str, Any] | None = None,
     common_model: bool = False,
     page_texts: dict[int, str] | None = None,
+    modality_mode: str | None = None,
 ) -> list[FieldFeatures]:
     """Feature vectors for every scalar field in one extraction.
+
+    ``spans`` maps a values-view path to its token logprobs, or to its span
+    (``inference_core.span_map.FieldSpan``, after ``collapse_spans``): a span
+    also says whether the printed text was written apart from the value (its
+    path is the envelope's ``raw``, :attr:`FieldFeatures.r_written`) and how
+    close the runner-up token came (``top2_margin``). A bare list says neither.
 
     ``page_texts`` (each page's text by its number) grounds each value on the
     pages its envelope cites; without it, ``page_text`` is searched whole.
@@ -443,28 +526,59 @@ def build_document_features(
     # (both views are no-ops on a flat extraction). The printed view keeps each
     # value's printed form — a canonical envelope's ``raw`` — for OCR agreement.
     printed = flatten_scalars(printed_view(extraction))
-    cited = _cited_pages(extraction) if page_texts else {}
+    # Every value's cited pages, with page text or without: a value read from
+    # the images alone is grounded once its text arrives (refresh_text_features).
+    cited = _cited_pages(extraction)
     extraction = values_view(extraction)
+    logprob_lists = {path: _token_logprobs(span) for path, span in (spans or {}).items()}
+    logprob_lists = {path: lps for path, lps in logprob_lists.items() if lps is not None}
     out: list[FieldFeatures] = []
     for path, value in sorted(flatten_scalars(extraction).items()):
-        logprobs = _span_logprobs(path, value, spans)
+        logprobs = _span_logprobs(path, value, logprob_lists)
         located = logprobs is not None
         empty = value is None or (isinstance(value, list) and not value)
+        r_written, margin = _span_details(path, value, spans or {})
         out.append(build_features(
             field_path=path,
             value=value,
             logprobs=logprobs,
             document=extraction,
             page_text=page_text,
-            cross_mode_value=(cross_mode or {}).get(path),
             mapped=located or empty,
             reason=None if located or empty else "no span located in the generation",
             printed_value=printed.get(path),
             common_model=common_model,
             page_ref=cited.get(path),
             page_texts=page_texts,
+            r_written=r_written,
+            top2_margin=margin,
+            modality_mode=modality_mode,
         ))
     return out
+
+
+def _token_logprobs(span: Any) -> list[float] | None:
+    """A span's token logprobs: the list itself, or a span object's."""
+    if isinstance(span, (list, tuple)):
+        return list(span)
+    logprobs = getattr(span, "token_logprobs", None)
+    return list(logprobs) if isinstance(logprobs, (list, tuple)) else None
+
+
+def _span_details(path: str, value: Any, spans: dict[str, Any]) -> tuple[bool | None, float | None]:
+    """``(raw written, top-2 margin)`` from the span objects behind one field;
+    ``(None, None)`` from bare logprob lists. A list of values reads every
+    element's span: raw written only when every element's was, and the
+    smallest margin among them (the most contested token decides)."""
+    span = spans.get(path)
+    elements = [span] if span is not None else (
+        [spans.get(f"{path}[{index}]") for index in range(len(value))] if isinstance(value, list) else [])
+    if not elements or any(e is None or isinstance(e, (list, tuple)) for e in elements):
+        return None, None
+    kinds = [str(getattr(e, "field_path", "") or "").rsplit(".", 1)[-1] for e in elements]
+    r_written = (all(k == "raw" for k in kinds) if all(k in ("raw", "parsed") for k in kinds) else None)
+    margins = [m for m in (getattr(e, "top2_margin", None) for e in elements) if isinstance(m, (int, float))]
+    return r_written, (min(margins) if margins and len(margins) == len(elements) else None)
 
 
 def _cited_pages(node: Any, path: str = "") -> dict[str, list[Any]]:

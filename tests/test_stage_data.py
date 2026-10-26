@@ -46,6 +46,8 @@ def _as_if_on_the_pod(monkeypatch):
     from training import train as T
 
     monkeypatch.setenv(T.OFF_POD_ENV, "1")
+    # A pod's clean checkout, whatever state this one is in (a real run refuses a dirty tree).
+    monkeypatch.setattr(T, "worktree_state", lambda: (False, None))
     monkeypatch.setattr(T, "_masking_encoder", lambda swift: _stub_masking_encoder())
 
 

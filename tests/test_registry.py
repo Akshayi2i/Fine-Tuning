@@ -390,6 +390,7 @@ def test_latest_promoted_finds_the_serving_version(client):
 
 def _bundle(**over):
     """A release of the policy adapter's v3, as `package` writes it."""
+    from common.config import served_mineru
     from registry_utils.models import ReleaseBundle
 
     base = dict(
@@ -405,6 +406,8 @@ def _bundle(**over):
         vision_config_hash="sha256:bbb",
         vllm_config_hash="sha256:ccc",
         lockfile_hash="sha256:ddd",
+        # Read by the served MinerU: promotion refuses any other (releases.ocr_pin_refusal).
+        ocr_pin={"mineru_version": served_mineru()["version"], "mineru_tier": served_mineru()["tier"]},
     )
     base.update(over)
     return ReleaseBundle(**base)

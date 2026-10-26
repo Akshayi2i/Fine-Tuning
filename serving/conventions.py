@@ -98,7 +98,40 @@ def conform(
             key = f"additional_fields[{now[int(m.group(1))]}]{m.group(2)}"
         rekeyed[key] = span
     present = {path for path, _ in _envelopes(extraction)}
+    flags += _recited_off_page(extraction, notes)
     return Conformed(extraction, {k: v for k, v in rekeyed.items() if k in present}, flags, notes)
+
+
+_RECITED = re.compile(r"^(?P<path>\S+) \[(?P<old>[\d, ]*)\] -> \[(?P<new>[\d, ]*)\]$")
+
+
+def _recited_off_page(extraction: Mapping[str, Any], notes: Iterable[tuple[str, str]]) -> list[str]:
+    """``<path>:printed_off_cited_page`` for each value the page-list rule
+    re-cited to pages none of which it cited: printed, but only off the pages
+    the model said (``serving.value_flags``). The rule mends the citation, as the
+    labels follow it; the doubt it raised - the right figure, maybe read for
+    another row or role - still goes to review, as the printed-values check
+    sends one it finds itself (``serving.printed_values``). A cited page whose
+    text cannot settle it keeps its place in the rule, so is never "off"."""
+    from serving.printed_values import _at
+    from serving.value_flags import OFF_CITED_PAGE_FLAG
+
+    out: list[str] = []
+    for kind, detail in notes:
+        found = _RECITED.match(detail) if kind == "page list" else None
+        if found is None:
+            continue
+        old = {int(page) for page in found["old"].split(",") if page.strip()}
+        new = sorted(int(page) for page in found["new"].split(",") if page.strip())
+        if not old or old & set(new):
+            continue
+        try:
+            envelope = _at(extraction, found["path"])
+        except (KeyError, IndexError, TypeError):
+            continue                       # moved since (an extra field dropped): not named surely
+        if isinstance(envelope, dict) and list(envelope.get("page_ref") or []) == new:
+            out.append(f"{found['path']}:{OFF_CITED_PAGE_FLAG}")
+    return out
 
 
 #: The client's field list: each field's meaning and the labels documents print
@@ -210,6 +243,88 @@ def likely_missed(extraction: Mapping[str, Any], page_texts: Mapping[int, str], 
         if _stated(kind, rest) or (not rest.strip(" :.-\t") and _stated(kind, following)):
             out.append(path)
     return [f"{path}:{LIKELY_MISSED_FLAG}" for path in out]
+
+
+def _first_value(kind: str, text: str) -> str | None:
+    """The first value of ``kind`` printed in ``text``: a date for a date, a
+    figure outside any date for a number or an amount; for text, all of it."""
+    if kind == "DateValue":
+        found = _DATE.search(text)
+        return found.group() if found else None
+    if kind in _FIGURES:
+        found = _NUMBER.search(_DATE.sub(" ", text))
+        return found.group() if found else None
+    stripped = text.strip(" :.-\t|#")
+    return stripped or None
+
+
+def _same_value(kind: str, printed: str, served: Mapping[str, Any]) -> bool | None:
+    """Whether ``printed`` (what a label is followed by) is the value ``served``
+    holds; None when it cannot be told - a reading neither side gives, a text
+    value with no digit (a name continues on the next line as often as not)."""
+    from common import grounding
+    from common.normalize import normalize_currency, normalize_date
+
+    raw, parsed = served.get("raw"), served.get("parsed")
+    if kind == "DateValue":
+        on_page = normalize_date(printed)
+        held = normalize_date(parsed) or normalize_date(raw)
+        return None if on_page is None or held is None else on_page == held
+    if kind in _FIGURES:
+        on_page = normalize_currency(printed)
+        held = (float(parsed) if isinstance(parsed, (int, float)) and not isinstance(parsed, bool)
+                else normalize_currency(raw))
+        return None if on_page is None or held is None else abs(abs(on_page) - abs(held)) < 0.005
+    if not (isinstance(raw, str) and any(ch.isdigit() for ch in raw) and any(ch.isdigit() for ch in printed)):
+        return None
+    return grounding.ground_tolerant(raw, None, {1: printed}).printed
+
+
+def role_mismatches(extraction: Mapping[str, Any], page_texts: Mapping[int, str], pages: Iterable[int],
+                    blocks: Iterable[str]) -> list[str]:
+    """``<block>.<field>:role_mismatch`` for each declarations field (``blocks``)
+    the answer holds a value for while every line of ``pages`` that opens with
+    the field's label - :func:`likely_missed`'s labels, the same rules - is
+    followed by another value.
+
+    The error printed values cannot catch: the value IS printed, as the
+    expiration date or the prior policy's number, and served under the
+    effective date or the policy number. Every labelled line is heard: one
+    printing the served value clears it, so an endorsement's own "Effective
+    Date" line beside the declarations' does not flag a right one. Dates and
+    figures are compared as what they read (a date as a date, an amount as an
+    amount); text only when both hold a digit - an identifier - looked up
+    OCR-tolerantly on the label's line. A flag, never a change."""
+    from common import grounding
+    from serving.value_flags import ROLE_MISMATCH_FLAG
+
+    index = _labels_by_first_word()
+    wanted = set(blocks)
+    lines = [line for page in pages for line in (page_texts.get(page) or "").splitlines() if line.strip()]
+    verdicts: dict[str, list[bool]] = {}
+    for number, line in enumerate(lines):
+        first = grounding.normalise(line).split(" ", 1)[0]
+        match = next(((words, fields, m.group("rest")) for words, fields, pattern in index.get(first, ())
+                      if (m := pattern.match(line))), None)
+        if match is None:
+            continue
+        words, fields, rest = match
+        if len(fields) != 1 or len(words) < MIN_LABEL_CHARS or " " not in words:
+            continue
+        (path, kind), = fields
+        block, _, name = path.partition(".")
+        held = extraction.get(block)
+        if block not in wanted or not isinstance(held, dict):
+            continue
+        value = held.get(name)
+        if not isinstance(value, dict) or value.get("raw") in (None, ""):
+            continue
+        text = rest if rest.strip(" :.-\t|") else (lines[number + 1] if number + 1 < len(lines) else "")
+        printed = _first_value(kind, text) if _stated(kind, text) else None
+        verdict = _same_value(kind, printed, value) if printed else None
+        if verdict is not None:
+            verdicts.setdefault(path, []).append(verdict)
+    return [f"{path}:{ROLE_MISMATCH_FLAG}" for path, seen in verdicts.items() if seen and not any(seen)]
 
 
 def declaration_objects(lob: str | list[str] | None) -> list[str]:

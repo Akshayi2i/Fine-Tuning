@@ -71,6 +71,10 @@ class StagedData:
     #: measures each row's target against. Kept beside the file, not in it:
     #: the trainer reads only messages and images.
     output_caps: dict[str, list[int]] = field(default_factory=dict)
+    #: Per staged file, each row's section group (``decl``, ``arrays``,
+    #: ``lineblk`` ...; else its task), in row order - what the length check
+    #: totals supervised tokens by. Beside the file, like ``output_caps``.
+    groups: dict[str, list[str]] = field(default_factory=dict)
 
 
 def to_swift_row(row: dict[str, Any], local_image: Callable[[str], str]) -> dict[str, Any]:
@@ -168,12 +172,12 @@ def stage_training_data(
 
     # Convert first. The local path of every image is known before it exists, so
     # the conversion — and every refusal in it — runs before any download.
-    converted: list[tuple[str, list[dict[str, Any]], list[int]]] = []
+    converted: list[tuple[str, list[dict[str, Any]], list[int], list[str]]] = []
     keys: set[str] = set()
 
     def local_image(key: str) -> str:
         keys.add(key)
-        return str((cache / key).resolve())
+        return key          # its cache path once every key's is known (image_cache_paths, below)
 
     for name, key in sources:
         rows = _read_rows(client, key)
@@ -183,12 +187,20 @@ def stage_training_data(
             _refuse_other_budgets(rows, max_pixels)
         converted.append((
             name, [to_swift_row(row, local_image) for row in rows], [_output_cap(r) for r in rows],
+            [str(r.get("sections") or r.get("task") or "unknown") for r in rows],
         ))
 
-    missing = sorted(key for key in keys if not (cache / key).exists())
-    _download_all(client, missing, cache, workers)
+    # Where each page is cached: by its content, shared by every cycle that reads
+    # it, when the reading behind it is known (image_cache_paths).
+    local = image_cache_paths(client, sorted(keys), cache, workers=workers,
+                              by_content=images_root is not None and in_staging_cache(images_root))
+    for _name, rows, *_rest in converted:
+        for row in rows:
+            row["images"] = [str(local[key].resolve()) for key in row["images"]]
+    missing = sorted(key for key in keys if not local[key].exists())
+    _download_to(client, [(key, local[key]) for key in missing], workers)
 
-    for name, rows, caps in converted:
+    for name, rows, caps, groups in converted:
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
@@ -197,6 +209,7 @@ def stage_training_data(
         )
         staged.rows += len(rows)
         staged.output_caps[str(target.resolve())] = caps
+        staged.groups[str(target.resolve())] = groups
         if name.startswith("val/"):
             staged.val_path, staged.val_rows = str(target.resolve()), len(rows)
         else:
@@ -237,11 +250,178 @@ def _refuse_other_budgets(rows: list[dict[str, Any]], max_pixels: int) -> None:
 
 
 def _download_all(client: BlobClient, keys: list[str], cache: Path, workers: int) -> None:
-    """Fetch ``keys`` concurrently. The first failure cancels what has not started."""
-    if not keys:
+    """Fetch ``keys`` concurrently, each to ``cache / key``."""
+    _download_to(client, [(key, cache / key) for key in keys], workers)
+
+
+# --------------------------------------------------------------------------
+# The page-image cache, by content
+# --------------------------------------------------------------------------
+
+#: The cache shared by every corpus version, beside the per-version folders
+#: (``paths.staging_train_images_dir``): a page is filed under its blob key and
+#: a tag of the reading that rendered it (:func:`content_tag`).
+CONTENT_CACHE_DIR = "by-content"
+
+#: Tags kept per page in the content cache: the newest (what a cycle reads) and
+#: the one before (a resumed run, or a comparison, may still read it).
+KEEP_CONTENT_TAGS = 2
+
+#: What a document's ``ocr_meta.json`` says about its page images' pixels.
+_CONTENT_FIELDS = ("source_checksum", "mineru_version", "mineru_tier", "ocr_device", "resolution_cap_px",
+                   "preprocessing_date")
+
+
+def in_staging_cache(images_root: str | Path) -> bool:
+    """Whether ``images_root`` is a per-version folder of the staging image cache
+    (``paths.staging_train_images_dir``: ``.../train-images/<tenant>/<version>``),
+    beside which the content cache lives - inside the tree the purge plan
+    lists (``pull_raw_pdfs``). Any other cache (the testing harness's) stays keyed by blob key."""
+    return Path(images_root).parent.parent.name == "train-images"
+
+
+def content_cache_root(images_root: str | Path) -> Path:
+    """The content-keyed cache beside a per-version image cache."""
+    return Path(images_root).parent / CONTENT_CACHE_DIR
+
+
+def content_tag(ocr_meta: dict[str, Any]) -> str | None:
+    """A tag for the pixels a document's reading rendered, or None when its
+    ``ocr_meta.json`` cannot say.
+
+    From what makes them: the PDF (``source_checksum``), the MinerU that read it,
+    its tier and device, the resolution cap, and when it was rendered - a
+    re-render after a renderer fix keeps every other field. Two cycles that read
+    one reading share its pages; a reading made again is a new tag, so a cache
+    spanning versions never serves the old pixels.
+    """
+    import hashlib
+
+    if not ocr_meta.get("source_checksum") or not ocr_meta.get("preprocessing_date"):
+        return None
+    identity = json.dumps({k: ocr_meta.get(k) for k in _CONTENT_FIELDS}, sort_keys=True, default=str)
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+
+def _tagged(key: str, tag: str) -> str:
+    """``processed/t/policy/s/page_3.png`` -> ``processed/t/policy/s/page_3.<tag>.png``."""
+    folder, _, name = key.rpartition("/")
+    stem, dot, suffix = name.rpartition(".")
+    name = f"{stem}.{tag}.{suffix}" if dot else f"{name}.{tag}"
+    return f"{folder}/{name}" if folder else name
+
+
+def _readings(client: BlobClient, keys: Sequence[str], workers: int) -> dict[str, dict[str, Any]]:
+    """``{document folder: its ocr_meta.json}`` for every page key under
+    ``processed/``, read once per document, through a pool. A folder with no
+    readable meta is left out."""
+    folders = sorted({key.rpartition("/")[0] for key in keys
+                      if key.startswith("processed/") and key.count("/") >= 4})
+    if not folders:
+        return {}
+
+    def read(folder: str) -> dict[str, Any] | None:
+        meta = f"{folder}/ocr_meta.json"
+        try:
+            return client.read_json(meta) if client.exists(meta) else None
+        except Exception as exc:  # noqa: BLE001 - an unreadable meta is cached by key, as before
+            log.warning("image cache: %s unreadable (%s); its pages are cached per corpus version", meta, exc)
+            return None
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(folders)))) as pool:
+        metas = list(pool.map(read, folders))
+    return {folder: meta for folder, meta in zip(folders, metas, strict=True) if isinstance(meta, dict)}
+
+
+def image_cache_paths(
+    client: BlobClient, keys: Sequence[str], images_root: str | Path, *,
+    workers: int = DOWNLOAD_WORKERS, by_content: bool = True,
+) -> dict[str, Path]:
+    """``{blob key: where the page is cached}``. Downloads nothing.
+
+    By content (:func:`content_tag`), under :data:`CONTENT_CACHE_DIR` beside the
+    per-version ``images_root``: every cycle and corpus version that reads a
+    page reads one copy, fetched once, until a new reading renders it again.
+    Before, the cache was per corpus version, and every cycle fetched every page
+    of the corpus again. A key whose reading is unknown - not under
+    ``processed/``, or no ``ocr_meta.json`` that says - stays under
+    ``images_root / key``, per version, as before.
+
+    Older caches stay readable: a page found in a per-version folder (this
+    version's or another's) fetched after its reading was rendered is that
+    reading's pixels, and is linked (or copied) into the content cache rather
+    than fetched again. One fetched before - a re-OCR since - is left alone.
+    """
+    root = Path(images_root)
+    out = {key: root / key for key in keys}
+    if not by_content or not keys:
+        return out
+    readings = _readings(client, keys, workers)
+    content = content_cache_root(root)
+    old_roots = _old_caches(root)
+    for key in keys:
+        meta = readings.get(key.rpartition("/")[0])
+        tag = content_tag(meta) if meta else None
+        if tag is None:
+            continue
+        target = content / _tagged(key, tag)
+        if not target.exists():
+            _adopt(old_roots, key, target, meta.get("preprocessing_date"))
+        out[key] = target
+    return out
+
+
+def _old_caches(images_root: Path) -> list[Path]:
+    """The per-version caches, this one first, then the most recently used."""
+    parent = images_root.parent
+    if not parent.is_dir():
+        return [images_root]
+    others = sorted((d for d in parent.iterdir()
+                     if d.is_dir() and d.name != CONTENT_CACHE_DIR and d != images_root),
+                    key=lambda d: d.stat().st_mtime, reverse=True)
+    return [images_root, *others]
+
+
+def _adopt(old_roots: Sequence[Path], key: str, target: Path, rendered: Any) -> bool:
+    """Place a page an older per-version cache holds at ``target``, when it was
+    fetched after its reading rendered it. True when it did."""
+    from datetime import datetime
+
+    try:
+        since = datetime.fromisoformat(str(rendered)).timestamp()
+    except (TypeError, ValueError):
+        return False
+    for old_root in old_roots:
+        old = old_root / key
+        try:
+            if not old.is_file() or old.stat().st_mtime < since:
+                continue
+        except OSError:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_name(f"{target.name}.{os.getpid()}.{uuid.uuid4().hex}.part")
+        try:
+            try:
+                os.link(old, partial)
+            except OSError:
+                import shutil
+
+                shutil.copy2(old, partial)
+            os.replace(partial, target)
+            return True
+        except OSError as exc:
+            partial.unlink(missing_ok=True)
+            log.debug("image cache: %s not adopted from %s (%s)", key, old_root, exc)
+    return False
+
+
+def _download_to(client: BlobClient, targets: list[tuple[str, Path]], workers: int) -> None:
+    """Fetch each ``(key, local path)`` concurrently. The first failure cancels
+    what has not started."""
+    if not targets:
         return
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = [pool.submit(_download, client, key, cache / key) for key in keys]
+        futures = [pool.submit(_download, client, key, target) for key, target in targets]
         try:
             for future in futures:
                 future.result()
@@ -334,9 +514,10 @@ def localize_keys(
     selection, calibration, the golden eval — so a page is fetched once per
     cache, atomically, whichever asks first.
     """
-    cache = Path(images_root)
-    _download_all(client, [k for k in keys if not (cache / k).exists()], cache, workers)
-    return {key: str((cache / key).resolve()) for key in keys}
+    local = image_cache_paths(client, list(keys), images_root, workers=workers,
+                              by_content=in_staging_cache(images_root))
+    _download_to(client, [(key, path) for key, path in local.items() if not path.exists()], workers)
+    return {key: str(local[key].resolve()) for key in keys}
 
 
 #: Corpus versions whose image cache is kept besides the one being staged: the
@@ -352,6 +533,10 @@ def prune_image_caches(images_root: str | Path, *, keep: int = KEEP_OTHER_IMAGE_
     pages on the volume until it filled and a staging download failed mid-run.
     The current version is never touched; of the others the ``keep`` most
     recently used survive.
+
+    The content-keyed cache (:data:`CONTENT_CACHE_DIR`) is shared by every
+    version and never removed whole: of each page's tags (a reading each), the
+    :data:`KEEP_CONTENT_TAGS` newest stay (:func:`prune_content_cache`).
     """
     import shutil
 
@@ -360,7 +545,8 @@ def prune_image_caches(images_root: str | Path, *, keep: int = KEEP_OTHER_IMAGE_
     if not parent.is_dir():
         return []
     others = sorted(
-        (d for d in parent.iterdir() if d.is_dir() and d.resolve() != current),
+        (d for d in parent.iterdir()
+         if d.is_dir() and d.resolve() != current and d.name != CONTENT_CACHE_DIR),
         key=lambda d: d.stat().st_mtime, reverse=True,
     )
     removed = []
@@ -369,4 +555,29 @@ def prune_image_caches(images_root: str | Path, *, keep: int = KEEP_OTHER_IMAGE_
         removed.append(str(stale))
     if removed:
         log.info("pruned %d old image cache(s): %s", len(removed), removed)
+    removed += prune_content_cache(content_cache_root(current))
+    return removed
+
+
+def prune_content_cache(content_root: str | Path, *, keep: int = KEEP_CONTENT_TAGS) -> list[str]:
+    """Delete the older readings' copies of each page in the content cache: of
+    ``page_N.<tag>.png`` the ``keep`` most recently written stay. Returns what went."""
+    root = Path(content_root)
+    if not root.is_dir():
+        return []
+    by_page: dict[tuple[str, str, str], list[Path]] = {}
+    for path in root.rglob("*"):
+        parts = path.name.split(".")
+        if len(parts) < 3 or parts[-1] == "part" or not path.is_file():
+            continue
+        # page_3.<tag>.png -> (folder, page_3, png)
+        by_page.setdefault((str(path.parent), ".".join(parts[:-2]), parts[-1]), []).append(path)
+    removed = []
+    for copies in by_page.values():
+        copies.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in copies[keep:]:
+            stale.unlink(missing_ok=True)
+            removed.append(str(stale))
+    if removed:
+        log.info("pruned %d superseded page image(s) from %s", len(removed), root)
     return removed

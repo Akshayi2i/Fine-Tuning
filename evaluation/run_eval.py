@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import functools
 import hashlib
 import json
@@ -81,7 +82,21 @@ UNREAD_PAGES = "printed_text_unread_pages"
 #: values checked, the fields compared - rather than each doc type's rate
 #: weighted by its readings: hallucination_rate is every value no page prints
 #: over every value checked, wherever they are.
-POOLED_METRICS: tuple[str, ...] = ("hallucination_rate", "run_to_run_agreement")
+POOLED_METRICS: tuple[str, ...] = ("hallucination_rate", "run_to_run_agreement",
+                                   "served_field_match", "real_ocr_plus_image_accuracy")
+
+#: Field match per reading mode on REAL documents (decision 2026-10-26), each
+#: the mean over its readings of the share of fields right - the per-reading
+#: definition of field_normalized_match - pooled over every doc type's readings
+#: (:data:`POOLED_METRICS`). Synthetic twins are left out: their labels came
+#: from a generator. ``served_field_match`` is what users receive: production
+#: reads the page images (image_only) and golden_eval scores those readings as
+#: served, held to the document's borrowed MinerU text. The gate's tier, its
+#: improvement rule and non-inferiority read it (``gating.SERVED_FIELD_MATCH``).
+REAL_MODE_METRICS: dict[str, str] = {
+    "served_field_match": IMAGE_ONLY_MODE,
+    "real_ocr_plus_image_accuracy": TEXT_DONOR_MODE,
+}
 
 
 class EvalError(RuntimeError):
@@ -275,10 +290,14 @@ def yardstick_settings() -> dict[str, Any]:
     """What the configuration sets about how the gate measures, recorded in
     every eval report's ``eval_set`` and folded into :func:`scoring_fingerprint`:
     the mode the golden eval reads a second time for run_to_run_agreement
-    (``run_to_run_mode``, ``evaluation.golden_eval.run_to_run_mode``)."""
-    from evaluation.golden_eval import run_to_run_mode
+    (``run_to_run_mode``, ``evaluation.golden_eval.run_to_run_mode``), and the
+    shares of the frozen set read in noisy_ocr_image and read twice
+    (``golden_noisy_share``, ``run_to_run_share``: below 1.0 another set of
+    readings is scored, so another number)."""
+    from evaluation.golden_eval import golden_noisy_share, run_to_run_mode, run_to_run_share
 
-    return {"run_to_run_mode": run_to_run_mode()}
+    return {"run_to_run_mode": run_to_run_mode(), "golden_noisy_share": golden_noisy_share(),
+            "run_to_run_share": run_to_run_share()}
 
 
 @functools.lru_cache(maxsize=1)
@@ -365,6 +384,11 @@ def yardstick_difference(
     if all(modes) and modes[0] != modes[1]:
         return (f"the two read their run-to-run repeat in different modes (the promoted release "
                 f"{modes[0]}, the candidate {modes[1]}), so their run_to_run_agreement are two numbers")
+    for share in ("golden_noisy_share", "run_to_run_share"):
+        shares = (promoted.get(share), candidate.get(share))
+        if all(s is not None for s in shares) and float(shares[0]) != float(shares[1]):
+            return (f"the two read different shares of the frozen set ({share}: the promoted release "
+                    f"{shares[0]}, the candidate {shares[1]}), so their scores are over other readings")
     if promoted["scoring_fingerprint"] != candidate["scoring_fingerprint"]:
         return (f"the two were scored by different scoring code (label rules, label verification "
                 f"or scorers; scoring fingerprint {promoted['scoring_fingerprint']} against "
@@ -442,6 +466,10 @@ class SubsetReport:
     printed_values: dict[str, Any] | None = None
     #: What run_to_run_agreement is over: the documents and fields compared.
     run_to_run: dict[str, Any] | None = None
+    #: The full set's error analysis (:func:`_error_analysis`): per carrier,
+    #: per mode, per field, the field confusions. Reported, never gated; kept
+    #: out of :meth:`as_dict`, carried once at the top (``error_analysis``).
+    analysis: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -640,7 +668,38 @@ class EvalReport:
             # Read with per_document: which line each real document is of, for
             # a continued run's line-by-line gate (decision 2026-10-23).
             "per_document_lines": dict(sorted(self.per_document_lines().items())),
+            # Where the errors are, over the full set (reported, never gated):
+            # per carrier, per mode, per field, which field's value turned up
+            # under which other one, and seen against unseen carriers.
+            "error_analysis": {report.doc_type: report.analysis
+                               for report in self.full_set() if report.analysis},
+            # What the gate's tier will rest on (decision 2026-10-26).
+            "tier_evidence": self.tier_evidence(),
         }
+
+    def tier_evidence(self) -> dict[str, Any]:
+        """What the gate's tier will rest on (``gating.tier_evidence``):
+        served_field_match, its one-sided 95% lower bound bootstrapped over the
+        real documents, and the tier and tier_confidence they give IF the gate
+        passes and the frozen set is full size.
+
+        The eval report is written before the gate decides, so the tier here is
+        named ``tier_if_gate_passes``: the gate decision records the tier.
+        """
+        from evaluation.gating import SERVED_FIELD_MATCH, tier_evidence
+
+        point = self.gate_metrics().get(SERVED_FIELD_MATCH)
+        scores = self.per_document_scores().get(SERVED_FIELD_MATCH, {})
+        weights = self.per_document_weights().get(SERVED_FIELD_MATCH, {})
+        ids = sorted(scores)
+        evidence = tier_evidence(
+            # As the gate reads it back from this report: rounded to 4 places.
+            {} if point is None else {SERVED_FIELD_MATCH: round(point, 4)},
+            ([scores[d] for d in ids], [weights.get(d, 1.0) for d in ids]) if ids else None,
+        ).as_dict()
+        evidence["tier_if_gate_passes"] = evidence.pop("tier")
+        evidence["tier_confidence_if_gate_passes"] = evidence.pop("tier_confidence")
+        return evidence
 
 
 # --------------------------------------------------------------------------
@@ -716,6 +775,7 @@ def score_subset(
     scored: Sequence[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]],
 ) -> SubsetReport:
     """Score one doc type × subset from ``(expected, got, metadata)`` triples."""
+    from calibration.features import infer_field_type
     from common.lob import merge_line, single_line
     from evaluation.metrics.auto_accept import AutoAcceptTally, score_auto_accept
     from evaluation.metrics.common_model import CommonModelTally, core_for_scoring, without_overflow
@@ -774,6 +834,13 @@ def score_subset(
     auto_accept = AutoAcceptTally()
     confidences: list[float] = []
     correctness: list[bool] = []
+    # The same pairs by field type (reported: is a type's confidence honest).
+    confidence_by_type: dict[str, tuple[list[float], list[bool]]] = {}
+    # Field match without the codes the model assigns rather than reads
+    # (coverage_code and the like): per reading, as field match is pooled.
+    pooled_without_codes: dict[Any, list[int]] = {}
+    # Where the errors are, over the full set only (reported, never gated).
+    analysis = _ErrorAnalysis() if subset == "full" else None
 
     # Field accuracy is pooled per DOCUMENT reading (source x modality), then
     # averaged over documents. Averaged per row, a policy read as sixty windows
@@ -782,6 +849,8 @@ def score_subset(
     # score — boilerplate pages answered with nothing — adds nothing, rather
     # than a 0.0.
     pooled: dict[Any, list[int]] = {}
+    # The readings (keys of ``pooled``) of real documents, for REAL_MODE_METRICS.
+    real_readings: set[Any] = set()
     # Each document's list recalls, for its per-document score.
     recalls_by_source: dict[str, list[float]] = {}
     for index, (expected, got, metadata) in enumerate(scored):
@@ -804,10 +873,19 @@ def score_subset(
             document_line = single_line(metadata.get("lob"))
             if document_line:
                 report.per_document_line[str(metadata["source_id"])] = document_line
+        if not metadata.get("synthetic"):
+            real_readings.add(key)
         tally = pooled.setdefault(key, [0, 0, 0])
         tally[0] += sum(r.correct for r in accuracy.results)
         tally[1] += sum(r.exact for r in accuracy.results)
         tally[2] += accuracy.total
+        codes = model_assigned_paths(expected, got)
+        read = [r for r in accuracy.results if _field_pattern(r.field_path) not in codes]
+        without_codes = pooled_without_codes.setdefault(key, [0, 0])
+        without_codes[0] += sum(r.correct for r in read)
+        without_codes[1] += len(read)
+        if analysis is not None:
+            analysis.add(metadata, accuracy.results, _line_name(lines[index]))
         lob_tally = by_lob.setdefault(_line_name(lines[index]), [0, 0])
         lob_tally[0] += sum(r.correct for r in accuracy.results)
         lob_tally[1] += accuracy.total
@@ -837,9 +915,15 @@ def score_subset(
             if isinstance(score, (int, float)) and not isinstance(score, bool):
                 confidences.append(float(score))
                 correctness.append(bool(result.correct))
+                field_type = infer_field_type(result.field_path, result.got, common_model=common_model[index])
+                pairs = confidence_by_type.setdefault(field_type, ([], []))
+                pairs[0].append(float(score))
+                pairs[1].append(bool(result.correct))
+                if analysis is not None:
+                    analysis.confidence(metadata, field_type, float(score), bool(result.correct))
 
         for result in accuracy.failures():
-            report.error_records.append({
+            record = {
                 "source_id": metadata.get("source_id", ""),
                 "field_path": result.field_path,
                 "expected": result.expected,
@@ -848,7 +932,12 @@ def score_subset(
                 "modality_mode": metadata.get("modality_mode", "ocr_plus_image"),
                 "is_scanned": bool(metadata.get("is_scanned")),
                 "lob": _line_name(lines[index]),
-            })
+            }
+            if metadata.get("carrier"):
+                record["carrier"] = str(metadata["carrier"])
+            report.error_records.append(record)
+            if analysis is not None:
+                analysis.error(metadata, record["error_class"])
 
         tables = (without_overflow(expected), without_overflow(got)) if common_model[index] else (expected, got)
         for list_report in score_all_list_fields(*tables, common_model=common_model[index]).values():
@@ -859,6 +948,10 @@ def score_subset(
             if list_report.got_rows:
                 list_precisions.append(list_report.precision)
 
+    accuracies_without_codes = [correct / total for correct, total in pooled_without_codes.values() if total]
+    if analysis is not None:
+        report.analysis = analysis.as_dict(by_field)
+
     # Per document: the mean of its readings (one per modality), so that over
     # documents read in the same modes it averages to the subset's own number.
     readings_by_source: dict[str, list[tuple[float, float]]] = {}
@@ -868,6 +961,14 @@ def score_subset(
             exacts.append(exact / total)
             if not str(source).startswith("#"):
                 readings_by_source.setdefault(source, []).append((correct / total, exact / total))
+    # Field match per mode on real documents (REAL_MODE_METRICS): each reading
+    # counts once, as in field_normalized_match.
+    real_by_mode: dict[str, _Pooled] = {name: _Pooled() for name in REAL_MODE_METRICS}
+    for (source, mode), (correct, _exact, total) in pooled.items():
+        if total and (source, mode) in real_readings:
+            for name, wanted in REAL_MODE_METRICS.items():
+                if mode == wanted:
+                    real_by_mode[name].add(str(source), correct / total, 1.0)
 
     lob = score_lob([(e, g) for e, g, _m in scored])
     misattribution = aggregate_misattribution(misattributions)
@@ -939,7 +1040,8 @@ def score_subset(
     # readings compared (POOLED_METRICS).
     printed = _printed_values(scored, common_model, score_hallucinations)
     agreement = _run_to_run(scored, common_model, lines)
-    for name, tally in (("hallucination_rate", printed), ("run_to_run_agreement", agreement)):
+    for name, tally in (("hallucination_rate", printed), ("run_to_run_agreement", agreement),
+                        *real_by_mode.items()):
         report.per_document[name] = tally.per_document()
         report.per_document_items[name] = tally.weights()
         if tally.weight:
@@ -1008,8 +1110,28 @@ def score_subset(
         "page_ref_exact_rate": page_refs.exact_rate,
         "page_ref_precision": page_refs.precision,
         "page_ref_recall": page_refs.recall,
-        # None when no value carried a flag (a flat extraction): not measured.
+        # None when no value carried a flag (a flat extraction), or when none
+        # was accepted: no error rate among accepted values exists then. The
+        # gate reads None as unmeasured (a conditional metric, gating.py).
         "auto_accept_error_rate": auto_accept.rate,
+        # Reported, never gated: of the values a flag decided, the share
+        # accepted - overall and per field type - and how right the accepted
+        # ones were, with the Wilson 95% lower bound (selective accuracy).
+        "auto_accept_coverage": auto_accept.coverage,
+        "auto_accept_coverage_by_type": auto_accept.coverage_by_type() or None,
+        "auto_accept_counts": ({"decided": auto_accept.flags_seen,
+                                "accepted": auto_accept.accepted, "wrong": auto_accept.wrong}
+                               if auto_accept.flags_seen else None),
+        "selective_accuracy": auto_accept.selective_accuracy,
+        "selective_accuracy_lower_95": auto_accept.selective_accuracy_lower,
+        "selective_accuracy_by_type": auto_accept.selective_by_type() or None,
+        # Reported, never gated (the tier reads served_field_match): the
+        # same field match without the codes the model assigns rather than
+        # reads off the page (coverage_code and every other bare value of an
+        # enveloped answer, model_assigned_paths).
+        "field_normalized_match_without_codes": (
+            sum(accuracies_without_codes) / len(accuracies_without_codes)
+            if accuracies_without_codes else None),
         # Absent, not 0.0, when no document in the set carries a line to score.
         "lob_detection_accuracy": lob.overall if lob.scored else None,
         "lob_accuracy_by_value": lob.accuracy_by_value(),
@@ -1023,6 +1145,11 @@ def score_subset(
         "ece_confidence": (
             expected_calibration_error(confidences, correctness) if confidences else None
         ),
+        # Reported, not gated: the same gap per field type (each its own calibrator).
+        "ece_by_field_type": {
+            field_type: round(expected_calibration_error(scores, right), 4)
+            for field_type, (scores, right) in sorted(confidence_by_type.items()) if scores
+        } or None,
         # --- arch v2.1 §15.2: faults an aggregate field score cannot see ------
         #
         # A false null produces NO tokens, so §5 confidence is blind to it —
@@ -1051,6 +1178,10 @@ def score_subset(
         # Two readings of one document in the main mode, the second sent in
         # another order: the share of fields they agree on (run_to_run_agreement).
         "run_to_run_agreement": agreement.rate,
+        # Field match on real documents' image_only readings as served (what
+        # users receive) and on their ocr_plus_image readings (REAL_MODE_METRICS).
+        # Absent where the subset holds no real reading of that mode.
+        **{name: tally.rate for name, tally in real_by_mode.items()},
         # Emitted only where reconciliation ran — Loss Runs. gate_metrics()
         # weights by the documents that produced each metric, so a metric that
         # only one doc type can produce still reaches the gate, weighted by that
@@ -1110,6 +1241,215 @@ def _error_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             for name, counts in sorted(by_field.items(), key=lambda item: -sum(item[1].values()))[:15]
         ],
     }
+
+
+def _field_pattern(path: str) -> str:
+    """A field's path with its rows unnumbered: ``coverages[3].limit`` is
+    ``coverages[].limit``, one field of every row."""
+    return re.sub(r"\[[^\]]*\]", "[]", path)
+
+
+def model_assigned_paths(expected: Any, got: Any) -> set[str]:
+    """The fields (:func:`_field_pattern`) the model assigns rather than reads:
+    every bare value - a scalar, or a list of them, outside any envelope - of an
+    answer or label written in envelopes. A common-model policy's
+    ``coverage_code`` and the other codes and types; its ids and links are not
+    scored as values at all. Empty for a flat document (no envelopes), where no
+    value is told from another."""
+    from evaluation.metrics.extraction_faults import _has_envelope
+
+    if not (_has_envelope(expected) or _has_envelope(got)):
+        return set()
+    return _bare_paths(expected, "") | _bare_paths(got, "")
+
+
+def _bare_paths(node: Any, path: str) -> set[str]:
+    from common.canonical import is_field_value
+
+    if is_field_value(node):
+        return set()
+    if isinstance(node, dict):
+        out: set[str] = set()
+        for key, value in node.items():
+            out |= _bare_paths(value, f"{path}.{key}" if path else str(key))
+        return out
+    if isinstance(node, list):
+        if node and not any(isinstance(item, (dict, list)) for item in node):
+            return {_field_pattern(path)}
+        out = set()
+        for item in node:
+            out |= _bare_paths(item, f"{path}[]")
+        return out
+    return {_field_pattern(path)} if node not in (None, "") and path else set()
+
+
+#: The field confusions kept per report: the most frequent first.
+CONFUSIONS_REPORTED = 50
+
+
+@dataclass
+class _ErrorAnalysis:
+    """The full set's errors, tallied for :attr:`SubsetReport.analysis`:
+    field match per carrier, per reading mode and - where the readings say -
+    per carrier seen in training or not; the error classes of each; the
+    calibration error per mode and field type; and which label field's value
+    the answer wrote under another field (``field_confusion``)."""
+
+    carriers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    modes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    seen: dict[str, dict[str, Any]] = field(default_factory=dict)
+    confusions: Counter = field(default_factory=Counter)
+    examples: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
+    mode_confidence: dict[str, dict[str, tuple[list[float], list[bool]]]] = field(default_factory=dict)
+
+    @staticmethod
+    def _keys(metadata: dict[str, Any]) -> tuple[str, str, str | None]:
+        seen = metadata.get("carrier_seen_in_train")
+        return (str(metadata.get("carrier") or "unknown"), str(metadata.get("modality_mode") or "unknown"),
+                ("seen" if seen else "unseen") if isinstance(seen, bool) else None)
+
+    def _rows(self, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+        carrier, mode, seen = self._keys(metadata)
+        tables = [(self.carriers, carrier), (self.modes, mode)] + ([(self.seen, seen)] if seen else [])
+        return [table.setdefault(key, {"documents": set(), "readings": 0, "scored": 0, "correct": 0,
+                                       "errors_by_class": Counter()}) for table, key in tables]
+
+    def add(self, metadata: dict[str, Any], results: Sequence[Any], line: str) -> None:
+        for row in self._rows(metadata):
+            row["documents"].add(str(metadata.get("source_id") or ""))
+            row["readings"] += 1
+            row["scored"] += len(results)
+            row["correct"] += sum(bool(r.correct) for r in results)
+        self._confusions(results, metadata, line)
+
+    def error(self, metadata: dict[str, Any], error_class: str) -> None:
+        for row in self._rows(metadata):
+            row["errors_by_class"][error_class or "unknown"] += 1
+
+    def confidence(self, metadata: dict[str, Any], field_type: str, score: float, correct: bool) -> None:
+        by_type = self.mode_confidence.setdefault(str(metadata.get("modality_mode") or "unknown"), {})
+        pairs = by_type.setdefault(field_type, ([], []))
+        pairs[0].append(score)
+        pairs[1].append(correct)
+
+    def _confusions(self, results: Sequence[Any], metadata: dict[str, Any], line: str) -> None:
+        """A label value of field A written under another field B: indexed by
+        its normalised form, so each wrong value is looked up, not compared with
+        every field; confirmed as field match compares (``values_agree``)."""
+        from evaluation.metrics.extraction_faults import _is_empty
+        from evaluation.metrics.field_accuracy import values_agree
+
+        gold: dict[str, list[Any]] = {}
+        for result in results:
+            for key in () if _is_empty(result.expected) else _confusion_keys(result.expected, result.field_path):
+                gold.setdefault(key, []).append(result)
+        for result in results:
+            if result.correct or _is_empty(result.got):
+                continue
+            found_under = _field_pattern(result.field_path)
+            candidates = {id(o): o for key in _confusion_keys(result.got, result.field_path) for o in gold.get(key, [])}
+            for other in sorted(candidates.values(), key=lambda o: o.field_path):
+                gold_field = _field_pattern(other.field_path)
+                if gold_field == found_under or not values_agree(other.expected, result.got, other.field_path):
+                    continue
+                pair = (gold_field, found_under)
+                self.confusions[pair] += 1
+                kept = self.examples.setdefault(pair, [])
+                if len(kept) < 3:
+                    kept.append({"source_id": metadata.get("source_id", ""), "value": str(result.got)[:80],
+                                 "mode": metadata.get("modality_mode"), "lob": line})
+                break
+
+    def as_dict(self, by_field: dict[str, list[int]]) -> dict[str, Any]:
+        from evaluation.metrics.coverage_metrics import expected_calibration_error
+
+        def table(rows: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+            return {key: {"documents": len(row["documents"]), "readings": row["readings"],
+                          "fields_scored": row["scored"], "fields_wrong": row["scored"] - row["correct"],
+                          "field_match": round(row["correct"] / row["scored"], 4) if row["scored"] else None,
+                          "errors_by_class": dict(row["errors_by_class"].most_common())}
+                    for key, row in sorted(rows.items())}
+
+        def ece(pairs: tuple[list[float], list[bool]]) -> float | None:
+            return round(expected_calibration_error(*pairs), 4) if pairs[0] else None
+
+        modes = table(self.modes)
+        for mode, by_type in self.mode_confidence.items():
+            if mode in modes:
+                every = ([s for scores, _ in by_type.values() for s in scores],
+                         [ok for _, right in by_type.values() for ok in right])
+                modes[mode]["ece"] = ece(every)
+                modes[mode]["ece_by_field_type"] = {t: ece(pairs) for t, pairs in sorted(by_type.items())}
+        out: dict[str, Any] = {
+            "by_carrier": table(self.carriers),
+            "by_mode": modes,
+            "by_field": {name: {"scored": total, "correct": correct, "accuracy": round(correct / total, 4)}
+                         for name, (correct, total) in sorted(by_field.items()) if total},
+            "field_confusion": [
+                {"gold_field": gold, "found_under": under, "count": count, "examples": self.examples[(gold, under)]}
+                for (gold, under), count in self.confusions.most_common(CONFUSIONS_REPORTED)
+            ],
+        }
+        if self.seen:
+            out["by_carrier_seen_in_train"] = table(self.seen)
+        return out
+
+
+def _confusion_keys(value: Any, path: str) -> set[str]:
+    """A value's forms to find it under another field by: normalised for its
+    own field, and as its bare letters and digits (two fields of different
+    kinds normalise one value differently). None too short or too plain to say
+    anything (a flag, a ``1``)."""
+    from common.normalize import normalize_value
+
+    if isinstance(value, (bool, dict, list)) or value is None:
+        return set()
+    keys = {re.sub(r"[^0-9a-z]", "", str(value).casefold())}
+    # A value no normaliser reads is looked up bare.
+    with contextlib.suppress(Exception):
+        keys.add(str(normalize_value(value, field_path=path) or "").strip())
+    return {key for key in keys if len(key) >= 4}
+
+
+def field_deltas(report: dict[str, Any], promoted: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Each field's accuracy against the promoted release's eval report, per doc
+    type: ``{doc_type: {"against", "same_yardstick", "fields": [...]}}``, the
+    fields both scored, the largest drop first. Read from each report's
+    ``error_analysis`` ``by_field``; a promoted report written before it was
+    kept offers its ``weakest_fields`` (the fields it reported at all). ``None``
+    with no promoted report, or nothing to compare. Reported, never gated: on
+    another yardstick (``same_yardstick`` false) a move may be the set or the
+    scoring, not the model."""
+    if not promoted:
+        return None
+    mine = report.get("error_analysis") or {}
+    theirs_all = promoted.get("error_analysis") or {}
+    same = yardstick_difference(promoted.get("eval_set"), report.get("eval_set"), None) is None if (
+        promoted.get("eval_set") and report.get("eval_set")) else None
+    out: dict[str, Any] = {}
+    for doc_type, analysis in sorted(mine.items()):
+        current = analysis.get("by_field") or {}
+        theirs = (theirs_all.get(doc_type) or {}).get("by_field") or _weakest_fields(promoted, doc_type)
+        fields = []
+        for name in sorted(set(current) & set(theirs)):
+            now, then = current[name], theirs[name]
+            if now.get("accuracy") is None or then.get("accuracy") is None:
+                continue
+            fields.append({"field": name, "accuracy": now["accuracy"], "promoted": then["accuracy"],
+                           "delta": round(now["accuracy"] - then["accuracy"], 4),
+                           "scored": now.get("scored"), "promoted_scored": then.get("scored")})
+        if fields:
+            out[doc_type] = {"against": promoted.get("model_version"), "same_yardstick": same,
+                             "fields": sorted(fields, key=lambda f: (f["delta"], f["field"]))}
+    return out or None
+
+
+def _weakest_fields(report: dict[str, Any], doc_type: str) -> dict[str, dict[str, Any]]:
+    for subset in (report.get("by_doc_type") or {}).get(doc_type) or []:
+        if subset.get("subset") == "full":
+            return {row["field"]: {"accuracy": row.get("accuracy"), "scored": row.get("scored")}
+                    for row in subset.get("weakest_fields") or [] if row.get("field")}
+    return {}
 
 
 def _hallucination_rate(scored: list[tuple[Any, Any, dict[str, Any]]], common_model: list[bool],
@@ -1434,18 +1774,22 @@ def _worst_line(by_lob: dict[str, list[int]], lines: Sequence[Any], common_model
     return round(min(rates), 4) if rates else None
 
 
-def line_document_scores(report: dict[str, Any]) -> dict[str, dict[str, tuple[float, float]]] | None:
-    """``{line: {source_id: (field match, weight)}}`` over a report's full set:
-    each real document's ``field_normalized_match`` and its weight in it
-    (``per_document_weights``; 1 when the report holds none), grouped by the
-    document's line (``per_document_lines``). What a continued run's gate pairs
-    line by line (decision 2026-10-23). ``None`` for a report written before it
-    recorded documents' lines."""
+def line_document_scores(
+    report: dict[str, Any], metric: str = "field_normalized_match",
+) -> dict[str, dict[str, tuple[float, float]]] | None:
+    """``{line: {source_id: (score, weight)}}`` over a report's full set: each
+    real document's ``metric`` and its weight in it (``per_document_weights``;
+    1 when the report holds none), grouped by the document's line
+    (``per_document_lines``). What a continued run's gate pairs line by line
+    (decisions 2026-10-23 and 2026-10-26): ``served_field_match`` where both
+    reports hold it, ``field_normalized_match`` otherwise. ``None`` for a report
+    written before it recorded documents' lines; empty when it holds no
+    per-document ``metric``."""
     lines = report.get("per_document_lines")
     if lines is None:
         return None
-    scores = (report.get("per_document") or {}).get("field_normalized_match") or {}
-    weights = (report.get("per_document_weights") or {}).get("field_normalized_match") or {}
+    scores = (report.get("per_document") or {}).get(metric) or {}
+    weights = (report.get("per_document_weights") or {}).get(metric) or {}
     grouped: dict[str, dict[str, tuple[float, float]]] = {}
     for source, line in lines.items():
         if source in scores:

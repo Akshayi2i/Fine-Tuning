@@ -121,7 +121,9 @@ def test_an_accepted_wrong_value_is_an_error():
 
 def test_a_flagged_wrong_value_reached_a_reviewer_not_a_user():
     tally = score_auto_accept(GOLD, {"policy": {"account_id": _env("A-1300", flagged=True)}})
-    assert (tally.accepted, tally.wrong, tally.rate) == (0, 0, 0.0)
+    # Nothing accepted: no error rate among accepted values (None, not a
+    # perfect 0.0), and a coverage of 0.
+    assert (tally.accepted, tally.wrong, tally.rate, tally.coverage) == (0, 0, None, 0.0)
 
 
 def test_an_accepted_value_the_label_does_not_hold_is_an_error():

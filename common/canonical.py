@@ -891,10 +891,31 @@ def expand_answer(node: Any) -> Any:
     return node
 
 
+def _reads_yes_no(parsed: Any) -> bool:
+    """Whether an envelope's ``parsed`` schema admits a yes/no and nothing else
+    but null (``BoolValue``): its value never reads as its printed form."""
+    kinds: set[str] = set()
+    for variant in [parsed, *((parsed.get("anyOf") or []) if isinstance(parsed, dict) else [])]:
+        kind = variant.get("type") if isinstance(variant, dict) else None
+        kinds |= {kind} if isinstance(kind, str) else set(kind or ())
+    return kinds - {"null"} == {"boolean"}
+
+
 def compact_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """The decoding schema of a compact answer: every envelope schema (an object
     declaring ``raw``, ``parsed`` and ``page_ref``) with those keys renamed
-    ``r``, ``v``, ``p`` - in that order - and ``r`` never required. A copy."""
+    ``r``, ``v``, ``p`` - in that order. A copy.
+
+    ``r`` is required for a yes/no envelope (its ``parsed`` a boolean or null:
+    ``BoolValue``), never for another. A yes/no has no printed form of its own
+    (:func:`as_printed` is None), so every training target writes its ``r``
+    (:func:`to_compact_answer`). Left optional, the decoder let the model write
+    an answer no target holds - a bare ``{"v": true}`` - served with ``raw``
+    null (:func:`expand_answer`): the mark it read ("X", "Included") gone, and
+    nothing printed for the check to look up. Any other envelope leaves ``r``
+    out when its value reads as printed, as training does. The answer format
+    is unchanged (``COMPACT_ANSWER_FORMAT``): only answers training never
+    wrote are refused."""
     import copy
 
     def walk(node: Any) -> Any:
@@ -911,6 +932,9 @@ def compact_schema(schema: dict[str, Any]) -> dict[str, Any]:
                 **{key: walk(value) for key, value in props.items() if key not in COMPACT_KEYS},
             }
             required = [COMPACT_KEYS.get(key, key) for key in node.get("required") or () if key != "raw"]
+            if _reads_yes_no(props["parsed"]):
+                # r first: written first, as training writes it.
+                required = ["r", *(key for key in required if key != "r")]
             if required:
                 out["required"] = required
             return out

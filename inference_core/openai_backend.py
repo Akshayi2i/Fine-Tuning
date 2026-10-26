@@ -22,7 +22,13 @@ schema slices, answer limits and merge. Only the transport differs:
   continuous batching does. The pipeline reads each answer as it arrives and
   sends a failed window's halves at once, instead of after the slowest window;
 * the window's schema slice goes as ``response_format`` (``json_schema``), the
-  pixel budget as ``mm_processor_kwargs``, and token logprobs as ``logprobs``;
+  pixel budget as ``mm_processor_kwargs``, and token logprobs as ``logprobs``
+  with the best alternative to each token (``top_logprobs: 2``: the near-tie
+  margin, ``span_map.FieldSpan.top2_margin``). The sampling settings a server
+  would fill from the model's generation config - repetition penalty, top_k,
+  presence and frequency penalties - are sent at their neutral values
+  (``model_runner.PINNED_SAMPLING``), and the server is started with
+  ``--generation-config vllm`` too;
 * the answer is streamed (``stream``, on by default): a RunPod proxy closes a
   request that has sent nothing back for about 100 seconds, and a window queued
   behind others, then writing a long schedule, takes longer than that. Streamed,
@@ -37,9 +43,13 @@ schema slices, answer limits and merge. Only the transport differs:
   would send the request and its token to an address nobody checked.
 
 What only the server sets is the server's: its logprobs mode (raw, for
-calibration), xgrammar's no-whitespace rule and its context length. Start it as
-``configs/inference/vllm_serving.yaml`` describes; a test of timing does not
-depend on them.
+calibration), xgrammar's no-whitespace rule, its context length and its
+generation config (``--generation-config vllm``: vLLM's neutral defaults, not
+the model's). Start it as ``configs/inference/vllm_serving.yaml`` describes; a
+test of timing does not depend on them. The prompt's length the server reports
+(``usage.prompt_tokens``) is compared per window with what the pages' pixel
+budget implies (``inference_core.prompt_tokens``): a server resizing pages to
+another budget is warned about, not trusted.
 """
 
 from __future__ import annotations
@@ -57,6 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from inference_core.model_runner import (
+    PINNED_SAMPLING,
     STOPPED_REPEATING,
     STREAM_CUT,
     Generation,
@@ -162,6 +173,7 @@ def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) ->
     content: list[str] = []
     tokens: list[str] = []
     logprobs: list[float] = []
+    seconds: list[float | None] = []
     finish_reason: str | None = None
     done = False
     prompt_tokens: int | None = None
@@ -189,6 +201,7 @@ def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) ->
             for item in (choice.get("logprobs") or {}).get("content") or []:
                 tokens.append(str(item["token"]))
                 logprobs.append(float(item["logprob"]))
+                seconds.append(_second_best(item))
             finish_reason = choice.get("finish_reason") or finish_reason
         if stop_repeats and length - checked_at >= REPEAT_CHECK_CHARS:
             checked_at = length
@@ -205,8 +218,19 @@ def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) ->
         if not done:
             log.warning("an answer's stream ended after %d characters with no finish reason and no [DONE]; "
                         "counted as cut off", length)
-    return {"text": "".join(content), "tokens": tokens, "logprobs": logprobs,
+    return {"text": "".join(content), "tokens": tokens, "logprobs": logprobs, "top2": seconds,
             "finish_reason": finish_reason, "prompt_tokens": prompt_tokens, "first_token_ms": first_token_ms}
+
+
+def _second_best(item: dict[str, Any]) -> float | None:
+    """One scored token's best alternative: the highest logprob among its
+    ``top_logprobs`` that is not the token written; None when none is listed."""
+    from inference_core.model_runner import second_best
+
+    alternatives = item.get("top_logprobs") or []
+    return second_best(((str(alt.get("token")), alt.get("logprob")) for alt in alternatives
+                        if isinstance(alt, dict) and isinstance(alt.get("logprob"), (int, float))),
+                       str(item.get("token")))
 
 
 class OpenAIChatBackend(ModelBackend):
@@ -343,9 +367,17 @@ class OpenAIChatBackend(ModelBackend):
             "top_p": config.top_p,
             "max_tokens": config.max_new_tokens,
             "seed": config.seed,
+            # Every sampling setting the server would otherwise take from the
+            # model's generation config, pinned (model_runner.PINNED_SAMPLING).
+            **PINNED_SAMPLING,
             "logprobs": bool(config.logprobs),
             "mm_processor_kwargs": {"min_pixels": min_pixels, "max_pixels": max_pixels},
         }
+        if config.logprobs and config.top_logprobs > 1:
+            # The best alternative to each token written: its near-tie margin
+            # (span_map.FieldSpan.top2_margin). Chat completions lists the top
+            # alternatives beside each token; 1 would list only the token itself.
+            body["top_logprobs"] = int(config.top_logprobs)
         if config.json_schema is not None:
             body["response_format"] = {"type": "json_schema",
                                        "json_schema": {"name": "extraction", "schema": config.json_schema}}
@@ -373,12 +405,14 @@ class OpenAIChatBackend(ModelBackend):
                 "text": choice["message"].get("content") or "",
                 "tokens": [str(item["token"]) for item in scored],
                 "logprobs": [float(item["logprob"]) for item in scored],
+                "top2": [_second_best(item) for item in scored],
                 "finish_reason": choice.get("finish_reason") or "stop",
                 "prompt_tokens": (reply.get("usage") or {}).get("prompt_tokens"),
                 "first_token_ms": None,
             }
         latency_ms = (time.perf_counter() - started) * 1000
         text, tokens, logprobs = answer["text"], answer["tokens"], answer["logprobs"]
+        top2 = list(answer.get("top2") or [])
         # The server scores the end-of-turn token (<|im_end|>) too, which the text
         # does not hold: left in, the tokens no longer spell the text and no field
         # can be given a confidence (inference_core.span_map).
@@ -386,6 +420,8 @@ class OpenAIChatBackend(ModelBackend):
         while tokens and joined != text and joined.startswith(text):
             joined = joined[: len(joined) - len(tokens.pop())]
             logprobs.pop()
+            if len(top2) > len(tokens):
+                top2.pop()
         first = answer["first_token_ms"]
         return Generation(
             text=text,
@@ -396,6 +432,7 @@ class OpenAIChatBackend(ModelBackend):
             latency_ms=round(latency_ms, 1),
             prompt_tokens=answer["prompt_tokens"],
             first_token_ms=round(first, 1) if first is not None else None,
+            token_top2_logprobs=top2 if len(top2) == len(tokens) and any(v is not None for v in top2) else [],
         )
 
     def _answer(self, messages: list[dict[str, Any]], config: RunnerConfig,

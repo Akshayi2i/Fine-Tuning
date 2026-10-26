@@ -1,7 +1,10 @@
 """The ceiling reading a policy in windows puts on accuracy (the oracle merge).
 
 Each document's GOLD label is sliced into its windows exactly as the dataset
-build slices it (``policy_windows.window_target``), the slices are merged by the
+build slices it (``policy_windows.window_target``) - its values with no page
+placed as the build places them (``with_placed_pages`` on a common-model line,
+``with_inferred_pages`` elsewhere), and a window the build leaves out (a value
+no page was found to print) left out here too - the slices are merged by the
 serving merge (``serving.policy_merge``), and the result is compared with the
 gold label as scoring uses it (``common.canonical.schema_label``). A perfect
 model reproduces exactly those slices, so whatever this loses no model can win
@@ -59,10 +62,13 @@ def oracle(source_id: str, label: dict, lob: Any, page_count: int,
         TargetReport,
         multi_window_sections,
         pages_to_read,
+        places_by_search,
         plan_windows,
+        printed_pages_in,
         unread_values,
         window_target,
         with_inferred_pages,
+        with_placed_pages,
     )
     from serving.policy_merge import PolicyWindow, merge_policy_windows
 
@@ -71,12 +77,29 @@ def oracle(source_id: str, label: dict, lob: Any, page_count: int,
     every_page, declarations_page = pages_to_read(ocr_pages, page_count)
     plans = plan_windows(lob, every_page, declarations_page, ocr_pages)
     report = TargetReport()
-    # As the dataset build does: pages placed from the OCR text, when there is one.
-    placed = with_inferred_pages(label, ocr_pages, report,
-                                 sections=multi_window_sections(lob, plans))
-    # leads as serving merges them: a split declarations window's lead piece first.
-    windows = [PolicyWindow(group=p.group, pages=list(p.pages), leads=p.leads,
-                            extraction=window_target(placed, lob, p, report)) for p in plans]
+    # Pages placed from the OCR text as the dataset build places them
+    # (build_jsonl._prepared): on a common-model line each value with no page
+    # is given every page that prints it (policy_windows.with_placed_pages);
+    # elsewhere, in a group read over several windows, the one page that does.
+    search = places_by_search(lob)
+    if search:
+        placed, _placement = with_placed_pages(label, ocr_pages)
+    else:
+        placed = with_inferred_pages(label, ocr_pages, report, sections=multi_window_sections(lob, plans))
+    # Form numbers taught on the windows whose pages print them, as built.
+    printed = printed_pages_in(ocr_pages) if ocr_pages else None
+    windows = []
+    #: Values of windows left out, as the build leaves out a window holding a
+    #: value no page was found to print (its decoder cannot write one with no page).
+    left_out: set[str] = set()
+    for plan in plans:
+        unpaged: list[str] | None = [] if search else None
+        target = window_target(placed, lob, plan, report, printed_pages=printed, unpaged=unpaged)
+        if unpaged:
+            left_out |= {_bare(path) for path in _value_paths(target)}
+            continue
+        # leads as serving merges them: a split declarations window's lead piece first.
+        windows.append(PolicyWindow(group=plan.group, pages=list(plan.pages), leads=plan.leads, extraction=target))
     merged = merge_policy_windows(windows, lob=lob)
     result.windows, result.conflicts = len(plans), len(merged.conflicts)
 
@@ -101,7 +124,8 @@ def oracle(source_id: str, label: dict, lob: Any, page_count: int,
     gold = values_view(scored)
     got = values_view(answer)
     reasons = {
-        "no_page_ref": {_bare(p.split(":", 1)[1]) for p in report.unplaced},
+        # A value with no page, or one in a window left out for holding such a value.
+        "no_page_ref": {_bare(p.split(":", 1)[1]) for p in report.unplaced} | left_out,
         "unread_page": {_bare(p) for p in unread_values(map_label(placed, lob), lob, plans)},
     }
 
@@ -173,6 +197,19 @@ def _without(node: Any, names: set[str]) -> Any:
 
 def _bare(path: str) -> str:
     return re.sub(r"\[\d+\]", "[]", path)
+
+
+def _value_paths(node: Any, path: str = "") -> list[str]:
+    """The paths of a model-form target's value envelopes."""
+    from common.canonical import is_field_value
+
+    if is_field_value(node):
+        return [path]
+    if isinstance(node, dict):
+        return [found for key, value in node.items() for found in _value_paths(value, f"{path}.{key}" if path else str(key))]
+    if isinstance(node, list):
+        return [found for index, value in enumerate(node) for found in _value_paths(value, f"{path}[{index}]")]
+    return []
 
 
 def ceiling(results: list[DocumentResult]) -> dict[str, Any]:

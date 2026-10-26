@@ -554,17 +554,31 @@ def process_batch(
     tenant_id: str | None = None,
     device: Device | None = None,
     force: bool = False,
+    workers: int = 1,
 ) -> dict[str, Any]:
-    """Process many documents. One failure never stops the batch."""
+    """Process many documents. One failure never stops the batch.
+
+    ``workers`` above 1 reads that many documents at once - for a served MinerU
+    (``served_ocr.ServedMinerUEngine``), whose GPU is the server's, so the
+    documents wait on its queue rather than on each other. Each document is
+    still read by :func:`process_document` alone, writing only its own keys
+    under ``processed/``, so the readings, the metadata and the result lists
+    (in ``source_ids`` order) are the serial run's. As in the serial run, an
+    error other than :class:`OcrError` - Blob unreachable - stops the batch:
+    the documents not yet started are not, the ones running finish first.
+    """
+    ids = list(source_ids)
     processed: list[str] = []
     skipped: list[str] = []
     failed: list[tuple[str, str]] = []
-    for source_id in source_ids:
+
+    def read(source_id: str) -> dict[str, Any]:
+        return process_document(doc_type, source_id, client, engine,
+                                tenant_id=tenant_id, device=device, force=force)
+
+    def record(source_id: str, outcome: Callable[[], dict[str, Any]]) -> None:
         try:
-            meta = process_document(
-                doc_type, source_id, client, engine,
-                tenant_id=tenant_id, device=device, force=force,
-            )
+            meta = outcome()
             # `process_document` returns the stored meta unchanged when it
             # skips, so there is no marker inside it to read — the previous
             # check looked for a `_skipped` key nothing ever wrote, and a run
@@ -573,11 +587,32 @@ def process_batch(
         except OcrError as exc:
             failed.append((source_id, str(exc)))
             log.warning("OCR failed for %s: %s", source_id, exc)
+
+    workers = max(1, int(workers or 1))
+    if workers == 1 or len(ids) <= 1:
+        for source_id in ids:
+            record(source_id, lambda sid=source_id: read(sid))
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(workers, len(ids)), thread_name_prefix="ocr") as pool:
+            futures = [(source_id, pool.submit(read, source_id)) for source_id in ids]
+            try:
+                # Collected in submission order: the lists are the serial run's.
+                for source_id, future in futures:
+                    record(source_id, future.result)
+            except BaseException:
+                for _sid, future in futures:
+                    future.cancel()
+                raise
+    log.info("OCR batch of %d %s document(s)%s: %d read, %d unchanged, %d failed", len(ids), doc_type,
+             f" ({workers} at once)" if workers > 1 else "", len(processed), len(skipped), len(failed))
     return {"processed": processed, "skipped": skipped, "failed": failed}
 
 
 def find_unprocessed(client: BlobClient, doc_type: str, tenant_id: str | None = None,
-                     mineru_version: str | None = None, mineru_tier: str | None = None) -> list[str]:
+                     mineru_version: str | None = None, mineru_tier: str | None = None,
+                     meta_cache: dict[str, Any] | None = None) -> list[str]:
     """Ingested documents with no ``ocr_meta.json`` yet - and, given the running
     ``mineru_version``, those read by another MinerU: the model learns how MinerU
     formats its output, so a tenant read by two versions is two distributions,
@@ -586,7 +621,13 @@ def find_unprocessed(client: BlobClient, doc_type: str, tenant_id: str | None = 
     A reading by a served MinerU records its tier, part of the pin: one made at
     another tier than ``mineru_tier`` - by default, given a version, the pinned
     tier (``configs/shared/ocr.yaml``) - is listed too. A reading that records
-    no tier (MinerU in-process) is held to its version alone."""
+    no tier (MinerU in-process) is held to its version alone.
+
+    ``meta_cache`` (blob key -> body), when given, is read before Blob and
+    filled from it: a run that asks several times - the OCR stage's completion
+    check, then the stage - reads each ``ocr_meta.json`` once. The caller
+    clears it once new readings are written.
+    """
     tenant = paths._tenant(tenant_id)
     ingested = {
         key.split("/")[3]
@@ -602,10 +643,15 @@ def find_unprocessed(client: BlobClient, doc_type: str, tenant_id: str | None = 
     for key in client.list(f"processed/{tenant}/{doc_type}/"):
         if not key.endswith("ocr_meta.json"):
             continue
-        try:
-            meta = client.read_json(key)
-        except Exception:  # noqa: BLE001 - unreadable metadata is not "done"
-            continue
+        if meta_cache is not None and key in meta_cache:
+            meta = meta_cache[key]
+        else:
+            try:
+                meta = client.read_json(key)
+            except Exception:  # noqa: BLE001 - unreadable metadata is not "done"
+                continue
+            if meta_cache is not None:
+                meta_cache[key] = meta
         if meta.get("render_only"):
             continue
         if mineru_version and meta.get("mineru_version") != mineru_version:
@@ -690,9 +736,19 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
                              "token $MINERU_TOKEN), not the one installed here (default $MINERU_URL)")
     parser.add_argument("--shard", default=None, metavar="I/N",
                         help="process only this share of the documents (0-based I of N), so N "
-                             "processes - one per GPU, each with its own CUDA_VISIBLE_DEVICES - "
-                             "split one batch between them")
+                             "processes - one per GPU, each with its own CUDA_VISIBLE_DEVICES, or one "
+                             "per machine against a served MinerU - split one batch between them")
+    parser.add_argument("--workers", type=int, default=1, metavar="N",
+                        help="documents read at once against the served MinerU (--mineru-url); default 1, "
+                             "one at a time. 4 is a good start against a dedicated MinerU. The MinerU "
+                             "installed here reads one at a time")
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.workers < 1:
+        parser.error("--workers is 1 or more")
+    if args.workers > 1 and not args.mineru_url:
+        parser.error("--workers reads documents at once against a served MinerU (--mineru-url, default "
+                     "MINERU_URL); the MinerU installed here holds the GPU and reads one at a time: "
+                     "use --shard, one process per GPU")
     # On the pod, run detached in tmux: a closed laptop must not stop this job.
     from orchestration.detach import detach_module_if_needed
 
@@ -705,7 +761,10 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
         from data_pipeline.ocr.served_ocr import MINERU_TOKEN_ENV, ServedMinerUEngine
 
         served = ServedMinerUEngine(
-            args.mineru_url, os.environ.get(MINERU_TOKEN_ENV) or os.environ.get("FIDEON_REMOTE_TOKEN"))
+            args.mineru_url, os.environ.get(MINERU_TOKEN_ENV) or os.environ.get("FIDEON_REMOTE_TOKEN"),
+            # Each document renders its pages in processes of its own: the CPUs are
+            # shared between the documents read at once, not multiplied by them.
+            render_workers=max(1, (os.cpu_count() or 1) // args.workers) if args.workers > 1 else None)
         engine: OcrEngine = served
         version, tier = served.environment().mineru_version, served.tier
     else:
@@ -723,7 +782,7 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
 
     result = process_batch(
         source_ids, args.doc_type, client, engine,
-        tenant_id=args.tenant, force=args.force_reprocess,
+        tenant_id=args.tenant, force=args.force_reprocess, workers=args.workers,
     )
     print(f"{len(result['processed'])} processed, {len(result['skipped'])} skipped, "
           f"{len(result['failed'])} failed")

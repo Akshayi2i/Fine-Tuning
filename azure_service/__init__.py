@@ -18,6 +18,8 @@ then MinerU reads the rest in the GPU's idle turns and the full-text tier joins
 * :mod:`azure_service.job_queue` - Azure Storage Queue, and an in-memory one for tests.
 * :mod:`azure_service.webhooks` - signed callbacks with no document content.
 * :mod:`azure_service.settings` - the environment both containers read.
+* :mod:`azure_service.retention` - flagged documents kept for review, per tenant
+  and OFF by default (legal sign-off first); its purge, export and mark-reviewed CLI.
 
 Deployment: ``azure_service/Dockerfile`` and ``azure_service/DEPLOY.md``.
 """

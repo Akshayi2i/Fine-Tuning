@@ -12,7 +12,6 @@ from __future__ import annotations
 import pytest
 
 from training import train as T
-from training.callbacks.early_stopping import EarlyStoppingState
 from training.data_collator import (
     IGNORE_INDEX,
     MaskingError,
@@ -351,29 +350,6 @@ def test_error_mix_is_summarised_as_shares():
     mix = summarise_error_mix(_perception_errors(6) + _reasoning_errors(4))
     assert mix["perception"] == pytest.approx(0.6)
     assert mix["schema_reasoning"] == pytest.approx(0.4)
-
-
-# --------------------------------------------------------------------------
-# Early stopping
-# --------------------------------------------------------------------------
-
-def test_early_stopping_tracks_field_f1_not_loss():
-    """Loss can improve while extraction gets worse — loss rewards fluent JSON,
-    and a confidently wrong value is fluent."""
-    state = EarlyStoppingState(patience=2)
-    assert not state.update(100, field_f1=0.70, eval_loss=0.45)
-    assert not state.update(200, field_f1=0.78, eval_loss=0.38)
-    assert not state.update(300, field_f1=0.77, eval_loss=0.35)
-    assert state.update(400, field_f1=0.76, eval_loss=0.31)      # stop, despite falling loss
-    assert state.best_score == 0.78 and state.best_step == 200
-
-
-def test_improvement_resets_patience():
-    state = EarlyStoppingState(patience=2)
-    state.update(100, 0.70)
-    state.update(200, 0.69)
-    assert not state.update(300, 0.75)
-    assert state.evaluations_without_improvement == 0
 
 
 # --------------------------------------------------------------------------
@@ -768,17 +744,6 @@ def test_an_empty_document_count_is_not_enough_data():
 
     with pytest.raises(SweepError, match="no per-type document counts"):
         assert_enough_data({})
-
-
-def test_an_evaluation_with_no_loss_records_no_loss():
-    """`or 0.0` wrote a loss of zero — a perfect model — for an evaluation that
-    reported none, and that 0.0 then read as the best value in the history."""
-    state = EarlyStoppingState(patience=2)
-    state.update(100, field_f1=0.70)
-    state.update(200, field_f1=0.75, eval_loss=0.31)
-
-    assert "eval_loss" not in state.history[0]
-    assert state.history[1]["eval_loss"] == 0.31
 
 
 def test_max_length_covers_the_per_doc_type_overrides():

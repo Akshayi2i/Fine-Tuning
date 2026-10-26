@@ -30,7 +30,17 @@ lora:
   # 0.10 at pilot scale, 0.05 at >= 200 documents per type. A rank-64 adapter on
   # ~25 documents per type will memorise them at 0.05; the higher rate is the
   # cheapest regularisation available and costs nothing once data arrives.
-  dropout: 0.10
+  #
+  # auto (training.train.resolve_lora_dropout) applies that rule: a run from
+  # the base takes 0.05 when every line it trains has >= 200 REAL (not
+  # synthetic) training documents, else 0.10; a continued run keeps its parent
+  # adapter's value (ms-swift trains a continued adapter with its own saved
+  # dropout anyway), so auto never stops a cycle continuing. The value chosen
+  # and why are on the run manifest (training_config.lora_dropout,
+  # lora_dropout_choice) and in the adapter's adapter_config.json. A number
+  # here is used as it is, and a continued run whose adapter was saved with
+  # another number is refused (by hand) or starts from the base (pipeline).
+  dropout: auto
   bias: "none"
 
   # Attention and MLP projections in every LANGUAGE-MODEL decoder layer. The
@@ -83,9 +93,36 @@ optimization:
 # these instead of the optimization values above; null keeps the value above.
 # Its documents already trained in the cycles before, so fewer passes or a lower
 # rate may be enough: set them from a measured continued run, not by guess.
+#
+# The A/B to run on the FIRST continued cycle, before setting either: on the
+# same corpus, (A) a fresh run (--fresh, 3 epochs at 1e-4) and (B) a continued
+# run with num_train_epochs: 1 and learning_rate: 5.0e-5 (write 5.0e-5: YAML
+# reads 5e-5 as text). Compare them on checkpoint selection's validation scores
+# (field and document accuracy, invented values, run-to-run agreement) and on
+# the gate (golden eval, line by line). Keep B's values here only if B is no
+# worse on both; record the comparison with the decision.
+#
+#   rehearsal_old_share   null (default): a continued run trains every document
+#       in every epoch, as a fresh run does. A share (0 < share <= 1, e.g. 0.4):
+#       each epoch trains every NEW document - one the continued chain of runs
+#       never trained on - and that share of the OLD ones, per line (at least
+#       one per line), spread evenly over each line's carriers, seeded, and
+#       rotated so the next epoch takes the next ones: every old document trains
+#       within ceil(1 / share) epochs. A fresh run ignores it. Which documents
+#       were new and which were rehearsed in each epoch is on the run manifest
+#       (data_stats.data_mix.rehearsal). Test it with the A/B above: same corpus,
+#       continued with and without it.
+#   rehearsal_weight_by_line_errors   false (default): every line rehearses the
+#       share above. true: a line's share is scaled by its error rate on the
+#       parent run's validation errors over the old documents' mean (at most
+#       1), so the lines the parent got wrong rehearse more. Needs the parent's
+#       validation-errors record; without one the plain share applies (the
+#       manifest says why).
 continued_training:
   num_train_epochs: null
   learning_rate: null
+  rehearsal_old_share: null
+  rehearsal_weight_by_line_errors: false
 
 batch:
   per_device_train_batch_size: 1
@@ -103,6 +140,33 @@ batch:
   # up front to learn its length - ~1 row/s on the CGL full run, 1.5 h before
   # step 1 - which is why that is off below.)
   dataset_num_proc: 8
+
+  # Throughput levers. null = not passed to ms-swift, its own default (what
+  # every run so far trained with). None changes what is learned, only how
+  # fast, so none is in the run fingerprint and a run may resume with another.
+  #
+  #   vit_gradient_checkpointing  null = ms-swift follows gradient_checkpointing
+  #       (on). The vision tower is frozen, so recomputing its activations buys
+  #       little memory; false may save 5-10% per step.
+  #   dataloader_num_workers      null = ms-swift's default. Rows are decoded
+  #       and their page images loaded in the training process without
+  #       workers; 4-8 may hide that behind the GPU.
+  #   per_device_eval_batch_size  null = the trainer's default. The in-training
+  #       loss checks only; with padding_free, 4 is suggested.
+  #
+  # Measure before setting any, ONE lever at a time, each against the run
+  # before it (python -m training.train --corpus <v> --out-version <v>
+  # --benchmark-steps 30 writes benchmark.json: step time median and p90,
+  # tokens/s, peak memory, and suggests the next lever):
+  #   1. vit_gradient_checkpointing: false
+  #   2. per_device_train_batch_size: 2 - accumulation halves on its own
+  #      (effective_batch_size stays 8), if peak memory leaves room
+  #   3. dataloader_num_workers: 4, then 8
+  # Keep a lever only if the median step time falls by more than the p90-median
+  # spread, and peak memory stays under ~90% of the card.
+  vit_gradient_checkpointing: null
+  dataloader_num_workers: null
+  per_device_eval_batch_size: null
 
 memory:
   # Logits for the assistant positions only, instead of a 151k-vocabulary
@@ -134,6 +198,10 @@ evaluation:
   # generates over, so fewer than 4 would discard a candidate before it is scored.
   # Counted in EVALUATION checkpoints: with resume checkpoints saved between
   # evaluations, the trainer keeps enough of them that these 4 survive.
+  # The checkpoint nearest two-thirds of the run is kept as well, whatever
+  # this says: the limit is raised until rotation cannot reach it
+  # (training.train.keep_two_thirds_limit), and its step is recorded in the
+  # run's training_complete.json (two_thirds_step) for checkpoint selection.
   save_total_limit: 4
 
   # A resume point at least this often (~1 h on one H200 at the measured 51 s per
@@ -158,17 +226,42 @@ evaluation:
   # loss only draws the progress curve: no early stopping, best-loss weights
   # never loaded. 160 rows instead of 400: ~3 min per check instead of ~7.4.
   loss_sample_rows: 160
+  # How both samples are drawn (evaluation.validation_sample.sample_options).
+  # All off by default: line x mode strata, each in proportion to the split.
+  # Each changes which rows are chosen, so the in-training checks and checkpoint
+  # selection, which read the same config, change together.
+  #   validation_sample_by_empty_target  true: stratified by whether a row's
+  #       target states anything, too, so windows whose answer is empty are
+  #       sampled in their share.
+  #   validation_rows_per_family_max  a number: at most that many rows of one
+  #       family (a seed and its twins; a policy's windows in every mode), so one
+  #       long policy does not fill the sample. null: no cap.
+  #   validation_sample_mode_shares  null: each mode in its share of the split (a
+  #       third each). `training`: the training mix (modality_mix) - under the
+  #       fast profile image_only 0.7, the mode production reads; set it under
+  #       format_profiles.fast.evaluation to leave standard as it is. Or a
+  #       mapping, e.g. {ocr_plus_image: 0.25, noisy_ocr_image: 0.05,
+  #       image_only: 0.7}. A mode with no rows gives its share to the others.
+  validation_sample_by_empty_target: false
+  validation_rows_per_family_max: null
+  validation_sample_mode_shares: null
   # When the top two candidates are closer than this in field accuracy on the
   # sample, those two are scored again on the full validation split, which
   # decides. Sample noise only matters inside such a margin.
   selection_tie_break_margin: 0.015
   # The best candidates on the sample are then scored on every validation row
   # and judged on whole documents - windows merged as serving merges them: of
-  # the finalists whose document accuracy is within the guard margin of the
-  # best one's, and whose rate of printed values left empty is within it of the
+  # the finalists whose field match is within the guard margin of the best
+  # one's, and whose rate of printed values left empty is within it of the
   # best finalist's, the one inventing the fewest values wins (decision
-  # 2026-10-24). 0 or 1: the sample decides (with the near-tie rule above).
-  # Costs one full validation pass per finalist, run at once on a multi-GPU pod.
+  # 2026-10-24). Field match there is the gate mirror (gate_mirror_accuracy):
+  # image_only readings of real documents, whole, held to their page text
+  # borrowed from ocr_plus_image as serving holds them - what the gate
+  # measures; with no such document read, document accuracy over every mode
+  # stands in, and the selection record says so. 0 or 1: the sample decides
+  # (with the near-tie rule above).
+  # Costs one full validation pass per finalist, sharded across every GPU of
+  # a multi-GPU pod (two finalists on four GPUs keep all four busy).
   # 2, not 3: on the CGL run each finalist pass was ~6,170 rows (~1 h 55 min on
   # one H200), and the third finalist never won (replayed with 2, it still
   # selects checkpoint-734).
@@ -182,8 +275,21 @@ evaluation:
   # same twice. The finalists' whole-document pass is generated a second time,
   # its rows in the reverse order, and a finalist whose agreement between the
   # two is more than the guard margin below the best finalist's does not win.
-  # Costs one more whole-document pass per finalist.
+  # Only the rows in run_to_run_mode (below: image_only, the gate's own repeat)
+  # are read twice; a pass that does not read that mode reads all its rows
+  # twice. Costs that mode's rows once more per finalist.
   selection_run_to_run_check: true
+  # The checkpoint nearest two-thirds of the final step is a candidate too,
+  # when it is on disk and not one already. Whether it won or tied is in the
+  # selection record and summary: the evidence for training two epochs.
+  selection_two_thirds_candidate: true
+  # Calibration fits from the selected finalist's own answers to its
+  # whole-document pass (saved in the run's working dir and in Blob beside the
+  # run's artifacts), generating only the rows they do not cover (the other
+  # modes) - when they were made by the checkpoint calibrated, in bf16, with
+  # the generation settings calibration uses; otherwise it generates the split
+  # itself. Its stage result records which.
+  calibration_reuses_selection: true
   # The golden eval reads every document a second time in run_to_run_mode, its
   # windows sent in reverse order, and the gate holds the release to
   # run_to_run_agreement (evaluation.golden_eval). Costs one more pass in that
@@ -197,9 +303,25 @@ evaluation:
   # into the scoring fingerprint, so a report made on another repeat mode is
   # neither reused for the gate nor compared with one made on this mode.
   run_to_run_mode: image_only
+  # The share of the frozen set that second reading covers: a deterministic
+  # subset (a hash of each source id), 1.0 = every document, as before. Below
+  # 1.0 it saves part of that pass, and run_to_run_agreement is over fewer
+  # documents. Part of the yardstick, like the mode.
+  run_to_run_share: 1.0
+  # The share of the frozen set the golden eval reads in noisy_ocr_image, a
+  # deterministic subset like the one above; 1.0 = every document, as today.
+  # The gate still averages the same modes; below 1.0 ocr_arbitration_accuracy
+  # is over fewer documents. Part of the yardstick.
+  golden_noisy_share: 1.0
+  # Golden-eval readings sent at once, on a backend that answers requests as
+  # they finish (a served vLLM); the in-process engine reads one document at
+  # a time, its windows batched. Results are put back in order.
+  golden_documents_in_flight: 4
   metric_for_best_model: "eval_loss"
   greater_is_better: false
-  early_stopping_patience: 3
+  # No early stopping: ms-swift 3 takes no patience argument, and stopping
+  # would only remove candidates from checkpoint selection, which chooses by
+  # generated accuracy. (early_stopping_patience was here, read by nothing.)
 
 logging:
   logging_steps: 10
@@ -213,9 +335,21 @@ seed: 42
 # marine 44, umbrella 55). A line under min_documents is repeated
 # ceil(min_documents / its documents) times, at most max_repeat. Validation and
 # test are never repeated. 0 turns it off.
+#
+#   count  what a line's size is counted in. documents (default): every
+#       document, each render of each twin included - so a line of 5 seeds
+#       with 20 twins each counts 100 and is never raised, though it holds 5
+#       policies' worth of layouts. families: a seed and its twins count once
+#       (every real family once). real: real documents only.
+#   distinct_repeats  false (default): a repeated line's rows are written again,
+#       byte for byte. true: each repeat comes from the NEXT epoch file of the
+#       corpus (the fourth too, which a three-epoch run otherwise never reads),
+#       so it has its own mode draw and windows.
 line_balance:
   min_documents: 100
   max_repeat: 3
+  count: documents
+  distinct_repeats: false
 
 # One render per twin per epoch (training.corpus_view.plan_render_rotation). A
 # twin's digital and scanned PDFs share one gold, so training both in an epoch
@@ -245,13 +379,49 @@ render_rotation: true
 #
 # Both are null until set: every document trains. The values used, and what
 # each line came to, are recorded on the run manifest (data_stats.data_mix) and
-# in the run's model card.
+# in the run's model card. scanned_share stays null until it is measured: set it
+# to the scanned share of the policies production actually receives (per line
+# where they differ), from production's own intake, not a guess.
+#
+#   twins_per_seed_per_epoch  null (default): every twin the shares keep trains
+#       in every epoch - the same twins each time. A number k: each epoch trains
+#       k twins of every seed (a twin with two renders is one twin; render
+#       rotation still picks the render), the next k the next epoch, seeded, so
+#       a seed's twins are all seen within ceil(twins / k) epochs. Real
+#       documents train every epoch. Recorded on the run manifest
+#       (data_stats.data_mix.twin_rotation).
 data_mix:
   synthetic_fraction: null
   scanned_share: null
+  twins_per_seed_per_epoch: null
 
-# The input-mode mix (50% OCR text and images, 20% corrupted OCR and images, 30%
-# images only) is common.constants.MODALITY_MIX unless set here:
+# Hard examples (training.corpus_view.hard_fields): repeat the train windows
+# whose targets hold a field the last model got most wrong on validation.
+# Read from the validation errors checkpoint selection records for the winning
+# checkpoint (artifact_registry.paths.validation_errors_key): the parent run's
+# for a continued run, else the promoted release's run. A field's error rate is
+# (wrong + missed + invented) / values.
+#
+#   top_fields  null (default): off. A number n: the n fields with the highest
+#       error rate among those with at least min_values gold values.
+#   max_repeat  a hard window appears up to this many times in its epoch
+#       (line balance's copies aside): its max_repeat - 1 extra copies come from
+#       the next epoch files - the same document's windows holding the field, in
+#       their own mode draw - so no extra copy is the same row again.
+#   min_values  a field with fewer gold values on validation is not ranked: its
+#       rate is noise.
+#
+# With no record to read (a first run, a run older than the record), nothing is
+# repeated and the run manifest says why (data_stats.data_mix.hard_examples).
+hard_examples:
+  top_fields: null
+  max_repeat: 2
+  min_values: 30
+
+# The input-mode mix is common.constants.MODALITY_MIX (50% OCR text and images,
+# 20% corrupted OCR and images, 30% images only: the standard profile) unless
+# set here or by the active format profile. The fast profile, shipped since
+# 2026-10-26, sets 25% / 5% / 70% images only (format_profiles.fast below):
 #
 #   modality_mix: {ocr_plus_image: 0.5, noisy_ocr_image: 0.2, image_only: 0.3}
 #

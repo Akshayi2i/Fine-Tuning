@@ -53,6 +53,9 @@ python -m pip install --upgrade pip wheel setuptools packaging ninja
 # transitive ones included, at the version resolved for the pod, so two pods set
 # up months apart run the same stack. The laptop's dev role has no lock.
 lock="${requirements%.txt}.lock"
+# flash-attn, the one training package not in a lock (it is compiled against the
+# torch the lock installs): pinned here, checked after the install below.
+FLASH_ATTN_VERSION="2.8.3"
 if [ -f "$lock" ]; then
   python -m pip install -r "$requirements" -c "$lock"
 else
@@ -68,10 +71,17 @@ if [ "$role" = "train" ]; then
   # the cache on the network volume and TMPDIR on the container disk that
   # rename crosses filesystems and fails ("Invalid cross-device link"); without
   # a cache both sides are under TMPDIR.
-  MAX_JOBS="${MAX_JOBS:-8}" python -m pip install "flash-attn>=2.7,<3" --no-build-isolation --no-cache-dir
+  #
+  # One exact version, not a range: a range took whatever flash-attn was newest
+  # on the day the pod was set up, so two pods trained on two kernels. 2.8.3 is
+  # built for the stack the locks pin - torch 2.8.0 on CUDA 12.8, Python 3.11 -
+  # and its release carries the prebuilt wheel for it
+  # (cu12torch2.8cxx11abiTRUE-cp311); with none to fetch it compiles from source
+  # against that torch. vLLM brings its own flash-attention kernels (vllm-flash-attn).
+  MAX_JOBS="${MAX_JOBS:-8}" python -m pip install "flash-attn==${FLASH_ATTN_VERSION}" --no-build-isolation --no-cache-dir
 fi
 
-python - "$role" <<'PY'
+python - "$role" "$FLASH_ATTN_VERSION" <<'PY'
 import importlib.metadata as md
 import sys
 
@@ -92,6 +102,8 @@ for name in wanted:
         missing.append(name)
 if missing:
     sys.exit(f"missing after install: {missing}")
+if role == "train" and md.version("flash-attn") != sys.argv[2]:
+    sys.exit(f"flash-attn {md.version('flash-attn')} is installed, not the pinned {sys.argv[2]}")
 if role in ("ocr", "train", "serve", "quantize"):
     import torch
 

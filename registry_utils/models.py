@@ -56,6 +56,13 @@ class Dependencies(_Base):
     corpus_version: str = Field(..., description="e.g. corpus/v3")
     code_git_commit: str = Field(..., description="exact repo commit that ran this")
 
+    #: Whether the working tree had uncommitted changes when the run was
+    #: recorded, and a hash of them (``git diff HEAD`` and the untracked files'
+    #: names), so two runs on one dirty commit can be told apart. None on a run
+    #: recorded before they were, or where git could not be read.
+    code_dirty: bool | None = None
+    code_diff_sha256: str | None = None
+
     #: Which Foundation this adapter sits on. None for a Foundation run. This is
     #: what makes the arch §12 dependency-upgrade rule a query rather than an audit.
     foundation_version: str | None = None
@@ -99,6 +106,10 @@ class TrainingConfig(_Base):
     lora_rank: int
     lora_alpha: int
     lora_dropout: float = 0.05
+    #: How ``lora_dropout`` was chosen (``training.train.resolve_lora_dropout``):
+    #: the config's number, ``auto`` from the corpus at a fresh run, or the
+    #: parent adapter's value at a continued one. None on older manifests.
+    lora_dropout_choice: dict[str, Any] | None = None
     bias: str = "none"
     learning_rate: float
     lr_scheduler: str = "cosine"
@@ -178,6 +189,11 @@ class DataStats(_Base):
     #: split -> line -> documents, real, synthetic and rows, of the run's view.
     examples_by_line: dict[str, dict[str, dict[str, int]]] = Field(default_factory=dict)
 
+    #: The pre-launch length check of the staged rows (``training.length_check``):
+    #: a row-length histogram and the supervised (answer) tokens per section
+    #: group. Empty on a dry run, which stages nothing.
+    token_stats: dict[str, Any] = Field(default_factory=dict)
+
     #: Recorded, not enforced, while de-identification is blocked (IMPL-05 §1).
     deidentified: bool = False
     image_redaction: str = "unresolved"
@@ -218,6 +234,27 @@ class EvalMetrics(_Base):
     #: Field match on the documents of carriers held out of train and val in
     #: their line (Fideon SPEC_09 amendment item 4). Reported, not gated.
     held_out_carrier_match: float | None = None
+
+    #: The selected checkpoint's validation field match as the gate measures it
+    #: (``checkpoint_eval`` gate mirror: image_only, whole real documents, held
+    #: to their page text as served), from checkpoint selection. Beside the
+    #: gate's own field match, cycle after cycle, it is what the early warning
+    #: predicts the gate from. Reported, not gated.
+    validation_gate_mirror_accuracy: float | None = None
+
+    #: What users receive (decision 2026-10-26): field match on the image_only
+    #: readings of real documents, as served. The tier, the improvement rule
+    #: and non-inferiority read it (evaluation.gating.SERVED_FIELD_MATCH).
+    served_field_match: float | None = None
+    #: Field match on the ocr_plus_image readings of real documents: the mode
+    #: short PDFs and the fallback read. Held to its floor.
+    real_ocr_plus_image_accuracy: float | None = None
+    #: The gate's tier, how sure it is (``confirmed`` / ``unconfirmed`` for a
+    #: production release), and the one-sided 95% lower bound on
+    #: served_field_match it rests on (evaluation.gating.tier_evidence).
+    tier: Literal["production", "interim"] | None = None
+    tier_confidence: Literal["confirmed", "unconfirmed"] | None = None
+    tier_lower_bound: float | None = None
 
     latency_ms_per_doc: float | None = None
 
@@ -396,6 +433,11 @@ class RunManifest(_Base):
 # Release bundles (arch v2.1 §12.3)
 # --------------------------------------------------------------------------
 
+#: ``gated``: passed its gate; where ``package`` leaves every release (decision
+#: 2026-10-26, #44), never promoting it. ``promote`` makes it ``promoted`` once a
+#: shadow check on the real server path passed (``orchestration.run shadow``) or
+#: a named person skipped it in writing; the release it replaces is ``archived``.
+#: ``candidate`` is a bundle written before it was gated (older bundles).
 ReleaseStatus = Literal["candidate", "gated", "promoted", "archived", "rejected"]
 
 
@@ -426,6 +468,42 @@ class GateOverride(_Base):
             raise ValueError(
                 "a gate override must name the person accountable for it, not a system identity"
             )
+        return v.strip()
+
+
+class ReleasePromotion(_Base):
+    """One promotion of a release, as ``python -m orchestration.run promote``
+    made it (decision 2026-10-26, #44): who, when, and on what evidence.
+
+    ``package`` no longer promotes: a release that passed its gate is written
+    ``gated``, read on the real server path beside the promoted one
+    (``orchestration.run shadow``), and promoted by a named person. A
+    promotion names the passing shadow report it rests on, or the written
+    reason the person skipped it; a rollback to a release promoted before
+    needs neither. ``tier`` and ``tier_confidence`` are the gate's, when it
+    recorded them.
+    """
+
+    promoted_by: str
+    promoted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    #: A release promoted before (archived), put back: no shadow is asked of it.
+    rollback: bool = False
+    #: The Blob key of the passing shadow report the promotion rests on.
+    shadow_report: str | None = None
+    #: Why the person promoting skipped the shadow check (``--skip-shadow --reason``).
+    shadow_skipped_reason: str | None = None
+    #: What was wrong with the shadow report, or that there was none, when skipped.
+    shadow_problem: str | None = None
+    #: The person promoted an interim-tier release knowingly (``--accept-interim``).
+    accepted_interim: bool = False
+    tier: Literal["production", "interim"] | None = None
+    tier_confidence: Any = None
+
+    @field_validator("promoted_by")
+    @classmethod
+    def _named(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("a promotion must name the person who made it")
         return v.strip()
 
 
@@ -511,6 +589,11 @@ class ReleaseBundle(_Base):
     lockfile_hash: str
 
     override: GateOverride | None = None
+
+    #: Every promotion of this release, oldest first (decision 2026-10-26):
+    #: the last one is the live one while ``status`` is ``promoted``. Empty on
+    #: a release never promoted, and on bundles written before it was recorded.
+    promotions: list[ReleasePromotion] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _consistency(self) -> ReleaseBundle:

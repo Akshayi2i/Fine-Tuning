@@ -82,3 +82,16 @@ def test_the_runner_refuses_a_minerU_tier_the_model_was_not_trained_on(tmp_path,
         latency_check.main(["--model-url", "https://m", "--mineru-url", "https://o", "--runs", "standard,fast",
                             "--doc", f"{tmp_path / 'a.pdf'}=personal_auto"])
     assert "--runs takes standard and/or fields-first" in capsys.readouterr().err
+
+
+def test_a_release_read_at_another_tier_is_refused_at_start_up_too():
+    """The Azure worker and served_adapter refuse what promotion refuses: a
+    corpus read at another MinerU tier (registry_utils.releases.ocr_pin_refusal
+    calls this same check). A pin with no tier recorded is held to its version."""
+    from scripts.served_adapter import ServedAdapterError, assert_ocr_pin
+
+    pin = {"version": "4.0.12", "tier": "basic"}
+    with pytest.raises(ServedAdapterError, match="tier flash"):
+        assert_ocr_pin({"mineru_version": "4.0.12", "mineru_tier": "flash"}, pin)
+    assert_ocr_pin({"mineru_version": "4.0.12", "mineru_tier": "basic"}, pin)
+    assert_ocr_pin({"mineru_version": "4.0.12"}, pin)

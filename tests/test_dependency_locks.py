@@ -84,7 +84,10 @@ def test_the_stack_is_the_one_the_code_is_written_for():
 def test_setup_installs_through_the_lock_and_caps_flash_attn():
     text = (ROOT / "scripts" / "setup_pod.sh").read_text(encoding="utf-8")
     assert 'python -m pip install -r "$requirements" -c "$lock"' in text
-    assert '"flash-attn>=2.7,<3"' in text
+    # One exact version (review 2026-10-26 #46), checked after the install.
+    assert 'FLASH_ATTN_VERSION="2.8.3"' in text
+    assert '"flash-attn==${FLASH_ATTN_VERSION}"' in text
+    assert "flash-attn>=" not in text
     assert "libgl1" in text
 
 

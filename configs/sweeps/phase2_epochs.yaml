@@ -7,7 +7,6 @@ depends_on: phase1_lr
 # (evaluation.validation_generation.score_generations). Ranking a sweep on a
 # differently named metric makes every candidate "unmeasured".
 metric: {name: "field_normalized_match", goal: "maximize"}
-early_stopping_patience: 2
 budget_runs_per_adapter_type: 3
 grid:
   foundation: {num_train_epochs: [2, 3, 4]}

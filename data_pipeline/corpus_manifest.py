@@ -166,6 +166,73 @@ def count_confusable_examples(
     return count, warnings
 
 
+def _answer_values(row: dict[str, Any]) -> int | None:
+    """How many values a row's answer states (each envelope, compact or full),
+    or None when its answer is not JSON."""
+    import json
+
+    from common.canonical import expand_answer, is_field_value
+
+    messages = row.get("messages") or []
+    if not messages or messages[-1].get("role") != "assistant":
+        return None
+    try:
+        answer = expand_answer(json.loads(messages[-1].get("content") or ""))
+    except (TypeError, ValueError):
+        return None
+
+    def count(node: Any) -> int:
+        if is_field_value(node):
+            return int(node.get("raw") is not None or node.get("parsed") is not None)
+        if isinstance(node, dict):
+            return sum(count(value) for value in node.values())
+        if isinstance(node, list):
+            return sum(count(value) for value in node)
+        return 0
+
+    return count(answer)
+
+
+def target_stats(rows_by_split: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Per split, line, section group and reading mode: ``rows``, ``empty_rows``
+    (answers stating no value - each one teaches "nothing here") and
+    ``mean_values`` per row (review item 33). Absence is taught by the empty
+    rows, and by every value a window leaves out; this is how much of it a
+    corpus teaches, per mode - an image_only row is taught the same target as
+    its OCR twin.
+
+    The line is the row's ``lob`` (a package's lines joined with "+"), else
+    its doc type; the group its ``sections``, else its ``task``.
+    """
+    from common.lob import lob_lines
+
+    totals: dict[tuple[str, str, str, str], list[int]] = defaultdict(lambda: [0, 0, 0])
+    for split, rows in rows_by_split.items():
+        for row in rows:
+            lines = sorted(lob_lines(row.get("lob"))) if row.get("lob") else []
+            line = "+".join(lines) or str(row.get("doc_type") or "unknown")
+            group = str(row.get("sections") or row.get("task") or "extract")
+            values = _answer_values(row) or 0
+            entry = totals[(split, line, group, str(row.get("modality_mode") or "unknown"))]
+            entry[0] += 1
+            entry[1] += int(values == 0)
+            entry[2] += values
+    out: dict[str, Any] = {}
+    for (split, line, group, mode), (count, empty, values) in sorted(totals.items()):
+        out.setdefault(split, {}).setdefault(line, {}).setdefault(group, {})[mode] = {
+            "rows": count, "empty_rows": empty, "mean_values": round(values / count, 2) if count else 0.0}
+    return out
+
+
+def _target_counts(counts: dict[str, int] | None) -> dict[str, int]:
+    """Every :data:`build_jsonl.TARGET_COUNTS` key, 0 where the build counted
+    none, then any other key it gave, in name order."""
+    from data_pipeline.dataset_builder.build_jsonl import TARGET_COUNTS
+
+    given = {str(key): int(value) for key, value in (counts or {}).items()}
+    return dict(sorted({**dict.fromkeys(TARGET_COUNTS, 0), **given}.items()))
+
+
 def _schema_pins(doc_types: list[str]) -> dict[str, str]:
     """``{"policy": "1.0.0", "acord:25": "1.0.0", ...}`` for the types present."""
     from common.schemas import schema_selectors
@@ -198,8 +265,16 @@ def build_manifest(
     edge_case_counts: dict[str, int] | None = None,
     lob_by_source: dict[str, Any] | None = None,
     modality_mix_target: dict[str, float] | None = None,
+    target_counts: dict[str, int] | None = None,
 ) -> tuple[dict[str, Any], CoverageReport]:
-    """Assemble the manifest and run every coverage check."""
+    """Assemble the manifest and run every coverage check.
+
+    ``target_counts``: what building the targets did
+    (``build_jsonl.BuildResult.target_counts``, keys ``build_jsonl.TARGET_COUNTS``):
+    rule-added values kept, re-paged and listed unprinted; values with no page
+    placed, and the windows and documents that cost or saved; answers read as
+    halves. Recorded as given, every key present (0 when none).
+    """
     report = CoverageReport()
 
     # ---- example counts ----
@@ -291,6 +366,10 @@ def build_manifest(
         "alias_coverage": alias_counts,
         "confusable_example_count": confusable_total,
         "edge_case_counts": edge_case_counts or {},
+        # What each line, group and mode teaches: rows, empty answers, values
+        # per answer (review item 33) - and what building the targets did.
+        "target_stats": target_stats(rows_by_split),
+        "target_counts": _target_counts(target_counts),
 
         # ---- de-identification: none, Option A (arch §8b, IMPL-05 §1) ----
         # Recorded honestly rather than omitted. Text-only de-identification

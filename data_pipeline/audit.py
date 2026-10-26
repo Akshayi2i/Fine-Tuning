@@ -319,6 +319,7 @@ def audit_document(folder: Path, report: AuditReport, checksums: dict[str, str])
     # ---- 3. values against the PDF — only for a PDF that opened: an unreadable
     # one is its blocker, not N "needs OCR" rows.
     pages = [_Page(text) for text in page_texts]
+    tolerant: dict[int, Any] | None = None
     for path, envelope in envelopes if audit.pages else ():
         raw = envelope.get("raw")
         if raw in (None, "") or isinstance(raw, (dict, list)):
@@ -330,27 +331,80 @@ def audit_document(folder: Path, report: AuditReport, checksums: dict[str, str])
             record.result = "skipped_short"
         elif refs and not any(has_text[r - 1] for r in refs) or not refs and not audit.text_pages:
             record.result = "needs_ocr"
+        elif not refs:
+            # Placed as the corpus build places it (policy_windows.with_placed_pages):
+            # serving's matcher, on every page with text - one page, or every page
+            # that prints it. Placeable, it is "no_page_ref"; on no page, "not_found".
+            if tolerant is None:
+                tolerant = grounding.tolerant_pages(
+                    {i + 1: text for i, text in enumerate(page_texts) if has_text[i]})
+            where = _where_printed(envelope, tolerant)
+            record.found_on = ",".join(map(str, where.pages[:5]))
+            record.result = "no_page_ref" if where.printed else "not_found"
         else:
             # The raw value, not a normalised copy: normalised, a code's pieces
             # become words, and "PAP-2025-0042" would be found on a page that
             # prints "PAP-2026-0042" beside a 2025 and a 0042 (appears_on).
             on = [i + 1 for i, page in enumerate(pages) if has_text[i] and _appears(raw, page)]
             record.found_on = ",".join(map(str, on[:5]))
-            if not refs:
-                record.result = "no_page_ref" if on else "not_found"
-            elif set(on) & set(refs):
+            if set(on) & set(refs):
                 record.result = "ok"
             elif on:
                 record.result = "wrong_page"
             else:
                 record.result = "not_found"
         audit.values.append(record)
+    _unpaged_findings(audit, metadata, report)
 
     # ---- 4. formats
     _check_formats(name, envelopes, report)
     # ---- 5. label consistency: compared across the folder (label_consistency)
     audit.labels = label_facts(label, lob)
     return audit
+
+
+def _where_printed(envelope: dict, pages: dict[int, Any]) -> grounding.Grounding:
+    """Where serving's matcher finds a value that cites no page
+    (``label_verification.where_printed``)."""
+    from data_pipeline.dataset_builder.label_verification import where_printed
+
+    return where_printed(envelope, [], pages)
+
+
+#: Values the pipeline fills itself, and the pipeline's own records: never a
+#: value a page is asked to print.
+_NOT_PRINTED_BY_DESIGN = ("fideon:", "text_sections")
+
+
+def _unpaged_findings(audit: DocumentAudit, metadata: dict[str, Any], report: AuditReport) -> None:
+    """``no_page_ref`` per gold (review item 2): its values that cite no page,
+    those the corpus build will place - on every page that prints them - and
+    those it cannot. A warning; a blocker for a REAL gold (not synthetic) only
+    for a value printed on no page with text that is not listed in the
+    metadata's ``unprinted_values``: the build can place it nowhere, so every
+    window that would hold it is left out of training. A scan with no text
+    (``needs_ocr``) is not judged here."""
+    from common.canonical import SYSTEM_SUPPLIED_FIELDS
+
+    system = {f"{section}.{name}" for section, name in SYSTEM_SUPPLIED_FIELDS}
+    listed = set(metadata.get("unprinted_values") or [])
+    unpaged = [v for v in audit.values if not v.page_ref and v.result in ("no_page_ref", "not_found")
+               and v.path not in system and not v.path.startswith(_NOT_PRINTED_BY_DESIGN)]
+    if not unpaged:
+        return
+    nowhere = [v.path for v in unpaged if v.result == "not_found" and v.path not in listed]
+    placed = sum(1 for v in unpaged if v.result == "no_page_ref")
+    report.findings.append(Finding(
+        audit.folder, "warning", "no_page_ref",
+        f"{len(unpaged)} value(s) cite no page: {placed} printed on a page with text, which the corpus "
+        f"build gives them (every page that prints them); {len(unpaged) - placed} printed on none"))
+    if nowhere and not audit.synthetic:
+        audit.importable = False
+        report.findings.append(Finding(
+            audit.folder, "blocker", "no_page_ref",
+            f"{len(nowhere)} value(s) cite no page and no page with text prints them "
+            f"({', '.join(nowhere[:5])}): give each the page that prints it, or list it in "
+            "metadata.json unprinted_values; as it is, every window that would hold it is left out"))
 
 
 def _refs(envelope: dict) -> list:

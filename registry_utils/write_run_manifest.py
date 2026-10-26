@@ -98,6 +98,9 @@ def write_manifest(
 
     if update_index:
         update_registry_index(manifest, client)
+    # Mirrored to the tracker with the stage times so far: a no-op unless
+    # MLFLOW_TRACKING_URI is set, and never a reason for the write to fail.
+    log_to_tracker(manifest, stage_seconds=_STAGE_SECONDS.get(manifest.run_id))
     return key
 
 
@@ -215,27 +218,68 @@ def mark_published(
     return manifest
 
 
-def log_to_tracker(manifest: RunManifest) -> None:
-    """Mirror the manifest into MLflow or W&B when configured.
+#: Each run's stage wall times so far, ``{run id: {stage: seconds}}``: recorded as
+#: each stage of ``pipeline_dag.run_stages`` finishes (``orchestration.notify``),
+#: logged with every manifest write after it.
+_STAGE_SECONDS: dict[str, dict[str, float]] = {}
 
-    A no-op when neither is set. The tracker adds a queryable UI; the Blob
-    manifest is the durable record that travels with the artifacts (arch §12),
-    so the tracker is never the source of truth and never blocks a run.
+#: The tag an MLflow run carries the run id in, so later writes find it again.
+TRACKER_RUN_TAG = "fideon_run_id"
+
+
+def record_stage_seconds(run_id: str, stage: str, seconds: float) -> None:
+    """A stage of ``run_id`` took ``seconds``: kept for its next manifest write,
+    and logged to the tracker now (a no-op without one)."""
+    _STAGE_SECONDS.setdefault(run_id, {})[stage] = float(seconds)
+    log_to_tracker(None, run_id=run_id, stage_seconds={stage: float(seconds)})
+
+
+def log_to_tracker(manifest: RunManifest | None, *, run_id: str | None = None,
+                   stage_seconds: dict[str, float] | None = None) -> None:
+    """Mirror the manifest - and each stage's wall time - into MLflow when configured.
+
+    A no-op unless ``MLFLOW_TRACKING_URI`` is set. The tracker adds a queryable
+    UI; the Blob manifest is the durable record that travels with the artifacts
+    (arch §12), so the tracker is never the source of truth and never blocks a
+    run: every failure here is logged and swallowed.
+
+    One MLflow run per run id, found again by its :data:`TRACKER_RUN_TAG` tag:
+    every manifest write and every stage logs into the same run, rather than
+    one MLflow run per write. ``stage_seconds`` go in as ``stage_seconds.<stage>``.
     """
     import os
 
-    if os.environ.get("MLFLOW_TRACKING_URI"):
-        try:
-            import mlflow
-
-            with mlflow.start_run(run_name=manifest.run_id):
-                mlflow.log_params(manifest.training_config.model_dump(mode="json"))
+    if not os.environ.get("MLFLOW_TRACKING_URI"):
+        return
+    run_id = run_id or (manifest.run_id if manifest is not None else None)
+    if not run_id:
+        return
+    try:
+        import mlflow
+    except ImportError:
+        log.warning("MLFLOW_TRACKING_URI is set but mlflow is not installed; %s is not tracked", run_id)
+        return
+    try:
+        found = mlflow.search_runs(filter_string=f"tags.{TRACKER_RUN_TAG} = '{run_id}'",
+                                   max_results=1, output_format="list")
+        existing = found[0].info.run_id if found else None
+        with (mlflow.start_run(run_id=existing) if existing
+              else mlflow.start_run(run_name=run_id, tags={TRACKER_RUN_TAG: run_id})):
+            if manifest is not None:
+                try:
+                    mlflow.log_params(manifest.training_config.model_dump(mode="json"))
+                except Exception as exc:  # noqa: BLE001 - a param logged before with another value
+                    log.debug("tracker: params of %s not logged again (%s)", run_id, exc)
                 metrics = {
                     k: v
                     for k, v in manifest.eval_metrics.model_dump(mode="json").items()
-                    if isinstance(v, (int, float))
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)
                 }
                 if metrics:
                     mlflow.log_metrics(metrics)
-        except Exception:  # pragma: no cover - tracking must never fail a run
-            pass
+                mlflow.set_tag("status", str(manifest.status))
+            if stage_seconds:
+                mlflow.log_metrics({f"stage_seconds.{stage}": float(seconds)
+                                    for stage, seconds in stage_seconds.items()})
+    except Exception as exc:  # noqa: BLE001 - tracking must never fail a run
+        log.warning("tracker: %s not logged (%s: %s)", run_id, type(exc).__name__, exc)

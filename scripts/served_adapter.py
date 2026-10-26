@@ -74,13 +74,24 @@ def check_adapter_config(config: dict[str, Any]) -> int:
 
 
 def assert_ocr_pin(release_pin: dict[str, Any], pin: dict[str, str]) -> None:
-    """Refuse a release whose corpus another MinerU read than the one serving reads with."""
+    """Refuse a release whose corpus another MinerU read than the one serving reads
+    with: another version, or another tier where the corpus recorded one."""
     trained = release_pin.get("mineru_version")
     if trained != pin["version"]:
         raise ServedAdapterError(
             f"the release was trained on text from MinerU {trained or '(not recorded)'}, but serving reads "
             f"pages with MinerU {pin['version']} (configs/shared/ocr.yaml): its text is formatted otherwise, "
             "input the model never saw. Re-OCR the corpus with the served MinerU and train a new version."
+        )
+    # The tier, where the corpus recorded one: a reading at another tier was made
+    # by other models. An in-process reading records none and is held to its
+    # version alone, as find_unprocessed holds it.
+    tier = release_pin.get("mineru_tier")
+    if tier is not None and tier != pin["tier"]:
+        raise ServedAdapterError(
+            f"the release was trained on text from MinerU {trained} at tier {tier}, but serving reads pages "
+            f"at tier {pin['tier']} (configs/shared/ocr.yaml): another tier reads a page with other models. "
+            "Re-OCR the corpus with the served MinerU and train a new version."
         )
 
 

@@ -32,11 +32,65 @@ class RenderError(RuntimeError):
     """Raised when a PDF cannot be rendered to page images."""
 
 
-def render_pdf_pages(pdf_bytes: bytes, max_long_side_px: int, workers: int = 1) -> list[bytes]:
+#: Pixels per side of one visual token (16 px patches merged 2x2): the factor
+#: Qwen's ``smart_resize`` rounds each side to (``training.length_check.RESIZE_FACTOR``).
+RESIZE_FACTOR = 32
+
+#: ``budget`` not given: the active format profile's (:func:`page_pixel_budget`).
+_ACTIVE: Any = object()
+
+
+def page_pixel_budget() -> tuple[int, int] | None:
+    """``(min_pixels, max_pixels)`` pages are resized to here, once, for every
+    reader: the active format profile's budget (``common.config.pixel_budget``)
+    under a profile other than standard; None under standard, whose pages are
+    rendered as they always were."""
+    from common.config import fast_profile, pixel_budget
+
+    return pixel_budget() if fast_profile() else None
+
+
+def smart_resize(height: int, width: int, *, min_pixels: int, max_pixels: int,
+                 factor: int = RESIZE_FACTOR) -> tuple[int, int]:
+    """``(height, width)`` a Qwen-VL image processor resizes a page to: each
+    side a multiple of ``factor``, the area within ``[min_pixels, max_pixels]``,
+    the aspect kept - the rule of ``qwen_vl_utils.smart_resize`` (ms-swift, at
+    training) and of transformers' Qwen2-VL processor (vLLM, at serving), and of
+    ``training.length_check.image_tokens``. A page already that size is resized
+    by neither: both compute the same size back."""
+    import math
+
+    h_bar = max(factor, round(height / factor) * factor)
+    w_bar = max(factor, round(width / factor) * factor)
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt(height * width / max_pixels)
+        h_bar = max(factor, math.floor(height / beta / factor) * factor)
+        w_bar = max(factor, math.floor(width / beta / factor) * factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+    return h_bar, w_bar
+
+
+def render_pdf_pages(pdf_bytes: bytes, max_long_side_px: int, workers: int = 1,
+                     budget: Any = _ACTIVE) -> list[bytes]:
     """Render each page to PNG with its long side at ``max_long_side_px``.
 
     Aspect ratio is preserved. The scale factor converts PDF points (72 per inch)
     to pixels, so a US Letter page at a 1792px cap renders at roughly 163 DPI.
+
+    Under a format profile with its own pixel budget (the fast profile's 1.25
+    MP; ``budget``, default :func:`page_pixel_budget`), each page is then
+    resized ONCE, here, to the size the model's image processors would resize
+    it to (:func:`smart_resize`), with one filter (bicubic, the processors'
+    own). A 1792 px render is about 2.48 MP; left to the readers, ms-swift's
+    qwen-vl-utils (PIL) downscaled it at training and transformers' processor
+    in vLLM (torch) at serving - two resamplers, two sets of pixels for one
+    page. Pre-resized, both compute the same size back and leave the pixels as
+    they are, so training and serving see the same pixels
+    (tests/test_parity.py measures it on the pod). Under the standard profile
+    (None) the pages are rendered as before.
 
     ``workers`` above 1 renders runs of pages in that many processes at once -
     a 114-page scan took 93 s in one - each page exactly as one process renders
@@ -48,21 +102,45 @@ def render_pdf_pages(pdf_bytes: bytes, max_long_side_px: int, workers: int = 1) 
     embedded image resolution per page, which is a separate concern from the cap
     and is not attempted here.
     """
+    if budget is _ACTIVE:
+        budget = page_pixel_budget()
+    budget = tuple(budget) if budget is not None else None
     count = _page_count(pdf_bytes)
     workers = max(1, min(workers, count))
     if workers == 1:
-        images = _render_range(pdf_bytes, max_long_side_px, 0, count)
+        images = _render_range(pdf_bytes, max_long_side_px, 0, count, budget)
     else:
         from concurrent.futures import ProcessPoolExecutor
 
         bounds = [count * part // workers for part in range(workers + 1)]
         with ProcessPoolExecutor(max_workers=workers) as pool:
             runs = pool.map(_render_range, [pdf_bytes] * workers, [max_long_side_px] * workers,
-                            bounds[:-1], bounds[1:])
+                            bounds[:-1], bounds[1:], [budget] * workers)
             images = [image for run in runs for image in run]
     if not images:
         raise RenderError("PDF produced no pages")
     return images
+
+
+def _resized_png(pixmap: Any, budget: tuple[int, int]) -> bytes:
+    """A rendered page as PNG at the size the image processors resize it to
+    (:func:`smart_resize`): bicubic, once; as rendered when it is that size."""
+    import io
+
+    from PIL import Image
+
+    min_pixels, max_pixels = budget
+    height, width = smart_resize(pixmap.height, pixmap.width, min_pixels=min_pixels, max_pixels=max_pixels)
+    if (height, width) == (pixmap.height, pixmap.width):
+        return pixmap.tobytes("png")
+    mode = {1: "L", 3: "RGB", 4: "RGBA"}.get(pixmap.n)
+    if mode is None:
+        raise RenderError(f"a rendered page has {pixmap.n} channels; expected 1, 3 or 4")
+    image = Image.frombytes(mode, (pixmap.width, pixmap.height), pixmap.samples)
+    resized = image.resize((width, height), Image.Resampling.BICUBIC)
+    out = io.BytesIO()
+    resized.save(out, format="PNG")
+    return out.getvalue()
 
 
 def _fitz() -> Any:
@@ -80,8 +158,10 @@ def _page_count(pdf_bytes: bytes) -> int:
         return doc.page_count
 
 
-def _render_range(pdf_bytes: bytes, max_long_side_px: int, start: int, stop: int) -> list[bytes]:
-    """Pages ``start`` to ``stop - 1`` (0-based) as PNG: one process's share."""
+def _render_range(pdf_bytes: bytes, max_long_side_px: int, start: int, stop: int,
+                  budget: tuple[int, int] | None = None) -> list[bytes]:
+    """Pages ``start`` to ``stop - 1`` (0-based) as PNG: one process's share;
+    each resized to ``budget`` when one is given (:func:`render_pdf_pages`)."""
     fitz = _fitz()
     images: list[bytes] = []
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
@@ -95,7 +175,7 @@ def _render_range(pdf_bytes: bytes, max_long_side_px: int, start: int, stop: int
             # exactly on the cap in pixels.
             scale = max_long_side_px / longest
             pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-            images.append(pixmap.tobytes("png"))
+            images.append(pixmap.tobytes("png") if budget is None else _resized_png(pixmap, budget))
     return images
 
 
@@ -115,6 +195,10 @@ def render_document(
     same resolution record, same provenance.
     """
     cap = resolution_cap_px()
+    # The size every page is resized to after rendering (the fast profile's),
+    # or None: pages rendered under another are other pixels, as another cap's are.
+    budget = page_pixel_budget()
+    budget = list(budget) if budget is not None else None
     env = current_environment(device, strict=device == "cuda")
     meta_key = paths.ocr_meta(doc_type, source_id, tenant_id)
 
@@ -128,7 +212,8 @@ def render_document(
         # document to image_only, which silently stopped the row-completeness
         # cross-check from flagging it while its page_*.md sat there unread.
         was_ocred = not existing.get("render_only")
-        if not force and not was_ocred and existing.get("resolution_cap_px") == cap:
+        if (not force and not was_ocred and existing.get("resolution_cap_px") == cap
+                and existing.get("page_pixel_budget") == budget):
             log.info("skipping %s: already rendered at %dpx", source_id, cap)
             return existing
 
@@ -155,6 +240,9 @@ def render_document(
         "ocr_device": env.device,
         "preprocessing_date": datetime.now(UTC).isoformat(),
         "resolution_cap_px": cap,
+        # (min_pixels, max_pixels) each page was resized to after rendering
+        # (render_pdf_pages), or None: rendered at the cap only.
+        "page_pixel_budget": budget,
         "source_checksum": raw_meta.get("checksum_sha256"),
         # Preserved. They cannot be recomputed without re-running OCR.
         "table_row_counts": existing.get("table_row_counts", {}) if was_ocred else {},

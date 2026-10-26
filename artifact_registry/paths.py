@@ -54,8 +54,13 @@ AdapterKind = Literal["foundation", "doc_type"]
 #: another tenant's ``policy_0001`` look frozen. The whole prefix moved at once:
 #: a set frozen at its root before this is refused until it is moved under its
 #: tenant (``evaluation.freeze_eval_set``), so ``tenant_of`` never reads a source id.
+#:
+#: ``run-artifacts`` holds what a run's checkpoint selection read off the
+#: tenant's validation documents (:func:`validation_generations_key`, and the
+#: error tallies beside it): the model's answers to those documents are their
+#: data.
 TENANT_SCOPED: Final[frozenset[str]] = frozenset(
-    {"raw-documents", "processed", "golden-labels", "corpus", "releases", "exports",
+    {"raw-documents", "processed", "golden-labels", "corpus", "releases", "exports", "run-artifacts",
      "golden-eval-set"}
 )
 
@@ -445,6 +450,43 @@ def model_card(
     """``model_card.md`` beside the run's ``run_manifest.json`` (Fideon SPEC_09 amendment item 7)."""
     manifest = run_manifest(run_id, run_type, doc_type, scope=scope)
     return manifest[: -len("run_manifest.json")] + "model_card.md"
+
+
+def run_artifact_dir(run_id: str, tenant_id: str | None = None) -> str:
+    """``run-artifacts/{tenant}/{run_id}`` - what a run read off the tenant's
+    validation documents, beside its manifest in the registry but under the
+    tenant: the model's answers to those documents are the tenant's data, and a
+    tenant deletion reaches them by prefix (:data:`TENANT_SCOPED`)."""
+    from common.run_ids import is_valid_run_id
+
+    if not is_valid_run_id(run_id):
+        raise PathError(f"invalid run_id {run_id!r}; expected '<lineage>-v<n>' (policy-v3)")
+    return _join("run-artifacts", _tenant(tenant_id), run_id.strip().lower())
+
+
+def validation_errors_key(run_id: str, tenant_id: str | None = None) -> str:
+    """``run-artifacts/{tenant}/{run_id}/validation_errors.json``: the selected
+    checkpoint's validation error tallies - values, wrong, missed and invented
+    by field, line, window group and reading mode (checkpoint selection)."""
+    return _join(run_artifact_dir(run_id, tenant_id), "validation_errors.json")
+
+
+def validation_generations_key(run_id: str, tenant_id: str | None = None) -> str:
+    """``run-artifacts/{tenant}/{run_id}/validation_generations.jsonl``: the
+    selected checkpoint's answers to the finalists' validation pass, logprobs
+    included, which calibration fits from instead of generating them again."""
+    return _join(run_artifact_dir(run_id, tenant_id), "validation_generations.jsonl")
+
+
+def eval_answers_key(run_id: str, tenant_id: str | None = None) -> str:
+    """``run-artifacts/{tenant}/{run_id}/eval_answers.jsonl.gz``: every golden-eval
+    reading's served answer, as the gate scored it, with what the scoring read
+    beside it (``evaluation.rescore``). The eval report records the key
+    (``answers_stored``). Under the tenant, not beside the report in the shared
+    ``eval-reports/`` tree: the model's answers to the tenant's frozen
+    documents are the tenant's data, and a tenant deletion reaches them by
+    prefix (:data:`TENANT_SCOPED`)."""
+    return _join(run_artifact_dir(run_id, tenant_id), "eval_answers.jsonl.gz")
 
 
 def registry_index() -> str:

@@ -184,20 +184,29 @@ def check_blob(client, results: list[Check]) -> None:
 
 def check_ocr_done(ctx, results: list[Check]) -> None:
     from artifact_registry.blob_client import for_ocr
+    from common.config import served_mineru
     from data_pipeline.labeling.export_golden_labels import list_labeled_source_ids
     from data_pipeline.ocr.run_mineru import find_unprocessed
+    from orchestration.pipeline_dag import ocr_remediation
 
     raw = for_ocr()
+    # Held to the served MinerU, version and tier (configs/shared/ocr.yaml): a
+    # document another MinerU read - 3.4.5 in-process - is not read as serving
+    # reads it, and a release trained on it is refused by the Azure worker.
+    pin = served_mineru()
     for doc_type in ADAPTER.doc_types:
         labelled = list_labeled_source_ids(ctx.client, doc_type, ctx.tenant_id)
-        pending = find_unprocessed(raw, doc_type, ctx.tenant_id)
+        pending = find_unprocessed(raw, doc_type, ctx.tenant_id, mineru_version=pin["version"],
+                                   mineru_tier=pin["tier"])
         if not labelled:
             results.append(Check(f"data {doc_type}", "FAIL", "no labelled documents",
                                  "import first: python -m data_pipeline.ingestion.import_labeled_pdfs ..."))
         elif pending:
-            results.append(Check(f"data {doc_type}", "FAIL", f"{len(labelled)} labelled, {len(pending)} not OCR'd",
-                                 f"/workspace/venv-ocr/bin/python -m data_pipeline.ocr.run_mineru --doc-type "
-                                 f"{doc_type} --all-unprocessed" + (f" --tenant {ctx.tenant_id}" if ctx.tenant_id else "")))
+            results.append(Check(
+                f"data {doc_type}", "FAIL",
+                f"{len(labelled)} labelled, {len(pending)} not read by the served MinerU {pin['version']} "
+                f"(tier {pin['tier']}): never OCR'd, or read by another MinerU",
+                ocr_remediation([doc_type], ctx.tenant_id)))
         elif len(labelled) < ctx.min_labels_per_type:
             results.append(Check(f"data {doc_type}", "FAIL",
                                  f"{len(labelled)} labelled, fewer than {ctx.min_labels_per_type}"))

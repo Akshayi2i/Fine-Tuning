@@ -33,9 +33,11 @@ few hundred documents, and the dependency is not worth the millisecond.
 from __future__ import annotations
 
 import logging
+import math
 import random
+import statistics
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -162,6 +164,21 @@ def paired_bootstrap(
         )
         return ConfidenceInterval(metric, observed, -1.0, 1.0, resamples, n)
 
+    deltas = _resampled_deltas(metric, n, current_mean, candidate_mean, resamples, seed)
+    lower = deltas[int(0.025 * resamples)]
+    upper = deltas[min(int(0.975 * resamples), resamples - 1)]
+    return ConfidenceInterval(metric, observed, lower, upper, resamples, n)
+
+
+def _resampled_deltas(
+    metric: str, n: int,
+    current_mean: Callable[[Sequence[int]], float],
+    candidate_mean: Callable[[Sequence[int]], float],
+    resamples: int, seed: int,
+) -> list[float]:
+    """(candidate − current) on ``resamples`` resamples of the ``n`` documents,
+    sorted. Seeded by ``seed`` and the metric's name, so one comparison always
+    draws the same resamples."""
     rng = random.Random(f"{seed}:{metric}")
     deltas: list[float] = []
     for _ in range(resamples):
@@ -170,11 +187,209 @@ def paired_bootstrap(
         # document samples and inflate every interval.
         picks = [rng.randrange(n) for _ in range(n)]
         deltas.append(candidate_mean(picks) - current_mean(picks))
-
     deltas.sort()
-    lower = deltas[int(0.025 * resamples)]
-    upper = deltas[min(int(0.975 * resamples), resamples - 1)]
-    return ConfidenceInterval(metric, observed, lower, upper, resamples, n)
+    return deltas
+
+
+@dataclass
+class NonInferiorityTest:
+    """A one-sided paired test that (candidate − reference) sits above −margin.
+
+    The null hypothesis is the regression: the candidate is worse by the margin
+    or more. ``p_value`` is the share of resampled differences at or below
+    −margin (read to six places, as :meth:`ConfidenceInterval.non_inferior`
+    reads a bound), and non-inferiority is shown at a level ``alpha`` when the
+    one-sided lower bound at that level, :meth:`lower_bound`, sits above
+    −margin. Kept with its resampled differences, so a multiple-testing
+    correction (:func:`holm_step_down`) can read the bound at any level.
+    """
+
+    metric: str
+    observed: float
+    margin: float
+    documents: int
+    p_value: float
+    resamples: int = RESAMPLES
+    deltas: list[float] = field(default_factory=list, repr=False)
+
+    def lower_bound(self, alpha: float) -> float:
+        """The one-sided (1 − alpha) lower bound on (candidate − reference)."""
+        index = min(max(int(alpha * len(self.deltas)), 0), len(self.deltas) - 1)
+        return self.deltas[index]
+
+    def shown(self, alpha: float) -> bool:
+        """Whether non-inferiority is shown at level ``alpha``."""
+        return round(self.lower_bound(alpha), 6) > -abs(self.margin)
+
+
+def non_inferiority_test(
+    metric: str,
+    reference: Sequence[float],
+    candidate: Sequence[float],
+    *,
+    margin: float,
+    reference_weights: Sequence[float] | None = None,
+    candidate_weights: Sequence[float] | None = None,
+    resamples: int = RESAMPLES,
+    seed: int = SEED,
+) -> NonInferiorityTest:
+    """The one-sided paired non-inferiority test of ``candidate`` against
+    ``reference`` (:class:`NonInferiorityTest`), resampling documents as
+    :func:`paired_bootstrap` does: per-document scores aligned by index, and
+    weights for both sides or neither.
+
+    One document cannot show anything: its differences span the whole range, so
+    non-inferiority is never shown on it (the rule :func:`paired_bootstrap`
+    applies at n=1).
+    """
+    if len(reference) != len(candidate):
+        raise ValueError(
+            f"{metric}: {len(reference)} reference scores against {len(candidate)} candidate "
+            "scores. They must be per-document and aligned by index."
+        )
+    n = len(reference)
+    if n == 0:
+        raise ValueError(f"{metric}: no documents to test")
+    if (reference_weights is None) != (candidate_weights is None):
+        raise ValueError(f"{metric}: weights for one side only; give both sides' weights, or neither")
+    reference_mean = _side_mean(metric, "reference", reference, reference_weights, None)
+    candidate_mean = _side_mean(metric, "candidate", candidate, candidate_weights, None)
+    observed = candidate_mean(range(n)) - reference_mean(range(n))
+    if n == 1:
+        return NonInferiorityTest(metric, observed, margin, n, 1.0, resamples, [-1.0, 1.0])
+    deltas = _resampled_deltas(metric, n, reference_mean, candidate_mean, resamples, seed)
+    at_or_below = sum(1 for d in deltas if round(d, 6) <= -abs(margin))
+    return NonInferiorityTest(metric, observed, margin, n, at_or_below / resamples, resamples, deltas)
+
+
+@dataclass
+class HolmOutcome:
+    """One hypothesis's place in a Holm step-down (:func:`holm_step_down`)."""
+
+    #: 1 for the smallest p-value, up to ``family``.
+    rank: int
+    #: How many hypotheses were tested together.
+    family: int
+    #: The level this hypothesis is tested at: alpha / (family − rank + 1).
+    adjusted_alpha: float
+    #: Holm's adjusted p-value: the running maximum of (family − rank + 1) · p.
+    adjusted_p: float
+    #: The one-sided lower bound at ``adjusted_alpha``.
+    bound: float
+    #: Whether non-inferiority is shown (the regression rejected).
+    shown: bool
+    #: The hypothesis whose failure stopped the step-down before this one was
+    #: reached, when one did: Holm then rejects nothing after it.
+    stopped_by: str | None = None
+
+
+def holm_step_down(tests: dict[str, NonInferiorityTest], alpha: float) -> dict[str, HolmOutcome]:
+    """Holm's step-down over one-sided non-inferiority tests, family-wise ``alpha``.
+
+    The tests are taken smallest p-value first (ties by name, so the order is
+    reproducible). The one ranked ``k`` of ``m`` is tested at alpha / (m − k + 1):
+    shown when its lower bound at that level sits above −margin. At the first
+    one not shown the procedure stops, and none after it is shown either - the
+    family-wise error, here the chance of calling ANY regressed hypothesis
+    non-inferior, stays at ``alpha``.
+    """
+    ordered = sorted(tests.items(), key=lambda item: (item[1].p_value, item[0]))
+    family = len(ordered)
+    outcomes: dict[str, HolmOutcome] = {}
+    stopped_by: str | None = None
+    running_p = 0.0
+    for rank, (name, test) in enumerate(ordered, 1):
+        adjusted_alpha = alpha / (family - rank + 1)
+        running_p = max(running_p, min(1.0, (family - rank + 1) * test.p_value))
+        own = test.shown(adjusted_alpha)
+        outcomes[name] = HolmOutcome(
+            rank=rank, family=family, adjusted_alpha=adjusted_alpha, adjusted_p=running_p,
+            bound=test.lower_bound(adjusted_alpha), shown=own and stopped_by is None,
+            stopped_by=stopped_by,
+        )
+        if not own and stopped_by is None:
+            stopped_by = name
+    return outcomes
+
+
+@dataclass
+class MeanBound:
+    """A one-sided lower confidence bound on one release's mean score over
+    documents (:func:`mean_lower_bound`)."""
+
+    metric: str
+    estimate: float
+    lower: float
+    documents: int
+    confidence: float
+    resamples: int = RESAMPLES
+    seed: int = SEED
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "metric": self.metric,
+            "point_estimate": round(self.estimate, 6),
+            "lower_bound": round(self.lower, 6),
+            "documents": self.documents,
+            "confidence": self.confidence,
+            "one_sided": True,
+            "resamples": self.resamples,
+            "seed": self.seed,
+        }
+
+
+def mean_lower_bound(
+    metric: str,
+    scores: Sequence[float],
+    weights: Sequence[float] | None = None,
+    *,
+    confidence: float = 0.95,
+    resamples: int = RESAMPLES,
+    seed: int = SEED,
+) -> MeanBound:
+    """The one-sided ``confidence`` lower bound on a mean over documents,
+    resampling the documents with replacement.
+
+    ``scores`` are per document, with ``weights`` (how much each counts in the
+    mean, as :func:`paired_bootstrap` weighs a side) or without. The bound is
+    the (1 − confidence) percentile of the resampled means. Seeded by ``seed``
+    and the metric's name, so the bound is reproducible.
+
+    One document says nothing about the next: at n=1 the bound is 0.0, the
+    lowest a share can be, so it never clears a bar (absence of evidence is not
+    evidence).
+    """
+    n = len(scores)
+    if n == 0:
+        raise ValueError(f"{metric}: no documents to bound")
+    mean = _side_mean(metric, "scores", scores, weights, None)
+    estimate = mean(range(n))
+    if n == 1:
+        log.warning("%s: a bound over a single document is no bound; recorded as 0.0", metric)
+        return MeanBound(metric, estimate, 0.0, n, confidence, resamples, seed)
+    rng = random.Random(f"{seed}:{metric}:mean")
+    means = sorted(mean([rng.randrange(n) for _ in range(n)]) for _ in range(resamples))
+    lower = means[min(max(int((1.0 - confidence) * resamples), 0), resamples - 1)]
+    return MeanBound(metric, estimate, lower, n, confidence, resamples, seed)
+
+
+def minimum_detectable_drop(
+    differences: Sequence[float], *, alpha: float = 0.05, power: float = 0.80,
+) -> float | None:
+    """The smallest true drop a one-sided test at level ``alpha`` would see with
+    probability ``power``, over these paired per-document differences:
+    (z₁₋α + z_power) · s / √n, with s their standard deviation.
+
+    What a reader needs beside a comparison too small to gate: a drop below this
+    could have happened at this n and gone unseen. ``None`` under two documents,
+    where no spread can be estimated.
+    """
+    n = len(differences)
+    if n < 2:
+        return None
+    z = statistics.NormalDist().inv_cdf
+    spread = statistics.stdev(float(d) for d in differences)
+    return (z(1.0 - alpha) + z(power)) * spread / math.sqrt(n)
 
 
 def _side_mean(

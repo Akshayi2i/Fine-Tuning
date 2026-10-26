@@ -58,12 +58,37 @@ defaults:
   min_labels_per_type: 25
   keep_staging: false
   seed: 42
+  # Documents the OCR stage reads at once against the served MinerU (stage 2's
+  # --ocr-workers; run_mineru --workers). 1 reads one at a time; 4 is a good
+  # start against a dedicated MinerU 4.0.12/basic. The in-process MinerU reads one.
+  ocr_workers: 1
+
+continued_training:
+  # When a cycle starts from the base model instead of continuing the promoted
+  # adapter (pipeline_dag.fresh_by_rule). Every rule is OFF by default; a cycle
+  # that goes fresh records why in its run manifest (fresh_reason).
+  #
+  # Fresh when more than this share of the documents the cycle can train on
+  # (labelled, not in the frozen eval set) are new to the adapter's chain, e.g. 0.4.
+  fresh_when_new_share_above: null
+  # Fresh once the chain (the run from the base and every run continuing it) is
+  # this many cycles long, e.g. 4: every 4th cycle starts from the base.
+  fresh_every_n_cycles: null
+  # Fresh when a gold the chain trained on changed content (or was deleted),
+  # compared by the gold hashes each corpus records (gold_sha256, since
+  # 2026-10-26). A chain corpus without them goes fresh too, saying so.
+  fresh_when_golds_changed: false
 
 notifications:
-  # Populated from env; empty means log-only.
-  on_gate_block: []
-  on_command_failure: []
-  on_publish: []
+  # A JSON POST to a webhook on these run events (orchestration/notify.py): run
+  # id, version, stage, status, tier and a short reason - never document content.
+  # The URL is a secret and comes from the environment variable named here
+  # (HTTPS only); unset, nothing is posted and the events are only logged.
+  webhook_url_env: FIDEON_NOTIFY_WEBHOOK_URL
+  on_stage_failure: true
+  on_gate_block: true
+  on_run_complete: true
+  timeout_seconds: 10
 
 deferred:
   # BUILT. This flag controls whether the pipeline runs it, which is a separate

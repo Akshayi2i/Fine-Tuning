@@ -98,6 +98,12 @@ class StageContext:
     # -- flags -------------------------------------------------------------
     dry_run: bool = True
     skip_ingest: bool = False
+    #: Documents the OCR stage reads at once against the served MinerU
+    #: (``run_mineru.process_batch``). 1 reads one at a time, as before.
+    ocr_workers: int = 1
+    #: Train on a working tree with uncommitted changes (``--allow-dirty``): a
+    #: real training run refuses one otherwise (``training.train.assert_clean_tree``).
+    allow_dirty: bool = False
     train_vit: bool = False
     min_labels_per_type: int = DAY_ZERO_MIN_LABELS_PER_TYPE
     push_adapters: bool = False
@@ -171,6 +177,13 @@ class StageContext:
 
     #: Family grouping evidence per doc type, from the dataset build (arch v2.1 §8.2).
     grouping: dict[str, Any] = field(default_factory=dict)
+    #: ``(MinerU version, tier) -> documents`` the dataset build loaded, held to
+    #: the served pin before a corpus is planned (:func:`assert_corpus_ocr_pin`).
+    ocr_readings: dict[tuple[str, str | None], int] = field(default_factory=dict)
+    #: ``ocr_meta.json`` bodies by key, read once per run by the OCR stage's
+    #: completion check and the stage (``run_mineru.find_unprocessed``); cleared
+    #: once the stage has written new ones.
+    ocr_meta_cache: dict[str, Any] = field(default_factory=dict)
 
     # -- fitted during the run ---------------------------------------------
     calibrators: dict[str, Any] = field(default_factory=dict)
@@ -180,6 +193,11 @@ class StageContext:
     results: dict[str, StageResult] = field(default_factory=dict)
     manifests: dict[str, Any] = field(default_factory=dict)
     unlabeled_backlog: dict[str, list[str]] = field(default_factory=dict)
+    #: Set by :func:`continuation` when the cycle continues a parent whose eval
+    #: report was on another yardstick only because the scoring code or
+    #: settings moved, and was re-scored from its stored answers (decision
+    #: 2026-10-26): ``{"run_id", "difference", "reason", "rescored_from"}``.
+    parent_report_rescored: dict[str, Any] | None = None
 
     @property
     def raw(self) -> BlobClient:
@@ -262,6 +280,11 @@ class RunReport:
             lines.append(f"  BLOCKED at {self.blocked_at}")
         if self.failed_at:
             lines.append(f"  FAILED at {self.failed_at}")
+        # What to run next, as a stage names it (package: shadow, then promote).
+        steps = [step for r in self.results for step in (r.data or {}).get("next_steps") or []]
+        if steps and self.ok:
+            lines.append("  next steps:")
+            lines += [f"    {step}" for step in steps]
         return "\n".join(lines)
 
 
@@ -343,14 +366,48 @@ def stage_ingestion(ctx: StageContext) -> StageResult:
 # --------------------------------------------------------------------------
 
 
-def _is_preprocessed(ctx: StageContext) -> bool:
+def _ocr_pin_for(engine: Any) -> tuple[str | None, str | None]:
+    """``(MinerU version, tier)`` a stored reading must match to count as read.
+
+    A served engine's own. With none (``MINERU_URL`` unset), the served pin in
+    ``configs/shared/ocr.yaml`` all the same: a document another MinerU read -
+    the in-process 3.4.5 - is still unread, and is never built into a corpus a
+    release would be refused for (:func:`assert_corpus_ocr_pin`). An injected
+    engine that says nothing of itself (a test's) holds a reading to its
+    existence alone.
+    """
+    if engine is None:
+        from common.config import served_mineru
+
+        pin = served_mineru()
+        return pin["version"], pin["tier"]
+    if hasattr(engine, "environment"):
+        return engine.environment().mineru_version, getattr(engine, "tier", None)
+    return None, None
+
+
+def _pending_ocr(ctx: StageContext, engine: Any) -> dict[str, list[str]]:
+    """``{doc type: source ids}`` not yet read as :func:`_ocr_pin_for` asks.
+
+    Every ``ocr_meta.json`` is read once per run, not once per question
+    (``ctx.ocr_meta_cache``): the completion check and the stage itself ask in turn."""
     from data_pipeline.ocr.run_mineru import find_unprocessed
+
+    version, tier = _ocr_pin_for(engine)
+    pending = {}
+    for doc_type in ctx.doc_types:
+        ids = find_unprocessed(ctx.raw, doc_type, ctx.tenant_id, mineru_version=version,
+                               mineru_tier=tier, meta_cache=getattr(ctx, "ocr_meta_cache", None))
+        if ids:
+            pending[doc_type] = ids
+    return pending
+
+
+def _is_preprocessed(ctx: StageContext) -> bool:
     from data_pipeline.ocr.served_ocr import ServedMinerUEngine
 
-    # With the served MinerU, a document another MinerU read still needs reading.
-    engine = ctx.ocr_engine or ServedMinerUEngine.from_environment()
-    version = engine.environment().mineru_version if hasattr(engine, "environment") else None
-    return not any(find_unprocessed(ctx.raw, dt, ctx.tenant_id, mineru_version=version) for dt in ctx.doc_types)
+    # A document another MinerU read still needs reading, by the served one.
+    return not _pending_ocr(ctx, ctx.ocr_engine or ServedMinerUEngine.from_environment())
 
 
 #: The OCR environment on the pod. MinerU 1.x cannot share an environment with
@@ -358,57 +415,69 @@ def _is_preprocessed(ctx: StageContext) -> bool:
 OCR_VENV = "/workspace/venv-ocr"
 
 
-def _assert_ocr_runnable(ctx: StageContext) -> None:
-    """Refuse clearly when documents still need OCR and MinerU is not installed here.
+def _assert_ocr_runnable(ctx: StageContext, pending: dict[str, list[str]]) -> None:
+    """Refuse clearly when documents still need OCR and no served MinerU is named.
 
-    The training environment has no MinerU. OCR runs first, in its own
-    environment; once every document has its ocr_meta.json this stage has
-    nothing to do and the pipeline carries on in the training environment.
+    The corpus is read by the served MinerU (``MINERU_URL``, the pin in
+    ``configs/shared/ocr.yaml``), from anywhere that reaches it. Without one,
+    only a MinerU installed here at the pinned version may read: another one -
+    the OCR environment's 3.4.5 - would write a corpus serving refuses.
     """
     import importlib.util
 
-    from data_pipeline.ocr.run_mineru import find_unprocessed
+    from common.config import served_mineru
 
-    if importlib.util.find_spec("mineru") is not None:
-        return
-    pending = {dt: len(find_unprocessed(ctx.raw, dt, ctx.tenant_id)) for dt in ctx.doc_types}
-    pending = {dt: n for dt, n in pending.items() if n}
     if not pending:
         return
-    commands = "\n".join(
-        f"  {OCR_VENV}/bin/python -m data_pipeline.ocr.run_mineru --doc-type {dt} --all-unprocessed"
-        for dt in pending
-    )
+    pin = served_mineru()
+    counts = ", ".join(f"{dt}: {len(ids)}" for dt, ids in pending.items())
+    if importlib.util.find_spec("mineru") is not None:
+        from data_pipeline.ocr.mineru_version import get_mineru_version
+
+        local = get_mineru_version()
+        if local == pin["version"]:
+            return
+        why = (f"the MinerU installed here is {local}, not the served pin {pin['version']} "
+               f"(tier {pin['tier']}): a corpus it read would train a release serving refuses")
+    else:
+        why = "no served MinerU is named (MINERU_URL) and none is installed here"
     raise PipelineError(
-        f"documents still need OCR ({', '.join(f'{dt}: {n}' for dt, n in pending.items())}) and "
-        "MinerU is not installed in this environment. It lives in the OCR environment, "
-        f"because it cannot share one with vLLM and torch 2.8. Run OCR there first:\n{commands}\n"
-        "then re-run this command; preprocessing will find nothing left to do."
+        f"documents still need reading by the served MinerU ({counts}), and {why}. Set MINERU_URL to "
+        f"the served MinerU {pin['version']}/{pin['tier']} (MINERU_TOKEN its token) and re-run, or read "
+        f"them first: {ocr_remediation(list(pending), ctx.tenant_id)}. Preprocessing then finds nothing "
+        "left to do."
     )
 
 
 def stage_preprocessing(ctx: StageContext) -> StageResult:
-    """MinerU OCR plus page rendering at the resolution cap. **Runs on GPU.**"""
-    from data_pipeline.ocr.run_mineru import MinerUEngine, find_unprocessed, process_batch
+    """MinerU OCR plus page rendering at the resolution cap.
+
+    Through the served MinerU when ``$MINERU_URL`` names one (``configs/shared/ocr.yaml``),
+    ``ctx.ocr_workers`` documents at once: it runs anywhere that reaches it.
+    Otherwise a MinerU installed here at the pinned version, one document at a time.
+    """
+    from data_pipeline.ocr.run_mineru import MinerUEngine, process_batch
     from data_pipeline.ocr.served_ocr import ServedMinerUEngine
 
-    # The served MinerU when $MINERU_URL names one (configs/shared/ocr.yaml): it
-    # runs anywhere that reaches it. Otherwise the one installed in the OCR environment.
     engine = ctx.ocr_engine or ServedMinerUEngine.from_environment()
-    if engine is None:
-        _assert_ocr_runnable(ctx)
-        engine = MinerUEngine()
-    # A served engine also re-reads what another MinerU read: one corpus, one MinerU.
-    version = engine.environment().mineru_version if hasattr(engine, "environment") else None
     processed, skipped, failed = [], [], []
-    for doc_type in ctx.doc_types:
-        pending = find_unprocessed(ctx.raw, doc_type, ctx.tenant_id, mineru_version=version)
-        if not pending:
-            continue
-        outcome = process_batch(pending, doc_type, ctx.raw, engine, tenant_id=ctx.tenant_id)
-        processed += outcome["processed"]
-        skipped += outcome["skipped"]
-        failed += [f"{sid}: {reason}" for sid, reason in outcome["failed"]]
+    try:
+        # A served engine also re-reads what another MinerU read: one corpus, one MinerU.
+        pending = _pending_ocr(ctx, engine)
+        if engine is None and pending:
+            _assert_ocr_runnable(ctx, pending)
+            engine = MinerUEngine()
+        # Concurrently against a served MinerU only: the in-process one holds the GPU.
+        workers = max(1, int(getattr(ctx, "ocr_workers", 1) or 1)) if hasattr(engine, "environment") else 1
+        for doc_type, ids in pending.items():
+            outcome = process_batch(ids, doc_type, ctx.raw, engine, tenant_id=ctx.tenant_id, workers=workers)
+            processed += outcome["processed"]
+            skipped += outcome["skipped"]
+            failed += [f"{sid}: {reason}" for sid, reason in outcome["failed"]]
+    finally:
+        # The readings just written are not the ones cached.
+        if getattr(ctx, "ocr_meta_cache", None) is not None:
+            ctx.ocr_meta_cache.clear()
 
     return StageResult(
         "preprocessing", "completed",
@@ -492,6 +561,10 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
 
     documents = []
     read_by: dict[str, int] = {}
+    #: (MinerU version, tier) -> documents: held to the served pin (plan_corpus).
+    readings: dict[tuple[str, str | None], int] = {}
+    #: Each document's page-text keys, read together below.
+    page_keys: list[list[str]] = []
     unreviewed: list[tuple[str, str]] = []
     for doc_type in ctx.doc_types:
         for source_id in list_labeled_source_ids(ctx.client, doc_type, ctx.tenant_id):
@@ -525,17 +598,19 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
 
             version = str(ocr_meta.get("mineru_version") or "unknown")
             read_by[version] = read_by.get(version, 0) + 1
+            reading = (version, ocr_meta.get("mineru_tier"))
+            readings[reading] = readings.get(reading, 0) + 1
+            page_keys.append([paths.processed_page(doc_type, source_id, page, "md", ctx.tenant_id)
+                              for page in range(1, page_count + 1)])
             documents.append(SourceDocument(
                 source_id=source_id,
                 doc_type=doc_type,
                 golden_label=label,
                 # Per page, never joined: the pairing with each page image is
                 # what tells the model which text it is looking at, and joining
-                # also split every table that crossed a page boundary.
-                ocr_pages=[
-                    ctx.client.read_text(paths.processed_page(doc_type, source_id, page, "md", ctx.tenant_id))
-                    for page in range(1, page_count + 1)
-                ],
+                # also split every table that crossed a page boundary. Read
+                # below, every document's pages at once (read_page_texts).
+                ocr_pages=[],
                 image_paths=[
                     paths.processed_page(doc_type, source_id, page, "png", ctx.tenant_id)
                     for page in range(1, page_count + 1)
@@ -566,8 +641,36 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
             "and re-import."
         )
     assert_one_mineru_version(read_by)
+    for document, texts in zip(documents, read_page_texts(ctx.client, page_keys), strict=True):
+        document.ocr_pages = texts
+    ctx.ocr_readings = readings
     ctx.grouping = assign_document_groups(ctx, documents)
     return documents
+
+
+#: Page texts the corpus build reads at once. One Blob GET per page: a corpus of
+#: 20,000 pages read one after another was minutes of a paid pod doing nothing.
+PAGE_READ_WORKERS = 16
+
+
+def read_page_texts(client: BlobClient, keys_per_document: Sequence[Sequence[str]],
+                    workers: int = PAGE_READ_WORKERS) -> list[list[str]]:
+    """Every document's page texts, in its page order: ``keys_per_document``
+    read through a pool of ``workers`` threads. The same texts in the same
+    order as reading them one by one; the first read that fails raises."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    flat = [key for keys in keys_per_document for key in keys]
+    if workers <= 1 or len(flat) <= 1:
+        texts = [client.read_text(key) for key in flat]
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="page-text") as pool:
+            texts = list(pool.map(client.read_text, flat))
+    out, at = [], 0
+    for keys in keys_per_document:
+        out.append(texts[at:at + len(keys)])
+        at += len(keys)
+    return out
 
 
 def split_policy(split: dict[str, Any]) -> dict[str, Any]:
@@ -597,10 +700,54 @@ def assert_one_mineru_version(read_by: dict[str, int]) -> None:
     if len(read_by) > 1:
         counts = ", ".join(f"{version} ({n})" for version, n in sorted(read_by.items()))
         raise PipelineError(
-            f"the documents were read by more than one MinerU: {counts}. Read them again with one: "
-            "run_mineru --all-unprocessed (with --mineru-url for the served MinerU, the pin in "
-            "configs/shared/ocr.yaml) re-reads those another MinerU read."
+            f"the documents were read by more than one MinerU: {counts}. Read them again with one, "
+            f"the served pin: {ocr_remediation()}"
         )
+
+
+def ocr_remediation(doc_types: Sequence[str] = ("policy",), tenant_id: str | None = None) -> str:
+    """The command that reads every document not yet read by the served MinerU
+    (``configs/shared/ocr.yaml``) - those never OCR'd and those another MinerU,
+    or another tier, read."""
+    from common.config import served_mineru
+
+    pin = served_mineru()
+    tenant = f" --tenant {tenant_id}" if tenant_id else ""
+    commands = "; ".join(
+        f"python -m data_pipeline.ocr.run_mineru --doc-type {doc_type} --all-unprocessed "
+        f"--mineru-url \"$MINERU_URL\" --workers 4{tenant}" for doc_type in doc_types)
+    return (f"{commands} - with MINERU_URL the served MinerU {pin['version']} (tier {pin['tier']}, "
+            "configs/shared/ocr.yaml); it needs no GPU or MinerU where it runs")
+
+
+def assert_corpus_ocr_pin(readings: dict[tuple[str, str | None], int]) -> None:
+    """Refuse a corpus any document of which another MinerU read than the served one.
+
+    Serving reads every page with the pinned MinerU (``common.config.served_mineru``)
+    and the Azure worker refuses, at start-up, a release whose corpus another
+    version read (``scripts.served_adapter.assert_ocr_pin``): trained here, gated
+    and promoted, such a corpus is an outage. Held as
+    :func:`registry_utils.releases.ocr_pin_refusal` holds a release - the version,
+    and the tier where the reading records one. ``readings``: ``(version, tier)
+    -> documents`` (:func:`load_labeled_documents`).
+    """
+    from registry_utils.releases import ocr_pin_refusal
+
+    off = {reading: n for reading, n in readings.items()
+           if ocr_pin_refusal({"mineru_version": None if reading[0] == "unknown" else reading[0],
+                               "mineru_tier": reading[1]})}
+    if not off:
+        return
+    from common.config import served_mineru
+
+    pin = served_mineru()
+    counts = ", ".join(f"{version}{f'/{tier}' if tier else ''} ({n})"
+                       for (version, tier), n in sorted(off.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")))
+    raise PipelineError(
+        f"{sum(off.values())} labelled document(s) were read by another MinerU than the served one, "
+        f"{pin['version']} (tier {pin['tier']}): {counts}. A release trained on them would be refused "
+        f"by serving at start-up. Read them with the served MinerU first: {ocr_remediation()}"
+    )
 
 
 def use_delivered_families(documents: list[Any]) -> bool:
@@ -896,6 +1043,9 @@ def plan_corpus(ctx: StageContext) -> CorpusPlan:
     documents = load_labeled_documents(ctx)
     if not documents:
         raise PipelineError("no labeled, OCR'd documents to build a corpus from")
+    # Before anything is split or trained: a corpus another MinerU read trains a
+    # release the Azure worker refuses at start-up.
+    assert_corpus_ocr_pin(ctx.ocr_readings)
 
     # Once the tenant's golden eval set is frozen it IS the test set: its
     # documents, and every document in the same family, stay out of the corpus —
@@ -1071,7 +1221,18 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
         seed=ctx.seed,
         git_commit=ctx.git_commit or "unknown",
         modality_mix_target=modality_mix_of(ctx),
+        # What building the targets did (verification, placed pages, halves,
+        # windows dropped): all zeros in the manifest until passed.
+        target_counts=dict(built.target_counts),
     )
+    # The served MinerU's tier beside its version: both are the OCR pin a release
+    # carries (registry_utils.releases.ocr_pin_refusal).
+    if ocr_environment.get("mineru_tier"):
+        manifest["mineru_tier"] = ocr_environment["mineru_tier"]
+    # Each kept gold's content as stored, so a later cycle can tell whether a gold
+    # this corpus trained on has changed since (continued_training.fresh_when_golds_changed).
+    manifest["gold_sha256"] = stored_gold_hashes(
+        ctx.client, {d.source_id: d.doc_type for d in documents if d.source_id in kept}, ctx.tenant_id)
     ctx.client.write_json(paths.corpus_manifest(ctx.corpus, ctx.tenant_id), manifest)
 
     for warning in coverage.warnings:
@@ -1177,22 +1338,33 @@ def continuation(ctx: StageContext) -> tuple[str | None, str | None]:
     - it was trained on another base model;
     - it has another LoRA rank, alpha or set of target modules (the weights
       would not fit), or was saved with another dropout, rsLoRA or bias
-      setting (ms-swift would keep its own);
+      setting (ms-swift would keep its own) - a dropout only when the
+      config gives a number: ``dropout: auto`` keeps the parent's;
     - it was packaged with another prompt hash or window plan: a template,
       schema or section-map change, so its outputs have another shape;
     - it has no eval report, or one on another yardstick (the set frozen
-      again, or other scoring code): the gate holds a continued run to its
-      parent line by line, and would block this cycle only after training it.
+      again, or another tenant's) that its stored answers cannot be re-scored
+      onto: the gate holds a continued run to its parent line by line, and
+      would block this cycle only after training it.
+
+    A parent's report on another yardstick only because the scoring code or
+    settings moved is re-scored from its stored answers by the code running
+    now (``evaluation.rescore``, decision 2026-10-26; the old model is never
+    run again) and the cycle continues, recording it on the context
+    (``parent_report_rescored``). A parent scored before answers were stored
+    has none to re-score, and the cycle starts from the base as before.
     """
     from artifact_registry.transfer import ADAPTER_FILES
     from common.config import base_model_config, training_config
     from common.prompts import prompt_hash
     from data_pipeline.dataset_builder.policy_windows import window_plan_id
+    from evaluation.rescore import rescore_report
     from evaluation.run_eval import eval_set_record, yardstick_difference
     from registry_utils.query_registry import RegistryQueryError
     from registry_utils.query_registry import get as get_manifest
     from training.train import adapter_config_mismatch
 
+    ctx.parent_report_rescored = None
     if ctx.fresh:
         return None, "asked for (--fresh)"
     promoted = promoted_release(ctx)
@@ -1228,7 +1400,8 @@ def continuation(ctx: StageContext) -> tuple[str | None, str | None]:
         return None, f"{run_id}'s adapter_config.json cannot be read ({type(exc).__name__})"
     # ms-swift continues an adapter with the settings it was SAVED with, not the
     # config's (training.train.adapter_config_mismatch): a changed dropout or
-    # rsLoRA would never apply, while the manifest recorded it.
+    # rsLoRA would never apply, while the manifest recorded it. Under
+    # `dropout: auto` the parent's dropout is the one wanted (resolve_lora_dropout).
     differs = adapter_config_mismatch(saved, lora)
     if differs:
         return None, (f"{run_id}'s adapter was trained with other LoRA settings ({differs}); "
@@ -1246,16 +1419,32 @@ def continuation(ctx: StageContext) -> tuple[str | None, str | None]:
     if not ctx.client.exists(report_key):
         return None, (f"{run_id} has no eval report at {report_key}, so the gate could not "
                       "compare this cycle with it line by line")
-    different = yardstick_difference(ctx.client.read_json(report_key).get("eval_set"),
-                                     eval_set_record(ctx.client, ctx.tenant_id, []), ctx.tenant_id)
+    current = eval_set_record(ctx.client, ctx.tenant_id, [])
+    different = yardstick_difference(ctx.client.read_json(report_key).get("eval_set"), current,
+                                     ctx.tenant_id)
+    rescored_from: dict[str, Any] | None = None
     if different:
-        return None, (f"{run_id}'s eval report is on another yardstick, so the gate could not "
-                      f"compare this cycle with it line by line: {different}")
-    _trained, unread = lineage_training_documents(ctx, run_id)
+        # Other scoring code or settings alone: its stored answers re-scored
+        # by the code running now. Another frozen set or tenant, or answers
+        # missing or incomplete, are refused, and the cycle starts fresh.
+        rescored, why = rescore_report(ctx.client, parent, ctx.tenant_id, eval_set=current)
+        if rescored is None:
+            return None, (f"{run_id}'s eval report is on another yardstick, so the gate could not "
+                          f"compare this cycle with it line by line: {different}. {why}")
+        rescored_from = {"run_id": run_id, "difference": different, "reason": why,
+                         "rescored_from": rescored.get("rescored_from")}
+    trained, unread = lineage_training_documents(ctx, run_id)
     if unread:
         return None, (f"the documents {run_id}'s chain of runs trained on cannot be read ({unread}), "
                       "so the split could not keep them out of validation, where the continued "
                       "adapter would be scored on documents it memorised")
+    # The operator's own rules (pipeline.yaml continued_training, all off by default).
+    if why := fresh_by_rule(ctx, run_id, trained):
+        return None, why
+    if rescored_from is not None:
+        log.info("%s continues %s, whose eval report was re-scored: %s", ctx.out_version, run_id,
+                 rescored_from["reason"])
+    ctx.parent_report_rescored = rescored_from
     return parent, None
 
 
@@ -1333,6 +1522,128 @@ def corpus_validates_on_trained(ctx: StageContext, corpus_manifest: dict[str, An
             "calibration on documents it memorised. Rebuild the corpus in this cycle to continue")
 
 
+# --------------------------------------------------------------------------
+# Fresh or continue: the operator's rules (pipeline.yaml continued_training)
+# --------------------------------------------------------------------------
+
+
+def gold_hash(label: Any) -> str:
+    """A gold's content: the sha256 of its canonical JSON (keys sorted)."""
+    import hashlib
+
+    text = json.dumps(label, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def stored_gold_hashes(client: BlobClient, doc_type_by_source: dict[str, str],
+                       tenant_id: str | None, workers: int = PAGE_READ_WORKERS) -> dict[str, str | None]:
+    """``{source id: gold_hash}`` of each gold as stored in Blob (before any rule
+    reads it), None where there is none any more. Read through a pool."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(item: tuple[str, str]) -> str | None:
+        source_id, doc_type = item
+        key = paths.golden_label(doc_type, source_id, tenant_id)
+        return gold_hash(client.read_json(key)) if client.exists(key) else None
+
+    items = sorted(doc_type_by_source.items())
+    if not items:
+        return {}
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(items))), thread_name_prefix="gold") as pool:
+        return dict(zip((s for s, _ in items), pool.map(one, items), strict=True))
+
+
+def _chain_corpora(ctx: StageContext, run_id: str) -> list[tuple[str, dict[str, Any]]]:
+    """``(run id, its corpus manifest)`` down ``run_id``'s chain of continued runs,
+    newest first. Only called once :func:`lineage_training_documents` read the
+    whole chain, so every manifest here is readable."""
+    from registry_utils.query_registry import get as get_manifest
+
+    chain: list[tuple[str, dict[str, Any]]] = []
+    current: str | None = run_id
+    while current and current not in {r for r, _ in chain}:
+        manifest = get_manifest(current, ctx.client)
+        key = paths.corpus_manifest(manifest.dependencies.corpus_version, ctx.tenant_id)
+        chain.append((current, ctx.client.read_json(key) if ctx.client.exists(key) else {}))
+        current = manifest.parent_run_id
+    return chain
+
+
+def fresh_by_rule(ctx: StageContext, run_id: str, trained: set[str]) -> str | None:
+    """Why this cycle starts from the base by the operator's rules, or None.
+
+    ``continued_training`` in ``orchestration/config/pipeline.yaml``, every rule
+    off by default (:func:`orchestration.settings.continued_training_rules`):
+
+    - ``fresh_every_n_cycles: N`` - fresh once ``run_id``'s chain (the run from
+      the base and every run continuing it) is N cycles long: every N-th cycle
+      starts again from the base;
+    - ``fresh_when_new_share_above: S`` - fresh when more than S of the
+      documents this cycle can train on (labelled, not in the frozen eval set)
+      are new to the chain. Measured before the split, so the dataset build and
+      training reach one answer; an upper bound of the new share of train,
+      since every document the chain trained on stays in train;
+    - ``fresh_when_golds_changed: true`` - fresh when a gold the chain trained
+      on changed content since (or was deleted): compared by the hash each
+      corpus records (``gold_sha256``). A chain corpus that records none (built
+      before 2026-10-26) cannot show it, and goes fresh too, saying so.
+
+    ``trained``: the documents the chain trained on (:func:`lineage_training_documents`).
+    """
+    from orchestration.settings import continued_training_rules
+
+    rules = continued_training_rules()
+    every = rules["fresh_every_n_cycles"]
+    share_above = rules["fresh_when_new_share_above"]
+    golds = rules["fresh_when_golds_changed"]
+    if not (every or share_above is not None or golds):
+        return None
+    chain = _chain_corpora(ctx, run_id)
+    if every and len(chain) >= every:
+        return (f"{run_id}'s chain is {len(chain)} cycle(s) long ({chain[-1][0]} from the base), and "
+                f"continued_training.fresh_every_n_cycles is {every}: every {every}th cycle starts from the base")
+    if share_above is not None:
+        from data_pipeline.labeling.export_golden_labels import list_labeled_source_ids
+        from evaluation.freeze_eval_set import frozen_manifest, is_frozen
+
+        labelled = {s for dt in ctx.doc_types for s in list_labeled_source_ids(ctx.client, dt, ctx.tenant_id)}
+        if is_frozen(ctx.client, tenant_id=ctx.tenant_id):
+            labelled -= set(frozen_manifest(ctx.client, tenant_id=ctx.tenant_id).get("source_ids") or [])
+        new = labelled - trained
+        share = len(new) / len(labelled) if labelled else 0.0
+        if share > share_above:
+            return (f"{len(new)} of the {len(labelled)} documents this cycle can train on ({share:.0%}) are new "
+                    f"to {run_id}'s chain, above continued_training.fresh_when_new_share_above ({share_above:.0%})")
+    if golds:
+        return golds_changed(ctx, run_id, chain)
+    return None
+
+
+def golds_changed(ctx: StageContext, run_id: str, chain: list[tuple[str, dict[str, Any]]]) -> str | None:
+    """Why the golds ``run_id``'s chain trained on are not all as they trained, or None."""
+    recorded: dict[str, str] = {}
+    for current, corpus in reversed(chain):                 # oldest first: the newest hash wins
+        hashes = corpus.get("gold_sha256")
+        if not isinstance(hashes, dict):
+            return (f"continued_training.fresh_when_golds_changed is on, and {current}'s corpus "
+                    f"{corpus.get('corpus_version') or '(unreadable)'} records no gold hashes (built before "
+                    "2026-10-26), so whether a gold it trained on changed cannot be told: from the base")
+        train = set((corpus.get("source_ids_by_split") or {}).get("train") or [])
+        recorded.update({s: h for s, h in hashes.items() if s in train})
+    doc_type_by_source = {}
+    for source_id in recorded:
+        for doc_type in ctx.doc_types:
+            if ctx.client.exists(paths.golden_label(doc_type, source_id, ctx.tenant_id)):
+                doc_type_by_source[source_id] = doc_type
+                break
+    now = stored_gold_hashes(ctx.client, doc_type_by_source, ctx.tenant_id)
+    changed = sorted(s for s, h in recorded.items() if now.get(s) != h)
+    if not changed:
+        return None
+    return (f"{len(changed)} gold(s) {run_id}'s chain trained on changed or were deleted since "
+            f"({', '.join(changed[:5])}), and continued_training.fresh_when_golds_changed is on")
+
+
 def stage_parent_adapter(ctx: StageContext, parent: str) -> str:
     """Copy the parent's adapter to the staging volume; return the local directory.
     A dry run copies nothing and returns where it would go."""
@@ -1405,6 +1716,8 @@ def stage_training(ctx: StageContext) -> StageResult:
             continue_from=continue_from,
             parent_run_id=parent_run_id,
             fresh_reason=fresh_reason,
+            # A real run refuses a dirty tree unless asked (--allow-dirty).
+            allow_dirty=getattr(ctx, "allow_dirty", False),
         )
         ctx.manifests[ADAPTER.name] = manifest
 
@@ -1444,6 +1757,9 @@ def stage_training(ctx: StageContext) -> StageResult:
             "push_adapters": ctx.push_adapters,
             "continued": parent_run_id,
             "fresh_reason": fresh_reason,
+            # The parent's eval report re-scored from its stored answers so the
+            # gate can compare this run with it (decision 2026-10-26).
+            "parent_report_rescored": ctx.parent_report_rescored if parent_run_id else None,
         },
     )
 
@@ -1482,6 +1798,17 @@ def _selection_settings(ctx: StageContext) -> dict[str, Any]:
             f"selection_document_modes names {unknown}, which no validation row is read in; "
             f"the reading modes are {list(MODALITY_MODES)}"
         )
+    # The second reading covers the gate's own repeat mode only (image_only):
+    # what the gate holds a release to, at the cost of that mode's rows. A pass
+    # that does not read the mode (the standard profile reads ocr_plus_image)
+    # reads all its rows twice, as before, rather than measure nothing.
+    from evaluation.golden_eval import run_to_run_mode
+
+    repeat_mode = run_to_run_mode()
+    repeat_modes = [repeat_mode] if not modes or repeat_mode in modes else []
+    if not repeat_modes:
+        log.warning("selection: the finalists' pass reads %s, not the gate's repeat mode %s; its rows are "
+                    "all read twice for the run-to-run guard", modes, repeat_mode)
     return {
         "validation_sample_rows": int(evaluation.get("validation_sample_rows") or 0),
         "selection_tie_break_margin": float(evaluation.get("selection_tie_break_margin") or 0.0),
@@ -1491,6 +1818,14 @@ def _selection_settings(ctx: StageContext) -> dict[str, Any]:
         # The finalists' pass read twice, for the run-to-run guard; on unless
         # the config says false (decision 2026-10-24).
         "selection_run_to_run_check": bool(evaluation.get("selection_run_to_run_check", True)),
+        # ...the second time in these modes only (none = every row of the pass).
+        "selection_repeat_modes": repeat_modes,
+        # The checkpoint nearest two-thirds of the final step is a candidate too
+        # (checkpoint_eval.two_thirds_checkpoint): the evidence for two epochs.
+        "selection_two_thirds_candidate": bool(evaluation.get("selection_two_thirds_candidate", True)),
+        # Calibration fits from the selected finalist's saved answers rather
+        # than generating the validation split again (collect_calibration_samples).
+        "calibration_reuses_selection": bool(evaluation.get("calibration_reuses_selection", True)),
     }
 
 
@@ -1515,13 +1850,17 @@ def _checkpoint_scorer(ctx: StageContext) -> Any:
         # finalists to judge: a near-tie alone reads nothing twice.
         "repeat": bool(selection["selection_run_to_run_check"]
                        and selection["selection_document_finalists"] >= 2),
+        # ...the gate's repeat mode only (image_only), where the pass reads it.
+        "repeat_modes": selection["selection_repeat_modes"],
     }
     distributed = training_config(ADAPTER.training_config).get("distributed") or {}
     gpus = scoring_gpus()[: training_gpus(distributed)]
+    # The run's working dir: each finalist's pass is saved here, and the
+    # selected one's is what calibration fits from (_finalist_answers).
+    work_dir = Path(paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)) / "checkpoint_scores"
     if len(gpus) > 1:
-        staged = paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)
-        return parallel_vllm_scorer(**settings, gpus=gpus, work_dir=Path(staged) / "checkpoint_scores")
-    return vllm_scorer(**settings)
+        return parallel_vllm_scorer(**settings, gpus=gpus, work_dir=work_dir, save_dir=work_dir / "finalists")
+    return vllm_scorer(**settings, save_dir=work_dir / "finalists")
 
 
 def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
@@ -1563,8 +1902,13 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
             raise PipelineError(f"checkpoint selection cannot start for {ctx.out_version}: {exc}") from exc
 
     settings = _selection_settings(ctx)
+    two_thirds = None
+    if settings["selection_two_thirds_candidate"]:
+        from evaluation.checkpoint_eval import two_thirds_checkpoint
+
+        two_thirds = two_thirds_checkpoint(checkpoints)
     try:
-        report = select_best(checkpoints, scorer, best_loss=ctx.best_loss_checkpoint)
+        report = select_best(checkpoints, scorer, best_loss=ctx.best_loss_checkpoint, two_thirds=two_thirds)
         full = getattr(scorer, "full", None)
         if settings["selection_document_finalists"] >= 2:
             # The finalists on every validation row, judged on whole documents
@@ -1589,6 +1933,11 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
         if callable(getattr(scorer, "close", None)):
             scorer.close()
 
+    from evaluation.checkpoint_eval import predicted_gate_field_match, two_thirds_outcome
+
+    report.two_thirds = two_thirds_outcome(report, sample_margin=settings["selection_tie_break_margin"])
+    report.finalist_pass = _persist_finalist_pass(ctx, scorer, report)
+    report.early_warning = predicted_gate_field_match(report.gate_mirror_accuracy, _gate_mirror_history(ctx))
     ctx.client.write_json(
         paths.checkpoint_selection(ctx.out_version, scope=ADAPTER.name), report.as_dict()
     )
@@ -1613,6 +1962,7 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
               f"sample{f'; chosen on {overrode} over the sample leader' if overrode else ''})")
     if report.loss_and_f1_disagreed:
         detail += f"; validation loss would have shipped {report.best_loss_checkpoint}"
+    detail += _selection_summary(report)
     from evaluation.checkpoint_eval import generation_cost
 
     cost = generation_cost(scorer)
@@ -1620,6 +1970,110 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
         detail += f"; {cost['rows']} row(s) generated in {cost['seconds']:.0f} s"
     return StageResult("checkpoint_eval", "completed", detail,
                        {**report.as_dict(), **({"generation": cost} if cost else {})})
+
+
+def _selection_summary(report: Any) -> str:
+    """What the selection summary adds to the winner: the gate mirror (or the
+    fallback the finalists were judged on), the early warning, and whether the
+    two-thirds checkpoint won or tied - the evidence for moving to two epochs."""
+    parts: list[str] = []
+    choice = report.document_choice or {}
+    if report.gate_mirror_accuracy is not None:
+        parts.append(f"gate mirror {report.gate_mirror_accuracy:.4f}")
+    elif choice.get("field_match_fallback"):
+        parts.append(f"no gate mirror ({choice['field_match_fallback']})")
+    warning = report.early_warning or {}
+    if warning.get("summary"):
+        parts.append(str(warning["summary"]))
+        log.info("selection: %s", warning["summary"])
+    third = report.two_thirds or {}
+    if third.get("checkpoint"):
+        name = Path(str(third["checkpoint"])).name
+        if "won" not in third:
+            verdict = "not scored"
+        elif third["won"]:
+            verdict = "WON"
+        elif third.get("tied"):
+            verdict = f"tied (behind by {third.get('behind_by')} on {third.get('measured_on')}, within {third.get('margin')})"
+        else:
+            verdict = f"lost (behind by {third.get('behind_by')} on {third.get('measured_on')})"
+        parts.append(f"two-thirds candidate {name} (step {third.get('step')} of {third.get('final_step')}): {verdict}")
+    return "".join(f"; {part}" for part in parts)
+
+
+def _persist_finalist_pass(ctx: StageContext, scorer: Any, report: Any) -> dict[str, Any]:
+    """The selected checkpoint's finalist pass, kept: its answers, logprobs
+    included, to Blob beside the run's artifacts (``validation_generations_key``;
+    the run's working dir has them already), which calibration fits from; and
+    its validation error tallies (``validation_errors_key``), for the tallies'
+    reader. Neither is fatal: without them calibration generates again."""
+    from evaluation.checkpoint_eval import saved_finalist_pass
+
+    found = saved_finalist_pass(scorer, report.selected)
+    if not found:
+        return {"saved": False, "reason": "the selected checkpoint's finalist pass was not saved (no "
+                "whole-document pass, or it failed); calibration generates the validation split itself"}
+    run_id = ADAPTER.run_id(ctx.out_version)
+    generations_key = paths.validation_generations_key(run_id, ctx.tenant_id)
+    errors_key = paths.validation_errors_key(run_id, ctx.tenant_id)
+    record: dict[str, Any] = {"saved": True, "checkpoint": report.selected, "local": found["generations"]}
+    try:
+        from evaluation.validation_generation import read_generations
+
+        with open(found["generations"], encoding="utf-8") as handle:
+            header, _ = read_generations(handle.readline())
+        record.update(settings=header.get("settings"), modes=header.get("modes"), rows=header.get("rows"))
+        ctx.client.upload_file(found["generations"], generations_key)
+        record["blob"] = generations_key
+        tallies = json.loads(Path(found["tallies"]).read_text(encoding="utf-8"))
+        ctx.client.write_json(errors_key, {
+            "version": 1, "run_id": run_id, "checkpoint": str(report.selected),
+            **{name: tallies.get(name) or {} for name in ("by_field", "by_line", "by_group", "by_mode")},
+        })
+        record["validation_errors"] = errors_key
+    except Exception as exc:  # noqa: BLE001 - kept where it could be; calibration falls back
+        log.warning("selection: could not keep the selected finalist's pass in Blob: %s", exc)
+        record["error"] = f"{type(exc).__name__}: {exc}"
+    return record
+
+
+def _validation_gate_mirror(ctx: StageContext) -> float | None:
+    """The selected checkpoint's validation gate mirror, from this process's
+    checkpoint selection or its record in Blob; None when selection measured
+    none (no real image_only document, or a version selected before it was)."""
+    selection = ctx.results.get("checkpoint_eval")
+    value = (selection.data or {}).get("validation_gate_mirror_accuracy") if selection else None
+    if value is None:
+        key = paths.checkpoint_selection(ctx.out_version, scope=ADAPTER.name)
+        try:
+            value = ctx.client.read_json(key).get("validation_gate_mirror_accuracy") if ctx.client.exists(key) else None
+        except Exception as exc:  # noqa: BLE001 - reported, never gated: an unreadable record is no number
+            log.warning("gate: could not read the validation gate mirror from %s: %s", key, exc)
+            value = None
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _gate_mirror_history(ctx: StageContext) -> list[dict[str, Any]]:
+    """Each earlier cycle of the adapter that recorded both numbers: its
+    selected checkpoint's validation gate mirror (its checkpoint selection) and
+    the gate's field match - the tier's number - on the golden set (its gate
+    decision). What the early warning's offset is the mean of."""
+    current = paths.version_number(ctx.out_version)
+    history: list[dict[str, Any]] = []
+    for number in range(1, current or 0):
+        version = f"v{number}"
+        selection_key = paths.checkpoint_selection(version, scope=ADAPTER.name)
+        decision_key = paths.gate_decision(version, scope=ADAPTER.name)
+        try:
+            if not (ctx.client.exists(selection_key) and ctx.client.exists(decision_key)):
+                continue
+            mirror = ctx.client.read_json(selection_key).get("validation_gate_mirror_accuracy")
+            gate = (ctx.client.read_json(decision_key).get("candidate_metrics") or {}).get("field_normalized_match")
+        except Exception as exc:  # noqa: BLE001 - an unreadable cycle is left out, not fatal
+            log.warning("selection: could not read %s's gate mirror or gate decision: %s", version, exc)
+            continue
+        history.append({"version": version, "gate_mirror_accuracy": mirror, "gate_field_match": gate})
+    return history
 
 
 # --------------------------------------------------------------------------
@@ -1866,13 +2320,15 @@ def default_baseline_metrics(ctx: StageContext) -> dict[str, Any] | None:
     which the gate handles. It never means "could not find one".
 
     This tenant's promoted release (:func:`promoted_version`), never another
-    tenant's newer one. Whether its scores can be compared with the
-    candidate's at all is :func:`baseline_not_comparable`.
+    tenant's newer one: its report as the gate compares the candidate with it
+    (:func:`promoted_baseline_report`, re-scored when only the scoring code or
+    settings moved). Whether its scores can be compared with the candidate's at
+    all is :func:`baseline_not_comparable`.
     """
-    key = _promoted_eval_report_key(ctx)
-    if key is None:
+    found = promoted_baseline_report(ctx)
+    if found is None:
         return None
-    report = ctx.client.read_json(key)
+    report = found[1]
     return report.get("gate_metrics") or report.get("candidate_metrics") or None
 
 
@@ -1881,38 +2337,107 @@ def baseline_not_comparable(ctx: StageContext) -> str | None:
     yardstick; ``None`` when it is, or when there is no promoted report.
 
     Another yardstick is another frozen set (the set was frozen again), another
-    tenant's set, or other scoring code (``run_eval.yardstick_difference``), or a
-    report that does not record which. Decision 2026-10-22: the gate then judges
-    the candidate on its floors alone, says why in the decision, and does not
-    score the old release again.
+    tenant's set, or other scoring code or settings
+    (``run_eval.yardstick_difference``), or a report that does not record which.
+    Other scoring code or settings alone: the promoted release's stored answers
+    are re-scored by the code running now (:func:`promoted_baseline_report`,
+    decision 2026-10-26) and compared - the old model is never run again. When
+    they cannot be (another set or tenant, answers missing or incomplete, a
+    release scored before answers were stored), decision 2026-10-22: the gate
+    judges the candidate on its floors alone and says why in the decision.
 
     The candidate's yardstick is its own eval report's record. A candidate with
     no record (scores a metrics provider supplied) is taken as scored on the set
     and the code as they stand now.
     """
-    from evaluation.run_eval import eval_set_record, yardstick_difference
+    from evaluation.run_eval import yardstick_difference
 
-    promoted_key = _promoted_eval_report_key(ctx)
-    if promoted_key is None:
+    found = promoted_baseline_report(ctx)
+    if found is None:
         return None
-    promoted_report = ctx.client.read_json(promoted_key)
-    if promoted_report.get("calibrated") is False:
+    promoted_key, promoted_report, rescoring = found
+    if unusable := _unusable_baseline(ctx, promoted_key, promoted_report):
+        return unusable
+    reason = yardstick_difference(promoted_report.get("eval_set"), _candidate_eval_set(ctx), ctx.tenant_id)
+    if not reason:
+        return None
+    refused = f". {rescoring['reason']}" if rescoring and not rescoring.get("rescored") else ""
+    return f"{reason} (promoted report {promoted_key}){refused}"
+
+
+def promoted_baseline_report(ctx: StageContext) -> tuple[str, dict[str, Any], dict[str, Any] | None] | None:
+    """``(where, report, rescoring)``: the promoted release's eval report as the
+    gate compares the candidate with it; ``None`` with no promoted report.
+
+    Its own report when it is on the candidate's yardstick. When it is on
+    another only because the scoring code or settings moved, its stored answers
+    re-scored by the code running now (``evaluation.rescore.rescore_report``,
+    decision 2026-10-26; the old model is never run again), so non-inferiority
+    and the improvement rule apply again: ``where`` then ends "(re-scored)" and
+    ``rescoring`` is ``{"rescored": True, "difference", "reason",
+    "rescored_from"}``. When they cannot be re-scored - another frozen set or
+    tenant, answers missing or incomplete, a release scored before answers were
+    stored - its own report, and ``{"rescored": False, "difference", "reason"}``:
+    the candidate is judged on its floors alone, as before. ``rescoring`` is
+    ``None`` when nothing had to be re-scored, or the report cannot be compared
+    whatever its yardstick (:func:`_unusable_baseline`).
+
+    Re-scored once per gate however often it is asked: the re-scoring is
+    remembered per Blob client (``evaluation.rescore``).
+    """
+    from evaluation.rescore import rescore_report
+    from evaluation.run_eval import yardstick_difference
+
+    key = _promoted_eval_report_key(ctx)
+    if key is None:
+        return None
+    report = ctx.client.read_json(key)
+    candidate = _candidate_eval_set(ctx)
+    different = yardstick_difference(report.get("eval_set"), candidate, ctx.tenant_id)
+    if different is None or _unusable_baseline(ctx, key, report):
+        return key, report, None
+    version = promoted_version(ctx)
+    rescored, why = (rescore_report(ctx.client, version, ctx.tenant_id, eval_set=candidate) if version
+                     else (None, "no promoted version"))
+    if rescored is None:
+        return key, report, {"rescored": False, "difference": different, "reason": why}
+    log.info("the promoted release's report is compared re-scored: %s", why)
+    return f"{key} (re-scored)", rescored, {"rescored": True, "difference": different, "reason": why,
+                                            "rescored_from": rescored.get("rescored_from")}
+
+
+def baseline_rescoring(ctx: StageContext) -> dict[str, Any] | None:
+    """What :func:`promoted_baseline_report` re-scored of the promoted release's
+    report, or why it could not, for the gate's decision; ``None`` when
+    nothing had to be."""
+    found = promoted_baseline_report(ctx)
+    return found[2] if found else None
+
+
+def _unusable_baseline(ctx: StageContext, key: str, report: dict[str, Any]) -> str | None:
+    """Why the promoted release's report cannot be compared whatever its
+    yardstick: scored without its calibrators, or on other lines."""
+    if report.get("calibrated") is False:
         # Scored without its calibrators (an ad-hoc `run_eval`, which writes the
         # same key): every field flagged, so auto_accept_error_rate reads 0.0.
-        return (f"the promoted release's report at {promoted_key} was scored without its "
+        return (f"the promoted release's report at {key} was scored without its "
                 "calibrators")
     candidate_lines = served_lines(ctx)
-    if "lines_scored" in promoted_report and promoted_report["lines_scored"] != candidate_lines:
-        return (f"the promoted release was scored on lines {promoted_report['lines_scored'] or 'all'} "
-                f"and the candidate serves {candidate_lines} (promoted report {promoted_key})")
-    promoted = promoted_report.get("eval_set")
+    if "lines_scored" in report and report["lines_scored"] != candidate_lines:
+        return (f"the promoted release was scored on lines {report['lines_scored'] or 'all'} "
+                f"and the candidate serves {candidate_lines} (promoted report {key})")
+    return None
+
+
+def _candidate_eval_set(ctx: StageContext) -> dict[str, Any]:
+    """The candidate's yardstick: its own eval report's record, or - with none
+    (scores a metrics provider supplied) - the set and the code as they stand now."""
+    from evaluation.run_eval import eval_set_record
+
     candidate_key = paths.eval_report(ctx.out_version, scope=ADAPTER.name)
     candidate = (ctx.client.read_json(candidate_key).get("eval_set")
                  if ctx.client.exists(candidate_key) else None)
-    if not candidate:
-        candidate = eval_set_record(ctx.client, ctx.tenant_id, [])
-    reason = yardstick_difference(promoted, candidate, ctx.tenant_id)
-    return f"{reason} (promoted report {promoted_key})" if reason else None
+    return candidate or eval_set_record(ctx.client, ctx.tenant_id, [])
 
 
 def promoted_version(ctx: StageContext) -> str | None:
@@ -2001,14 +2526,16 @@ def paired_document_scores(
     from evaluation.run_eval import yardstick_difference
 
     notes = warnings if warnings is not None else []
-    promoted_key = _promoted_eval_report_key(ctx)
-    if promoted_key is None:
+    # The promoted report as the gate compares it: re-scored when only the
+    # scoring code or settings moved (promoted_baseline_report).
+    found = promoted_baseline_report(ctx)
+    if found is None:
         return None
+    promoted_key, promoted_report, _rescoring = found
     candidate_key = paths.eval_report(ctx.out_version, scope=ADAPTER.name)
     if not ctx.client.exists(candidate_key):
         _not_paired(notes, f"the candidate has no eval report at {candidate_key}")
         return None
-    promoted_report = ctx.client.read_json(promoted_key)
     candidate_report = ctx.client.read_json(candidate_key)
     # The yardstick first: two yardsticks' scores are not paired even where both
     # reports hold per-document scores, and are not compared at all.
@@ -2124,26 +2651,80 @@ def eval_set_size(
     return {t: int(counts.get(t) or 0) for t in ADAPTER.doc_types}, f"frozen_manifest.{counted}"
 
 
+def served_document_scores(
+    ctx: StageContext, warnings: list[str] | None = None,
+) -> tuple[list[float], list[float]] | None:
+    """The candidate's per-document ``served_field_match`` over its real
+    documents, ``(scores, weights)`` in source-id order, read from its eval
+    report (``per_document`` and ``per_document_weights``): what the gate
+    bootstraps the tier's lower bound from (``gating.tier_evidence``, decision
+    2026-10-26).
+
+    ``None`` when the report is not there, is another tenant's (the report path
+    names no tenant), or holds no such scores (written before they were kept,
+    or a set with no real document read image_only): the release is then
+    interim, never production on missing data, and the reason is added to
+    ``warnings`` when the report is another tenant's.
+    """
+    from evaluation.gating import SERVED_FIELD_MATCH
+
+    notes = warnings if warnings is not None else []
+    key = paths.eval_report(ctx.out_version, scope=ADAPTER.name)
+    report = ctx.client.read_json(key) if ctx.client.exists(key) else {}
+    if not report:
+        return None
+    tenant = (report.get("eval_set") or {}).get("tenant_id")
+    if tenant is not None and tenant != paths._tenant(ctx.tenant_id):
+        notes.append(f"the eval report at {key} was scored on tenant {tenant!r}'s set, so its "
+                     f"per-document {SERVED_FIELD_MATCH} does not bound this candidate's tier")
+        return None
+    scores = (report.get("per_document") or {}).get(SERVED_FIELD_MATCH) or {}
+    if not scores:
+        return None
+    weights = (report.get("per_document_weights") or {}).get(SERVED_FIELD_MATCH) or {}
+    ids = sorted(scores)
+    return ([float(scores[d]) for d in ids], [float(weights.get(d) or 1.0) for d in ids])
+
+
 def line_evidence(
     ctx: StageContext, parent_run_id: str, warnings: list[str] | None = None,
 ) -> tuple[Any, str | None]:
-    """What a continued run is held to, line by line (decision 2026-10-23):
-    ``(gating.LineEvidence, None)``, or ``(None, why)`` when no comparison can
-    be made - the candidate's or the parent's eval report missing, the parent's
-    on another yardstick (``run_eval.yardstick_difference``), or either written
-    before reports recorded each document's line.
+    """What a continued run is held to, line by line (decisions 2026-10-23 and
+    2026-10-26): ``(gating.LineEvidence, None)``, or ``(None, why)`` when no
+    comparison can be made - the candidate's or the parent's eval report
+    missing, the parent's on another yardstick (``run_eval.yardstick_difference``),
+    or either written before reports recorded each document's line.
 
-    Each line the candidate serves is held to the BEST run on it since the last
-    run from the base: the parent, its parent, and so on down ``parent_run_id``
-    to the run that started from the base. Best is the highest field match over
-    the line's real documents both reports scored, among the runs sharing at
-    least ``gating.LINE_MIN_DOCUMENTS`` of them with the candidate; the
-    comparison pairs those documents' scores. A run on the chain whose report is
-    missing or on another yardstick is left out with a warning - except the
-    parent, which is required. Lines the parent's release serves (its report's
-    ``lines_scored``) and the candidate does not are ``dropped``.
+    Each line the candidate serves is paired, on the line's real documents both
+    reports scored, on the served field match (``served_field_match`` per
+    document: image_only readings as served, decision 2026-10-26) - or, for a
+    line a reference's report holds none of (written before it was kept), on
+    ``field_normalized_match``, with a warning; ``LineComparison.measure``
+    records which - with two runs:
+
+    * the PARENT (``compared``), the run it continued;
+    * the cumulative-drift reference (``drift``): the last run from the base,
+      found by walking ``parent_run_id`` down the chain to the run whose
+      manifest names no parent. When that run's report is missing or on another
+      yardstick, or the chain cannot be walked back to it, the oldest run of
+      the chain on this yardstick is held to instead, and ``drift_note`` says
+      so. When that is the parent itself there is no drift check: the parent
+      check, at the smaller margin, already covers it.
+
+    Every line with at least one shared document is passed on; whether it has
+    enough to be gated is the gate's call (``gating.LINE_MIN_DOCUMENTS``). The
+    parent and the last run from the base, when their report is on another
+    yardstick only because the scoring code or its settings moved, are held to
+    their stored answers re-scored by the code running now
+    (``evaluation.rescore.rescored_or_none``, decision 2026-10-26), recorded in
+    ``rescored``. A run on the chain whose report is missing or on another
+    yardstick is left out with a warning - except the parent, which is required. Lines the parent's
+    release serves (its report's ``lines_scored``) and the candidate does not
+    are ``dropped``; lines the parent scored that share no document with the
+    candidate are ``thin``.
     """
-    from evaluation.gating import LINE_MIN_DOCUMENTS, LineComparison, LineEvidence
+    from evaluation.gating import SERVED_FIELD_MATCH, LineComparison, LineEvidence
+    from evaluation.rescore import rescored_or_none
     from evaluation.run_eval import line_document_scores, yardstick_difference
     from registry_utils.query_registry import RegistryQueryError
     from registry_utils.query_registry import get as get_manifest
@@ -2159,12 +2740,23 @@ def line_evidence(
                       "(written before reports recorded them)")
 
     # The runs since the last run from the base, parent first, with their
-    # per-line document scores.
+    # per-line document scores; and that run from the base, when the walk
+    # reaches it.
     chain: list[tuple[str, dict[str, dict[str, tuple[float, float]]], dict[str, Any]]] = []
+    fresh_run: str | None = None
     run_id: str | None = parent_run_id
     seen: set[str] = set()
+    rescored: dict[str, dict[str, Any]] = {}
     while run_id and run_id not in seen:
         seen.add(run_id)
+        stopped: str | None = None
+        try:
+            next_run = get_manifest(run_id, ctx.client).parent_run_id
+        except (RegistryQueryError, KeyError, FileNotFoundError, ValueError) as exc:
+            next_run = None
+            stopped = (f"the chain of runs this one continued stops at {run_id}: its run manifest "
+                       f"cannot be read ({type(exc).__name__})")
+        is_fresh = stopped is None and not next_run
         key = paths.eval_report(version_of(run_id), scope=ADAPTER.name)
         report = ctx.client.read_json(key) if ctx.client.exists(key) else None
         if report is None:
@@ -2172,6 +2764,22 @@ def line_evidence(
         else:
             why = yardstick_difference(report.get("eval_set"), candidate_report.get("eval_set"),
                                        ctx.tenant_id)
+            if why and (run_id == parent_run_id or is_fresh):
+                # A reference on another yardstick only because the scoring
+                # code or its settings moved is re-scored from its stored
+                # answers, as the gate's baseline and the continuation are
+                # (evaluation.rescore, decision 2026-10-26): a continued cycle
+                # whose parent was re-scored to continue it is not then blocked
+                # at the gate for the same report.
+                said: list[str] = []
+                again = rescored_or_none(ctx.client, version_of(run_id), ctx.tenant_id,
+                                         candidate_report.get("eval_set"), notes=said)
+                if again is not None:
+                    rescored[run_id] = {"difference": why, "rescored_from": again.get("rescored_from")}
+                    notes.extend(said)
+                    report, why = again, None
+                elif said:
+                    why = f"{why}; {said[-1]}"
         scores = line_document_scores(report) if report is not None and not why else None
         if scores is None and not why:
             why = f"its report at {key} records no document's line (written before reports recorded them)"
@@ -2182,45 +2790,73 @@ def line_evidence(
                          f"line: {why}")
         else:
             chain.append((run_id, scores, report))
-        try:
-            run_id = get_manifest(run_id, ctx.client).parent_run_id
-        except (RegistryQueryError, KeyError, FileNotFoundError, ValueError) as exc:
-            notes.append(f"the chain of runs this one continued stops at {run_id}: its run manifest "
-                         f"cannot be read ({type(exc).__name__})")
+        if stopped:
+            notes.append(stopped)
             break
+        if is_fresh:
+            fresh_run = run_id
+        run_id = next_run
+
+    # What each line is compared on (decision 2026-10-26): the served field
+    # match - image_only readings of real documents, as served - and, for a
+    # line a reference holds none of, the field match over every mode.
+    mine_served = line_document_scores(candidate_report, SERVED_FIELD_MATCH) or {}
+
+    def paired(reference: str, report: dict[str, Any],
+               by_line: dict[str, dict[str, tuple[float, float]]], line: str) -> Any:
+        theirs_served = line_document_scores(report, SERVED_FIELD_MATCH) or {}
+        for measure, mine, theirs in (
+                (SERVED_FIELD_MATCH, mine_served.get(line) or {}, theirs_served.get(line) or {}),
+                ("field_normalized_match", mine_by_line.get(line) or {}, by_line.get(line) or {})):
+            shared = sorted(set(theirs) & set(mine))
+            if not shared:
+                continue
+            if measure != SERVED_FIELD_MATCH:
+                notes.append(
+                    f"{line} against {reference}: compared on field_normalized_match, the field match "
+                    f"over every reading mode - {reference}'s report or the candidate's holds no "
+                    f"{SERVED_FIELD_MATCH} for this line's documents (written before it was kept, or "
+                    "no image_only reading)")
+            return LineComparison(
+                line=line, reference=reference,
+                reference_scores=[theirs[d][0] for d in shared],
+                candidate_scores=[mine[d][0] for d in shared],
+                reference_weights=[theirs[d][1] for d in shared],
+                candidate_weights=[mine[d][1] for d in shared],
+                reference_rescored=reference in rescored,
+                measure=measure,
+            )
+        return None
 
     parent_scores, parent_report = chain[0][1], chain[0][2]
     parent_lines = set(parent_report.get("lines_scored") or parent_scores)
     served = set(served_lines(ctx))
     evidence = LineEvidence(dropped=sorted(parent_lines - served), added=sorted(served - parent_lines),
-                            chain=[run for run, _scores, _report in chain])
+                            chain=[run for run, _scores, _report in chain], rescored=rescored)
     for line in sorted(served):
-        mine = mine_by_line.get(line) or {}
-        best: tuple[float, str, list[str], dict[str, tuple[float, float]]] | None = None
-        most_shared = 0
-        for run, scores, _report in chain:
-            theirs = scores.get(line) or {}
-            shared = sorted(set(theirs) & set(mine))
-            most_shared = max(most_shared, len(shared))
-            if len(shared) < LINE_MIN_DOCUMENTS:
-                continue
-            weights = [theirs[d][1] for d in shared]
-            mean = sum(theirs[d][0] * w for d, w in zip(shared, weights, strict=True)) / (sum(weights) or 1.0)
-            # Strictly higher: on a tie the nearer run (parent first) is held to.
-            if best is None or mean > best[0]:
-                best = (mean, run, shared, theirs)
-        if best is None:
-            if most_shared or line in parent_lines:
-                evidence.thin[line] = most_shared
-            continue
-        _mean, run, shared, theirs = best
-        evidence.compared.append(LineComparison(
-            line=line, reference=run,
-            reference_scores=[theirs[d][0] for d in shared],
-            candidate_scores=[mine[d][0] for d in shared],
-            reference_weights=[theirs[d][1] for d in shared],
-            candidate_weights=[mine[d][1] for d in shared],
-        ))
+        comparison = paired(parent_run_id, parent_report, parent_scores, line)
+        if comparison is not None:
+            evidence.compared.append(comparison)
+        elif line in parent_lines:
+            evidence.thin[line] = 0
+
+    # The cumulative-drift reference: the last run from the base, else the
+    # oldest run of the chain on this yardstick.
+    oldest, oldest_scores, oldest_report = chain[-1]
+    if fresh_run is not None and fresh_run == oldest:
+        evidence.drift_reference_is_fresh = True
+    else:
+        why = (f"{fresh_run}, the last run from the base, has no report on this yardstick"
+               if fresh_run is not None else
+               "the chain of runs could not be walked back to the run from the base")
+        evidence.drift_note = (
+            f"the cumulative drift check holds each line to {oldest}, the oldest run of the chain "
+            f"on this yardstick: {why}" if oldest != parent_run_id else
+            f"no cumulative drift check: {why}, and no run older than the parent is on this yardstick")
+    if oldest != parent_run_id:
+        evidence.drift_reference = oldest
+        evidence.drift = [c for c in (paired(oldest, oldest_report, oldest_scores, line)
+                                      for line in sorted(served)) if c is not None]
     return evidence, None
 
 
@@ -2250,10 +2886,14 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
     # Why the promoted release is on another yardstick, when it is: the
     # candidate is then judged on its floors alone (decision 2026-10-22).
     not_comparable: str | None = None
+    # Whether the promoted release's report was re-scored to be compared, or
+    # why it could not be (promoted_baseline_report, decision 2026-10-26).
+    rescoring: dict[str, Any] | None = None
     if baseline is None:
         baseline = default_baseline_metrics(ctx)
         if baseline is not None:
             not_comparable = baseline_not_comparable(ctx)
+            rescoring = baseline_rescoring(ctx)
         # Paired only against the promoted report's own documents: an injected
         # baseline has no per-document scores to pair with.
         if per_document is None and baseline is not None and not not_comparable:
@@ -2296,6 +2936,9 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
                               if parent_run else (None, None))
     if continued and not parent_run:
         line_missing = f"it continued {continued}, a directory, not a run of the adapter"
+    # The candidate's per-document served field match: the tier's lower bound
+    # is bootstrapped from it (decision 2026-10-26).
+    served = served_document_scores(ctx, warnings=pairing)
     result = promotion_gate(
         candidate,
         baseline,
@@ -2312,6 +2955,7 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         line_evidence=evidence,
         line_evidence_missing=line_missing,
         override=ctx.gate_override,
+        served_documents=served,
     )
 
     # `gate_decision`, not `eval_report`. Writing here used to clobber the
@@ -2333,6 +2977,10 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         "baseline_metrics": None if not_comparable else baseline,
         "baseline_not_comparable": not_comparable,
         "baseline_metrics_not_compared": baseline if not_comparable else None,
+        # Its stored answers re-scored by the scoring code running now, so it
+        # was compared (decision 2026-10-26); or why they could not be.
+        "baseline_rescored": bool(rescoring and rescoring.get("rescored") and not not_comparable),
+        "baseline_rescoring": rescoring,
         "passed": result.passed and not cascade_blocked,
         "cascade_blocked": cascade.describe() if cascade_blocked else None,
         "failed_gates": result.failed_gates,
@@ -2348,11 +2996,18 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         "paired_documents": {
             v.name: v.interval.documents for v in result.verdicts if v.interval is not None
         },
-        # A continued run's line-by-line comparison (decision 2026-10-23): the
-        # runs compared, each line's numbers and the run it was held to, and the
-        # lines not compared - or why no comparison could be made.
+        # A continued run's line-by-line comparison (decisions 2026-10-23 and
+        # 2026-10-26): the runs on the chain, each line's evidence against the
+        # parent and against the cumulative-drift reference (documents, change,
+        # bound, Holm-adjusted alpha, gated or warned), and the lines not
+        # compared - or why no comparison could be made.
         "line_comparison": (
             {"continued": continued, "runs_compared": list(evidence.chain),
+             "parent": parent_run, "drift_reference": evidence.drift_reference,
+             "drift_reference_is_fresh": evidence.drift_reference_is_fresh,
+             "drift_note": evidence.drift_note,
+             # The references re-scored from their stored answers (#15), and why.
+             "rescored_references": dict(evidence.rescored),
              "lines": list(result.line_verdicts), "not_compared": dict(evidence.thin),
              "dropped": list(evidence.dropped), "added": list(evidence.added)}
             if evidence is not None
@@ -2375,9 +3030,19 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
             "small": small,
         },
         "warnings": list(result.warnings),
-        # Fideon SPEC_09 §6: production (field match >= 0.92) or interim; None if
-        # blocked, by the gate or by the cascade.
+        # Fideon SPEC_09 §6 and decision 2026-10-26: production (served field
+        # match >= 0.92, its one-sided 95% lower bound >= 0.90, 150 real
+        # documents) or interim; None if blocked, by the gate or by the cascade.
         "tier": result.tier if not cascade_blocked else None,
+        # confirmed (the bound >= 0.92 too) or unconfirmed, for production.
+        "tier_confidence": result.tier_confidence if not cascade_blocked else None,
+        # What the tier rests on: the point estimate, the bound, the real
+        # documents it was bootstrapped over, the bars, and why not production.
+        "tier_evidence": result.tier_evidence.as_dict() if result.tier_evidence else None,
+        # Beside the tier and the golden field match it reads: the selected
+        # checkpoint's validation gate mirror (checkpoint selection) - the pair
+        # the next cycles' early warning predicts the gate from. Not gated.
+        "validation_gate_mirror_accuracy": _validation_gate_mirror(ctx),
     }
     decision["adapter"] = ADAPTER.run_id(ctx.out_version)
     decision["doc_types"] = list(ADAPTER.doc_types)
@@ -2393,7 +3058,13 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         paths.staging_eval_report(ctx.out_version, scope=ADAPTER.name), json.dumps(candidate)
     )
 
-    apply_to_manifest(result, foundation, metrics=candidate)
+    # The manifest's metrics carry the gate mirror beside the gate's own, and
+    # the tier as the decision records it - none when the cascade blocked it -
+    # with its confidence and lower bound (EvalMetrics, decision 2026-10-26).
+    apply_to_manifest(result, foundation, metrics={
+        **candidate, "validation_gate_mirror_accuracy": decision["validation_gate_mirror_accuracy"],
+        "tier": decision["tier"], "tier_confidence": decision["tier_confidence"],
+        "tier_lower_bound": (decision["tier_evidence"] or {}).get("lower_bound")})
     if cascade_blocked:
         foundation.promotion.tier = None
     from registry_utils.write_run_manifest import write_manifest
@@ -2420,8 +3091,13 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         "evaluation_gate", "completed",
         "gate passed" + (" (first version, no baseline)" if result.is_first_version else
                          " (floors only: the promoted release is on another yardstick)"
-                         if result.baseline_not_comparable else ""),
-        {"metrics": candidate, "failed_gates": [], "cascade_dependents": cascade.dependents},
+                         if result.baseline_not_comparable else "")
+        # The run summary shows the tier, how sure it is, and the bound.
+        + (f"; {result.tier_evidence.describe()}" if result.tier_evidence else ""),
+        {"metrics": candidate, "failed_gates": [], "cascade_dependents": cascade.dependents,
+         "validation_gate_mirror_accuracy": decision["validation_gate_mirror_accuracy"],
+         "tier": decision["tier"], "tier_confidence": decision["tier_confidence"],
+         "tier_evidence": decision["tier_evidence"]},
     )
 
 
@@ -2490,55 +3166,207 @@ def _staged_serving_model(ctx: StageContext, fmt: str) -> Any:  # pragma: no cov
 
 
 def collect_calibration_samples(ctx: StageContext) -> dict[str, Any]:
-    """Generate the validation split with each staged serving format.
+    """The validation split's calibration samples, per staged serving format.
 
     Per format, never shared: quantization moves the logprob distribution, so
     each format's features come from its own generations (arch v2.1 §5.3).
     Before this, nothing produced calibration samples, and calibrate skipped on
     every real run — every field of every release routed to review.
+
+    The generations are the selected checkpoint's own answers from its
+    finalists' pass where they can be (:func:`_finalist_answers`), and only
+    the rows they do not cover are generated (:func:`_calibration_generate`).
+
+    Per format, the samples are by reading mode
+    (``calibration.population.samples_by_mode``: ``{mode: {half: [(features,
+    correct)]}}``), so the stage fits on the modes the profile fits on -
+    image_only under fast, every mode under standard.
     """
+    samples, _how = _collect_calibration_samples(ctx)
+    return samples
+
+
+def _collect_calibration_samples(ctx: StageContext) -> tuple[dict[str, Any], dict[str, Any]]:
+    """:func:`collect_calibration_samples`, and per format how its generations
+    were come by: reused from the finalists' pass, generated, or both, and why."""
+    from calibration.population import samples_by_mode
     from evaluation.validation_generation import (
         assert_generations_usable,
-        calibration_samples,
-        generate_validation,
         read_rows,
+        reading_key,
     )
-    from inference_core.model_runner import release_model
 
     val_key = paths.corpus_scope_eval_split(ctx.corpus, "val", ADAPTER.name, ctx.tenant_id)
     if not ctx.client.exists(val_key):
         log.warning("no validation split at %s; nothing to calibrate on", val_key)
-        return {}
+        return {}, {}
     rows = read_rows(ctx.client.read_text(val_key))
-    if ctx.serving_model_loader is None:
-        # The real vLLM path opens images by local path; the rows hold Blob keys.
-        from training.stage_data import localize_rows
-
-        rows = localize_rows(
-            rows, ctx.client, paths.staging_train_images_dir(ctx.corpus, ctx.tenant_id)
-        )
-    loader = ctx.serving_model_loader or _staged_serving_model
 
     samples: dict[str, Any] = {}
+    how: dict[str, Any] = {}
     for fmt in ctx.formats:
-        # One engine at a time: each format's model is freed before the next
-        # loads, or the second format finds the card still full of the first.
-        model = loader(ctx, fmt)
-        stats: dict[str, Any] = {}
-        try:
-            generations = generate_validation(rows, model, stats=stats)
-        finally:
-            release_model(model)
-        log.info("calibration (%s): %s row(s) in %s s, %s call(s) of up to %s, slowest %s s", fmt,
-                 stats.get("generated"), stats.get("seconds"), stats.get("calls"), stats.get("batch_rows"),
-                 stats.get("slowest_call_seconds"))
+        reused, why = _finalist_answers(ctx, rows, fmt)
+        remaining = [row for row in rows if reading_key(row) not in reused] if reused else rows
+        generated, made = _calibration_generate(ctx, remaining, fmt, val_key) if remaining else ([], {})
+        if reused:
+            # Keys are unique here (_finalist_answers refuses a split where they are not).
+            answers = {**reused, **{reading_key(g.row): g for g in generated}}
+            generations = [answers[reading_key(row)] for row in rows]
+        else:
+            generations = generated
+        how[fmt] = {
+            # Which path was taken (review #28): the finalist's answers, fresh
+            # generations, or the finalist's plus the rows they do not cover.
+            "source": ("finalist_answers" if reused and not remaining
+                       else "finalist_answers+generated" if reused else "generated"),
+            "why": why, "reused_rows": len(reused), "generated_rows": len(remaining), **made,
+        }
+        log.info("calibration (%s): %d row(s) reused from the finalists' pass, %d generated (%s)",
+                 fmt, len(reused), len(remaining), why)
         assert_generations_usable(generations, what=f"calibration ({fmt})")
-        halves = calibration_samples(generations)
+        by_mode = samples_by_mode(generations)
         # Only a format with evidence gets an entry. An empty entry reads as
         # "samples supplied" and would fit a calibrator on nothing.
-        if any(halves.values()):
-            samples[fmt] = halves
-    return samples
+        if any(rows for halves in by_mode.values() for rows in halves.values()):
+            samples[fmt] = by_mode
+    return samples, how
+
+
+def _finalist_pass_record(ctx: StageContext) -> dict[str, Any]:
+    """Where checkpoint selection kept the selected finalist's answers
+    (``finalist_pass`` in its record), from this process or from Blob."""
+    selection = ctx.results.get("checkpoint_eval")
+    record = (selection.data or {}).get("finalist_pass") if selection else None
+    if record is None:
+        key = paths.checkpoint_selection(ctx.out_version, scope=ADAPTER.name)
+        if ctx.client.exists(key):
+            record = ctx.client.read_json(key).get("finalist_pass")
+    return dict(record or {})
+
+
+def _calibration_generation_settings() -> dict[str, Any]:
+    """The generation settings calibration generates with: the served engine's
+    (``_staged_serving_model`` loads the vLLM backend)."""
+    from evaluation.validation_generation import generation_settings
+    from inference_core.runner_config import load_runner_config
+
+    return generation_settings(load_runner_config("vllm"))
+
+
+def _finalist_answers(ctx: StageContext, rows: list[dict[str, Any]], fmt: str) -> tuple[dict[str, Any], str]:
+    """The selected checkpoint's answers from its finalists' pass, by reading
+    (``reading_key``), restored onto this split's rows - and why, or why none.
+
+    Guarded: reused only when they were made by the checkpoint calibrated
+    (``adapter_checkpoint``), in the format served (bf16), with the generation
+    settings calibration would generate with, on these rows (each answer's row
+    digest); anything else and calibration generates them itself. Nothing is
+    reused partly: a single answer to another split refuses them all.
+    """
+    from evaluation.validation_generation import (
+        read_generations,
+        reading_key,
+        restored_generation,
+        row_digest,
+    )
+
+    if fmt != "bf16":
+        return {}, f"selection generated in bf16, not {fmt}"
+    if not _selection_settings(ctx)["calibration_reuses_selection"]:
+        return {}, "calibration_reuses_selection is off"
+    record = _finalist_pass_record(ctx)
+    if not record.get("saved"):
+        return {}, record.get("reason") or "checkpoint selection kept no finalist answers"
+    text = None
+    try:
+        if record.get("local") and Path(record["local"]).is_file():
+            text = Path(record["local"]).read_text(encoding="utf-8")
+        elif record.get("blob") and ctx.client.exists(record["blob"]):
+            text = ctx.client.read_text(record["blob"])
+    except OSError as exc:
+        return {}, f"the finalist answers could not be read: {exc}"
+    if text is None:
+        return {}, "the finalist answers are neither in the run's working dir nor in Blob"
+    header, records = read_generations(text)
+    checkpoint = adapter_checkpoint(ctx)
+    if header.get("checkpoint") != checkpoint:
+        return {}, f"they were made by {header.get('checkpoint')}, and {checkpoint} is calibrated"
+    expected = _calibration_generation_settings()
+    if header.get("settings") != expected:
+        return {}, f"they were generated with other settings ({header.get('settings')}, calibration: {expected})"
+    keys = [reading_key(row) for row in rows]
+    if len(set(keys)) != len(keys):
+        return {}, "two validation rows are the same reading, so an answer cannot be put back on its row"
+    by_key = dict(zip(keys, rows, strict=True))
+    reused: dict[str, Any] = {}
+    for answer in records:
+        row = by_key.get(answer.get("key"))
+        if row is None or answer.get("digest") != row_digest(row):
+            return {}, f"they answer another validation split (first mismatch: {answer.get('key')})"
+        reused[answer["key"]] = restored_generation(row, answer)
+    return reused, (f"{len(reused)} answer(s) of {checkpoint}'s finalists' pass "
+                    f"({', '.join(header.get('modes') or [])}), same checkpoint and generation settings")
+
+
+def _calibration_gpus() -> list[str]:
+    """The GPUs calibration may generate on: those selection scored on."""
+    from common.config import training_config
+    from evaluation.checkpoint_eval import scoring_gpus
+    from training.train import training_gpus
+
+    distributed = training_config(ADAPTER.training_config).get("distributed") or {}
+    return scoring_gpus()[: training_gpus(distributed)]
+
+
+def _calibration_generate(ctx: StageContext, rows: list[dict[str, Any]], fmt: str,
+                          val_key: str) -> tuple[list[Any], dict[str, Any]]:
+    """``rows`` generated with the served model, in their order, and what it
+    cost: sharded across every GPU (``checkpoint_eval.generate_sharded``, the
+    selected adapter on the base, as selection generates) when the pod has
+    several; else - or when that fails - with one engine here."""
+    from evaluation.validation_generation import generate_validation, reading_key
+    from inference_core.model_runner import release_model
+    from training.stage_data import localize_rows
+
+    images_root = paths.staging_train_images_dir(ctx.corpus, ctx.tenant_id)
+    gpus = _calibration_gpus() if ctx.serving_model_loader is None and fmt == "bf16" else []
+    if len(gpus) > 1:
+        from evaluation.checkpoint_eval import CheckpointEvalError, generate_sharded
+
+        adapter = serving_adapter(ctx)
+        localize_rows(rows, ctx.client, images_root)   # fetched once, here, for the workers to read
+        try:
+            done = generate_sharded(
+                rows=rows, val_path=val_key, images_root=images_root, sample_rows=0, full=False,
+                full_modes=None, checkpoints=[adapter], gpus=gpus, kind="calibration",
+                work_dir=Path(paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)) / "calibration",
+                only_keys=[reading_key(row) for row in rows],
+                # --from-blob: the adapter is the version's Blob copy, fetched by each worker.
+                prepare_adapters=not Path(adapter).is_dir())[adapter]
+        except CheckpointEvalError as exc:
+            done = None
+            log.warning("calibration (%s): cannot shard the generation (%s); one engine generates it", fmt, exc)
+        if done is not None and done.error is None:
+            return done.generations, {"gpus": len(gpus), "shards": done.stats}
+        if done is not None:
+            log.warning("calibration (%s): the sharded generation failed (%s); one engine generates it again",
+                        fmt, done.error)
+    if ctx.serving_model_loader is None:
+        # The real vLLM path opens images by local path; the rows hold Blob keys.
+        rows = localize_rows(rows, ctx.client, images_root)
+    loader = ctx.serving_model_loader or _staged_serving_model
+    # One engine at a time: each format's model is freed before the next
+    # loads, or the second format finds the card still full of the first.
+    model = loader(ctx, fmt)
+    stats: dict[str, Any] = {}
+    try:
+        generations = generate_validation(rows, model, stats=stats)
+    finally:
+        release_model(model)
+    log.info("calibration (%s): %s row(s) in %s s, %s call(s) of up to %s, slowest %s s", fmt,
+             stats.get("generated"), stats.get("seconds"), stats.get("calls"), stats.get("batch_rows"),
+             stats.get("slowest_call_seconds"))
+    return generations, {"gpus": 1, **stats}
 
 
 def stage_calibrate(ctx: StageContext) -> StageResult:
@@ -2559,11 +3387,20 @@ def stage_calibrate(ctx: StageContext) -> StageResult:
     threshold chosen there prices risk the model has already been shown — the
     difference between a guarantee and a hope.
     """
-    from calibration.feature_calibrator import fit_calibrators
-    from calibration.thresholds import auto_accept_error_rate, fit_thresholds
+    from calibration.population import (
+        HALVES,
+        fit_release_calibration,
+        production_samples,
+        scored_by_field_type,
+    )
+    from calibration.thresholds import auto_accept_error_rate
+    from common.config import STANDARD_PROFILE
 
+    # How each format's generations were come by (review #28): the selected
+    # finalist's saved answers, fresh generation, or both - and why.
+    generation: dict[str, Any] = {}
     if not ctx.calibration_samples and not ctx.dry_run:
-        ctx.calibration_samples = collect_calibration_samples(ctx)
+        ctx.calibration_samples, generation = _collect_calibration_samples(ctx)
 
     if not ctx.calibration_samples:
         # Honest rather than silent: without labelled validation features there
@@ -2574,7 +3411,7 @@ def stage_calibrate(ctx: StageContext) -> StageResult:
             "calibrate", "skipped",
             "no labelled validation features supplied, so no calibrator or threshold could be "
             "fitted. Every field will route to review until one is.",
-            {"calibrated_formats": [], "unenforced_types": []},
+            {"calibrated_formats": [], "unenforced_types": [], "generation": generation},
         )
 
     fitted: dict[str, Any] = {}
@@ -2591,20 +3428,17 @@ def stage_calibrate(ctx: StageContext) -> StageResult:
             )
             continue
 
-        calibrators = fit_calibrators(
-            samples.get("calibration", []), release_id=ctx.release_id, serving_format=fmt
-        )
-        scored_by_type: dict[str, list[tuple[float, bool]]] = {}
-        for features, was_correct in samples.get("threshold", []):
-            confidence = calibrators.predict(features)
-            if confidence is not None:
-                scored_by_type.setdefault(features.field_type, []).append(
-                    (confidence, was_correct)
-                )
-
-        thresholds = fit_thresholds(
-            scored_by_type, release_id=ctx.release_id, serving_format=fmt
-        )
+        # By reading mode (collect_calibration_samples), fitted on the modes the
+        # profile fits on: image_only under fast - the mode production reads -
+        # every mode pooled under standard (calibration.population). Samples
+        # supplied as two halves carry no mode: pooled, as before.
+        supplied = set(samples) <= set(HALVES)
+        by_mode = {"supplied": samples} if supplied else samples
+        release = fit_release_calibration(by_mode, release_id=ctx.release_id, serving_format=fmt,
+                                          profile=STANDARD_PROFILE if supplied else None)
+        calibrators, thresholds = release.calibrators, release.thresholds
+        scored_by_type = scored_by_field_type(
+            calibrators, production_samples(by_mode, STANDARD_PROFILE if supplied else None)["threshold"])
         ctx.client.write_json(
             paths.release_calibrators(ctx.release_id, fmt, ctx.tenant_id),
             {"calibrators": calibrators.as_dict(), "thresholds": thresholds.as_dict(),
@@ -2625,6 +3459,9 @@ def stage_calibrate(ctx: StageContext) -> StageResult:
             # calibrators were not fitted on: the gap between stated confidence
             # and observed accuracy, per field type and over all fields.
             "expected_calibration_error": _calibration_errors(scored_by_type),
+            # What it was fitted on: the profile, the modes, the rows of each
+            # half and mode, and the calibration error in each mode.
+            "report": release.report,
         }
 
     detail = "; ".join(
@@ -2633,7 +3470,12 @@ def stage_calibrate(ctx: StageContext) -> StageResult:
         f"calibration error {body['expected_calibration_error']['all']:.3f}"
         for fmt, body in sorted(fitted.items())
     ) or "nothing fitted"
-    return StageResult("calibrate", "completed", detail, {"by_format": fitted})
+    for fmt, body in sorted(fitted.items()):
+        detail += f"; {fmt} fitted on {', '.join(body['report'].get('fitted_on_modes') or [])}"
+    for fmt, body in sorted(generation.items()):
+        detail += (f"; {fmt} fitted from {body['source']} ({body['reused_rows']} row(s) reused, "
+                   f"{body['generated_rows']} generated)")
+    return StageResult("calibrate", "completed", detail, {"by_format": fitted, "generation": generation})
 
 
 def _calibration_errors(scored_by_type: dict[str, list[tuple[float, bool]]]) -> dict[str, float]:
@@ -2666,8 +3508,9 @@ def assert_not_released(ctx: StageContext) -> None:
     promoted it with no named person (a rollback by another route), a failure
     overwrote the decision that let it be promoted, so ``promote`` could no
     longer put it back. A rollback is ``promote --version vN``; a new model is a
-    new cycle. A ``gated`` release (a format still missing its calibrator) may
-    be packaged again.
+    new cycle. A ``gated`` release (every release package writes, never promoted
+    yet) may be packaged again; its shadow check is then run again, since the
+    report names the bundle it read (``registry_utils.releases.shadow_problem``).
     """
     index_key = paths.release_index(ctx.tenant_id)
     rows = ctx.client.read_json(index_key) if ctx.client.exists(index_key) else []
@@ -2805,11 +3648,13 @@ def _file_hash(*files: Path) -> str:
 def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
     """Assemble the release bundle for this cycle (arch v2.1 §12.3).
 
-    Returns ``(bundle, reasons_not_promoted)``. The bundle is ``promoted`` only
-    when every serving format has its own calibrator and its own gate run;
-    otherwise it is ``gated`` (it passed the gate that did run) and the reasons
-    say what is missing. Promoting by default and listing the gaps would make the
-    record claim a guarantee nobody measured.
+    Returns ``(bundle, reasons_not_promotable)``. The bundle is always
+    ``gated``: package never promotes (decision 2026-10-26, #44); a person
+    does, after a shadow check on the real server path (``orchestration.run
+    shadow``, then ``promote``). The reasons say what ``promote`` would refuse
+    it for: a serving format with no calibrator or no gate run of its own.
+    Listing the gaps on a promotable record would make it claim a guarantee
+    nobody measured.
     """
     from common.config import base_model_config
     from common.prompts import prompt_hash
@@ -2881,7 +3726,8 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
     try:
         bundle = ReleaseBundle(
             release_id=ctx.release_id,
-            status="gated" if reasons else "promoted",
+            # Never promoted here (decision 2026-10-26, #44): `shadow`, then `promote`.
+            status="gated",
             tier=tier,
             tenant_scope=paths._tenant(ctx.tenant_id),
             scope=ADAPTER.name,
@@ -2903,6 +3749,10 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
             ocr_pin={
                 "mineru_version": corpus_manifest.get("mineru_version"),
                 "ocr_device": corpus_manifest.get("ocr_device"),
+                # The served MinerU's tier, when the corpus records one
+                # (registry_utils.releases.ocr_pin_refusal holds it to the pin).
+                **({"mineru_tier": corpus_manifest["mineru_tier"]}
+                   if corpus_manifest.get("mineru_tier") else {}),
             },
             vision_config_hash=_file_hash(root / "configs" / "shared" / "vision.yaml"),
             vllm_config_hash=_file_hash(root / "configs" / "inference" / "vllm_serving.yaml"),
@@ -2994,14 +3844,18 @@ def record_release_measurements(ctx: StageContext, bundle: Any) -> None:
 
 
 def write_release_bundle(ctx: StageContext, bundle: Any) -> None:
-    """Write the bundle and its row in the tenant's release index. A promoted
-    bundle becomes the tenant's one promoted release, and the one it replaces
-    is archived (``registry_utils.releases.promote_release``)."""
-    from registry_utils.releases import ReleaseError, promote_release, write_index
+    """Write the bundle and its row in the tenant's release index, ``gated``.
 
-    # Written as gated until the promotion has happened: a promotion refused
-    # below must not leave an index claiming two promoted releases, or this one.
-    written = bundle.model_copy(update={"status": "gated"}) if bundle.status == "promoted" else bundle
+    Package never promotes and archives nothing (decision 2026-10-26, #44):
+    it auto-promoted every release that passed its gate, interim tier
+    included, and archived the one serving. A person promotes now, after the
+    release is read on the real server path beside the promoted one
+    (:func:`release_next_steps`: ``orchestration.run shadow``, then
+    ``promote``). A dry run never promoted, and still does not.
+    """
+    from registry_utils.releases import write_index
+
+    written = bundle.model_copy(update={"status": "gated"}) if bundle.status != "gated" else bundle
     ctx.client.write_json(
         paths.release_bundle(bundle.release_id, ctx.tenant_id),
         json.loads(written.model_dump_json()),
@@ -3010,20 +3864,31 @@ def write_release_bundle(ctx: StageContext, bundle: Any) -> None:
     rows = ctx.client.read_json(index_key) if ctx.client.exists(index_key) else []
     rows = [r for r in rows if r.get("release_id") != bundle.release_id] + [written.index_row()]
     write_index(ctx.client, rows, ctx.tenant_id)
-    if bundle.status != "promoted":
-        return
+
+
+def release_next_steps(ctx: StageContext, bundle: Any, not_promotable: list[str]) -> list[str]:
+    """What the operator runs after ``package`` (decision 2026-10-26, #44): the
+    shadow check of the gated release on the real server path, then its
+    promotion by a named person. A release ``promote`` would refuse says what
+    to fix first; a dry run pushed placeholders, so it has nothing to read."""
+    from registry_utils.releases import promoted_release_id
+    from scripts.served_adapter import lora_name
+
+    release = bundle.release_id
     if ctx.dry_run:
-        # A dry run pushed placeholders, not weights: promoting it would point
-        # serving at them and archive the release that works.
-        log.warning("dry run: %s would be promoted; it is left gated", bundle.release_id)
-        return
-    try:
-        archived = promote_release(ctx.client, bundle.release_id, ctx.tenant_id,
-                                   promoted_by=f"package {ctx.out_version}")
-    except ReleaseError as exc:
-        raise PipelineError(str(exc)) from exc
-    if archived:
-        log.info("%s is promoted; archived %s", bundle.release_id, ", ".join(archived))
+        return [f"dry run: {release} pushed placeholders, so it is neither shadowed nor promoted"]
+    if not_promotable:
+        return [f"{release} cannot be promoted yet ({'; '.join(not_promotable)}): package it again once fixed"]
+    tenant = f" --tenant {ctx.tenant_id}" if ctx.tenant_id else ""
+    current = promoted_release_id(ctx.client, ctx.tenant_id, excluding=release)
+    served = (f"{lora_name(release)} and {lora_name(current)} (vllm serve ... --max-loras 2)" if current
+              else f"{lora_name(release)}")
+    interim = " --accept-interim" if bundle.tier == "interim" else ""
+    return [
+        f"1. shadow:  python -m orchestration.run shadow --version {release} --model-url <vLLM URL> "
+        f"--mineru-url <MinerU URL>{tenant}   (the pod's vLLM serving {served})",
+        f"2. promote: python -m orchestration.run promote --version {release} --by \"<person>\"{tenant}{interim}",
+    ]
 
 
 def _clear_staged_scope(ctx: StageContext) -> int:
@@ -3165,7 +4030,8 @@ def stage_push(ctx: StageContext) -> StageResult:
     # pushed, so every path it pins exists in Blob.
     write_release_bundle(ctx, bundle)
     for reason in not_promoted:
-        log.warning("%s is %s, not promoted: %s", bundle.release_id, bundle.status, reason)
+        log.warning("%s is %s, and promote would refuse it: %s", bundle.release_id, bundle.status, reason)
+    next_steps = release_next_steps(ctx, bundle, not_promoted)
 
     cleared = 0
     if not ctx.keep_staging and published:
@@ -3194,7 +4060,10 @@ def stage_push(ctx: StageContext) -> StageResult:
         {
             "pushed": pushed, "published": published, "staging_cleared": cleared,
             "release_id": bundle.release_id, "release_status": bundle.status,
+            # What promote would refuse the release for (package itself never promotes).
             "not_promoted_because": not_promoted,
+            # Printed by the run summary (RunReport.render): shadow, then promote.
+            "next_steps": next_steps,
         },
     )
 
@@ -3370,6 +4239,7 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
             report.results.append(result)
             report.failed_at = stages[0].name
             log.error("%s", exc)
+            _write_progress(report, ctx)            # and told, as any stage that failed
             return report
 
     from common.logging_setup import reassert
@@ -3478,7 +4348,14 @@ def progress_report_name(report: RunReport, ctx: StageContext) -> str:
 def _write_progress(report: RunReport, ctx: StageContext) -> None:
     """The run report so far, written after every stage to
     ``$FIDEON_LOG_DIR`` (default /workspace/logs) when that folder exists: a
-    run that dies part-way still says what each finished stage took."""
+    run that dies part-way still says what each finished stage took.
+
+    Called after every stage that ran, so also where each one is told
+    (``orchestration.notify.after_stage``): its wall time to the tracker, and a
+    webhook post for a stage that failed or a gate that blocked."""
+    from orchestration.notify import after_stage
+
+    after_stage(report, ctx)
     folder = Path(os.environ.get(PROGRESS_DIR_ENV) or "/workspace/logs")
     if not folder.is_dir():
         return

@@ -55,6 +55,10 @@ transient/jobs/<tenant>/<job id>/phase1.json   the model's answer, for phase 2 a
 transient/page-links/...                       page images, only with PAGE_IMAGES=link; deleted after phase 1
 ```
 
+Nothing else is kept. Retention for review (section 9) is **off by default**; when
+a tenant is opted in after legal sign-off, its flagged documents are copied to a
+separate container (`REVIEW_CONTAINER`) before the PDF above is deleted.
+
 **Restarts.** The queue redelivers a job whose worker died (after `VISIBILITY_TIMEOUT_S`).
 A job whose phase-1 checkpoint exists (`fields_ready`) **resumes phase 2** - MinerU
 reads its pages, no model time is spent again, the served fields stay as they
@@ -254,6 +258,12 @@ az containerapp create -g $RG -n extraction-worker --environment $ENV \
 | `KEEP_FILES` | worker | false | keep PDFs, checkpoints and page images after a job (debugging only) |
 | `PAGE_IMAGES`, `PAGE_LINK_SAS_TOKEN` | worker | inline | `link`: pages put in Blob, vLLM fetches them by read-only link |
 | `MAX_CONCURRENCY`, `RUN_PAGES`, `TEXT_MAX_WAIT_S`, `MAX_TEXT_BACKLOG` | worker | 96, 20, 600, 4 | windows in flight; MinerU run size; longest wait for a GPU turn; jobs waiting for their full text before no new job is taken |
+| `REVIEW_RETENTION_TENANTS` | worker, retention CLI | empty = **off** | tenants whose flagged, low-confidence and sampled documents are kept for review (section 9). Set only after the sign-off there |
+| `REVIEW_RETENTION_SAMPLE` | worker | 0.05 | share of an opted-in tenant's unflagged jobs kept anyway (hash of the job id) |
+| `REVIEW_RETENTION_LOW_CONFIDENCE` | worker | 0.80 | an overall confidence below this keeps the job |
+| `REVIEW_RETENTION_FLAG_KINDS` | worker | `low_confidence,no_confidence,not_printed,not_printed_removed,parsed_mismatch,role_mismatch,printed_off_cited_page,near_tie,likely_missed,unverified_unread_page,link_to_removed_row,row_count_mismatch,window_failed` | review-flag kinds (suffix after the flag's last `:`) that keep a job; document-level flags such as `uncalibrated` or `schema:invalid` never do alone |
+| `REVIEW_RETENTION_DAYS` | worker | 90 | days a retained document is kept before `retention purge` deletes it |
+| `REVIEW_CONTAINER` | worker, retention CLI | review-retention | where retained documents go: a container of its own (the jobs, registry or raw one is refused) |
 
 ### Why one worker replica per GPU
 
@@ -315,13 +325,173 @@ Deploy a worker image built from the commit the release was packaged from.
 * **Rotating an API key**: add the new key beside the old in the Key Vault secret,
   create a new revision (or restart) so the env refreshes, move clients, remove the old.
 
-## 9. Running it locally
+## 9. Retention for review (off by default)
+
+Decision 2026-10-26 (#43): flagged production documents can be kept so a person
+can label them for the feedback loop. **The code ships disabled.** With
+`REVIEW_RETENTION_TENANTS` empty - the default - nothing is kept for anyone, and
+the PDF is deleted when its job ends, as before. The API shows nothing of it to
+clients: no parameter, no field in a status or result. A request cannot opt a
+tenant in; only this setting can.
+
+### Before setting a tenant: legal and contract sign-off
+
+These are insurance policies: names, addresses, dates of birth, driver's
+licence numbers, VINs, claims. Keeping them beyond the job, and using them to
+train, needs written approval **before** a tenant is named:
+
+* **The client's contract and DPA** allow us to keep their documents after the
+  extraction, for this purpose (quality review, labelling, training a model), for
+  `REVIEW_RETENTION_DAYS` days, in this Azure region. Where the DPA needs it, the
+  client's consent, and their customers' notice (privacy notices) cover it.
+* **Training use**: whether a client's documents may train the model that serves
+  other clients (one shared policy adapter), and under which tenant they are
+  imported. If not, the export stops at review and nothing is imported.
+* **Who may see them** (below), and the labellers' agreements (confidentiality,
+  where they work, devices).
+* **Deletion**: the retention period, deletion on request (`purge --tenant T --all`
+  when consent is withdrawn or the contract ends) and on expiry, and that Blob
+  soft delete or versioning, if the account has them, keep deleted blobs for
+  their own period.
+* **Sub-processors and location**: the review container is in the same storage
+  account and region as the jobs; an export to a laptop moves documents out of
+  Azure (prefer `intake/<batch>`, below).
+
+Record the sign-off (who, when, which tenants, which period) with the change that
+sets `REVIEW_RETENTION_TENANTS`.
+
+### What is kept, and for how long
+
+When a job of a named tenant ends `done`, the worker keeps it - before the PDF is
+deleted - if **any** of these holds (`azure_service/retention.py`):
+
+* `flagged`: a served value is flagged (`"flagged": true`, unless only because the
+  release had no calibrator for it) or the result has a review flag of a kind in
+  `REVIEW_RETENTION_FLAG_KINDS` - a value that needs a person: `low_confidence`,
+  `no_confidence`, `not_printed`, `not_printed_removed`, `parsed_mismatch`,
+  `role_mismatch`, `printed_off_cited_page`, `near_tie`, `likely_missed`,
+  `unverified_unread_page`, `link_to_removed_row`, and data that may be missing:
+  `row_count_mismatch`, `window_failed`. A document-level system flag
+  (`uncalibrated`, `schema:invalid`, `printed_values:no_page_text`) alone keeps
+  nothing, or nearly every document would be kept. The manifest names the kinds
+  that kept it (`triggered_kinds`);
+* `low_confidence`: the overall confidence is below `REVIEW_RETENTION_LOW_CONFIDENCE` (0.80), or there is none;
+* `sample`: otherwise, `REVIEW_RETENTION_SAMPLE` (5%) of jobs, chosen by a hash of the job id.
+
+```
+review-retention/retained/<tenant>/<job id>/document.pdf   the PDF as the client sent it
+review-retention/retained/<tenant>/<job id>/result.json    the final result as served
+review-retention/retained/<tenant>/<job id>/manifest.json  tenant, job id, line, reasons, triggered kinds, flag counts and kinds,
+                                                           overall confidence, model and release, pages, bytes,
+                                                           retained_at, expires_at, state - no file name, no value
+```
+
+Failed jobs and other tenants' jobs are never kept. A copy that fails is logged
+(job id and error type only) and never fails the job. Kept for
+`REVIEW_RETENTION_DAYS` (90) after `retained_at`, or until it is marked reviewed,
+whichever comes first.
+
+**Encryption.** Azure Storage encrypts every blob at rest (AES-256,
+Microsoft-managed keys) and the service reaches it over HTTPS only. Where the
+contract asks for customer-managed keys, give the container an encryption scope
+backed by a Key Vault key:
+
+```bash
+az storage account encryption-scope create --account-name $STORAGE -g $RG -n review-cmk \
+   --key-source Microsoft.KeyVault --key-uri https://$KV.vault.azure.net/keys/review-retention
+# (the account's identity needs get/wrapKey/unwrapKey on the key) - then create the container with it:
+az storage container create --account-name $STORAGE --name review-retention --auth-mode login \
+   --default-encryption-scope review-cmk --prevent-encryption-scope-override true
+```
+
+### Setting it up
+
+```bash
+az storage container create --account-name $STORAGE --name review-retention --auth-mode login
+# The worker writes it; nobody else by default. (Give the worker its own identity when this
+# is on: with one identity for both apps, the API could read retained documents too.)
+az role assignment create --assignee-object-id $ID_PRINCIPAL --assignee-principal-type ServicePrincipal \
+   --role "Storage Blob Data Contributor" --scope "$SA/blobServices/default/containers/review-retention"
+# The people who review and label: a named security group, read only.
+az role assignment create --assignee-object-id <reviewers group id> --assignee-principal-type Group \
+   --role "Storage Blob Data Reader" --scope "$SA/blobServices/default/containers/review-retention"
+# Then, after the sign-off, on the worker:
+az containerapp update -g $RG -n extraction-worker \
+   --set-env-vars REVIEW_RETENTION_TENANTS=<tenant>[,<tenant>] REVIEW_RETENTION_DAYS=90
+```
+
+**Who can read it (RBAC).** Only the worker's identity (Contributor, to write)
+and the reviewers' group (Reader) - never the API's identity, the training pod's
+SAS or a SAS for the jobs container. The operator who runs `purge`, `export` and
+`mark-reviewed` needs Contributor on the container, and for an export to
+`intake/<batch>` the same write access to the raw container's `intake/` a laptop
+uploads deliveries with. Turn on the storage account's diagnostic logs
+(`StorageRead`, `StorageWrite`, `StorageDelete` to Log Analytics) so every read
+of a retained document is on record. With `STORAGE_AUTH=environment` the login
+must reach this container too (a SAS for the jobs container alone cannot).
+
+At start the worker writes and deletes a probe in the container; if it cannot,
+it logs `retention for review is OFF` and reads documents as usual, keeping
+nothing.
+
+### Purge, export, review
+
+```bash
+# Daily (a Container Apps job on a cron, or by hand): expired, reviewed and incomplete items.
+python -m azure_service.retention purge [--tenant T] [--dry-run]
+# Consent withdrawn or the contract ended: every item of a tenant, whatever its state.
+python -m azure_service.retention purge --tenant T --all
+# Copy retained documents into the labelling intake as UNLABELLED documents (oldest first).
+python -m azure_service.retention export --tenant T --out intake/review-2026-11 --limit 50
+python -m azure_service.retention export --tenant T --out ./review-2026-11       # a local folder
+# A person has dealt with one (labelled, imported, or judged not worth a label): purge deletes it next.
+python -m azure_service.retention mark-reviewed --tenant T --job <job id>
+```
+
+`export` writes one folder per document, the layout the audit and
+`import_labeled_pdfs` read: `<tenant>__<job id>/document.pdf`, `metadata.json`
+(`lob`, `synthetic: false`, the tenant, the job, why it was kept, no review
+record) and `draft.json` (the served answer, in `pre_annotate`'s draft shape:
+a starting point, never a label). **It never writes `golden.json`.** A person
+labels it (writes `golden.json`, and adds `reviewer_id` and `review_date` to
+`metadata.json`); the audit and the import refuse the folder until then (every
+gold needs a real person's review record). `--out intake/<batch>` writes to the raw container
+(`AZURE_RAW_CONTAINER`) for `pull_intake --batch <batch>`; any other value is a
+local folder, which then holds client documents on that machine. Only a tenant
+in `REVIEW_RETENTION_TENANTS` is exported, so run it with the worker's setting.
+An exported item is marked `exported` and is not exported again; it stays until
+it is marked reviewed or expires. The intake copy is outside this purge: it
+follows the intake's own rules (`pull_raw_pdfs --purge-plan` finds it once imported).
+
+A scheduled purge, as a Container Apps job with the worker's image and identity:
+
+```bash
+az containerapp job create -g $RG -n retention-purge --environment $ENV --trigger-type Schedule \
+   --cron-expression "30 3 * * *" --replica-timeout 1800 --replica-retry-limit 1 \
+   --image $ACR.azurecr.io/extraction-worker:$TAG --registry-server $ACR.azurecr.io --registry-identity $ID \
+   --mi-user-assigned $ID --cpu 0.5 --memory 1Gi \
+   --command "/bin/sh" --args "-c" "python -m azure_service.retention purge" \
+   --env-vars STORAGE_AUTH=managed_identity STORAGE_ACCOUNT=$STORAGE AZURE_CLIENT_ID=$ID_CLIENT \
+       REVIEW_CONTAINER=review-retention
+```
+
+**The lifecycle rule is the backstop**: should purge stop running, Azure deletes
+retained blobs after 90 days anyway (match it to `REVIEW_RETENTION_DAYS`). Merge
+it into the account's policy beside the rules of section 3:
+
+```json
+{"enabled": true, "name": "review-retention-90d", "type": "Lifecycle", "definition": {
+   "filters": {"blobTypes": ["blockBlob"], "prefixMatch": ["review-retention/retained/"]},
+   "actions": {"baseBlob": {"delete": {"daysAfterModificationGreaterThan": 90}}}}}
+```
+
+## 10. Running it locally
 
 Tests (no Azure, no network, no GPU):
 
 ```bash
 pip install -e ".[data,service,dev]"
-pytest -q tests/test_azure_service.py tests/test_azure_service_runtime.py
+pytest -q tests/test_azure_service.py tests/test_azure_service_runtime.py tests/test_decision_retention.py
 ```
 
 Against Azurite and a pod:

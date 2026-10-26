@@ -244,7 +244,9 @@ def test_weight_decay_is_zero_on_a_low_rank_adapter():
     does that job here (arch v2.1 §11.1)."""
     optimization = load_yaml(ROOT / "configs" / "training" / "unified.yaml")["optimization"]
     assert float(optimization["weight_decay"]) == 0.0
-    assert float(load_yaml(ROOT / "configs" / "training" / "unified.yaml")["lora"]["dropout"]) >= 0.05
+    # A number, or auto - which chooses 0.05 or 0.10 (training.train.auto_dropout).
+    dropout = load_yaml(ROOT / "configs" / "training" / "unified.yaml")["lora"]["dropout"]
+    assert dropout == "auto" or float(dropout) >= 0.05
 
 
 def test_the_effective_batch_is_small_enough_to_produce_updates():

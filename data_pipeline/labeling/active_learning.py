@@ -235,6 +235,7 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
                         choices=list(ACTIVE_DOC_TYPES))
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--threshold", type=float, default=DEFAULT_REVIEW_CONFIDENCE_THRESHOLD)
+    parser.add_argument("--limit", type=int, default=None, help="extract at most this many documents per type")
     args = parser.parse_args(list(argv) if argv is not None else None)
     # On the pod, run detached in tmux: a closed laptop must not stop this job.
     from orchestration.detach import detach_module_if_needed
@@ -246,13 +247,21 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     client = BlobClient()
     assert_routing_permitted(client, args.doc_types, args.tenant)
 
-    raise SystemExit(
-        "Wire this to a batch extraction run: extract the unlabeled documents with "
-        f"--model {args.model} (testing/run_extraction.py, which calls the serving pipeline), then "
-        "pass the ExtractionResults to build_queue(). The queue construction, the ordering, the "
-        "completeness override and the day-zero refusal above are complete and tested; only the "
-        "model backend is outstanding (Phase 0)."
-    )
+    # The unlabelled documents, extracted by the release through the serving
+    # pipeline with its calibrators (orchestration.label_noise.backlog_results).
+    from inference_core.model_runner import load_model, release_model
+    from orchestration.label_noise import backlog_results
+
+    model = load_model(args.model, client)
+    try:
+        results = backlog_results(client, model, version=args.model, doc_types=args.doc_types,
+                                  tenant_id=args.tenant, limit=args.limit)
+    finally:
+        release_model(model)
+    queue = build_queue(results, model_version=args.model, review_threshold=args.threshold)
+    key = write_queue(queue, client, args.tenant)
+    print(f"review queue: {len(queue.items)} document(s) {queue.by_routing} -> {key}")
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

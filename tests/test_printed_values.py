@@ -98,7 +98,8 @@ def test_strict_takes_out_a_value_no_page_prints_and_keeps_its_key():
     entry = next(e for e in held.record["not_printed"] if e["path"] == "policy.policy_number")
     assert entry == {"path": "policy.policy_number", "raw": "PA-2026-9999", "pages": [1]}
     assert held.record["mode"] == "strict" and held.record["removed"] is True
-    assert set(held.record) == {"mode", "checked", "unchecked", "not_printed", "removed", "unread_page"}
+    assert set(held.record) == {"mode", "checked", "unchecked", "not_printed", "removed", "unread_page",
+                                "parsed_mismatch", "off_cited_page", "rows_not_colocated", "form_refs"}
 
 
 def test_flag_mode_keeps_the_value_and_flags_it(flag_mode):
@@ -266,7 +267,8 @@ def test_printed_on_no_page_with_text_while_a_cited_page_has_none_is_kept_and_fl
     assert held.extraction["carrier"]["name"]["raw"] == "Acme Phantom Insurance Co"
     assert held.flags == ["carrier.name:unverified_unread_page"]
     assert held.record == {"mode": "strict", "checked": 0, "unchecked": 1, "not_printed": [], "removed": True,
-                           "unread_page": 1}
+                           "unread_page": 1, "parsed_mismatch": 0, "off_cited_page": 0, "rows_not_colocated": 0,
+                           "form_refs": {"checked": 0, "not_printed": []}}
 
 
 def test_printed_on_another_page_than_a_blank_cited_one_is_printed():

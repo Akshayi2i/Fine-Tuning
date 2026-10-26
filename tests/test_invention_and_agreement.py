@@ -218,7 +218,7 @@ def test_the_repeat_mode_is_read_again_with_its_windows_reversed_after_the_norma
     assert metrics["hallucination_rate"] == 0.0
 
 
-def test_no_repeat_when_the_check_is_off_and_a_failed_repeat_is_an_empty_answer(monkeypatch):
+def test_no_repeat_when_the_check_is_off_and_a_failed_repeat_is_an_infrastructure_failure(monkeypatch):
     from evaluation import golden_eval
 
     calls: list[tuple[str, str, str]] = []
@@ -230,9 +230,13 @@ def test_no_repeat_when_the_check_is_off_and_a_failed_repeat_is_an_empty_answer(
     _fake_extract(monkeypatch, calls, fail_repeat=True)
     triples = golden_eval.evaluate(_golden_docs(), object(), object(), "/tmp", run_to_run=True)
     # The repeat reads image_only (decision 2026-10-26; ocr_plus_image before).
+    # Tried twice, failed twice: not an empty second answer (that scored an
+    # outage as disagreement) but an infrastructure failure, compared with nothing.
     [p1] = [meta for _e, _g, meta in triples if meta["source_id"] == "p1" and meta["modality_mode"] == "image_only"]
-    assert p1[REPEAT_ANSWER] == {} and "engine fell over" in p1["repeat_error"]
-    assert build_report("v1", triples).gate_metrics()["run_to_run_agreement"] == 0.0
+    assert REPEAT_ANSWER not in p1 and "engine fell over" in p1["repeat_error"]
+    assert [(f["source_id"], f["pass"]) for f in triples.infrastructure_failures] == [("p1", "repeat"),
+                                                                                    ("p2", "repeat")]
+    assert "run_to_run_agreement" not in build_report("v1", triples).gate_metrics()
 
 
 def test_the_repeat_is_on_by_default_in_the_config():

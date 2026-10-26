@@ -42,12 +42,21 @@ renumbered from 1 in the window (common.structural_ids), so a window is taught
 the ids it can see and never a reference to a row it is not shown. Its label
 holds one part, of the line itself. Every finished target is checked against
 the window's slice of the model view, the grammar its decoder is held to: a
-target that grammar cannot write is refused, never taught.
+target that grammar cannot write is refused, never taught. A value citing no
+page is one it cannot write (``page_ref`` minItems 1), so on these lines the
+corpus build first gives each such value every page whose clean text prints it
+(:func:`with_placed_pages`, serving's matcher), and a window whose target would
+still hold one is left out by the build (``window_target(unpaged=...)``), never
+its whole document.
+
+A window whose answer runs past its reservation is retried by serving in two
+halves; the build cuts it the same way (:func:`window_halves`, serving's own
+rule). Neither changes the plan: :func:`window_plan_id` is the planner's.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any
@@ -487,6 +496,139 @@ def with_inferred_pages(
     return out
 
 
+@dataclass
+class Placement:
+    """What :func:`with_placed_pages` did with the values that record no page."""
+
+    #: Path -> the pages it was given: every page whose clean text prints it.
+    placed: dict[str, list[int]] = field(default_factory=dict)
+    #: Printed on no page of the clean text: left without a page, so a window
+    #: that would hold one is left out (``build_jsonl``), never the document.
+    not_printed: list[str] = field(default_factory=list)
+    #: Nothing the search can settle - a reading ("Yes", a ``bool``), a single
+    #: character, or a document with no text: left without a page, as above.
+    unchecked: list[str] = field(default_factory=list)
+
+
+def places_by_search(lob: str | list[str] | None) -> bool:
+    """Whether the corpus build gives a value with no page every page whose
+    clean text prints it (:func:`with_placed_pages`): on the lines the label
+    rules hold for (``label_rules.label_rules_apply``, the common-model
+    lines), whose convention it is - a value printed several times is one
+    value citing every page that prints it - and whose decoder cannot write a
+    value with no page (``page_ref`` minItems 1). Elsewhere a value with no
+    page is placed only on the one page that prints it
+    (:func:`with_inferred_pages`), as before."""
+    from data_pipeline.ingestion.label_rules import label_rules_apply
+
+    return label_rules_apply("policy", lob)
+
+
+def with_placed_pages(
+    label: dict[str, Any], page_texts: Sequence[str | None] | None, *, skip: Collection[str] = (),
+) -> tuple[dict[str, Any], Placement]:
+    """``label`` with each stated value that records no page given every page
+    whose clean text prints it, by serving's matcher
+    (``label_verification.where_printed``: figure-aware, tolerant of OCR) -
+    one page, or every page printing it (the value-once convention). Every
+    section is searched, the overflow entries (``additional_fields``) by their
+    value, an entry that cites a page of its own excepted; never the system's
+    fields, nor ``text_sections``.
+
+    ``skip``: paths listed as printed nowhere (``unprinted_values``), which keep
+    that verdict. A value the search cannot place keeps no page and is named in
+    the :class:`Placement`. A copy when anything is placed; ``label`` itself
+    otherwise.
+    """
+    import copy
+
+    from common import grounding
+    from common.canonical import SYSTEM_SUPPLIED_FIELDS
+    from data_pipeline.dataset_builder.label_verification import where_printed
+
+    placement = Placement()
+    pages = grounding.tolerant_pages(dict(enumerate(page_texts or [], start=1)))
+    system = {f"{section}.{name}" for section, name in SYSTEM_SUPPLIED_FIELDS}
+    skipped = set(skip)
+    unpaged: list[tuple[list[Any], str, dict[str, Any]]] = []
+
+    def stated(node: dict[str, Any]) -> bool:
+        return node.get("raw") is not None or node.get("parsed") is not None
+
+    def walk(node: Any, steps: list[Any], path: str) -> None:
+        if is_field_value(node):
+            if not node.get("page_ref") and stated(node) and path not in system and path not in skipped:
+                unpaged.append((steps, path, node))
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if not str(key).startswith("fideon:"):
+                    walk(value, [*steps, key], f"{path}.{key}" if path else str(key))
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                walk(item, [*steps, index], f"{path}[{index}]")
+
+    for name, section in label.items():
+        if name in EXCLUDED_FROM_TARGETS or str(name).startswith("fideon:"):
+            continue
+        if name == ADDITIONAL_FIELDS and isinstance(section, list):
+            for index, entry in enumerate(section):
+                value = entry.get("value") if isinstance(entry, dict) else None
+                if is_field_value(value) and not entry.get("page_ref"):
+                    walk(value, [name, index, "value"], f"{name}[{index}].value")
+            continue
+        walk(section, [name], str(name))
+
+    if not unpaged:
+        return label, placement
+    has_text = any(page.has_text for page in pages.values())
+    out: dict[str, Any] | None = None
+    for steps, path, node in unpaged:
+        where = where_printed(node, [], pages) if has_text else grounding.Grounding(grounding.UNCHECKED)
+        if where.printed:
+            out = out if out is not None else copy.deepcopy(label)
+            target: Any = out
+            for step in steps:
+                target = target[step]
+            target["page_ref"] = list(where.pages)
+            placement.placed[path] = list(where.pages)
+        elif where.status == grounding.NOT_PRINTED:
+            placement.not_printed.append(path)
+        else:
+            placement.unchecked.append(path)
+    return (out if out is not None else label), placement
+
+
+def unpaged_paths(target: Any, path: str = "") -> list[str]:
+    """The paths of a model-form target's values that cite no page - what a
+    common-model window's decoder cannot write (``page_ref`` minItems 1)."""
+    if is_field_value(target):
+        return [] if target.get("page_ref") else [path]
+    if isinstance(target, dict):
+        return [found for key, value in target.items()
+                for found in unpaged_paths(value, f"{path}.{key}" if path else str(key))]
+    if isinstance(target, list):
+        return [found for index, value in enumerate(target)
+                for found in unpaged_paths(value, f"{path}[{index}]")]
+    return []
+
+
+def window_halves(plan: PolicyWindowPlan, declarations_page: int | None) -> list[PolicyWindowPlan]:
+    """A window cut in two, exactly as serving cuts a window whose answer was
+    cut off (``serving.pipeline._halves``, imported here so the rule is one):
+    in page order, the declarations leading the half that holds their page.
+
+    A half is never its group's only window (``single`` False), so it takes a
+    value with no page only where the declarations lead it. ``window_index``
+    stays the parent's: the rows tell the halves apart by ``window_half``.
+    """
+    from serving.pipeline import _halves, _Planned
+
+    return [PolicyWindowPlan(plan.group, plan.window_index, tuple(piece.pages), single=False,
+                             leads=piece.leads, homed=plan.homed)
+            for piece in _halves(_Planned(plan.group, list(plan.pages), plan.leads), declarations_page)]
+
+
 def window_target(
     label: dict[str, Any],
     lob: str | list[str] | None,
@@ -494,6 +636,7 @@ def window_target(
     report: TargetReport | None = None,
     *,
     printed_pages: Callable[[Any], set[int]] | None = None,
+    unpaged: list[str] | None = None,
 ) -> dict[str, Any]:
     """The model-form target for one window: its sections, on its pages.
 
@@ -504,6 +647,10 @@ def window_target(
     On a common-model line, raises :class:`CanonicalLabelError` for a label
     with more than one part or a part of another line (:func:`with_own_part`),
     and for a target the window's decoder could not write (:func:`_check_writable`).
+    Given ``unpaged``, a target that holds a value citing no page - which no
+    page was found to print - is not refused: the paths are added to it and the
+    target returned unchecked, for the caller to leave the window out
+    (:func:`unpaged_paths`).
     """
     from common.canonical import schema_label, within_schema
     from common.schema_sections import sections_for
@@ -548,6 +695,9 @@ def window_target(
         if report is not None:
             report.dangling.extend(f"{plan.group}:{ref}" for ref in [*left_out, *ids.dangling])
         target = in_schema_order(target, view)
+        if unpaged is not None and (missing := unpaged_paths(target)):
+            unpaged.extend(missing)
+            return target
         _check_writable(target, lob, plan)
         return target
     # Entries in SPEC_21's own shape (label, value, section_hint, page_ref), not

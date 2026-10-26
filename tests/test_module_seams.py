@@ -178,16 +178,6 @@ def test_every_serving_threshold_in_the_yaml_reaches_the_pipeline():
         assert tuning.get("review_threshold") == threshold
 
 
-def test_greater_is_better_is_read_rather_than_hardcoded():
-    """It was hardcoded True while all four training YAMLs carried the key, so
-    a config selecting on eval_loss restored the WORST checkpoint."""
-    from training.callbacks.early_stopping import swift_early_stopping_args
-
-    args = swift_early_stopping_args(2, metric_for_best_model="eval_loss", greater_is_better=False)
-    assert args["greater_is_better"] is False
-    assert args["metric_for_best_model"] == "eval_loss"
-
-
 def test_the_trainer_honours_its_yaml_over_the_helper_defaults():
     """The fixed-one-of-two check. This ordering bug was fixed in train_adapter
     and left standing in train_foundation, exactly as the val-split leak had

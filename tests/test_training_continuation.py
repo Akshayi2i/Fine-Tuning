@@ -35,8 +35,10 @@ def matching_adapter_config(**over) -> dict:
 
     lora = training_config(ADAPTER.training_config)["lora"]
     modules = list(lora["target_modules"]) + (["merger"] if lora.get("include_vision_projector") else [])
+    # PEFT saves a number; under `auto`, the rate a small corpus is given.
+    dropout = 0.1 if lora["dropout"] == "auto" else lora["dropout"]
     return {"peft_type": "LORA", "r": lora["rank"], "lora_alpha": lora["alpha"],
-            "lora_dropout": lora["dropout"], "use_rslora": bool(lora.get("use_rslora", False)),
+            "lora_dropout": dropout, "use_rslora": bool(lora.get("use_rslora", False)),
             "bias": lora["bias"], "target_modules": sorted(modules), **over}
 
 
@@ -147,6 +149,8 @@ def _as_if_on_the_pod(monkeypatch, tmp_path) -> list:
 
     monkeypatch.setenv(T.OFF_POD_ENV, "1")
     monkeypatch.setenv("RUNPOD_VOLUME_MOUNT", str(tmp_path / "volume"))
+    # A pod's clean checkout, whatever state this one is in (a real run refuses a dirty tree).
+    monkeypatch.setattr(T, "worktree_state", lambda: (False, None))
     monkeypatch.setattr(T, "_masking_encoder", lambda swift: _stub_masking_encoder())
     monkeypatch.setattr(T, "_token_counter", lambda: _stub_tokens)
     monkeypatch.setattr(T, "validate_all", lambda **_kw: None)
@@ -168,11 +172,12 @@ def test_a_continued_run_whose_adapter_has_other_lora_settings_is_refused(client
 
     _seed(client)
     launched = _as_if_on_the_pod(monkeypatch, tmp_path)
-    parent = _adapter(tmp_path / "parent", lora_dropout=0.05)        # the config says 0.10
+    # rsLoRA: the config's dropout is auto, which keeps whatever the parent's is.
+    parent = _adapter(tmp_path / "parent", use_rslora=True)          # the config says False
     with pytest.raises(T.TrainingError) as refused:
         _train(client, dry_run=False, continue_from=parent, parent_run_id="policy-v8")
     message = str(refused.value)
-    assert "lora_dropout is 0.05 in the adapter, 0.1 in the config" in message
+    assert "use_rslora is True in the adapter, False in the config" in message
     assert "--fresh" in message and "adapter_config.json" in message
     assert not launched
     # Refused before anything was recorded or staged.

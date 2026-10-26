@@ -285,17 +285,21 @@ def _ctx(pending):
                            ocr_engine=None, pending=pending)
 
 
-def test_pending_ocr_without_mineru_names_the_ocr_environment(monkeypatch):
+def test_pending_ocr_without_mineru_names_the_served_mineru(monkeypatch):
+    """Review 2026-10-26 #4: the remedy reads through the served MinerU (the pin),
+    never the OCR environment's in-process 3.4.5, whose corpus serving refuses."""
     from data_pipeline.ocr import run_mineru
     from orchestration import pipeline_dag
 
     monkeypatch.setattr("importlib.util.find_spec", lambda name, *a: None)
-    monkeypatch.setattr(run_mineru, "find_unprocessed", lambda raw, dt, tenant: ["d1", "d2"])
+    monkeypatch.delenv("MINERU_URL", raising=False)
+    monkeypatch.setattr(run_mineru, "find_unprocessed", lambda raw, dt, tenant, **held: ["d1", "d2"])
     with pytest.raises(pipeline_dag.PipelineError) as err:
         pipeline_dag.stage_preprocessing(_ctx(2))
     message = str(err.value)
     assert "policy: 2" in message
-    assert f"{pipeline_dag.OCR_VENV}/bin/python -m data_pipeline.ocr.run_mineru --doc-type policy" in message
+    assert "-m data_pipeline.ocr.run_mineru --doc-type policy --all-unprocessed --mineru-url" in message
+    assert pipeline_dag.OCR_VENV not in message
 
 
 def test_nothing_pending_needs_no_mineru(monkeypatch):
@@ -304,7 +308,7 @@ def test_nothing_pending_needs_no_mineru(monkeypatch):
 
     monkeypatch.setattr("importlib.util.find_spec", lambda name, *a: None)
     monkeypatch.delenv("MINERU_URL", raising=False)                  # the in-process MinerU's path
-    monkeypatch.setattr(run_mineru, "find_unprocessed", lambda raw, dt, tenant, mineru_version=None: [])
+    monkeypatch.setattr(run_mineru, "find_unprocessed", lambda raw, dt, tenant, **held: [])
     monkeypatch.setattr(run_mineru, "MinerUEngine", lambda: object())
     result = pipeline_dag.stage_preprocessing(_ctx(0))
     assert result.status == "completed"

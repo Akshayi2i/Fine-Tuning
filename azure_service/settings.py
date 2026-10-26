@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,20 @@ MIN_KEY_CHARS = 32
 
 #: A PDF larger than this is refused (the 114-page scan in the data is 84 MB).
 DEFAULT_MAX_PDF_MB = 150
+
+#: The review-flag kinds (a flag's suffix after its last ``:``) that say a value
+#: needs a person, and so retain a job for review (``REVIEW_RETENTION_FLAG_KINDS``).
+#: Each is a kind serving emits on a value: confidence (serving.pipeline,
+#: calibration.apply_calibration), printed values (serving.printed_values,
+#: serving.conventions) and value checks (serving.value_flags). Document-level
+#: system flags - ``uncalibrated``, ``schema:invalid``, ``printed_values:no_page_text``
+#: - are not among them: alone they would keep nearly every document.
+DEFAULT_RETENTION_FLAG_KINDS = (
+    "low_confidence", "no_confidence", "not_printed", "not_printed_removed", "parsed_mismatch", "role_mismatch",
+    "printed_off_cited_page", "near_tie", "likely_missed", "unverified_unread_page", "link_to_removed_row",
+    # Data that may be missing: rows the table's own count says were not read, a window the model failed.
+    "row_count_mismatch", "window_failed",
+)
 
 
 class SettingsError(ValueError):
@@ -52,6 +67,25 @@ def _number(environ: Mapping[str, str], name: str, default: float, *, minimum: f
     if value < minimum:
         raise SettingsError(f"{name} must be at least {minimum}, got {value}")
     return value
+
+
+def _fraction(environ: Mapping[str, str], name: str, default: float) -> float:
+    value = _number(environ, name, default)
+    if value > 1:
+        raise SettingsError(f"{name} must be a share between 0 and 1, got {value}")
+    return value
+
+
+def _flag_kinds(raw: str | None) -> tuple[str, ...]:
+    """``a,b`` -> ``("a", "b")``; unset: :data:`DEFAULT_RETENTION_FLAG_KINDS`."""
+    if raw is None:
+        return DEFAULT_RETENTION_FLAG_KINDS
+    kinds = tuple(dict.fromkeys(kind.strip().lower() for kind in raw.split(",") if kind.strip()))
+    bad = [kind for kind in kinds if not re.match(r"^[a-z][a-z0-9_]{0,63}$", kind)]
+    if bad:
+        raise SettingsError(f"REVIEW_RETENTION_FLAG_KINDS takes flag kinds (the part after a flag's last ':', "
+                            f"e.g. low_confidence), not {bad}")
+    return kinds
 
 
 def _tenant_name(tenant: str) -> str:
@@ -174,6 +208,28 @@ class Settings:
     #: Jobs whose fields are out and whose full text waits: no new job is taken beyond this.
     max_text_backlog: int = 4
 
+    # -- retention for review (decision 2026-10-26, #43): OFF by default --------
+    #: The tenants whose finished jobs may be kept for review (flagged, low
+    #: confidence or sampled: :mod:`azure_service.retention`). Empty - the
+    #: default - keeps nothing of anyone. Set only after the legal and contract
+    #: sign-off DEPLOY.md names; no request can opt a tenant in.
+    review_retention_tenants: tuple[str, ...] = ()
+    #: The share of an opted-in tenant's unflagged jobs kept anyway, chosen by job id.
+    review_retention_sample: float = 0.05
+    #: An overall confidence below this keeps the job.
+    review_retention_low_confidence: float = 0.80
+    #: The review-flag kinds that retain a job (:data:`DEFAULT_RETENTION_FLAG_KINDS`).
+    review_retention_flag_kinds: tuple[str, ...] = DEFAULT_RETENTION_FLAG_KINDS
+    #: How long a retained document is kept before ``retention purge`` deletes it.
+    review_retention_days: int = 90
+    #: The container retained documents go to: its own, never the jobs, registry or raw one.
+    review_container: str = "review-retention"
+
+    def retains_for(self, tenant: str) -> bool:
+        """Whether ``tenant``'s jobs may be retained for review: named in
+        ``REVIEW_RETENTION_TENANTS``, and nothing else decides it."""
+        return bool(tenant) and tenant in self.review_retention_tenants
+
     def webhook_secret_for(self, tenant: str) -> str | None:
         return self.webhook_secrets.get(tenant) or self.webhook_secret
 
@@ -228,7 +284,18 @@ class Settings:
             run_pages=int(_number(env, "RUN_PAGES", 20, minimum=1)),
             text_max_wait_s=_number(env, "TEXT_MAX_WAIT_S", 600.0, minimum=1),
             max_text_backlog=int(_number(env, "MAX_TEXT_BACKLOG", 4, minimum=1)),
+            review_retention_tenants=tuple(_tenant_name(t) for t in (text("REVIEW_RETENTION_TENANTS") or "")
+                                           .split(",") if t.strip()),
+            review_retention_sample=_fraction(env, "REVIEW_RETENTION_SAMPLE", 0.05),
+            review_retention_low_confidence=_fraction(env, "REVIEW_RETENTION_LOW_CONFIDENCE", 0.80),
+            review_retention_flag_kinds=_flag_kinds(text("REVIEW_RETENTION_FLAG_KINDS")),
+            review_retention_days=int(_number(env, "REVIEW_RETENTION_DAYS", 90, minimum=1)),
+            review_container=text("REVIEW_CONTAINER", "review-retention") or "review-retention",
         )
+        others = {settings.jobs_container, settings.registry_container, text("AZURE_RAW_CONTAINER")} - {None}
+        if settings.review_container in others:
+            raise SettingsError(f"REVIEW_CONTAINER must be a container of its own, not {settings.review_container!r} "
+                                "(the jobs, registry or raw one): retained documents get their own access and expiry")
         if settings.allow_base_fallback and not settings.base_model_name:
             raise SettingsError("ALLOW_BASE_FALLBACK needs BASE_MODEL_NAME: the name vLLM serves the base model as")
         if settings.storage_auth == "managed_identity" and not (settings.blob_account_url
@@ -268,4 +335,6 @@ class Settings:
             "visibility_timeout_s": self.visibility_timeout_s, "images": self.images,
             "base_fallback": self.allow_base_fallback, "keep_files": self.keep_files,
             "webhook_secrets": sorted(self.webhook_secrets) + (["*"] if self.webhook_secret else []),
+            "review_retention": {"tenants": list(self.review_retention_tenants), "container": self.review_container,
+                                 "days": self.review_retention_days} if self.review_retention_tenants else "off",
         }

@@ -403,9 +403,21 @@ def test_a_self_contained_report_scores_as_before():
                 "modality_mode": "ocr_plus_image",
                 "ocr_text": "GL-77 OH $500.00 Akron Dayton Toledo Location 1 Location 2 PREM"}
     [full] = build_report("t", [(gold, got, metadata)]).full_set()
-    metrics = {k: round(v, 4) if isinstance(v, float) else v for k, v in full.metrics.items()}
+    metrics = {k: round(v, 4) if isinstance(v, float) else v for k, v in full.metrics.items()
+               if k not in REPORTED_SINCE}
     assert metrics == PINNED_OLD_STYLE
     assert [r["field_path"] for r in full.error_records] == ["billing.amount_due"]
+
+
+#: Reported beside the pinned numbers since the gate-metrics review of
+#: 2026-10-26 (auto-accept coverage, selective accuracy, field match without
+#: codes) and the gate decisions of the same day (the served measure and real
+#: ocr_plus_image accuracy): new numbers, none of them moving one pinned below.
+REPORTED_SINCE = frozenset({
+    "auto_accept_coverage", "auto_accept_coverage_by_type", "auto_accept_counts", "selective_accuracy",
+    "selective_accuracy_lower_95", "selective_accuracy_by_type", "field_normalized_match_without_codes",
+    "ece_by_field_type", "served_field_match", "real_ocr_plus_image_accuracy",
+})
 
 
 #: The report above as the scoring produced it before those fixes - except

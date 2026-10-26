@@ -13,7 +13,20 @@ regime, which is what makes "3 epochs" mean three passes.
 The configured shares are applied here: per line, its synthetic
 fraction and scanned share decide which synthetic documents train, the same
 ones in every epoch (:mod:`training.data_mix`, Fideon SPEC_09 amendment items 6
-and 7). Every real document trains.
+and 7). Every real document trains. With ``data_mix.twins_per_seed_per_epoch``
+set, each epoch trains that many twins of every seed instead, the next ones the
+next epoch (:func:`training.data_mix.plan_twin_rotation`); null trains every
+twin in every epoch.
+
+**Rehearsal** (``continued_training.rehearsal_old_share``, null by default): a
+run that continues the promoted adapter trains, in each epoch, every NEW
+document and a rotated, stratified sample of the OLD ones - those its chain of
+runs trained on (:func:`plan_rehearsal`). Fresh runs train every document.
+
+**Hard examples** (``hard_examples.top_fields``, null by default): the train
+windows whose targets hold one of the fields the parent run (or the promoted
+release's run) got most wrong on validation are repeated, each repeat from
+another epoch file (:func:`hard_fields`, :func:`target_fields`).
 
 **Render rotation** (``render_rotation: true`` in the training config): a
 twin delivered as a digital and a scanned PDF with one gold trains in ONE of
@@ -29,9 +42,13 @@ every render.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
+import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
@@ -71,6 +88,16 @@ class CorpusView:
     #: Render rotation as applied: on or off, and per line its documents, the
     #: documents of one epoch and the twins rotated (empty when off).
     render_rotation: dict = field(default_factory=dict)
+    #: Twin rotation as applied (data_mix.twins_per_seed_per_epoch; empty when off).
+    twin_rotation: dict = field(default_factory=dict)
+    #: Rehearsal of a continued run: its new and old documents, and the old ones
+    #: each epoch trains (continued_training.rehearsal_old_share; empty when off).
+    rehearsal: dict = field(default_factory=dict)
+    #: Hard examples as applied: the fields and the rows repeated per epoch
+    #: (hard_examples; empty when off).
+    hard_examples: dict = field(default_factory=dict)
+    #: How line balance counted a line and filled its repeats.
+    line_balance: dict = field(default_factory=dict)
 
     @property
     def train_rows(self) -> int:
@@ -91,10 +118,17 @@ def _filter(text: str) -> tuple[str, int, int]:
     them to the base model (``ServedRelease.covers_lob``); training on them
     would teach inputs the adapter is never asked. Returns ``(jsonl, kept, dropped)``.
     """
+    rows, dropped = _filter_rows(text)
+    kept = [line for line, _ in rows]
+    return "\n".join(kept) + ("\n" if kept else ""), len(kept), dropped
+
+
+def _filter_rows(text: str) -> tuple[list[tuple[str, dict]], int]:
+    """:func:`_filter`'s rows, each as ``(its JSONL line, the row)``, and the rows dropped."""
     from common.lob import known_lines, single_line
 
     lines = known_lines()
-    kept: list[str] = []
+    kept: list[tuple[str, dict]] = []
     dropped = 0
     for line in text.splitlines():
         if not line.strip():
@@ -104,10 +138,10 @@ def _filter(text: str) -> tuple[str, int, int]:
         except ValueError as exc:
             raise CorpusViewError(f"corpus row is not JSON: {exc}") from exc
         if row.get("doc_type") in ADAPTER.doc_types and single_line(row.get("lob")) in lines:
-            kept.append(line)
+            kept.append((line, row))
         else:
             dropped += 1
-    return "\n".join(kept) + ("\n" if kept else ""), len(kept), dropped
+    return kept, dropped
 
 
 def _line_of(row: dict) -> str:
@@ -127,18 +161,55 @@ def _balance_settings() -> dict[str, int]:
             "max_repeat": int(settings.get("max_repeat") or 1)}
 
 
+#: What line balance counts a line's size in (``line_balance.count``).
+BALANCE_COUNTS = ("documents", "families", "real")
+
+
+def _balance_options() -> dict[str, Any]:
+    """``line_balance.count`` and ``line_balance.distinct_repeats``: today's
+    behaviour (documents, identical repeats) when they are absent."""
+    from common.config import training_config
+
+    settings = training_config(ADAPTER.training_config).get("line_balance") or {}
+    count = settings.get("count") or "documents"
+    if count not in BALANCE_COUNTS:
+        raise CorpusViewError(f"line_balance.count is {count!r}; expected one of {list(BALANCE_COUNTS)}")
+    return {"count": count, "distinct_repeats": bool(settings.get("distinct_repeats"))}
+
+
+def _unit(row: dict, count: str) -> Any:
+    """What one row counts as toward its line's size; None counts for nothing."""
+    if count == "families":                       # a seed and its twins are one
+        return str(row.get("group_id") or row.get("source_id"))
+    if count == "real":
+        return None if row.get("synthetic") else str(row.get("source_id"))
+    return row.get("source_id")
+
+
 def line_repeats(rows: list[dict], *, min_documents: int, max_repeat: int,
-                 target: int | None = None) -> dict[str, int]:
+                 target: int | None = None, count: str = "documents") -> dict[str, int]:
     """How many times each line's rows go into an epoch file (``line_balance``).
 
     Counted in DOCUMENTS, not rows: a line of long policies has many rows per
     document and is not small for it. ``target`` is the documents a line is
     raised toward when the caller has fixed it (render rotation); by default it
     is ``min_documents``, capped at the largest line.
+
+    ``count`` is what a line's size is counted in: ``documents`` (every render
+    of every twin is one; the default), ``families`` (a seed and all its twins
+    are one) or ``real`` (synthetic documents count for nothing). Twins are
+    near-copies of their seed, so a line of five seeds with twenty twins each is
+    small however many documents it holds. A line with nothing to count is
+    repeated ``max_repeat`` times.
     """
+    if count not in BALANCE_COUNTS:
+        raise CorpusViewError(f"line balance cannot count in {count!r}; expected one of {list(BALANCE_COUNTS)}")
     documents: dict[str, set] = {}
     for row in rows:
-        documents.setdefault(_line_of(row), set()).add(row.get("source_id"))
+        units = documents.setdefault(_line_of(row), set())
+        unit = _unit(row, count)
+        if unit is not None:
+            units.add(unit)
     if min_documents <= 0 or max_repeat <= 1 or not documents:
         return {line: 1 for line in documents}
     # Toward the largest line, never past it: when every line is small (a smoke
@@ -147,7 +218,7 @@ def line_repeats(rows: list[dict], *, min_documents: int, max_repeat: int,
     if target is None:
         target = min(min_documents, max(len(ids) for ids in documents.values()))
     return {
-        line: 1 if len(ids) >= target else min(max_repeat, -(-target // len(ids)))
+        line: 1 if len(ids) >= target else max_repeat if not ids else min(max_repeat, -(-target // len(ids)))
         for line, ids in documents.items()
     }
 
@@ -250,13 +321,6 @@ def _rows_of(body: str) -> list[dict]:
     return [json.loads(line) for line in body.splitlines() if line.strip()]
 
 
-def _keep(body: str, keep: set[str]) -> tuple[str, int]:
-    """``body`` with only the rows of the documents in ``keep``."""
-    out = [line for line in body.splitlines()
-           if line.strip() and str(json.loads(line).get("source_id")) in keep]
-    return "\n".join(out) + ("\n" if out else ""), len(out)
-
-
 def examples_by_line(rows: list[dict]) -> dict[str, dict[str, int]]:
     """Per line: documents, how many real and synthetic, and rows."""
     documents: dict[str, dict[str, bool]] = {}
@@ -281,15 +345,330 @@ def _balance(body: str, repeats: dict[str, int]) -> tuple[str, int]:
     return "\n".join(out) + ("\n" if out else ""), len(out)
 
 
+def _hash(value: str, seed: int) -> int:
+    return int.from_bytes(hashlib.sha256(f"{seed}:corpus_view:{value}".encode()).digest()[:8], "big")
+
+
+# --------------------------------------------------------------------------
+# Rehearsal: a continued run's new documents, and a rotated sample of its old ones
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Rehearsal:
+    """Which old documents rest in which epoch, and the record of it."""
+
+    #: epoch -> old source_ids that do not train in it.
+    rested: dict[int, set[str]] = field(default_factory=dict)
+    record: dict = field(default_factory=dict)
+
+
+def _rehearsal_settings() -> tuple[float | None, bool]:
+    """``continued_training.rehearsal_old_share`` and ``rehearsal_weight_by_line_errors``."""
+    from common.config import training_config
+
+    block = training_config(ADAPTER.training_config).get("continued_training") or {}
+    share = block.get("rehearsal_old_share")
+    if share is not None and (isinstance(share, bool) or not isinstance(share, (int, float))
+                              or not 0 < share <= 1):
+        raise CorpusViewError(f"continued_training.rehearsal_old_share must be a share above 0 and at "
+                              f"most 1, or null; got {share!r}")
+    return (None if share is None else float(share)), bool(block.get("rehearsal_weight_by_line_errors"))
+
+
+def _interleaved(carriers: dict[str, list[str]], seed: int) -> list[str]:
+    """One line's old documents in an order that spreads every carrier evenly:
+    a carrier's documents, ranked by a seeded hash, sit at even steps over the
+    whole order. Any run of ``k`` consecutive documents then holds about
+    ``k / n`` of each carrier's - which is what makes a rotated window a
+    stratified sample."""
+    keyed: list[tuple[float, int, str]] = []
+    for carrier, ids in carriers.items():
+        ranked = sorted(ids, key=lambda s: (_hash(f"rehearsal:{s}", seed), s))
+        offset = _hash(f"rehearsal_carrier:{carrier}", seed) / float(1 << 64)
+        for index, source_id in enumerate(ranked):
+            keyed.append(((index + offset) / len(ranked), _hash(f"rehearsal_carrier:{carrier}", seed), source_id))
+    return [source_id for *_, source_id in sorted(keyed)]
+
+
+def line_error_rates(errors: dict | None) -> dict[str, float]:
+    """Per line, its validation error rate in a validation-errors record (``by_line``)."""
+    out: dict[str, float] = {}
+    for line, counts in ((errors or {}).get("by_line") or {}).items():
+        if isinstance(counts, dict):
+            rate, values = error_rate(counts)
+            if values > 0:
+                out[str(line)] = rate
+    return out
+
+
+def _line_shares(share: float, old_by_line: dict[str, int], rates: dict[str, float] | None) -> dict[str, float]:
+    """Each line's share of its old documents per epoch: ``share``, or - weighted
+    by validation errors - ``share`` times its error rate over the old documents'
+    mean rate, at most 1. A line the errors do not name keeps ``share``."""
+    known = {line: rates[line] for line in old_by_line if rates and line in rates}
+    documents = sum(old_by_line[line] for line in known)
+    mean = sum(old_by_line[line] * rate for line, rate in known.items()) / documents if documents else 0.0
+    return {line: min(1.0, share * known[line] / mean) if line in known and mean > 0 else share
+            for line in old_by_line}
+
+
+def plan_rehearsal(rows: list[dict], old: set[str], share: float, *, seed: int, epochs: int = EPOCH_FILES,
+                   line_rates: dict[str, float] | None = None) -> Rehearsal:
+    """Every new document in every epoch; of the old ones, a rotated share per epoch.
+
+    ``old`` are the documents the parent's chain of runs trained on. Per line,
+    ``round(share * old documents)`` of them train in each epoch (at least one):
+    stratified by line exactly and by carrier closely (:func:`_interleaved`),
+    and rotated - epoch ``e`` takes the window after epoch ``e - 1``'s - so
+    every old document trains within ``ceil(1 / share)`` epochs. Seeded, so a
+    rebuild takes the same ones. ``line_rates`` (validation error rate per line)
+    weight the share toward the lines the parent got wrong (:func:`_line_shares`).
+    """
+    docs: dict[str, dict] = {}
+    for row in rows:
+        docs.setdefault(str(row.get("source_id")), row)
+    old_by_line: dict[str, dict[str, list[str]]] = {}
+    new_by_line: dict[str, int] = {}
+    new_ids: list[str] = []
+    for source_id, row in docs.items():
+        line = _line_of(row)
+        if source_id in old:
+            old_by_line.setdefault(line, {}).setdefault(str(row.get("carrier") or "unknown"), []).append(source_id)
+        else:
+            new_ids.append(source_id)
+            new_by_line[line] = new_by_line.get(line, 0) + 1
+    counts = {line: sum(len(ids) for ids in carriers.values()) for line, carriers in old_by_line.items()}
+    shares = _line_shares(share, counts, line_rates)
+    plan = Rehearsal(rested={e: set() for e in range(1, epochs + 1)})
+    rehearsed: dict[int, list[str]] = {e: [] for e in range(1, epochs + 1)}
+    lines: dict[str, dict] = {}
+    for line, carriers in sorted(old_by_line.items()):
+        ordered = _interleaved(carriers, seed)
+        n = len(ordered)
+        k = min(n, max(1, math.floor(shares[line] * n + 0.5)))
+        for epoch in range(1, epochs + 1):
+            start = (epoch - 1) * k
+            chosen = {ordered[(start + i) % n] for i in range(k)}
+            plan.rested[epoch].update(source_id for source_id in ordered if source_id not in chosen)
+            rehearsed[epoch].extend(chosen)
+        lines[line] = {"new": new_by_line.get(line, 0), "old": n, "carriers": len(carriers),
+                       "share": round(shares[line], 4), "old_per_epoch": k,
+                       "epochs_to_see_every_old_document": -(-n // k),
+                       "error_rate": None if line_rates is None or line not in line_rates
+                       else round(line_rates[line], 4)}
+    for line, n in new_by_line.items():
+        lines.setdefault(line, {"new": n, "old": 0, "carriers": 0, "share": share, "old_per_epoch": 0,
+                                "epochs_to_see_every_old_document": 0, "error_rate": None})
+    plan.record = {
+        "enabled": True, "old_share": share, "weighted_by_line_errors": line_rates is not None,
+        "new_documents": len(new_ids), "old_documents": sum(counts.values()),
+        "lines": dict(sorted(lines.items())),
+        "new": sorted(new_ids),
+        "rehearsed_by_epoch": {e: sorted(ids) for e, ids in rehearsed.items()},
+    }
+    return plan
+
+
+def chain_trained_documents(client: BlobClient, run_id: str,
+                            tenant_id: str | None = None) -> tuple[set[str], str | None]:
+    """The documents ``run_id`` and the runs it continued trained on, as
+    ``orchestration.pipeline_dag.lineage_training_documents`` reads them (the
+    same set the split pins to train): ``(ids, None)``, or ``(ids, why not all)``."""
+    from types import SimpleNamespace
+
+    from orchestration.pipeline_dag import lineage_training_documents
+
+    return lineage_training_documents(SimpleNamespace(client=client, tenant_id=tenant_id), run_id)
+
+
+def promoted_run(client: BlobClient, tenant_id: str | None, out_version: str | None) -> str | None:
+    """The run of this tenant's promoted release other than ``out_version``'s,
+    as ``orchestration.pipeline_dag.promoted_release`` reads it; None if none."""
+    from types import SimpleNamespace
+
+    from orchestration.pipeline_dag import promoted_release
+
+    promoted = promoted_release(SimpleNamespace(client=client, tenant_id=tenant_id, release_id=out_version))
+    return ADAPTER.run_id(promoted[1]) if promoted else None
+
+
+# --------------------------------------------------------------------------
+# Hard examples: the fields the last model got most wrong on validation
+# --------------------------------------------------------------------------
+
+
+def _hard_settings() -> dict[str, int] | None:
+    """``hard_examples``: ``top_fields`` (None: off), ``max_repeat`` and ``min_values``."""
+    from common.config import training_config
+
+    block = training_config(ADAPTER.training_config).get("hard_examples") or {}
+    if block.get("top_fields") is None:
+        return None
+    settings = {"top_fields": block.get("top_fields"), "max_repeat": block.get("max_repeat", 2),
+                "min_values": block.get("min_values", 30)}
+    for key, value in settings.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise CorpusViewError(f"hard_examples.{key} must be a whole number of at least 1; got {value!r}")
+    return settings
+
+
+def error_rate(counts: dict) -> tuple[float, int]:
+    """``(errors / values, values)`` of one validation-errors tally: wrong,
+    missed and invented values over the values the gold states."""
+    values = int(counts.get("values") or 0)
+    errors = sum(int(counts.get(key) or 0) for key in ("wrong", "missed", "invented"))
+    return (errors / values if values else 0.0), values
+
+
+def field_key(path: str) -> str:
+    """A field path with its list positions as ``[]`` (``vehicles[0].vin`` -> ``vehicles[].vin``)."""
+    return re.sub(r"\[[^\]]*\]", "[]", str(path))
+
+
+def hard_fields(errors: dict, top_fields: int, *, min_values: int = 30) -> list[dict]:
+    """The ``top_fields`` fields of a validation-errors record with the highest
+    error rate, among those with at least ``min_values`` gold values (fewer is
+    noise) and at least one error; ties go to the field with more values."""
+    ranked = []
+    for path, counts in ((errors or {}).get("by_field") or {}).items():
+        if not isinstance(counts, dict):
+            continue
+        rate, values = error_rate(counts)
+        if values >= min_values and rate > 0:
+            ranked.append((-rate, -values, field_key(path), rate, values))
+    ranked.sort()
+    return [{"field": path, "error_rate": round(rate, 4), "values": values}
+            for _, _, path, rate, values in ranked[:top_fields]]
+
+
+def _empty(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def target_fields(row: dict) -> set[str]:
+    """The fields a row's target states a value for, as validation errors name
+    them: the answer in the full model form (a compact answer expanded),
+    flattened as scoring flattens it, list positions as ``[]``."""
+    messages = row.get("messages") or []
+    if not messages or not isinstance(messages[-1], dict) or messages[-1].get("role") != "assistant":
+        return set()
+    content = messages[-1].get("content")
+    if isinstance(content, list):
+        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    try:
+        target = json.loads(content or "")
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(target, dict):
+        return set()
+    from common.canonical import expand_answer
+    from evaluation.metrics.field_accuracy import flatten_scalars
+
+    return {field_key(path) for path, value in flatten_scalars(expand_answer(target)).items() if not _empty(value)}
+
+
+def holds_any(fields: set[str], wanted: set[str]) -> bool:
+    """Whether a row's fields hold one of ``wanted``: the same path, or one ending
+    in the other at a ``.`` - a record and a target may root a path differently."""
+    for path in fields:
+        if path in wanted or any(path.endswith(f".{w}") or w.endswith(f".{path}") for w in wanted):
+            return True
+    return False
+
+
+def load_validation_errors(client: BlobClient, run_id: str,
+                           tenant_id: str | None = None) -> tuple[dict | None, str | None]:
+    """The validation errors of ``run_id``'s winning checkpoint, or ``(None, why not)``.
+
+    Written by checkpoint selection at ``paths.validation_errors_key``; a build
+    without that key, or a run that has no record (older than it), has none.
+    """
+    key_of = getattr(paths, "validation_errors_key", None)
+    if key_of is None:
+        return None, "this build has no artifact_registry.paths.validation_errors_key"
+    key = key_of(run_id, tenant_id=tenant_id)
+    if not client.exists(key):
+        return None, f"{run_id} has no validation errors at {key}"
+    try:
+        errors = client.read_json(key)
+    except ValueError as exc:  # not JSON
+        return None, f"{run_id}'s validation errors at {key} cannot be read ({type(exc).__name__})"
+    if not isinstance(errors, dict) or errors.get("version") != 1:
+        return None, f"{run_id}'s validation errors at {key} are not version 1"
+    return errors, None
+
+
+# --------------------------------------------------------------------------
+# Writing the view
+# --------------------------------------------------------------------------
+
+
+def _epoch_lines(epoch: int, files: dict[int, list[tuple[str, dict]]], docs: set[str],
+                 repeats: dict[str, int], *, distinct: bool, hard: set[str] | None = None,
+                 hard_extra: int = 0, holds: Any = None) -> tuple[list[str], int]:
+    """One epoch file's lines, and how many of them are hard-example repeats.
+
+    The documents ``docs`` train once from this epoch's file. A line repeated
+    ``r`` times by line balance writes its rows ``r`` times - identical, or with
+    ``distinct``, the repeats from the NEXT epoch files (each its own mode draw
+    and windows; the fourth file, which a three-epoch run never reads alone,
+    included). A hard example's ``hard_extra`` repeats come from the epoch files
+    after those: the rows there of the same documents whose targets hold a hard
+    field. An offset past the last file wraps back to this one.
+    """
+    def source(offset: int) -> list[tuple[str, dict]]:
+        return files[(epoch - 1 + offset) % EPOCH_FILES + 1]
+
+    def trains(row: dict) -> bool:
+        return str(row.get("source_id")) in docs
+
+    out: list[str] = []
+    own = [(text, row) for text, row in files[epoch] if trains(row)]
+    if distinct:
+        out.extend(text for text, _ in own)
+        most = max((repeats.get(_line_of(row), 1) for _, row in own), default=1)
+        for offset in range(1, most):
+            out.extend(text for text, row in source(offset)
+                       if trains(row) and repeats.get(_line_of(row), 1) > offset)
+    else:
+        for text, row in own:
+            out.extend([text] * repeats.get(_line_of(row), 1))
+    extra = 0
+    if hard and hard_extra > 0:
+        most = max(repeats.values(), default=1) if distinct else 1
+        for offset in range(1, most + hard_extra):
+            for text, row in source(offset):
+                if not trains(row):
+                    continue
+                first = repeats.get(_line_of(row), 1) if distinct else 1
+                if first <= offset < first + hard_extra and holds(row):
+                    out.append(text)
+                    extra += 1
+    return out, extra
+
+
 def materialize(
     corpus_version: str,
     client: BlobClient,
     *,
     tenant_id: str | None = None,
+    parent_run_id: str | None = None,
+    out_version: str | None = None,
 ) -> CorpusView:
-    """Write the adapter's epoch and validation files, and report them."""
+    """Write the adapter's epoch and validation files, and report them.
+
+    ``parent_run_id`` is the run a continued cycle continues (None: the run
+    starts from the base): rehearsal reads which documents its chain trained
+    on, and hard examples its validation errors. ``out_version`` is this
+    cycle's version, so that a fresh run reading the promoted release's errors
+    never takes its own release for it.
+    """
+    from common.config import training_config
+    from training.data_mix import mix_settings, plan_twin_rotation, select_documents
+
     view = CorpusView()
-    rotation: RenderRotation | None = None
+    files: dict[int, list[tuple[str, dict]]] = {}
     for epoch in range(1, EPOCH_FILES + 1):
         source = paths.corpus_epoch_file(corpus_version, epoch, tenant_id)
         if not client.exists(source):
@@ -297,53 +676,150 @@ def materialize(
                 f"corpus {corpus_version} has no {source}. The view filters the corpus that "
                 "was built; it does not build one of its own."
             )
-        body, kept, dropped = _filter(client.read_text(source))
-        if epoch == 1:
-            # One choice of documents and one set of repeat counts for every
-            # epoch, from the documents of the first: every epoch file holds
-            # every training document once - or, with render rotation, every
-            # twin once, in the render that epoch gives it.
-            from common.config import training_config
-            from training.data_mix import mix_settings, select_documents
+        files[epoch], dropped = _filter_rows(client.read_text(source))
+        view.dropped_rows += dropped
 
-            settings = mix_settings()
-            seed = int(training_config(ADAPTER.training_config).get("seed", 42))
-            keep, mix = select_documents(_rows_of(body), settings, seed=seed, line_of=_line_of)
-            view.mix_settings = settings.as_dict()
-            view.data_mix = {line: m.as_dict() for line, m in mix.items()}
-            kept_rows = [row for row in _rows_of(body) if str(row.get("source_id")) in keep]
-            view.rested_documents = len({str(r.get("source_id")) for r in _rows_of(body)}) - len(keep)
-            if settings.steers:
-                log.info("data mix: %s", {line: (m.real, m.synthetic_kept, m.synthetic_available)
-                                          for line, m in mix.items()})
-            balance = _balance_settings()
-            if _rotation_enabled():
-                # After the shares (they choose documents, rotation chooses a
-                # render per epoch) and before balance, which counts one epoch.
-                rotation = plan_render_rotation(
-                    kept_rows, seed=seed,
-                    min_documents=balance["min_documents"] if balance["max_repeat"] > 1 else 0)
-                view.render_rotation = rotation.as_dict()
-                log.info("render rotation: documents per epoch %s", {
-                    line: (r["documents"], r["documents_per_epoch"]) for line, r in rotation.lines.items()})
-            first = rotation.rested.get(1, set()) if rotation else set()
-            epoch_rows = [row for row in kept_rows if str(row.get("source_id")) not in first]
-            view.examples_by_line["train"] = examples_by_line(epoch_rows)
-            view.line_repeats = line_repeats(epoch_rows, **balance,
-                                             target=(rotation.target or None) if rotation else None)
-            for line, record in view.data_mix.items():
-                record["repeats"] = view.line_repeats.get(line, 1)
-            boosted = {line: n for line, n in view.line_repeats.items() if n > 1}
-            if boosted:
-                log.info("line balance: repeating %s in every epoch file", boosted)
-        rested = rotation.rested.get(epoch, set()) if rotation else set()
-        body, kept = _keep(body, keep - rested)
-        body, kept = _balance(body, view.line_repeats)
+    # One choice of documents and one set of repeat counts for every epoch,
+    # from the documents of the first: every epoch file holds every training
+    # document once - or, with render rotation, every twin once, in the render
+    # that epoch gives it; with twin rotation or rehearsal, that epoch's twins
+    # and old documents.
+    first = [row for _, row in files[1]]
+    settings = mix_settings()
+    seed = int(training_config(ADAPTER.training_config).get("seed", 42))
+    keep, mix = select_documents(first, settings, seed=seed, line_of=_line_of)
+    view.mix_settings = settings.as_dict()
+    view.data_mix = {line: m.as_dict() for line, m in mix.items()}
+    kept_rows = [row for row in first if str(row.get("source_id")) in keep]
+    view.rested_documents = len({str(r.get("source_id")) for r in first}) - len(keep)
+    if settings.steers:
+        log.info("data mix: %s", {line: (m.real, m.synthetic_kept, m.synthetic_available)
+                                  for line, m in mix.items()})
+    balance = _balance_settings()
+    options = _balance_options()
+    rested: dict[int, set[str]] = {e: set() for e in range(1, EPOCH_FILES + 1)}
+
+    errors_cache: dict[str, tuple[dict | None, str | None]] = {}
+
+    def errors_of(run_id: str) -> tuple[dict | None, str | None]:
+        if run_id not in errors_cache:
+            errors_cache[run_id] = load_validation_errors(client, run_id, tenant_id)
+        return errors_cache[run_id]
+
+    share, weighted = _rehearsal_settings()
+    if share is not None and parent_run_id is None:
+        view.rehearsal = {"enabled": False, "old_share": share,
+                          "reason": "the run continues no recorded run (it starts from the base): "
+                                    "every document trains every epoch"}
+    elif share is not None:
+        old, unread = chain_trained_documents(client, parent_run_id, tenant_id)
+        if unread:
+            # continuation() refuses to continue on an unread chain; a run here
+            # anyway trains everything rather than guess which documents are old.
+            view.rehearsal = {"enabled": False, "old_share": share,
+                              "reason": f"what {parent_run_id}'s chain trained on cannot be read ({unread})"}
+            log.warning("rehearsal is off for this run: %s", view.rehearsal["reason"])
+        else:
+            rates, note = None, None
+            if weighted:
+                errors, note = errors_of(parent_run_id)
+                rates = line_error_rates(errors) if errors else None
+            plan = plan_rehearsal(kept_rows, old, share, seed=seed, line_rates=rates)
+            plan.record.update({"parent_run_id": parent_run_id, "errors_note": note})
+            view.rehearsal = plan.record
+            for epoch, ids in plan.rested.items():
+                rested[epoch] |= ids
+            log.info("rehearsal: %d new document(s) every epoch, %d old one(s) at a share of %s: %s",
+                     plan.record["new_documents"], plan.record["old_documents"], share,
+                     {line: (r["new"], r["old"], r["old_per_epoch"]) for line, r in plan.record["lines"].items()})
+
+    if settings.twins_per_seed_per_epoch:
+        twins = plan_twin_rotation(kept_rows, settings.twins_per_seed_per_epoch, seed=seed,
+                                   epochs=EPOCH_FILES, line_of=_line_of)
+        view.twin_rotation = twins.as_dict()
+        for epoch, ids in twins.rested.items():
+            rested[epoch] |= ids
+        log.info("twin rotation: %d twin(s) of every seed per epoch: %s", twins.per_seed,
+                 {line: (r["twins"], r["twins_per_epoch"]) for line, r in twins.lines.items()})
+
+    rotation: RenderRotation | None = None
+    if _rotation_enabled():
+        # After the shares (they choose documents, rotation chooses a render
+        # per epoch) and before balance, which counts one epoch.
+        rotation = plan_render_rotation(
+            kept_rows, seed=seed,
+            min_documents=balance["min_documents"] if balance["max_repeat"] > 1 else 0)
+        view.render_rotation = rotation.as_dict()
+        for epoch, ids in rotation.rested.items():
+            rested[epoch] |= ids
+        log.info("render rotation: documents per epoch %s", {
+            line: (r["documents"], r["documents_per_epoch"]) for line, r in rotation.lines.items()})
+
+    epoch_rows = [row for row in kept_rows if str(row.get("source_id")) not in rested[1]]
+    view.examples_by_line["train"] = examples_by_line(epoch_rows)
+    # Render rotation fixes the documents a line is raised toward before a
+    # small line keeps both renders. Counted in families or real documents, or
+    # with twin rotation or rehearsal thinning the epoch, the target is counted
+    # on the epoch's own rows instead.
+    fixed = (rotation is not None and options["count"] == "documents"
+             and not view.twin_rotation and not view.rehearsal.get("enabled"))
+    view.line_repeats = line_repeats(epoch_rows, **balance, count=options["count"],
+                                     target=(rotation.target or None) if fixed else None)
+    view.line_balance = {**balance, **options}
+    for line, record in view.data_mix.items():
+        record["repeats"] = view.line_repeats.get(line, 1)
+    boosted = {line: n for line, n in view.line_repeats.items() if n > 1}
+    if boosted:
+        log.info("line balance: repeating %s in every epoch file%s", boosted,
+                 ", each repeat from another epoch file" if options["distinct_repeats"] else "")
+
+    hard = _hard_settings()
+    wanted: set[str] | None = None
+    if hard is not None:
+        try:
+            errors_run = parent_run_id or promoted_run(client, tenant_id, out_version)
+        except (RuntimeError, ValueError, KeyError, OSError) as exc:
+            errors_run, reason = None, f"the promoted release cannot be read ({type(exc).__name__}: {exc})"
+        else:
+            reason = "no release is promoted and the run continues none" if errors_run is None else None
+        errors = None
+        if errors_run is not None:
+            errors, reason = errors_of(errors_run)
+        fields = hard_fields(errors, hard["top_fields"], min_values=hard["min_values"]) if errors else []
+        if errors is not None and not fields:
+            reason = f"no field of {errors_run}'s validation errors has {hard['min_values']}+ values and an error"
+        view.hard_examples = {"enabled": bool(fields), **hard, "errors_run": errors_run, "fields": fields}
+        if fields:
+            wanted = {entry["field"] for entry in fields}
+            view.hard_examples["rows_repeated_by_epoch"] = {}
+            log.info("hard examples: repeating the windows holding %s", sorted(wanted))
+        else:
+            view.hard_examples["reason"] = reason
+            log.warning("hard examples are configured but not applied: %s", reason)
+
+    holds_cache: dict[int, bool] = {}
+
+    def holds(row: dict) -> bool:
+        if id(row) not in holds_cache:
+            holds_cache[id(row)] = holds_any(target_fields(row), wanted or set())
+        return holds_cache[id(row)]
+
+    for epoch in range(1, EPOCH_FILES + 1):
+        docs = keep - rested[epoch]
+        if options["distinct_repeats"] or wanted:
+            out, extra = _epoch_lines(epoch, files, docs, view.line_repeats,
+                                      distinct=options["distinct_repeats"], hard=wanted,
+                                      hard_extra=hard["max_repeat"] - 1 if hard else 0, holds=holds)
+            body, kept = "\n".join(out) + ("\n" if out else ""), len(out)
+            if wanted:
+                view.hard_examples["rows_repeated_by_epoch"][epoch] = extra
+        else:
+            own = [text for text, row in files[epoch] if str(row.get("source_id")) in docs]
+            body, kept = _balance("\n".join(own), view.line_repeats)
         target = paths.corpus_scope_epoch_file(corpus_version, epoch, ADAPTER.name, tenant_id)
         client.write_text(target, body)
         view.epoch_files.append(target)
         view.rows_by_epoch[epoch] = kept
-        view.dropped_rows += dropped
 
     if not view.train_rows:
         raise CorpusViewError(

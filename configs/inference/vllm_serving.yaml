@@ -32,7 +32,11 @@ generation:
   # Mandatory. Per-token logprobs are the entire basis of per-field confidence
   # (arch 5). A backend that cannot return them is not a valid serving backend.
   logprobs: true
-  top_logprobs: 1
+  # The token written and the best other one: their margin is each value's
+  # near-tie margin (serving.near_tie_margin below). Sent to a served model as
+  # the request's top_logprobs, to the in-process engine as SamplingParams.logprobs.
+  # Greedy decoding writes the same tokens either way.
+  top_logprobs: 2
 
   # MUST stay raw_logprobs while structured decoding is on (arch v2.1 5.1).
   # Constrained decoding masks invalid tokens, so the post-mask distribution is
@@ -75,6 +79,19 @@ serving:
   max_loras: 4
   max_lora_rank: 64            # must be >= the Foundation rank
   gpu_memory_utilization: 0.90
+  # A value whose tokens came this close (in nats, logprob of the token written
+  # minus the best other token's) to another token is flagged <path>:near_tie
+  # and sent to review: greedy decoding with repeatable: false can write the
+  # other one on another run, when the batch around the request differs.
+  near_tie_margin: 0.1
+  # A stock `vllm serve` takes every sampling setting a request leaves out from
+  # the model's generation_config.json. The requests pin them
+  # (inference_core.model_runner.PINNED_SAMPLING: repetition_penalty 1.0,
+  # top_k -1, presence and frequency penalty 0), and the server is started with
+  # `--generation-config vllm` as well, so nothing the model ships decides them.
+  # Its other flags: --logprobs-mode raw_logprobs, --structured-outputs-config
+  # '{"backend": "xgrammar", "disable_any_whitespace": true}' and
+  # --max-model-len at least sequence.max_seq_len above.
 
 routing:
   # Below this, do NOT guess an adapter. Fall back to Foundation-only extraction

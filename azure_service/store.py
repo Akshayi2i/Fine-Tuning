@@ -15,7 +15,10 @@ written before the status that announces it, so a poll that reads
 ``fields_ready`` or ``done`` always finds its result.
 
 ``transient/`` holds document content only while a job runs; a lifecycle rule
-on the prefix (DEPLOY.md) removes anything a crash left behind.
+on the prefix (DEPLOY.md) removes anything a crash left behind. A job kept for
+review (:mod:`azure_service.retention`, off by default) is copied to the
+separate ``REVIEW_CONTAINER`` before :meth:`JobStore.delete_transient` runs;
+nothing of it is written here.
 """
 
 from __future__ import annotations

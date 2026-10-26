@@ -375,7 +375,8 @@ def test_an_override_clears_gates_whose_reasons_do_not_start_with_their_name():
     fell = promotion_gate(
         _metrics(), _metrics(), continued_from="policy-v1",
         line_evidence=LineEvidence(compared=[LineComparison(
-            "homeowners", "policy-v1", reference_scores=[0.95] * 6, candidate_scores=[0.90] * 6)]),
+            # 30 documents: the fewest a line is gated on (decision 2026-10-26).
+            "homeowners", "policy-v1", reference_scores=[0.95] * 30, candidate_scores=[0.90] * 30)]),
         override=GateOverrideRecord("A. Reviewer", reason, ["line:homeowners"]),
     )
     assert fell.waived == ["line:homeowners"] and fell.passed, fell.report()
@@ -935,10 +936,12 @@ def test_a_metric_one_document_measures_is_a_point_estimate_not_a_permanent_bloc
     cannot grow once frozen."""
     from evaluation.gating import promotion_gate
 
+    # The improvement comes from served_field_match, the primary field match
+    # since decision 2026-10-26.
     result = promotion_gate(
         _metrics(scanned_accuracy=0.80), _metrics(scanned_accuracy=0.80),
         per_document={
-            **_paired("field_normalized_match", 0.90, 0.96),
+            **_paired("served_field_match", 0.90, 0.96),
             **_paired("list_field_recall", 0.96, 0.96),
             "scanned_accuracy": ([0.80], [0.80]),
         },
@@ -951,7 +954,7 @@ def test_a_metric_one_document_measures_is_a_point_estimate_not_a_permanent_bloc
     # Still a point comparison against δ: a real drop on that one document blocks.
     dropped = promotion_gate(
         _metrics(scanned_accuracy=0.70), _metrics(scanned_accuracy=0.80),
-        per_document={**_paired("field_normalized_match", 0.90, 0.96),
+        per_document={**_paired("served_field_match", 0.90, 0.96),
                       "scanned_accuracy": ([0.80], [0.70])},
     )
     assert "scanned_accuracy" in dropped.failed_gates
@@ -1001,9 +1004,10 @@ def test_a_baseline_on_another_yardstick_is_judged_on_floors_alone():
     metrics = {name: 0.96 for name in GATING_METRICS}
     metrics.update(ece_confidence=0.04, confusable_misattribution_rate=0.02, false_null_rate=0.03,
                    auto_accept_error_rate=0.01, schema_validity_rate=1.0)
-    better = {**metrics, "field_normalized_match": 0.995, "list_field_recall": 0.999}
+    # Non-inferiority reads served_field_match since decision 2026-10-26.
+    better = {**metrics, "served_field_match": 0.995, "list_field_recall": 0.999}
     compared = promotion_gate(dict(metrics), better)
-    assert "field_normalized_match" in compared.failed_gates
+    assert "served_field_match" in compared.failed_gates
 
     reason = "the set was frozen again"
     result = promotion_gate(dict(metrics), better, baseline_not_comparable=reason,

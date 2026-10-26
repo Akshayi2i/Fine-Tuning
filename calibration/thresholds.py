@@ -5,13 +5,27 @@ a starting point". It was never tuned, and it could not be — nothing measured
 what error rate it actually bought. A threshold that is not tied to an outcome is
 a guess wearing a decimal point.
 
-**What replaces it.** For each field type, choose the *lowest* threshold such
-that the error rate among fields at or above it meets the §0d target — measured
-with the **upper bound** of a 95% binomial interval, not the point estimate.
+**What replaces it.** For each field type, the threshold is chosen by
+**learn-then-test** (fixed-sequence testing): the candidate thresholds are
+tested from the strictest toward the loosest, each on whether the error rate
+among fields at or above it meets the §0d target - measured with the **upper
+bound** of a 95% binomial interval, not the point estimate - and the scan stops
+at the first one that fails. The threshold is the loosest one that passed.
 
-Lowest, because a higher threshold sends more fields to review than the guarantee
-requires, and review is the expensive resource this whole confidence system
-exists to ration.
+Why not "the lowest threshold that passes", scanned upward: the threshold is
+chosen on the same data its bound is computed on, and taking the best of fifty
+tests that each hold with 95% confidence does not hold with 95%. Tested in a
+fixed order and stopped at the first failure, every threshold accepted was
+reached through tests that all passed, and the guarantee holds for the one
+chosen. A threshold whose accepted count cannot meet the target even with zero
+errors (fewer than :data:`MIN_ACCEPTED_SAMPLE`, or a bound that zero errors in
+that many still exceeds) is not a test it could pass: it is skipped, not
+counted as the failure that stops the scan - a decision on the confidences
+alone, never on which fields were right, so it costs the guarantee nothing.
+
+Loosest that passed, because a higher threshold sends more fields to review than
+the guarantee requires, and review is the expensive resource this whole
+confidence system exists to ration.
 
 Upper bound, because the point estimate on a small sample is optimistic by
 construction: two errors in forty auto-accepted fields is a 5% point estimate and
@@ -71,8 +85,9 @@ MIN_ACCEPTED_SAMPLE = 30
 #: support. Revisit the targets at pilot exit alongside the §0d production
 #: values, not before.
 
-#: Candidate thresholds, scanned low to high. 0.01 granularity: finer than the
-#: calibrator's resolution on a few hundred instances, and the scan is cheap.
+#: Candidate thresholds, ascending; tested from the strictest (the last) down.
+#: 0.01 granularity: finer than the calibrator's resolution on a few hundred
+#: instances, and the scan is cheap.
 _GRID = [i / 100 for i in range(50, 100)]
 
 
@@ -150,7 +165,11 @@ def choose_threshold(
     target_error_rate: float | None = None,
     min_accepted: int = MIN_ACCEPTED_SAMPLE,
 ) -> FieldTypeThreshold:
-    """The lowest threshold whose auto-accepted error rate meets the target.
+    """The threshold learn-then-test reaches (module docstring): candidates
+    tested from the strictest toward the loosest, each passing when the 95%
+    upper bound of its auto-accepted error rate meets the target, the scan
+    stopped at the first failure; the loosest that passed is chosen. A
+    candidate that could not pass with zero errors is skipped, not failed.
 
     ``scored`` is ``(calibrated_confidence, was_correct)`` per field, from the
     **threshold half** of validation.
@@ -173,37 +192,47 @@ def choose_threshold(
         )
 
     best: FieldTypeThreshold | None = None
-    for candidate in _GRID:
+    failed_at: float | None = None
+    for candidate in reversed(_GRID):
         accepted = [correct for confidence, correct in scored if confidence >= candidate]
-        if len(accepted) < min_accepted:
-            # Not enough evidence at this threshold to promise anything. Scanning
-            # on rather than stopping: a higher threshold accepts fewer fields,
-            # so this only gets worse — but the loop is cheap and stopping early
-            # on a non-monotonic sample would be a subtle bug.
+        if len(accepted) < min_accepted or binomial_upper_bound(0, len(accepted)) > target:
+            # Not a test this threshold could pass: too few accepted fields to
+            # promise anything, or so few that zero errors would still miss the
+            # target. Decided on the confidences alone, never on which fields
+            # were right, so skipping it spends nothing of the guarantee - and
+            # the looser thresholds below it accept more and may be testable.
             continue
         errors = sum(1 for correct in accepted if not correct)
         bound = binomial_upper_bound(errors, len(accepted))
-        if bound <= target:
-            best = FieldTypeThreshold(
-                field_type=field_type,
-                threshold=candidate,
-                target_error_rate=target,
-                accepted=len(accepted),
-                errors=errors,
-                reviewed=len(scored) - len(accepted),
-                achieved_upper_bound=bound,
-            )
-            break   # lowest threshold that meets the target — review is the
-                    # expensive resource, so accept as much as the promise allows
+        if bound > target:
+            # The first failure ends the sequence (learn-then-test): a looser
+            # threshold passing after a stricter one failed would be the best
+            # of many tries, which the 95% does not cover.
+            failed_at = candidate
+            break
+        # Passed: review is the expensive resource, so go on accepting as much
+        # as the promise allows.
+        best = FieldTypeThreshold(
+            field_type=field_type,
+            threshold=candidate,
+            target_error_rate=target,
+            accepted=len(accepted),
+            errors=errors,
+            reviewed=len(scored) - len(accepted),
+            achieved_upper_bound=bound,
+        )
 
     if best is None:
         return FieldTypeThreshold(
             field_type, None, target,
             reviewed=len(scored),
             reason=(
-                f"no threshold on [{_GRID[0]:.2f}, {_GRID[-1]:.2f}] achieves a {target:.0%} "
-                f"error bound with at least {min_accepted} accepted fields. Everything of this "
-                "type routes to review — which is the honest outcome, not a failure of the scan."
+                f"no threshold on [{_GRID[0]:.2f}, {_GRID[-1]:.2f}], tested from the strictest "
+                f"down, achieves a {target:.0%} error bound with at least {min_accepted} accepted "
+                "fields"
+                + (f" before the first failure (at {failed_at:.2f})" if failed_at is not None else "")
+                + ". Everything of this type routes to review — which is the honest outcome, not a "
+                "failure of the scan."
             ),
         )
     log.info("%s", best.guarantee())

@@ -452,6 +452,10 @@ def assert_effective_batch(config: dict[str, Any], n_gpu: int = 1) -> None:
 #: The ``continued_training`` keys that must be positive when set.
 _POSITIVE_CONTINUED = ("num_train_epochs", "learning_rate")
 
+#: ``continued_training`` keys that choose a continued run's DATA (rehearsal,
+#: training.corpus_view), not optimizer values: never laid over ``optimization``.
+CONTINUED_DATA_KEYS = frozenset({"rehearsal_old_share", "rehearsal_weight_by_line_errors"})
+
 
 def continued_training_problem(config: dict[str, Any]) -> str | None:
     """What is wrong with a training config's ``continued_training`` block, or None.
@@ -469,6 +473,11 @@ def continued_training_problem(config: dict[str, Any]) -> str | None:
         return f"continued_training must map optimization keys to values, got {block!r}"
     known = set(config.get("optimization") or {})
     for key, value in block.items():
+        if key == "rehearsal_old_share" and value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1):
+            return f"continued_training.rehearsal_old_share must be a share above 0 and at most 1, or null, got {value!r}"
+        if key in CONTINUED_DATA_KEYS:
+            continue
         if key not in known:
             return (f"continued_training.{key} is not a key of the optimization block "
                     f"({', '.join(sorted(known))}), so it would be silently unused")

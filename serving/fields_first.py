@@ -18,7 +18,9 @@ read in two phases:
    while those pages print its label and a value is flagged ``likely_missed``.
    A value whose cited page MinerU read empty is served flagged
    ``unverified_unread_page``, as the standard path serves it
-   (``serving.printed_values``). So the fields served at the gate hold no value
+   (``serving.printed_values``); one printed only on a read page it does not
+   cite is served flagged ``printed_off_cited_page`` and sent to review, as is
+   one under a label those pages print another value after (``role_mismatch``). So the fields served at the gate hold no value
    the PDF was not seen to print, nor one not said to be unverified. When no
    page the fields cite has any text, nothing could be checked: nothing is
    served before the full text. A row held back keeps the ids of the rows left
@@ -132,6 +134,62 @@ def _pending(flag: str) -> str:
             else flag)
 
 
+#: ``calibrators``/``thresholds`` not given: those the result was scored with
+#: (``ExtractionResult.calibrated_with``).
+FROM_RESULT: Any = object()
+
+
+def _feature_vectors(kept: Any) -> dict[str, Any]:
+    """The result's feature vectors as ``FieldFeatures``: a result restored
+    from a checkpoint (``dataclasses.asdict`` then JSON) carries them as dicts."""
+    import dataclasses
+
+    from calibration.features import FieldFeatures
+
+    names = {f.name for f in dataclasses.fields(FieldFeatures) if f.init}
+    out: dict[str, Any] = {}
+    for path, features in (kept or {}).items():
+        if isinstance(features, FieldFeatures):
+            out[path] = features
+        elif isinstance(features, dict):
+            try:
+                out[path] = FieldFeatures(**{k: v for k, v in features.items() if k in names})
+            except TypeError:
+                continue                            # not a feature vector: that field is not scored again
+    return out
+
+
+def rescore_on_text(result: Any, page_texts: Mapping[int, str], *, calibrators: Any = FROM_RESULT,
+                    thresholds: Any = FROM_RESULT) -> None:
+    """``result``'s confidence and review flags computed again on the page text
+    that arrived after its fields were read from the images
+    (``calibration.post_text.recalibrate_after_text``), in place, with the
+    release calibrators and thresholds it was scored with - the same that
+    ``read_fields``' ``extract_options`` gave extract - unless others are given.
+
+    Under the fast profile the calibrators are fitted on image-only readings
+    WITH their document's text (``calibration.population``): scored without it,
+    a field's text agreement is missing from the vector the calibrator reads.
+    A no-op without calibrators, feature vectors or text. The values a review
+    flag sends to review (``serving.value_flags``) stay flagged: the second
+    scoring writes each envelope's ``flagged`` from confidence alone."""
+    from calibration.post_text import recalibrate_after_text
+    from serving.pipeline import CalibratedWith
+    from serving.value_flags import route_served
+
+    held = getattr(result, "calibrated_with", None)
+    held = held if isinstance(held, CalibratedWith) else None
+    if calibrators is FROM_RESULT:
+        calibrators = held.calibrators if held is not None else None
+    if thresholds is FROM_RESULT:
+        thresholds = held.thresholds if held is not None else None
+    features = _feature_vectors(getattr(result, "confidence_features", None))
+    # Given even when empty: the result's own (from a checkpoint, dicts) are never read raw.
+    recalibrate_after_text(result, page_texts, calibrators=calibrators, thresholds=thresholds,
+                           features=features)
+    route_served(result.extraction, result.review_flags)
+
+
 def verify_fields(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, page_count: int) -> dict[str, Any]:
     """The fields as they may be served now: held to the text of the pages they cite.
 
@@ -142,8 +200,9 @@ def verify_fields(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, 
     is False when no page read has any text: nothing was checked, and the copy
     must not be served.
     """
-    from serving.pipeline import _likely_missed
+    from serving.pipeline import _likely_missed, _role_mismatches
     from serving.printed_values import hold_result_to_printed
+    from serving.value_flags import route_served
 
     pages = cited_pages(result.extraction, page_count) or list(range(1, min(page_count, FALLBACK_PAGES) + 1))
     started = time.perf_counter()
@@ -153,7 +212,16 @@ def verify_fields(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, 
     flags = {_pending(flag) for flag in served.review_flags}
     if result.doc_type == "policy" and result.mode == "image_only":
         flags.update(_likely_missed(served.extraction, text["texts"], lob))
+        # A value served under a label the read pages print another value after.
+        flags.update(_role_mismatches(served.extraction, text["texts"], lob))
     served.review_flags = sorted(flags)
+    # A value printed only off the pages it cites - here, the pages the fields
+    # cite - or under a label printing another goes to review now, not only at
+    # the end (serving.value_flags).
+    route_served(served.extraction, served.review_flags)
+    # And its confidence computed again on the text of the pages it cites -
+    # every page any field cites was read - as the full text will at the end.
+    rescore_on_text(served, text["texts"])
     if served.printed_check is not None:
         served.printed_check = {**served.printed_check, "pages_read": pages, "whole_document": False}
     return {"served": served, "verified": served.printed_check is not None, "texts": text["texts"],
@@ -233,11 +301,15 @@ def read_fields(pdf: bytes, *, name: str, lob: str, source_id: str, model: Any, 
 
 def add_full_text(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, pages_dir: Path,
                   page_count: int, turns: GpuTurns | None = None,
-                  known_texts: dict[int, str] | None = None) -> dict[str, Any]:
+                  known_texts: dict[int, str] | None = None,
+                  calibrators: Any = FROM_RESULT, thresholds: Any = FROM_RESULT) -> dict[str, Any]:
     """Phase 2: MinerU reads the pages not yet read - a run of pages at a time,
     in the GPU's idle turns when ``turns`` is given - and ``result``, the
     model's answer, is held to the whole document's text and joined by the
-    full-text tier.
+    full-text tier; then its fields' confidence is computed again on that text
+    (:func:`rescore_on_text`) with the release calibrators phase 1 scored it
+    with - ``calibrators``/``thresholds``, by default those the result carries
+    (a result restored from a checkpoint carries none: pass them).
 
     ``known_texts``: pages already read (the cited pages, by
     :func:`verify_fields`). Each page's text lands in ``<pages dir>/page_NNN.md``.
@@ -261,5 +333,6 @@ def add_full_text(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, 
     for number, page in texts.items():
         (pages_dir / f"page_{number:03d}.md").write_text(page, encoding="utf-8")
     attach_full_text(result, texts, lob=lob)
+    rescore_on_text(result, texts, calibrators=calibrators, thresholds=thresholds)
     return {"ocr": info, "timings_s": {"ocr": round(seconds, 2), "pages_read": len(remaining),
                                        "full_text": round(time.perf_counter() - began, 2)}}

@@ -19,6 +19,7 @@ import pytest
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient, InMemoryBackend
+from common.config import served_mineru
 from orchestration import run as cli
 from orchestration.pipeline_dag import (
     FINETUNE_STAGES,
@@ -42,6 +43,8 @@ from orchestration.runpod_controller import (
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+#: The MinerU every seeded page was read by: the served one, the OCR pin.
+SERVED_MINERU = served_mineru()
 
 #: A candidate that measures every gating metric and beats nothing — the shape a
 #: real eval report has, without pretending to be a real score.
@@ -123,7 +126,9 @@ def seed_corpus(client: BlobClient) -> list[str]:
         client.write_bytes(paths.processed_page(doc_type, source_id, 1, "png"), b"\x89PNG fixture")
         client.write_json(paths.ocr_meta(doc_type, source_id), {
             "source_id": source_id, "doc_type": doc_type, "page_count": 1,
-            "mineru_version": "2.0.0", "ocr_device": "cuda", "resolution_cap_px": 1792,
+            # Read by the served MinerU, as the OCR pin asks (configs/shared/ocr.yaml).
+            "mineru_version": SERVED_MINERU["version"], "mineru_tier": SERVED_MINERU["tier"],
+            "ocr_device": "cuda", "resolution_cap_px": 1792,
             "source_checksum": f"sha-{source_id}", "table_row_counts": {"1": 0}, "failed_pages": [],
         })
         client.write_json(paths.golden_label(doc_type, source_id),
@@ -855,8 +860,14 @@ def test_the_interim_cap_follows_what_the_candidate_was_scored_on(client, contro
 
     seed_corpus(client)
     client.write_json(manifest_key(), {**large_set, "frozen_from_corpus": "corpus/v1"})
-    client.write_json(paths.eval_report("v1", scope="policy"), {"eval_set": _scored_on(policy=200)})
-    policy = make_context(client, controller, metrics_provider=lambda _c: dict(PASSING_METRICS))
+    # Production also needs what users receive, served_field_match, and its
+    # per-document scores to bound it (decision 2026-10-26).
+    served = {f"policy_{i:04d}": 0.95 for i in range(200)}
+    client.write_json(paths.eval_report("v1", scope="policy"), {
+        "eval_set": _scored_on(policy=200), "per_document": {"served_field_match": served},
+        "per_document_weights": {"served_field_match": dict.fromkeys(served, 1.0)}})
+    policy = make_context(client, controller, metrics_provider=lambda _c: {
+        **PASSING_METRICS, "served_field_match": 0.95})
     assert run_stages(policy, stages_for("all"), command="all").ok
     decision = client.read_json(paths.gate_decision("v1", scope="policy"))
     assert decision["tier"] == "production"
@@ -2093,7 +2104,8 @@ def test_package_writes_the_release_bundle_it_pins(client, controller):
     # What it may serve: policies. Which lines is trained_lines' to say.
     assert bundle["doc_types"] == ["policy"]
     assert bundle["prompt_hash"] and bundle["vllm_config_hash"] and bundle["lockfile_hash"]
-    assert bundle["ocr_pin"]["mineru_version"] == "2.0.0"
+    assert bundle["ocr_pin"]["mineru_version"] == SERVED_MINERU["version"]
+    assert bundle["ocr_pin"]["mineru_tier"] == SERVED_MINERU["tier"]
     assert "bf16" in bundle["gate_reports"]
 
     index = client.read_json(paths.release_index())
@@ -2135,7 +2147,8 @@ def test_an_uncalibrated_release_is_gated_not_promoted(client, controller):
 
 
 def _package_for_real(ctx) -> None:
-    """The release step as a real `package` ends: the bundle written and promoted."""
+    """The release step as a real `package` ends: the bundle written, gated -
+    package never promotes (decision 2026-10-26, #44)."""
     from orchestration.pipeline_dag import build_release_bundle, write_release_bundle
 
     ctx.dry_run = False
@@ -2143,7 +2156,11 @@ def _package_for_real(ctx) -> None:
     write_release_bundle(ctx, bundle)
 
 
-def test_a_calibrated_gated_bf16_release_is_promoted(client, controller):
+def test_a_calibrated_gated_bf16_release_is_left_gated_for_the_shadow_check(client, controller):
+    """Decision 2026-10-26 (#44): package auto-promoted a calibrated release
+    whose gate passed, interim tier included. It writes it ``gated`` now, a
+    dry run and a real one alike; a person promotes it after the shadow check
+    (tests/test_decision_promotion.py)."""
     seed_corpus(client)
     ctx = make_context(
         client, controller,
@@ -2151,24 +2168,26 @@ def test_a_calibrated_gated_bf16_release_is_promoted(client, controller):
     )
     report = run_stages(ctx, stages_for("all"), command="all")
     assert report.ok, report.render()
-    # A dry run pushed placeholders, so it never promotes: the bundle stays gated.
     assert client.read_json(paths.release_bundle("v1"))["status"] == "gated"
     _package_for_real(ctx)
 
     bundle = client.read_json(paths.release_bundle("v1"))
-    assert bundle["status"] == "promoted", ctx.results["package"].data["not_promoted_because"]
+    assert bundle["status"] == "gated", ctx.results["package"].data["not_promoted_because"]
     assert bundle["calibrators"]["bf16"] == paths.release_calibrators("v1", "bf16")
-    # The index row says so too: it is what serving and the next gate read.
+    assert bundle.get("promotions", []) == []
+    # The index row says so too: serving reads no promoted release.
     [row] = client.read_json(paths.release_index())
-    assert row["release_id"] == "v1" and row["status"] == "promoted"
+    assert row["release_id"] == "v1" and row["status"] == "gated"
 
 
-def test_a_promoted_release_archives_the_one_it_replaces(client, controller):
-    """One promoted release per tenant: packaging a promoted v2 archives v1, in
-    the index and in v1's own bundle, so serving and the next gate read v2.
-    Each from the base: a v2 continuing v1 needs v1's per-line scores, which
-    is tests/test_incremental_training.py's subject."""
+def test_packaging_a_release_never_archives_the_promoted_one(client, controller):
+    """Packaging a calibrated v2 used to promote it and archive v1. Now v1
+    stays the promoted release - in the index, in its bundle, and as the next
+    gate's baseline - and v2 waits, gated, for its shadow check and a person's
+    promotion. Each from the base: a v2 continuing v1 needs v1's per-line
+    scores, which is tests/test_incremental_training.py's subject."""
     from orchestration.pipeline_dag import promoted_version
+    from registry_utils.releases import promote_release
 
     seed_corpus(client)
     for version in ("v1", "v2"):
@@ -2177,15 +2196,14 @@ def test_a_promoted_release_archives_the_one_it_replaces(client, controller):
         report = run_stages(ctx, stages_for("all"), command="all")
         assert report.ok, report.render()
         _package_for_real(ctx)
+        if version == "v1":
+            promote_release(client, "v1", promoted_by="A. Reviewer")   # as `promote` would
 
     status = {row["release_id"]: row["status"] for row in client.read_json(paths.release_index())}
-    assert status == {"v1": "archived", "v2": "promoted"}
-    assert client.read_json(paths.release_bundle("v1"))["status"] == "archived"
-    assert client.read_json(paths.release_bundle("v2"))["status"] == "promoted"
-    # Archived, not deleted: its calibrators and gate decision stay for a rollback.
-    assert client.exists(paths.release_calibrators("v1", "bf16"))
-    assert client.exists(paths.release_gate_decision("v1", "bf16"))
-    assert promoted_version(make_context(client, controller, out_version="v3")) == "v2"
+    assert status == {"v1": "promoted", "v2": "gated"}
+    assert client.read_json(paths.release_bundle("v1"))["status"] == "promoted"
+    assert client.read_json(paths.release_bundle("v2"))["status"] == "gated"
+    assert promoted_version(make_context(client, controller, out_version="v3")) == "v1"
 
 
 # --------------------------------------------------------------------------

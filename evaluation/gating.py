@@ -43,8 +43,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from data_pipeline.dataset_builder.split_groups import MIN_DOCS_TO_MEASURE_LINE
-from evaluation.bootstrap import ConfidenceInterval, paired_bootstrap
+from evaluation.bootstrap import (
+    RESAMPLES,
+    SEED,
+    ConfidenceInterval,
+    holm_step_down,
+    mean_lower_bound,
+    minimum_detectable_drop,
+    non_inferiority_test,
+    paired_bootstrap,
+)
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +99,14 @@ GATING_METRICS: dict[str, Direction] = {
     # equal between two readings of the same document in the main mode, the
     # second with its windows sent in reverse order (evaluation.golden_eval).
     "run_to_run_agreement": "higher_is_better",
+    # What users receive (decision 2026-10-26): field match on the image_only
+    # readings of REAL documents, as served - checked on the borrowed MinerU
+    # text, as production checks them (evaluation.run_eval). The tier, the
+    # improvement rule and non-inferiority read it (SERVED_FIELD_MATCH).
+    "served_field_match": "higher_is_better",
+    # The mode short PDFs and the fallback read: field match on the
+    # ocr_plus_image readings of real documents. Held to its floor alone.
+    "real_ocr_plus_image_accuracy": "higher_is_better",
 }
 
 #: Gating under arch v2.1 §15.2, but **not enforced yet** — nothing produces
@@ -144,6 +160,12 @@ CONDITIONAL_METRICS: frozenset[str] = frozenset({
     # switch that blocked every release when used would not be a switch; once a
     # promoted release has measured it, every later candidate must too.
     "run_to_run_agreement",
+    # Only an eval set holding REAL documents measures them: a set of synthetic
+    # twins alone has no real reading. Not a way to stop looking: without
+    # served_field_match the release is never production (tier_evidence), and
+    # once a promoted release has measured them, every later candidate must too.
+    "served_field_match",
+    "real_ocr_plus_image_accuracy",
 })
 
 
@@ -194,6 +216,11 @@ PILOT_FLOORS: dict[str, float] = {
     # thresholds hold on unseen documents passes with room.
     "auto_accept_error_rate": 0.02,
     "worst_line_field_match": 0.85,
+    # The field-match floor, on what users receive and on the mode short PDFs
+    # and the fallback read (decision 2026-10-26). field_normalized_match keeps
+    # its own floor above.
+    "served_field_match": 0.85,
+    "real_ocr_plus_image_accuracy": 0.85,
     # No ceiling on hallucination_rate and no floor on run_to_run_agreement yet:
     # the user sets them after the first measured run (decision 2026-10-24).
     # Until then each is held to non-inferiority with the promoted release
@@ -227,19 +254,41 @@ NON_INFERIORITY_DELTA: dict[str, float] = {
     # The same margin as a printed value left empty: a value invented and one
     # left out are the two ways a release stops reading what the page prints.
     "hallucination_rate": 0.010,
+    # The margin field_normalized_match was held to, on the number that
+    # replaced it in non-inferiority (decision 2026-10-26).
+    "served_field_match": 0.010,
     # run_to_run_agreement takes DEFAULT_DELTA.
 }
 DEFAULT_DELTA = 0.015
 
+#: Gating metrics held to their floor alone (decision 2026-10-26). Their
+#: movement against the promoted release is still computed and reported (the
+#: verdict's interval), never gated: non-inferiority reads served_field_match,
+#: what users receive, instead of the three-mode field_normalized_match; and
+#: the ocr_plus_image accuracy on real documents was given a floor of its own,
+#: nothing more.
+FLOOR_ONLY_METRICS: frozenset[str] = frozenset({
+    "field_normalized_match",
+    "real_ocr_plus_image_accuracy",
+})
+
 #: At least one of these must improve, or the release must fix a documented
-#: defect. They are the metrics the business actually experiences.
-PRIMARY_METRICS: tuple[str, ...] = ("field_normalized_match", "list_field_recall")
+#: defect. They are the metrics the business actually experiences: the field
+#: match users receive (served_field_match, which replaced the three-mode
+#: field_normalized_match on 2026-10-26) and list recall.
+PRIMARY_METRICS: tuple[str, ...] = ("served_field_match", "list_field_recall")
 
 #: The gates beside GATING_METRICS that promotion_gate can fail, by the names an
 #: override waives them under: the improvement rule, and a continued run's
 #: missing per-line comparison with its parent. A continued run's regression on
 #: one line is ``line:<line>`` (:func:`is_gate`).
 OTHER_GATES: tuple[str, ...] = ("improvement", "line_regression_evidence")
+
+#: The count, in the candidate's metrics, of golden-eval readings that failed to
+#: extract twice (``golden_eval.evaluate_version``). Above 0 the gate does not
+#: decide: it blocks, and asks for the eval to be run again. Not a gate an
+#: override can waive - a decision on part of the set is no decision.
+INFRASTRUCTURE_FAILURES = "infrastructure_failures"
 
 
 def is_gate(name: str) -> bool:
@@ -280,6 +329,10 @@ class MetricVerdict:
     #: what the adapter trains, no scan in the eval set. Distinct from `unmeasured`, which means
     #: something could have produced it and did not: that blocks, this does not.
     applicable: bool = True
+
+    #: False for a metric held to its floor alone (:data:`FLOOR_ONLY_METRICS`):
+    #: its interval is reported, and a drop does not block.
+    comparison_gated: bool = True
 
     @property
     def unmeasured(self) -> bool:
@@ -372,6 +425,7 @@ class MetricVerdict:
             "improved": self.improved,
             "basis": self.basis,
             "applicable": self.applicable,
+            "comparison_gated": self.comparison_gated,
             "interval": self.interval.as_dict() if self.interval else None,
         }
 
@@ -455,9 +509,23 @@ class GateResult:
     #: release - there is a predecessor, on another yardstick.
     baseline_not_comparable: str | None = None
 
-    #: A continued run's line-by-line comparison: per line, the run it was held
-    #: to, both field matches and the paired interval (decision 2026-10-23).
+    #: A continued run's line-by-line comparison (decisions 2026-10-23 and
+    #: 2026-10-26): per line and check - ``parent`` (the run it continued) or
+    #: ``drift`` (the last run from the base) - the run held to, the documents,
+    #: both field matches, the change, the margin, the one-sided bound at the
+    #: Holm-adjusted level, and whether the line was gated or only warned.
     line_verdicts: list[dict[str, Any]] = field(default_factory=list)
+
+    #: What the tier rests on (:func:`tier_evidence`): served_field_match, its
+    #: one-sided 95% lower bound over real documents, and why a passed release
+    #: is not production. ``None`` when the gate did not decide.
+    tier_evidence: TierEvidence | None = None
+
+    @property
+    def tier_confidence(self) -> str | None:
+        """``confirmed`` or ``unconfirmed`` for a production release; ``None``
+        otherwise (:func:`tier_evidence`)."""
+        return self.tier_evidence.tier_confidence if self.tier_evidence else None
 
     @property
     def improved_metrics(self) -> list[str]:
@@ -483,11 +551,9 @@ class GateResult:
             f"  not applicable: {v.name}"
             for v in self.verdicts if v.unmeasured and not v.applicable
         )
-        lines.extend(
-            f"  line {v['line']} against {v['held_to']}: {v['reference']:.4f} -> "
-            f"{v['candidate']:.4f} (95% CI lower bound {v['interval']['ci_lower']:+.4f})"
-            for v in self.line_verdicts
-        )
+        lines.extend(f"  {_describe_line_verdict(v)}" for v in self.line_verdicts)
+        if self.tier_evidence is not None:
+            lines.append(f"  {self.tier_evidence.describe()}")
         lines.extend(f"  BLOCKED: {reason}" for reason in self.blocking_reasons)
         lines.extend(f"  WARNING: {warning}" for warning in self.warnings)
         if self.override:
@@ -500,6 +566,9 @@ class GateResult:
     def as_dict(self) -> dict[str, Any]:
         return {
             "passed": self.passed,
+            "tier": self.tier,
+            "tier_confidence": self.tier_confidence,
+            "tier_evidence": self.tier_evidence.as_dict() if self.tier_evidence else None,
             "is_first_version": self.is_first_version,
             "baseline_not_comparable": self.baseline_not_comparable,
             "not_applicable": sorted(
@@ -531,6 +600,7 @@ def promotion_gate(
     small_eval_set: bool = False,
     warnings: Sequence[str] | None = None,
     baseline_not_comparable: str | None = None,
+    served_documents: ServedDocuments | None = None,
 ) -> GateResult:
     """Decide whether a candidate release may be promoted.
 
@@ -572,6 +642,12 @@ def promotion_gate(
             Given, the candidate is judged on its floors alone: no
             non-inferiority comparison and no improvement rule, and the reason
             is a warning in the decision. The old release is not scored again.
+        served_documents: the candidate's per-document ``served_field_match``
+            over its real documents, ``(scores, weights)`` or ``scores``
+            alone (the eval report's ``per_document`` and
+            ``per_document_weights``). The tier's lower bound is bootstrapped
+            from them (:func:`tier_evidence`); without them a passed release is
+            interim - production is shown, never assumed.
     """
     result = GateResult(passed=True, is_first_version=current_metrics is None)
     result.warnings.extend(warnings or ())
@@ -596,6 +672,23 @@ def promotion_gate(
         override.validate()
         result.override = override
 
+    failures = candidate_metrics.get(INFRASTRUCTURE_FAILURES)
+    if failures is not None and (not _finite(failures) or failures > 0):
+        # Not a verdict on the model: readings the engine failed twice were not
+        # scored, so every metric is over part of the frozen set. Deciding on
+        # it would either pass a release on the documents it managed or block
+        # it for an outage. No override waives this (it names no gate an
+        # override may name, is_gate): the eval is run again.
+        _block(result, INFRASTRUCTURE_FAILURES,
+               f"{failures} reading(s) of the frozen eval set failed to extract even after a retry, "
+               "so they were not scored and the gate does not decide on this measurement: re-run the "
+               "gate. The eval report lists them (infrastructure_failures); if the same readings fail "
+               "again, the failure is in serving or the frozen document, not the engine.")
+        result.passed = False
+        result.tier = None
+        log.info("%s", result.report())
+        return result
+
     for name, direction in GATING_METRICS.items():
         verdict = MetricVerdict(
             name=name,
@@ -610,6 +703,7 @@ def promotion_gate(
             # detection, a subset's scoring), not a set with nothing to measure.
             applicable=name not in not_applicable
             or (name in CONDITIONAL_METRICS and baseline.get(name) is not None),
+            comparison_gated=name not in FLOOR_ONLY_METRICS,
         )
         if current_metrics is not None and verdict.current is None and verdict.candidate is not None:
             # A promoted report scored before the metric was measured: nothing
@@ -676,7 +770,7 @@ def promotion_gate(
             _block(result, name,
                    f"{name} is {verdict.candidate:.4f} against a floor of {verdict.floor:.4f} "
                    "(arch v2.1 §0d). Floors apply to the first release too.")
-        if not verdict.non_inferior:
+        if not verdict.non_inferior and verdict.comparison_gated:
             bound = verdict.interval.lower if verdict.interval else None
             detail = (
                 f"95% CI lower bound {bound:+.4f} is below -{verdict.delta:.3f}"
@@ -718,33 +812,179 @@ def promotion_gate(
 
         )
     result.passed = not result.blocking_reasons
-    result.tier = (
-        release_tier(candidate_metrics, small_eval_set=small_eval_set) if result.passed else None
-    )
+    result.tier_evidence = tier_evidence(
+        candidate_metrics, served_documents, small_eval_set=small_eval_set, passed=result.passed)
+    result.tier = result.tier_evidence.tier
     log.info("%s", result.report())
     return result
 
 
-#: Fideon SPEC_09 §6: a release is PRODUCTION only when its field match reaches this.
-#: One that clears every floor (0.85 and the rest) but not this is promoted as
-#: INTERIM - usable, and labelled as not yet at the production bar.
+#: The metric the tier, the improvement rule and non-inferiority read (decision
+#: 2026-10-26): field match on the image_only readings of real documents, as
+#: served. What users receive - production reads the page images and holds the
+#: values to MinerU's text - where field_normalized_match averages three modes
+#: and counts synthetic twins.
+SERVED_FIELD_MATCH = "served_field_match"
+
+#: Fideon SPEC_09 §6: a release is PRODUCTION only when its served field match
+#: reaches this (and the bound below). One that clears every floor (0.85 and
+#: the rest) but not this is promoted as INTERIM - usable, and labelled as not
+#: yet at the production bar.
 PRODUCTION_FIELD_MATCH = 0.92
 
+#: How sure a production pass must be (decision 2026-10-26): the one-sided
+#: lower bound on served_field_match, at :data:`TIER_CONFIDENCE`, bootstrapped
+#: over real documents, must reach this.
+PRODUCTION_LOWER_BOUND = 0.90
 
-def release_tier(metrics: dict[str, Any], *, small_eval_set: bool = False) -> str:
-    """``production`` or ``interim`` for a release that passed the gate.
+#: A production release whose lower bound reaches this too is ``confirmed``;
+#: one between :data:`PRODUCTION_LOWER_BOUND` and this is ``unconfirmed``.
+CONFIRMED_LOWER_BOUND = 0.92
 
-    Field match is ``field_normalized_match``, the metric the 0.85 floor is on.
-    A release carries one adapter, so its metric is that adapter's. A missing
-    value is interim: production has to be shown, not assumed - and so is one
-    measured on an eval set accepted below its minimum size.
+#: The bound's confidence: one-sided 95%.
+TIER_CONFIDENCE = 0.95
+
+#: Real documents a production release must be scored on: the frozen set's
+#: production minimum (``freeze_eval_set.MIN_FROZEN_DOCS_PER_TYPE``, arch v2.1
+#: §15.4). The bound's documents are held to it too.
+PRODUCTION_MIN_REAL_DOCUMENTS = 150
+
+#: The candidate's per-document served_field_match: ``(scores, weights)``, or
+#: the scores alone (each document counting once).
+ServedDocuments = tuple[Sequence[float], Sequence[float] | None] | Sequence[float]
+
+
+@dataclass
+class TierEvidence:
+    """What a release's tier rests on (:func:`tier_evidence`)."""
+
+    #: ``production`` or ``interim`` for a release that passed; ``None`` for one
+    #: that did not.
+    tier: str | None
+    #: ``confirmed`` (lower bound >= :data:`CONFIRMED_LOWER_BOUND`) or
+    #: ``unconfirmed`` for a production release; ``None`` for any other.
+    tier_confidence: str | None
+    #: served_field_match as the gate metrics carry it.
+    point_estimate: float | None
+    #: Its one-sided lower bound over real documents; ``None`` with no
+    #: per-document scores.
+    lower_bound: float | None
+    #: The real documents the bound was bootstrapped over.
+    documents: int = 0
+    #: Why a passed release is not production (empty for a production one).
+    reasons: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "tier": self.tier,
+            "tier_confidence": self.tier_confidence,
+            "metric": SERVED_FIELD_MATCH,
+            "point_estimate": None if self.point_estimate is None else round(self.point_estimate, 6),
+            "lower_bound": None if self.lower_bound is None else round(self.lower_bound, 6),
+            "documents": self.documents,
+            "confidence": TIER_CONFIDENCE,
+            "one_sided": True,
+            "resamples": RESAMPLES,
+            "seed": SEED,
+            "production_point_bar": PRODUCTION_FIELD_MATCH,
+            "production_bound_bar": PRODUCTION_LOWER_BOUND,
+            "confirmed_bound_bar": CONFIRMED_LOWER_BOUND,
+            "minimum_real_documents": PRODUCTION_MIN_REAL_DOCUMENTS,
+            "not_production_because": list(self.reasons),
+        }
+
+    def describe(self) -> str:
+        point = "n/a" if self.point_estimate is None else f"{self.point_estimate:.4f}"
+        bound = "n/a" if self.lower_bound is None else f"{self.lower_bound:.4f}"
+        text = (f"tier {self.tier or 'none'}"
+                + (f" ({self.tier_confidence})" if self.tier_confidence else "")
+                + f": {SERVED_FIELD_MATCH} {point}, one-sided {TIER_CONFIDENCE:.0%} lower bound "
+                f"{bound} over {self.documents} real document(s)")
+        if self.reasons and self.tier is not None:
+            text += " - not production: " + "; ".join(self.reasons)
+        return text
+
+
+def _served_scores(served: ServedDocuments | None) -> tuple[list[float], list[float] | None]:
+    """``(scores, weights)`` from what :func:`promotion_gate` was given."""
+    if served is None:
+        return [], None
+    if (isinstance(served, tuple) and len(served) == 2
+            and all(part is None or not isinstance(part, (int, float)) for part in served)):
+        scores, weights = served
+        return [float(s) for s in scores or ()], (None if weights is None else [float(w) for w in weights])
+    return [float(s) for s in served], None
+
+
+def tier_evidence(
+    metrics: dict[str, Any],
+    served_documents: ServedDocuments | None = None,
+    *,
+    small_eval_set: bool = False,
+    passed: bool = True,
+) -> TierEvidence:
+    """The tier of a release, and what it rests on (decision 2026-10-26).
+
+    PRODUCTION needs all of: the gate passed; at least
+    :data:`PRODUCTION_MIN_REAL_DOCUMENTS` real documents (an eval set below the
+    frozen minimum, ``small_eval_set``, is not, and neither is a bound over
+    fewer); served_field_match >= :data:`PRODUCTION_FIELD_MATCH`; and its
+    one-sided :data:`TIER_CONFIDENCE` lower bound, a document-level bootstrap
+    over the real documents (``evaluation.bootstrap.mean_lower_bound``,
+    10,000 resamples, seeded), >= :data:`PRODUCTION_LOWER_BOUND`. A passed
+    release short of any of them is INTERIM, with every reason recorded.
+
+    Missing evidence is never production: no served_field_match (the eval set
+    holds no real document read image_only) or no per-document scores to bound
+    it is interim, and says which.
+
+    ``tier_confidence`` qualifies a production tier: ``confirmed`` when the
+    lower bound itself reaches :data:`CONFIRMED_LOWER_BOUND`, ``unconfirmed``
+    when only the point estimate does.
     """
+    reasons: list[str] = []
+    point = metrics.get(SERVED_FIELD_MATCH)
+    point = float(point) if _finite(point) else None
+    scores, weights = _served_scores(served_documents)
+    bound = None
+    if point is None:
+        reasons.append(
+            f"{SERVED_FIELD_MATCH} was not measured: the eval set holds no real document read "
+            "image_only, so what users receive was not scored")
+    if scores:
+        measured = mean_lower_bound(SERVED_FIELD_MATCH, scores, weights, confidence=TIER_CONFIDENCE)
+        bound = measured.lower
+    elif point is not None:
+        reasons.append(
+            f"no per-document {SERVED_FIELD_MATCH} scores to bound it (the candidate's eval report "
+            "holds none), so how sure the pass is cannot be shown")
     if small_eval_set:
-        return "interim"
-    value = metrics.get("field_normalized_match")
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= PRODUCTION_FIELD_MATCH:
-        return "production"
-    return "interim"
+        reasons.append(
+            f"scored on fewer real documents of a type than the frozen set's minimum "
+            f"({PRODUCTION_MIN_REAL_DOCUMENTS})")
+    if scores and len(scores) < PRODUCTION_MIN_REAL_DOCUMENTS:
+        reasons.append(
+            f"the bound rests on {len(scores)} real document(s) read image_only, fewer than "
+            f"{PRODUCTION_MIN_REAL_DOCUMENTS}")
+    if point is not None and round(point, 6) < PRODUCTION_FIELD_MATCH:
+        reasons.append(f"{SERVED_FIELD_MATCH} {point:.4f} is below {PRODUCTION_FIELD_MATCH}")
+    if bound is not None and round(bound, 6) < PRODUCTION_LOWER_BOUND:
+        reasons.append(
+            f"its one-sided {TIER_CONFIDENCE:.0%} lower bound {bound:.4f} is below "
+            f"{PRODUCTION_LOWER_BOUND}")
+    tier = None if not passed else "interim" if reasons else "production"
+    confidence = None
+    if tier == "production" and bound is not None:
+        confidence = "confirmed" if round(bound, 6) >= CONFIRMED_LOWER_BOUND else "unconfirmed"
+    return TierEvidence(tier=tier, tier_confidence=confidence, point_estimate=point,
+                        lower_bound=bound, documents=len(scores), reasons=reasons)
+
+
+def release_tier(metrics: dict[str, Any], *, small_eval_set: bool = False,
+                 served_documents: ServedDocuments | None = None) -> str:
+    """``production`` or ``interim`` for a release that passed the gate
+    (:func:`tier_evidence`, which says why)."""
+    return str(tier_evidence(metrics, served_documents, small_eval_set=small_eval_set).tier)
 
 
 def _block(result: GateResult, gate: str, reason: str) -> None:
@@ -821,36 +1061,71 @@ def _require_improvement(result: GateResult, fixes_defect: str | None) -> None:
     )
 
 
-#: A continued run's line is compared with the runs before it only on at least
-#: this many real documents scored in both reports: the bar the split uses to
-#: measure a line at all (``split_groups.MIN_DOCS_TO_MEASURE_LINE``). Documents,
-#: not values: one policy read in three modes holds hundreds of values, so a
-#: bar on values let a single document decide a line.
-LINE_MIN_DOCUMENTS = MIN_DOCS_TO_MEASURE_LINE
+#: A continued run's line is GATED only on at least this many real documents
+#: scored in both reports (decision 2026-10-26). Below it the line is warned,
+#: with the smallest drop its documents could show (``minimum_detectable_drop``):
+#: on a handful of documents a one-sided bound is either too wide to pass a
+#: line that held or decided by one odd policy. Documents, not values: one
+#: policy holds hundreds of values, so a bar on values let a single document
+#: decide a line. Its own number, not the split's ``MIN_DOCS_TO_MEASURE_LINE``
+#: (whether a line is measured at all).
+LINE_MIN_DOCUMENTS = 30
+
+#: The margin each line is held to against the PARENT, the run it continued:
+#: one-sided, (candidate − parent) must sit above −this.
+LINE_PARENT_MARGIN = 0.015
+
+#: The margin each line is held to against the LAST FRESH run of the chain, the
+#: run from the base the chain started at: small losses each under the parent
+#: margin add up over cycles, and this catches them once they pass it.
+LINE_DRIFT_MARGIN = 0.03
+
+#: Family-wise alpha of each family of line tests (the parent checks, the drift
+#: checks), held by Holm's step-down across the lines tested
+#: (``evaluation.bootstrap.holm_step_down``).
+LINE_FAMILY_ALPHA = 0.05
+
+#: The power the minimum detectable drop of a warned line is stated at.
+LINE_DETECTION_POWER = 0.80
 
 
 @dataclass
 class LineComparison:
-    """One line's paired per-document field match: the candidate's against the
-    run it is held to on that line, the best since the last run from the base.
-    Aligned by index, as :func:`evaluation.bootstrap.paired_bootstrap` pairs."""
+    """One line's paired per-document field match: the candidate's against one
+    run's on the real documents both scored. Aligned by index, as
+    :func:`evaluation.bootstrap.paired_bootstrap` pairs."""
 
     line: str
-    #: The run held to: the best on this line since the last run from the base.
+    #: The run held to: the parent (``LineEvidence.compared``) or the last run
+    #: from the base (``LineEvidence.drift``).
     reference: str
     reference_scores: list[float]
     candidate_scores: list[float]
     reference_weights: list[float] | None = None
     candidate_weights: list[float] | None = None
+    #: Whether the reference's scores come from its stored answers re-scored by
+    #: the scoring code running now (``evaluation.rescore``, decision
+    #: 2026-10-26): its own report was on another yardstick only because the
+    #: scoring code or its settings moved.
+    reference_rescored: bool = False
+    #: What the scores are (decision 2026-10-26): ``served_field_match`` per
+    #: document - image_only readings of real documents, as served - or
+    #: ``field_normalized_match``, the field match over every mode, for a line
+    #: the reference's report holds no served scores of (written before they
+    #: were kept).
+    measure: str = "field_normalized_match"
 
 
 @dataclass
 class LineEvidence:
-    """What a continued run's line-by-line gate rests on (decision 2026-10-23)."""
+    """What a continued run's line-by-line gate rests on (decisions 2026-10-23
+    and 2026-10-26)."""
 
+    #: Each line against the PARENT, on every real document both scored. The
+    #: gate decides which have enough documents to gate (LINE_MIN_DOCUMENTS).
     compared: list[LineComparison] = field(default_factory=list)
-    #: Lines the candidate serves that no earlier run scored on enough shared
-    #: real documents, with the most it shared: not compared, and warned.
+    #: Lines the parent scored that share no real document with the candidate,
+    #: with that count (0): not compared, and warned.
     thin: dict[str, int] = field(default_factory=dict)
     #: Lines the parent's release serves and the candidate does not.
     dropped: list[str] = field(default_factory=list)
@@ -858,6 +1133,23 @@ class LineEvidence:
     added: list[str] = field(default_factory=list)
     #: The runs compared with, parent first, back to the last run from the base.
     chain: list[str] = field(default_factory=list)
+    #: Each line against the cumulative-drift reference (``drift_reference``),
+    #: on every real document both scored.
+    drift: list[LineComparison] = field(default_factory=list)
+    #: The run the drift check holds each line to: the last run from the base
+    #: when its report is on this yardstick, else the oldest run of the chain
+    #: that is (``drift_note`` says so). ``None`` when there is no run older
+    #: than the parent to hold to.
+    drift_reference: str | None = None
+    #: Whether ``drift_reference`` is the run from the base itself.
+    drift_reference_is_fresh: bool = False
+    #: Why the drift check holds to another run than the last fresh one, or is
+    #: not made, when either.
+    drift_note: str | None = None
+    #: The references re-scored from their stored answers: ``{run: {difference,
+    #: rescored_from}}`` - what put their report on another yardstick, and the
+    #: yardstick it was scored on before.
+    rescored: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _weighted_mean(scores: Sequence[float], weights: Sequence[float] | None) -> float:
@@ -876,18 +1168,27 @@ def _require_line_non_regression(
 
     Continued training compounds drift (decision 2026-10-23): each cycle starts
     from the last one's weights, so a line can slip a little every cycle. Each
-    line is therefore held to the BEST any run since the last run from the base
-    scored on it (``LineComparison.reference``), not only to the parent: a slip
-    under δ per cycle still adds up against the best, and blocks once it is
-    more than δ.
+    line the candidate serves is checked twice, each time over the line's real
+    documents scored in both reports (decision 2026-10-26):
 
-    The test is the main gate's non-inferiority, per line: a paired bootstrap
-    over the line's real documents scored in both reports, whose 95% lower bound
-    on (candidate − reference) must sit above −``DEFAULT_DELTA``. A line with
-    fewer than :data:`LINE_MIN_DOCUMENTS` such documents is not compared, and is
-    named in a warning. A line the parent's release serves and the candidate
-    does not blocks as ``line:<line>`` too: its policies would move to the base
-    model unannounced.
+    * **parent** - against the run it continued (``LineEvidence.compared``), at
+      margin :data:`LINE_PARENT_MARGIN`;
+    * **drift** - against the last run from the base the chain started at
+      (``LineEvidence.drift``), at margin :data:`LINE_DRIFT_MARGIN`: losses each
+      within the parent margin add up over cycles, and this blocks once they
+      pass it.
+
+    Each check is a one-sided paired non-inferiority test, a bootstrap over the
+    line's documents (``evaluation.bootstrap.non_inferiority_test``), and each
+    family of lines is corrected together by Holm's step-down at family-wise
+    :data:`LINE_FAMILY_ALPHA`. A line with fewer than :data:`LINE_MIN_DOCUMENTS`
+    shared documents is not gated: it is warned, with the smallest drop its
+    documents could show. Every line's evidence - documents, change, bound,
+    adjusted alpha, gated or warned - is a line verdict in the decision.
+
+    A line not shown non-inferior blocks as ``line:<line>``, and so does a line
+    the parent's release serves and the candidate does not: its policies would
+    move to the base model unannounced.
 
     No comparable parent scores at all (``missing`` says why: the parent's report
     is gone, or on another frozen set or scoring code) blocks
@@ -918,42 +1219,126 @@ def _require_line_non_regression(
             "not: there is no earlier run to compare them with.")
     if evidence.thin:
         result.warnings.append(
-            f"not compared with the runs before, fewer than {LINE_MIN_DOCUMENTS} real documents "
-            "scored in both reports: "
+            "not compared with the run it continued, no real document of the line scored in both "
+            "reports to pair: "
             + ", ".join(f"{line} ({n})" for line, n in sorted(evidence.thin.items())))
-    if not evidence.compared and not evidence.dropped:
+    gated = _line_family(result, evidence.compared, check="parent", margin=LINE_PARENT_MARGIN,
+                         fresh=False)
+    if not gated and not evidence.dropped:
         warning = (f"this run continued {continued_from}, but no line had {LINE_MIN_DOCUMENTS} or "
-                   "more real documents scored in both reports, so no line was compared with the "
-                   "runs before it.")
+                   "more real documents scored in both reports, so no line was gated against the "
+                   "run it continued.")
         log.warning("%s", warning)
         result.warnings.append(warning)
-    for comparison in sorted(evidence.compared, key=lambda c: c.line):
-        interval = paired_bootstrap(
-            f"line:{comparison.line}", comparison.reference_scores, comparison.candidate_scores,
-            current_weights=comparison.reference_weights,
-            candidate_weights=comparison.candidate_weights,
-        )
-        held = interval.non_inferior(DEFAULT_DELTA)
-        before = _weighted_mean(comparison.reference_scores, comparison.reference_weights)
-        after = _weighted_mean(comparison.candidate_scores, comparison.candidate_weights)
-        result.line_verdicts.append({
-            "line": comparison.line,
-            "held_to": comparison.reference,
+    if evidence.drift_note:
+        result.warnings.append(evidence.drift_note)
+    _line_family(result, evidence.drift, check="drift", margin=LINE_DRIFT_MARGIN,
+                 fresh=evidence.drift_reference_is_fresh)
+
+
+def _line_family(result: GateResult, comparisons: Sequence[LineComparison], *, check: str,
+                 margin: float, fresh: bool) -> int:
+    """One family of line checks (``parent`` or ``drift``): the lines with
+    enough shared documents tested together under Holm's step-down, the rest
+    warned. Records a verdict per line and blocks each line not shown
+    non-inferior. Returns how many lines were gated."""
+    tests = {
+        c.line: non_inferiority_test(
+            f"{check}:{c.line}", c.reference_scores, c.candidate_scores, margin=margin,
+            reference_weights=c.reference_weights, candidate_weights=c.candidate_weights)
+        for c in comparisons if len(c.candidate_scores) >= LINE_MIN_DOCUMENTS
+    }
+    holm = holm_step_down(tests, LINE_FAMILY_ALPHA)
+    warned: list[str] = []
+    for c in sorted(comparisons, key=lambda c: c.line):
+        before = _weighted_mean(c.reference_scores, c.reference_weights)
+        after = _weighted_mean(c.candidate_scores, c.candidate_weights)
+        documents = len(c.candidate_scores)
+        detectable = minimum_detectable_drop(
+            [a - b for a, b in zip(c.candidate_scores, c.reference_scores, strict=True)],
+            alpha=LINE_FAMILY_ALPHA, power=LINE_DETECTION_POWER)
+        verdict: dict[str, Any] = {
+            "line": c.line,
+            "check": check,
+            "held_to": c.reference,
+            "held_to_rescored": c.reference_rescored,
+            "measure": c.measure,
+            "documents": documents,
             "reference": round(before, 6),
             "candidate": round(after, 6),
-            "delta": DEFAULT_DELTA,
-            "non_inferior": held,
-            "interval": interval.as_dict(),
-        })
-        if not held:
-            _block(
-                result, f"line:{comparison.line}",
-                f"{comparison.line} is not non-inferior to {comparison.reference}, the best run on it "
-                f"since the last run from the base: field match {before:.4f} -> {after:.4f}, 95% CI "
-                f"lower bound {interval.lower:+.4f} is not above -{DEFAULT_DELTA:.3f} over "
-                f"{interval.documents} document(s). A continued run must not lose ground on a line "
-                "it already read.",
-            )
+            "delta": round(after - before, 6),
+            "margin": margin,
+            "minimum_detectable_drop": None if detectable is None else round(detectable, 6),
+        }
+        outcome = holm.get(c.line)
+        if outcome is None:
+            verdict.update(status="warned", non_inferior=None, p_value=None, holm_adjusted_p=None,
+                           adjusted_alpha=None, bound=None, holm_rank=None, holm_family=len(tests),
+                           holm_stopped_by=None)
+            warned.append(f"{c.line} ({documents}"
+                          + (f", minimum detectable drop {detectable:.3f}" if detectable is not None
+                             else ", too few to estimate a detectable drop")
+                          + ")")
+        else:
+            verdict.update(status="gated", non_inferior=outcome.shown,
+                           p_value=round(tests[c.line].p_value, 6),
+                           holm_adjusted_p=round(outcome.adjusted_p, 6),
+                           adjusted_alpha=round(outcome.adjusted_alpha, 6),
+                           bound=round(outcome.bound, 6), holm_rank=outcome.rank,
+                           holm_family=outcome.family, holm_stopped_by=outcome.stopped_by)
+        result.line_verdicts.append(verdict)
+        if outcome is not None and not outcome.shown:
+            _block(result, f"line:{c.line}",
+                   _line_block_reason(verdict, check=check, fresh=fresh, own=tests[c.line].shown(
+                       outcome.adjusted_alpha)))
+    if warned:
+        against = "the run it continued" if check == "parent" else "the last run from the base"
+        result.warnings.append(
+            f"not gated against {against} ({check}), fewer than {LINE_MIN_DOCUMENTS} real documents "
+            "scored in both reports; a drop smaller than the minimum detectable drop (one-sided "
+            f"alpha {LINE_FAMILY_ALPHA}, power {LINE_DETECTION_POWER:.0%}) could go unseen at "
+            "that n: " + ", ".join(warned))
+    return len(tests)
+
+
+def _line_block_reason(verdict: dict[str, Any], *, check: str, fresh: bool, own: bool) -> str:
+    line, held_to = verdict["line"], verdict["held_to"]
+    numbers = (
+        f"{verdict.get('measure', 'field_normalized_match')} {verdict['reference']:.4f} -> "
+        f"{verdict['candidate']:.4f} over "
+        f"{verdict['documents']} real document(s); the one-sided lower bound "
+        f"{verdict['bound']:+.4f} at Holm-adjusted alpha {verdict['adjusted_alpha']:.4f} "
+        f"(line {verdict['holm_rank']} of {verdict['holm_family']}) is "
+        + ("above" if own else "not above") + f" -{verdict['margin']:.3f}"
+    )
+    if own:
+        # Its own bound clears the margin: blocked because Holm's step-down
+        # stopped at a line before it.
+        numbers += (f", but Holm's step-down stopped at {verdict['holm_stopped_by']} before "
+                    "reaching it, so it is not shown non-inferior either")
+    if check == "parent":
+        return (f"{line} is not non-inferior to {held_to}, the run it continued: {numbers}. A "
+                "continued run must not lose ground on a line it already read.")
+    reference = ("the last run from the base" if fresh
+                 else "the oldest run of the chain on this yardstick")
+    return (f"{line} has drifted from {held_to}, {reference}: {numbers}. Losses each within the "
+            f"parent margin ({LINE_PARENT_MARGIN}) have added up over the cycles: train the next "
+            f"cycle from the base (--fresh), or waive line:{line}.")
+
+
+def _describe_line_verdict(verdict: dict[str, Any]) -> str:
+    """One line verdict as :meth:`GateResult.report` prints it."""
+    head = (f"line {verdict.get('line')} ({verdict.get('check', 'parent')}) against "
+            f"{verdict.get('held_to')}, {verdict.get('measure', 'field_normalized_match')}: "
+            f"{verdict.get('reference', 0.0):.4f} -> "
+            f"{verdict.get('candidate', 0.0):.4f} over {verdict.get('documents')} document(s)")
+    if verdict.get("status") == "warned":
+        detectable = verdict.get("minimum_detectable_drop")
+        return (head + f", not gated (fewer than {LINE_MIN_DOCUMENTS})"
+                + (f", minimum detectable drop {detectable:.3f}" if detectable is not None else ""))
+    return (head + f", one-sided bound {verdict.get('bound', 0.0):+.4f} at alpha "
+            f"{verdict.get('adjusted_alpha', 0.0):.4f} against -{verdict.get('margin', 0.0):.3f} "
+            + ("✓" if verdict.get("non_inferior") else "✗"))
 
 
 def apply_to_manifest(result: GateResult, manifest: Any, *, gated_against: str | None = None,
@@ -963,17 +1348,24 @@ def apply_to_manifest(result: GateResult, manifest: Any, *, gated_against: str |
     The decision travels with the artifact, so "was this promoted, and against
     what" is answerable later without reconstructing it. With ``metrics``, the
     scores gated are recorded too (the registry index and the model card read
-    them).
+    them), with the tier, its confidence and the lower bound it rests on
+    (decision 2026-10-26) - from ``result`` unless ``metrics`` names them.
     """
     manifest.promotion.beat_previous_on_all_gates = result.passed and not result.waived
     manifest.promotion.tier = result.tier
     if metrics is not None:
         from registry_utils.models import EvalMetrics
 
+        evidence = result.tier_evidence
+        recorded = {
+            "tier": result.tier, "tier_confidence": result.tier_confidence,
+            "tier_lower_bound": evidence.lower_bound if evidence is not None else None,
+            **metrics,
+        }
         known = EvalMetrics.model_fields
         manifest.eval_metrics = EvalMetrics(**{
-            name: value for name, value in metrics.items()
-            if name in known and (value is None or isinstance(value, (int, float, dict)))
+            name: value for name, value in recorded.items()
+            if name in known and (value is None or isinstance(value, (int, float, str, dict)))
             and not isinstance(value, bool)
         })
     manifest.promotion.failed_gates = list(result.failed_gates) + [

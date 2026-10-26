@@ -50,17 +50,81 @@ class LengthCheckError(RuntimeError):
     """Raised when a staged row cannot be measured."""
 
 
+#: Width of one bar of the row-length histogram, in tokens.
+HISTOGRAM_BUCKET = 4096
+
+#: The repeating-table groups. When their answers are more than
+#: :data:`HEAVY_GROUP_SHARE` of every supervised token, the declarations'
+#: fields - one value each, short answers - get a small share of the gradient.
+HEAVY_GROUPS = ("arrays", "lineblk")
+HEAVY_GROUP_SHARE = 0.6
+
+
 @dataclass
 class LengthReport:
-    """What was measured, and what does not fit."""
+    """What was measured, and what does not fit.
+
+    Besides the fit check, the training rows' shape (the files ``measure``
+    was told to count, the epoch files - not the validation sample): a
+    row-length histogram and the supervised tokens - the answer, the
+    assistant turn's text - per section group.
+    """
 
     rows: int = 0
     longest: int = 0
     over: list[dict[str, object]] = field(default_factory=list)
+    #: Rows counted in the statistics below, and their tokens.
+    counted_rows: int = 0
+    counted_tokens: int = 0
+    #: Lower edge of each :data:`HISTOGRAM_BUCKET`-wide bar -> rows.
+    histogram: dict[int, int] = field(default_factory=dict)
+    #: Section group -> {"rows": n, "tokens": supervised tokens}.
+    supervised: dict[str, dict[str, int]] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
         return not self.over
+
+    @property
+    def supervised_tokens(self) -> int:
+        return sum(group["tokens"] for group in self.supervised.values())
+
+    def heavy_share(self) -> float:
+        """The share of supervised tokens in :data:`HEAVY_GROUPS`; 0 with none."""
+        total = self.supervised_tokens
+        heavy = sum(self.supervised.get(g, {}).get("tokens", 0) for g in HEAVY_GROUPS)
+        return heavy / total if total else 0.0
+
+    def warnings(self) -> list[str]:
+        """What an operator should hear before the run: today, a supervised
+        token mix the repeating tables dominate."""
+        share = self.heavy_share()
+        if share <= HEAVY_GROUP_SHARE:
+            return []
+        return [
+            f"{share:.0%} of the supervised tokens are in {' and '.join(HEAVY_GROUPS)} rows (over "
+            f"{HEAVY_GROUP_SHARE:.0%}): the loss is a mean over answer tokens, so the declarations' "
+            "fields - short, one value each - may be under-weighted. Compare per-group accuracy "
+            "before reading the overall number."
+        ]
+
+    def summary(self) -> dict[str, object]:
+        """The statistics as JSON, for the run manifest and benchmark.json."""
+        total = self.supervised_tokens
+        return {
+            "rows": self.counted_rows,
+            "longest": self.longest,
+            "mean_tokens": round(self.counted_tokens / self.counted_rows) if self.counted_rows else 0,
+            "histogram_bucket_tokens": HISTOGRAM_BUCKET,
+            "length_histogram": {str(edge): n for edge, n in sorted(self.histogram.items())},
+            "supervised_tokens": total,
+            "supervised_by_group": {
+                group: {**counts, "share": round(counts["tokens"] / total, 4) if total else 0.0}
+                for group, counts in sorted(self.supervised.items())
+            },
+            "heavy_group_share": round(self.heavy_share(), 4),
+            "warnings": self.warnings(),
+        }
 
 
 def png_size(path: str | Path) -> tuple[int, int]:
@@ -105,6 +169,8 @@ def measure(
     max_pixels: int,
     batch: int = 256,
     output_caps: dict[str, list[int]] | None = None,
+    groups: dict[str, list[str]] | None = None,
+    stats_files: Sequence[str | Path] | None = None,
 ) -> LengthReport:
     """Measure every row of the staged (ms-swift format) files.
 
@@ -112,9 +178,16 @@ def measure(
     reservation — the target (assistant turn) against its own cap too. A target
     past its reservation is the case that clips an answer, and the corpus
     estimate under-counts exactly that text (digits tokenize one apiece).
+
+    The rows of ``stats_files`` (default: every file) are also counted into the
+    report's histogram and supervised-token totals, each row under its section
+    group from ``groups`` (per file, in row order, as staging records them;
+    ``unknown`` without).
     """
     report = LengthReport()
     caps_by_file = output_caps or {}
+    groups_by_file = groups or {}
+    counted = None if stats_files is None else {str(Path(f).resolve()) for f in stats_files}
     # One header read per image. Every epoch file names the same pages, so an
     # uncached pass read each page's header once per epoch — thousands of
     # small reads off a network volume before a launch.
@@ -127,6 +200,8 @@ def measure(
 
     for path in files:
         caps = caps_by_file.get(str(path)) or caps_by_file.get(str(Path(path).resolve()))
+        row_groups = groups_by_file.get(str(path)) or groups_by_file.get(str(Path(path).resolve()))
+        counts = counted is None or str(Path(path).resolve()) in counted
         rows = [
             json.loads(line)
             for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()
@@ -141,7 +216,9 @@ def measure(
                 row["messages"][-1]["content"] if row["messages"][-1]["role"] == "assistant" else ""
                 for row in chunk
             ]
-            target_tokens = count_tokens(targets) if caps else [0] * len(chunk)
+            # Always counted: the answer is what the run supervises, so its
+            # tokens per group are the run's weighting (the length report).
+            target_tokens = count_tokens(targets)
             for index, (row, text_tokens, output_tokens) in enumerate(
                 zip(chunk, count_tokens(texts), target_tokens, strict=True)
             ):
@@ -153,6 +230,15 @@ def measure(
                 total = text_tokens + visual + TOKENS_PER_MESSAGE * len(row["messages"])
                 report.rows += 1
                 report.longest = max(report.longest, total)
+                if counts:
+                    group = row_groups[start + index] if row_groups else "unknown"
+                    tally = report.supervised.setdefault(group, {"rows": 0, "tokens": 0})
+                    tally["rows"] += 1
+                    tally["tokens"] += output_tokens
+                    edge = (total // HISTOGRAM_BUCKET) * HISTOGRAM_BUCKET
+                    report.histogram[edge] = report.histogram.get(edge, 0) + 1
+                    report.counted_rows += 1
+                    report.counted_tokens += total
                 cap = caps[start + index] if caps else None
                 if cap is not None and output_tokens > cap:
                     report.over.append({

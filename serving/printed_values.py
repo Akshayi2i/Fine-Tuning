@@ -52,12 +52,26 @@ its place there in the answer as the model wrote it, marked ``#`` -
 vehicle, whichever vehicle is served at ``vehicles[0]`` now. No flag names a
 served path that holds another value. A value made null keeps its own path.
 
+A value printed, but only on pages it does not cite (every page it cites read),
+is kept, flagged ``<path>:printed_off_cited_page`` and sent to review; a value
+whose ``parsed`` its ``raw`` clearly does not read as (``serving.raw_parsed``)
+is taken out in strict mode and flagged ``<path>:parsed_mismatch``; a row whose
+printed values share no page is flagged ``<row>:row_not_colocated``; and each of
+a coverage's ``form_refs`` - printed strings, not envelopes - is looked up as a
+value is, and one printed nowhere leaves its list in strict mode
+(decision 2026-10-26, :func:`_check`).
+
 What was found is the record (``ExtractionResult.printed_check``, read by the
 evaluation)::
 
     {"mode": "strict"|"flag", "checked": int, "unchecked": int,
      "not_printed": [{"path": str, "raw": str, "pages": [int, ...]}],
-     "removed": bool, "unread_page": int}
+     "removed": bool, "unread_page": int,
+     "parsed_mismatch": int, "off_cited_page": int, "rows_not_colocated": int,
+     "form_refs": {"checked": int, "not_printed": [{"path", "raw", "pages"}]}}
+
+The form numbers are counted apart from ``checked`` and ``not_printed``: the
+invented rate below measures the envelopes, as it always has.
 
 ``checked`` counts the values found printed or printed nowhere, ``not_printed``
 lists the latter with the pages they cite (``raw`` is what was looked for, and
@@ -338,19 +352,82 @@ def _grounded(forms: tuple[Any, ...], cited: Iterable[Any], pages: Mapping[int, 
     return verdicts[0]
 
 
+def _cited_all_read(cited: Iterable[Any], pages: Mapping[int, Any]) -> bool:
+    """Whether every page ``cited`` names was searched and has text: only then
+    does "printed on another page" say the citation is wrong, not that a page
+    OCR could not read prints it too."""
+    wanted = [int(page) for page in cited if str(page).lstrip("-").isdigit()]
+    return bool(wanted) and all(page in pages and pages[page].has_text for page in wanted)
+
+
+def _printed_strings(extraction: Any) -> Iterable[tuple[str, str, list[int]]]:
+    """Every plain string the schema says is printed (``common.model_view.
+    PRINTED_STRING_FIELDS``: a coverage's ``form_refs``), as ``(path, string,
+    the pages its row's values cite)``. Not envelopes, so the value check never
+    saw them: a form number invented into a coverage was served."""
+    from common.canonical import is_field_value
+    from common.model_view import PRINTED_STRING_FIELDS
+
+    names = {name for fields in PRINTED_STRING_FIELDS.values() for name in fields}
+
+    def walk(node: Any, path: str) -> Iterable[tuple[str, str, list[int]]]:
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                yield from walk(item, f"{path}[{index}]")
+            return
+        if not isinstance(node, dict) or is_field_value(node):
+            return
+        cited = sorted({int(page) for value in node.values() if is_field_value(value)
+                        for page in value.get("page_ref") or [] if str(page).isdigit()})
+        for key, value in node.items():
+            here = f"{path}.{key}" if path else str(key)
+            if key in names and isinstance(value, list):
+                for index, item in enumerate(value):
+                    if isinstance(item, str) and item.strip():
+                        yield f"{here}[{index}]", item, cited
+            elif not str(key).startswith("fideon:"):
+                yield from walk(value, here)
+
+    yield from walk(extraction, "")
+
+
 def _check(extraction: Mapping[str, Any], pages: Mapping[int, Any], mode: str) -> _Checked:
     """Every printed value of ``extraction`` looked up on ``pages``, and what
-    ``mode`` makes of those no page prints."""
+    ``mode`` makes of those no page prints.
+
+    Besides whether a value is printed, it says (decision 2026-10-26):
+
+    * **printed off its cited pages** - printed, but only on pages it does not
+      cite while every page it cites was read: the right figure, maybe from
+      another row or another role. Kept, flagged
+      ``<path>:printed_off_cited_page`` and sent to review
+      (``serving.value_flags``);
+    * **parsed against raw** - a ``parsed`` its ``raw`` clearly does not read as
+      (``serving.raw_parsed``: "$1,000" holding 10000, a date's day and month
+      swapped). Taken out in strict mode, kept in flag mode; flagged
+      ``<path>:parsed_mismatch`` either way;
+    * **a row of fragments** - a row whose values, each printed, share no page:
+      flagged ``<row>:row_not_colocated``, nothing more;
+    * **form numbers** - each of a coverage's ``form_refs`` looked up as a value
+      is; one printed nowhere leaves its list in strict mode. Counted apart
+      (``form_refs``), so the invented rate measures what it always measured.
+    """
     from common import grounding
     from data_pipeline.ingestion.label_rules import _SYSTEM, _envelopes, _pages
     from serving.conventions import NOT_PRINTED_FLAG
+    from serving.raw_parsed import parsed_mismatch
+    from serving.value_flags import OFF_CITED_PAGE_FLAG, PARSED_MISMATCH_FLAG, ROW_NOT_COLOCATED_FLAG
 
     checked = unchecked = 0
     # Path -> what was looked for, for a value printed nowhere, with its pages.
     unprinted: dict[str, tuple[Any, list[int]]] = {}
     unread: list[str] = []
+    off_cited: list[str] = []
+    mismatched: list[str] = []
     # Row path -> [its values printed nowhere, its values still served with a printed form].
     rows: dict[str, list[int]] = {}
+    # Row path -> (what was looked for, the pages found printing it) of each value found printed.
+    found_in: dict[str, list[tuple[tuple[Any, ...], tuple[Any, ...], tuple[int, ...]]]] = {}
     # A table repeats its values ("Included", "$500"): each is looked up once per citation.
     looked_up: dict[tuple[Any, ...], grounding.Grounding] = {}
     for path, envelope in _envelopes(extraction):
@@ -371,10 +448,31 @@ def _check(extraction: Mapping[str, Any], pages: Mapping[int, Any], mode: str) -
         missing = where.status == grounding.NOT_PRINTED
         if missing:
             unprinted[path] = (forms[0], _pages(envelope))
+        elif parsed_mismatch(path, envelope):
+            mismatched.append(path)
+        if where.status == grounding.ON_OTHER_PAGE and _cited_all_read(cited, pages):
+            off_cited.append(path)
         for row in _rows_of(path):
             rows.setdefault(row, [0, 0])[0 if missing else 1] += 1
+            if where.printed:
+                found_in.setdefault(row, []).append((key[0], forms, where.pages))
+
+    # Coverage form numbers: plain printed strings, each looked up as a value is.
+    form_refs: dict[str, tuple[str, list[int]]] = {}
+    form_refs_checked = 0
+    for path, item, cited in _printed_strings(extraction):
+        key = ((("str", item),), tuple(map(str, cited)))
+        if key not in looked_up:
+            looked_up[key] = _grounded((item,), cited, pages)
+        where = looked_up[key]
+        if where.status == grounding.UNCHECKED:
+            continue
+        form_refs_checked += 1
+        if where.status == grounding.NOT_PRINTED:
+            form_refs[path] = (item, cited)
 
     edits = _Edits()
+    taken: set[str] = set()
     if mode == STRICT:
         # A row goes once no value in it is still printed: one with a value
         # found, or one the text could not settle, stays with what it has.
@@ -383,7 +481,10 @@ def _check(extraction: Mapping[str, Any], pages: Mapping[int, Any], mode: str) -
             if not any(up in taken for up in _rows_of(row)):
                 head, at = _list_and_position(row)
                 edits.dropped.setdefault(head, []).append(at)
-        for path in unprinted:
+        # A value parsed as another than it prints is taken out as one printed
+        # nowhere is - its row stays: what it prints is on the page. A form
+        # number printed nowhere leaves its list.
+        for path in [*unprinted, *mismatched, *form_refs]:
             if any(up in taken for up in _rows_of(path)):
                 continue                                    # its row goes
             if path.endswith("]"):
@@ -394,13 +495,43 @@ def _check(extraction: Mapping[str, Any], pages: Mapping[int, Any], mode: str) -
         for positions in edits.dropped.values():
             positions.sort()
 
+    # Rows whose values are each printed, on no page they all share. Each was
+    # searched first on the pages it cites, so the pages found are confirmed on
+    # every page before a row is flagged.
+    every_page: dict[tuple[Any, ...], set[int]] = {}
+
+    def printing(forms: tuple[Any, ...], forms_key: tuple[Any, ...]) -> set[int]:
+        if forms_key not in every_page:
+            every_page[forms_key] = {page for form in forms
+                                     for page in grounding.ground_tolerant(form, None, pages).pages}
+        return every_page[forms_key]
+
+    scattered: list[str] = []
+    for row, values in found_in.items():
+        if len(values) < 2 or row in taken:
+            continue
+        if set.intersection(*(set(found) for _key, _forms, found in values)):
+            continue
+        if not set.intersection(*(printing(forms, forms_key) for forms_key, forms, _found in values)):
+            scattered.append(row)
+
     record = {"mode": mode, "checked": checked, "unchecked": unchecked,
               "not_printed": [{"path": edits.named(path), "raw": form if isinstance(form, str) else str(form),
                                "pages": cites} for path, (form, cites) in unprinted.items()],
-              "removed": mode == STRICT, "unread_page": len(unread)}
+              "removed": mode == STRICT, "unread_page": len(unread),
+              "parsed_mismatch": len(mismatched),
+              "off_cited_page": len(off_cited),
+              "rows_not_colocated": len(scattered),
+              "form_refs": {"checked": form_refs_checked,
+                            "not_printed": [{"path": edits.named(path), "raw": item, "pages": cites}
+                                            for path, (item, cites) in form_refs.items()]}}
     kind = REMOVED_FLAG if mode == STRICT else NOT_PRINTED_FLAG
-    flags = [f"{edits.named(path)}:{kind}" for path in unprinted]
+    flags = [f"{edits.named(path)}:{kind}" for path in [*unprinted, *form_refs]]
     flags += [f"{edits.named(path)}:{UNREAD_PAGE_FLAG}" for path in unread]
+    flags += [f"{edits.named(path)}:{PARSED_MISMATCH_FLAG}" for path in mismatched]
+    flags += [f"{edits.named(path)}:{OFF_CITED_PAGE_FLAG}" for path in off_cited
+              if edits.path(path) is not None and path not in edits.nulled]
+    flags += [f"{edits.named(row)}:{ROW_NOT_COLOCATED_FLAG}" for row in scattered]
     return _Checked(edits, flags, record)
 
 
@@ -533,6 +664,12 @@ def hold_result_to_printed(result: Any, page_texts: Mapping[int, str]) -> None:
         flags = _hold_served(result, edits, flags)
     result.review_flags = sorted({*flags, *checked.flags})
     result.printed_check = checked.record
+    # Served values the check doubts though it keeps them - printed only off the
+    # pages they cite, a parse their print contradicts (flag mode) - go to
+    # review, as extract sends them (serving.value_flags).
+    from serving.value_flags import route_served
+
+    route_served(result.extraction, result.review_flags)
 
 
 def _hold_served(result: Any, edits: _Edits, flags: list[str]) -> list[str]:

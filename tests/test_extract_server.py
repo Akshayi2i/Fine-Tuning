@@ -205,7 +205,10 @@ def test_a_value_cited_on_the_wrong_page_is_held_back_then_served_once_found(tmp
         served["extraction"]["policy"]["policy_number"].get("raw") is None
     assert "policy.policy_number:pending_full_text" in _flags(served)
     assert final["extraction"]["policy"]["policy_number"]["raw"] == "PA-1"          # printed: it comes back
-    assert not any(flag.startswith("policy.policy_number:") and "printed" in flag for flag in _flags(final))
+    assert not any(flag.startswith("policy.policy_number:") and "not_printed" in flag for flag in _flags(final))
+    # ...printed on a page it does not cite: served, flagged and sent to review (decision 2026-10-26).
+    assert "policy.policy_number:printed_off_cited_page" in _flags(final)
+    assert final["extraction"]["policy"]["policy_number"]["flagged"] is True
 
 
 def test_an_invented_value_is_never_served(tmp_path):

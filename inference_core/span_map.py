@@ -44,6 +44,13 @@ class FieldSpan:
     token_logprobs: list[float] = field(default_factory=list)
     mapped: bool = False
     reason: str | None = None      # why mapping failed, when it did
+    #: The smallest margin over the value's tokens between the token written and
+    #: the best other token (logprob, nats): near 0, the model all but wrote
+    #: another value, and a run whose batch differs can write it
+    #: (``serving.pipeline.near_tie_flags``). Negative when the decoder's
+    #: schema masked the model's own first choice. None when the backend gave no
+    #: second-best logprob for any of its tokens.
+    top2_margin: float | None = None
 
     @property
     def token_count(self) -> int:
@@ -230,12 +237,22 @@ def _tokens_overlapping(offsets: list[tuple[int, int]], start: int, end: int) ->
     return (first, last + 1) if first != -1 else (-1, -1)
 
 
+def top2_margin(logprobs: list[float], second: list[float | None] | None) -> float | None:
+    """The smallest ``logprob - second-best logprob`` over a value's tokens;
+    None when no token has a second-best."""
+    if not second:
+        return None
+    margins = [first - other for first, other in zip(logprobs, second, strict=False) if other is not None]
+    return round(min(margins), 6) if margins else None
+
+
 def map_field_spans(
     generated_text: str,
     tokens: list[str],
     token_logprobs: list[float],
     *,
     strict: bool = False,
+    token_top2_logprobs: list[float | None] | None = None,
 ) -> dict[str, FieldSpan]:
     """Map every generated field to its tokens and their logprobs.
 
@@ -245,6 +262,9 @@ def map_field_spans(
         token_logprobs: one logprob per token, same order and length.
         strict: raise when the tokens do not reconstruct the text, instead of
             degrading to unmapped spans.
+        token_top2_logprobs: per token, the best logprob of a token other than
+            the one written (None where the backend gave none), same length -
+            each span's :attr:`FieldSpan.top2_margin`. Left out, no span has one.
 
     Returns:
         ``field_path -> FieldSpan``. **Check ``mapped``**: an unmapped field has
@@ -255,6 +275,9 @@ def map_field_spans(
             f"{len(tokens)} tokens but {len(token_logprobs)} logprobs. They must align — "
             "a misaligned pair silently attributes one field's probability to another."
         )
+    if token_top2_logprobs is not None and len(token_top2_logprobs) != len(tokens):
+        # A second-best list that does not align is ignored, never misattributed.
+        token_top2_logprobs = None
 
     spans = scan_json_spans(generated_text)
     offsets = token_char_offsets(tokens)
@@ -281,6 +304,8 @@ def map_field_spans(
         else:
             span.token_start, span.token_end = start, end
             span.token_logprobs = token_logprobs[start:end]
+            span.top2_margin = top2_margin(
+                span.token_logprobs, token_top2_logprobs[start:end] if token_top2_logprobs else None)
             span.mapped = True
         mapped[span.field_path] = span
     return mapped
@@ -309,6 +334,7 @@ def map_compact_field_spans(
     token_logprobs: list[float],
     *,
     strict: bool = False,
+    token_top2_logprobs: list[float | None] | None = None,
 ) -> dict[str, FieldSpan]:
     """:func:`map_field_spans` for a compact answer (the fast format profile),
     keyed as the same answer written in full: an envelope's ``r`` span as its
@@ -320,7 +346,8 @@ def map_compact_field_spans(
     and ``v`` is where the model read it. Spans outside an envelope (a code, an
     id) keep their paths.
     """
-    spans = map_field_spans(generated_text, tokens, token_logprobs, strict=strict)
+    spans = map_field_spans(generated_text, tokens, token_logprobs, strict=strict,
+                            token_top2_logprobs=token_top2_logprobs)
     try:
         envelopes = compact_envelope_paths(json.loads(generated_text))
     except ValueError as exc:

@@ -10,11 +10,23 @@ a different image-token count, a system prompt joined with a different separator
 — nothing raises. The model simply performs worse in production than it did in
 evaluation, and the gap looks like ordinary generalisation loss.
 
-**Two of these need a GPU and the pinned stack**, so they are marked ``gpu`` and
-skipped in CI. That is a real limitation, not a formality: until they run on a
-pod, train/serve parity is asserted by construction rather than measured. The
-third — prompt parity — is pure and runs everywhere, because the prompt renderer
-is the one piece both sides share in this repo today.
+**Three of these need a GPU and the pinned stack** - tokens, pixels and
+outputs - so they are marked ``gpu`` and skipped in CI. That is a real
+limitation, not a formality: until they run on a pod, train/serve parity is
+asserted by construction rather than measured. Prompt parity is pure and runs
+everywhere, because the prompt renderer is one piece both sides share; the page
+renderer is the other (``data_pipeline.ocr.render_only``).
+
+Run them on the pod, in the training environment (ms-swift, vLLM, the pinned
+base weights), against the corpus the run trains on::
+
+    FIDEON_PARITY_CORPUS=/workspace/<run>/staged/epoch_1.jsonl \\
+        python -m pytest -m gpu tests/test_parity.py -x
+
+``FIDEON_PARITY_CORPUS`` is a staged ms-swift epoch file: its first ten rows -
+real pages, real prompts, fast-layout windows under the fast profile - replace
+the fixed examples. Unset, the fixed examples are built here: half of them
+fast-layout policy windows, every page from the shared renderer.
 """
 
 from __future__ import annotations
@@ -135,16 +147,78 @@ def _pinned_stack_or_skip() -> Path:
     return model_dir
 
 
-#: Page sizes the fixed examples are drawn at: a letter page at the 1792px cap
-#: both ways, and smaller renders.
-_PAGE_SIZES = ((1386, 1792), (1792, 1386), (1275, 1650), (1224, 1584), (850, 1100))
+#: Page sizes the fixed examples are drawn at, in PDF points (72 a inch): a
+#: letter page both ways, legal, A4, and a half sheet. Each is rendered by the
+#: shared renderer at the 1792 px cap - and, under the fast profile, resized to
+#: its pixel budget there - as every corpus and served page is.
+_PAGE_SIZES = ((612, 792), (792, 612), (612, 1008), (595, 842), (396, 612))
+
+#: The line the fast-layout rows are windows of: a common-model line, whose
+#: policy windows are written in the fast layout under the fast profile.
+_WINDOW_LINE = "personal_auto"
+
+
+def _page_images(tmp_path: Path, name: str, sizes: list[tuple[int, int]]) -> list[str]:
+    """Pages drawn with text and rules, rendered by the shared renderer
+    (``data_pipeline.ocr.render_only.render_pdf_pages``): the pixels, and the
+    resize the fast profile makes there, that training and serving both read.
+
+    Not blank: a white page reads the same through any resampler, so a pixel
+    comparison of one proves nothing. Without PyMuPDF the pages are drawn with
+    PIL at the size the renderer would give them."""
+    from common.config import resolution_cap_px
+    from data_pipeline.ocr.render_only import RenderError, page_pixel_budget, render_pdf_pages, smart_resize
+
+    cap = resolution_cap_px()
+    try:
+        import fitz
+
+        document = fitz.open()
+        for number, (width, height) in enumerate(sizes, start=1):
+            page = document.new_page(width=width, height=height)
+            for line in range(int(height // 18) - 4):
+                page.insert_text((36, 54 + line * 18), f"{name} p{number} line {line} | Limit $1,{line:03d},000 "
+                                 f"| VIN 1HGCV1F30KA{line:06d}", fontsize=9)
+            for x in range(36, int(width) - 36, 48):
+                page.draw_line((x, 36), (x, height - 36), width=0.5)
+        rendered = render_pdf_pages(document.tobytes(), cap)
+    except (ImportError, RenderError):
+        import io
+
+        from PIL import Image, ImageDraw
+
+        budget = page_pixel_budget()
+        rendered = []
+        for width, height in sizes:
+            scale = cap / max(width, height)
+            pixels = (round(width * scale), round(height * scale))
+            if budget is not None:
+                h, w = smart_resize(pixels[1], pixels[0], min_pixels=budget[0], max_pixels=budget[1])
+                pixels = (w, h)
+            image = Image.new("RGB", pixels, "white")
+            draw = ImageDraw.Draw(image)
+            for y in range(20, pixels[1] - 20, 24):
+                draw.text((20, y), f"{name} | Limit $1,{y:03d},000 | VIN 1HGCV1F30KA{y:06d}", fill="black")
+            out = io.BytesIO()
+            image.save(out, format="PNG")
+            rendered.append(out.getvalue())
+    paths = []
+    for number, png in enumerate(rendered, start=1):
+        path = tmp_path / f"{name}_page_{number}.png"
+        path.write_bytes(png)
+        paths.append(str(path))
+    return paths
 
 
 def _parity_rows(tmp_path: Path) -> list[dict]:
     """PARITY_EXAMPLE_COUNT staged (ms-swift) rows, fixed so a failure reproduces.
 
     The first rows of ``$FIDEON_PARITY_CORPUS`` when set; otherwise examples
-    built with the shared prompt renderer - one to three pages, both modes.
+    built with the shared prompt renderer and the shared page renderer - one to
+    three pages, both modes. Every other row is a policy WINDOW of a
+    common-model line (``sections`` set): under the fast profile, the fast
+    layout with a compact answer, the rows a fast corpus is made of; the rest
+    whole-schema requests, written as in standard.
     """
     corpus = os.environ.get(PARITY_CORPUS_ENV)
     if corpus:
@@ -157,26 +231,32 @@ def _parity_rows(tmp_path: Path) -> list[dict]:
                     break
         return rows
 
-    from PIL import Image
-
+    from common.schema_sections import groups_for
     from inference_core.input_builder import build_messages
     from training.stage_data import to_swift_row
 
+    groups = groups_for(_WINDOW_LINE)
     rows = []
     for i in range(PARITY_EXAMPLE_COUNT):
-        paths = []
-        for page in range(1 + i % 3):
-            width, height = _PAGE_SIZES[(i + page) % len(_PAGE_SIZES)]
-            path = tmp_path / f"example_{i}_page_{page + 1}.png"
-            Image.new("RGB", (width, height), "white").save(path)
-            paths.append(str(path))
+        count = 1 + i % 3
+        paths = _page_images(tmp_path, f"example_{i}",
+                             [_PAGE_SIZES[(i + page) % len(_PAGE_SIZES)] for page in range(count)])
         mode = "image_only" if i % 4 == 3 else "ocr_plus_image"
-        text = (f"POLICY NUMBER GL-{1000 + i}\n| Coverage | Limit |\n|---|---|\n"
+        text = (f"POLICY NUMBER PA-{1000 + i}\n| Coverage | Limit |\n|---|---|\n"
                 "| Each Occurrence | $1,000,000 |")
-        built = build_messages(
-            "policy", paths, None if mode == "image_only" else [text] * len(paths), mode,
-            lob="gl", assistant_content=json.dumps({"policy": {"policy_number": f"GL-{1000 + i}"}}),
-        )
+        texts = None if mode == "image_only" else [text] * count
+        if i % 2 == 0:
+            # A fast-layout window, with the compact answer such a row trains on.
+            built = build_messages(
+                "policy", paths, texts, mode, lob=_WINDOW_LINE, sections=groups[(i // 2) % len(groups)],
+                page_numbers=list(range(1, count + 1)), total_pages=count,
+                assistant_content=json.dumps({"policy": {"policy_number": {"v": f"PA-{1000 + i}", "p": [1]}}}),
+            )
+        else:
+            built = build_messages(
+                "policy", paths, texts, mode,
+                lob="gl", assistant_content=json.dumps({"policy": {"policy_number": f"GL-{1000 + i}"}}),
+            )
         rows.append(to_swift_row({"source_id": f"parity_{i}", "messages": built.messages},
                                  lambda key: key))
     return rows
@@ -256,6 +336,83 @@ def test_template_token_parity(tmp_path, record_property):  # pragma: no cover -
         assert image_pad_runs(trained, pad) == image_pad_runs(served, pad) == expected, (
             f"row {index}: image-token counts differ (trained, served, resize rule)"
         )
+
+
+def _served_pixel_values(processor, images, min_pixels: int, max_pixels: int):
+    """The page images through the processor as vLLM 0.11 calls it for
+    Qwen3-VL: the fast image processor, the request's pixel budget as
+    ``size={"shortest_edge": min, "longest_edge": max}`` (older processors take
+    ``min_pixels``/``max_pixels``). Returns ``(pixel_values, image_grid_thw)``."""
+    image_processor = processor.image_processor
+    try:
+        out = image_processor(images=images, size={"shortest_edge": min_pixels, "longest_edge": max_pixels},
+                              return_tensors="pt")
+    except (TypeError, ValueError):
+        out = image_processor(images=images, min_pixels=min_pixels, max_pixels=max_pixels, return_tensors="pt")
+    return out["pixel_values"], out["image_grid_thw"]
+
+
+@pytest.mark.gpu
+def test_pixel_parity(tmp_path, record_property):  # pragma: no cover - needs the pod
+    """ms-swift and vLLM must give the model the SAME pixels for the same page.
+
+    Training reads a page through ms-swift's template - qwen-vl-utils resizes it
+    with PIL, then the HF processor - and serving through vLLM's HF processor
+    alone, with torch. A page larger than the pixel budget (a 1792 px render is
+    ~2.48 MP; the fast profile's budget 1.25 MP) was downscaled by both, two
+    resamplers, two sets of pixels, and the token test above cannot see it: the
+    image-token counts agree. The shared renderer resizes each page to the size
+    both processors compute (``render_only.render_pdf_pages``), so neither
+    resamples it again: their ``pixel_values`` must agree to within half a
+    pixel step, and their grids exactly. The pages go as serving sends them (a
+    gray page as a grayscale PNG, ``inference_core.page_links.sent_png``) and
+    as the server opens them (RGB).
+
+    On the pod, in the training environment, against the real staged corpus::
+
+        FIDEON_PARITY_CORPUS=/workspace/<run>/staged/epoch_1.jsonl \\
+            python -m pytest -m gpu tests/test_parity.py -k "parity" -x
+
+    Without ``FIDEON_PARITY_CORPUS`` the ten fixed rows are built here, half of
+    them fast-layout policy windows, their pages from the shared renderer.
+    """
+    model_dir = _pinned_stack_or_skip()
+    import io
+
+    import torch
+    from PIL import Image
+    from transformers import AutoProcessor
+
+    from common.config import pixel_budget
+    from inference_core.page_links import sent_png
+    from training.train import _masking_encoder, build_training_config
+
+    rows = _parity_rows(tmp_path)
+    swift, _recorded = build_training_config(
+        corpus_paths=[str(tmp_path / "parity.jsonl")] * 16, output_dir=str(tmp_path / "out"))
+    encode, _header, _end, _suffix = _masking_encoder(swift)
+    processor = AutoProcessor.from_pretrained(str(model_dir), use_fast=True)
+    std = min(float(s) for s in processor.image_processor.image_std)
+    half_step = 0.5 / 255 / std
+    min_pixels, max_pixels = pixel_budget()
+
+    worst = 0.0
+    for index, row in enumerate(rows):
+        trained = encode(row)
+        images = [Image.open(io.BytesIO(sent_png(Path(path)))).convert("RGB") for path in row["images"]]
+        served, served_grid = _served_pixel_values(processor, images, min_pixels, max_pixels)
+        trained_pixels = torch.as_tensor(trained["pixel_values"]).float()
+        trained_grid = torch.as_tensor(trained["image_grid_thw"])
+        assert torch.equal(trained_grid.long(), served_grid.long()), (
+            f"row {index}: the pages' patch grids differ (trained {trained_grid.tolist()}, "
+            f"served {served_grid.tolist()}): training and serving resize them to different sizes")
+        assert trained_pixels.shape == served.shape, f"row {index}: pixel_values shapes differ"
+        diff = float((trained_pixels - served.float()).abs().max())
+        worst = max(worst, diff)
+        assert diff < half_step, (
+            f"row {index}: pixel_values differ by up to {diff:.4f} (half a pixel step is {half_step:.4f}): "
+            "training and serving resample the pages differently")
+    record_property("pixel_values_max_abs_diff", worst)
 
 
 @pytest.mark.gpu
@@ -351,7 +508,7 @@ def test_the_gpu_parity_tests_are_registered_rather_than_forgotten():
     import inspect
 
     source = inspect.getsource(__import__(__name__, fromlist=["_"]))
-    for name in ("test_template_token_parity", "test_serving_output_parity"):
+    for name in ("test_template_token_parity", "test_pixel_parity", "test_serving_output_parity"):
         assert f"def {name}" in source
         assert source.index("@pytest.mark.gpu") < source.index(f"def {name}")
 

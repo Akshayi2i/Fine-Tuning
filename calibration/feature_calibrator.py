@@ -22,7 +22,7 @@ forty instances produces numbers that look like probabilities and are not, and
 the thresholds in §5.4 are defined against a calibrated score.
 
 Gradient descent in pure Python. The design matrix is a few hundred rows by
-eleven columns; scikit-learn would be faster and is already an `eval` extra, but
+a dozen columns; scikit-learn would be faster and is already an `eval` extra, but
 this keeps calibration runnable on the pod without pulling the eval stack in, and
 the fit takes milliseconds.
 """
@@ -82,14 +82,35 @@ class FieldTypeCalibrator:
     #: refuses to produce a confidence.
     enforced: bool = True
     reason: str | None = None
+    #: Features left out of the fit because every instance carried the same
+    #: value: they taught nothing, and read at serving - once filled (a span
+    #: that reports its runner-up, text that arrives) - their weight would move
+    #: every confidence by an amount no data ever priced.
+    constant_features: list[str] = field(default_factory=list)
 
     def predict(self, features: FieldFeatures) -> float:
-        """The calibrated probability this field is correct."""
+        """The calibrated probability this field is correct.
+
+        Read by the names the calibrator was fitted on, so one fitted on fewer
+        features - or on a retired one (``features.LEGACY_FEATURES``) - reads
+        exactly its own vector."""
         if not self.enforced:
             raise CalibratorError(
                 f"{self.field_type} has no enforced calibrator ({self.reason}). Every field of "
                 "this type routes to review rather than carrying a number nobody measured."
             )
+        if self.feature_names:
+            values = features.named_values()
+            unknown = [name for name in self.feature_names if name not in values]
+            if unknown or len(self.feature_names) != len(self.weights):
+                raise CalibratorError(
+                    f"{self.field_type} calibrator names features {unknown or self.feature_names} it "
+                    f"cannot read with {len(self.weights)} weight(s). A calibrator and a feature "
+                    "vector that disagree on shape produce a confident number about the wrong thing."
+                )
+            z = self.bias + sum(w * values[name] for w, name in zip(self.weights, self.feature_names,
+                                                                      strict=True))
+            return _sigmoid(z)
         vector = features.vector()
         if len(vector) != len(self.weights):
             raise CalibratorError(
@@ -111,6 +132,7 @@ class FieldTypeCalibrator:
             "bias": self.bias,
             "weights": dict(zip(self.feature_names, self.weights, strict=True))
             if self.feature_names else {},
+            "constant_features": list(self.constant_features),
         }
 
     @classmethod
@@ -122,7 +144,9 @@ class FieldTypeCalibrator:
         # about the wrong features. It round-tripped without raising, which is
         # what made it worth a test.
         stored = payload.get("weights", {})
-        names = [n for n in FieldFeatures.feature_names() if n in stored]
+        # Today's features and the retired ones: a calibrator fitted before a
+        # feature was retired reads it at the constant it always was.
+        names = [n for n in FieldFeatures.known_feature_names() if n in stored]
         unknown = sorted(set(stored) - set(names))
         if unknown:
             raise CalibratorError(
@@ -140,6 +164,7 @@ class FieldTypeCalibrator:
             method=payload.get("method", "logistic"),
             enforced=bool(payload.get("enforced", True)),
             reason=payload.get("reason"),
+            constant_features=list(payload.get("constant_features") or []),
         )
 
 
@@ -184,13 +209,21 @@ def fit_field_type(
         log.warning("%s: %s", features.field_type, calibrator.reason)
         return calibrator
 
-    weights = [0.0] * len(names)
+    # Fitted on the features that vary: a column every instance holds at one
+    # value (cross-mode agreement once, a span detail the engine did not report,
+    # text agreement on image-only rows) is a second bias at fit time and an
+    # unpriced shift at serving the day it is filled.
+    keep = [i for i in range(len(names)) if len({vector[i] for vector in features.vectors}) > 1]
+    calibrator.constant_features = [names[i] for i in range(len(names)) if i not in keep]
+    calibrator.feature_names = [names[i] for i in keep]
+    rows = [[vector[i] for i in keep] for vector in features.vectors]
+    weights = [0.0] * len(keep)
     bias = 0.0
     n = features.size
     for _ in range(iterations):
-        grad_w = [0.0] * len(names)
+        grad_w = [0.0] * len(keep)
         grad_b = 0.0
-        for vector, label in zip(features.vectors, features.correct, strict=True):
+        for vector, label in zip(rows, features.correct, strict=True):
             z = bias + sum(w * x for w, x in zip(weights, vector, strict=True))
             error = _sigmoid(z) - (1.0 if label else 0.0)
             grad_b += error

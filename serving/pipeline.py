@@ -67,6 +67,7 @@ from inference_core.model_runner import Generation, LoadedModel, generate, gener
 from inference_core.span_map import SpanMapError, map_compact_field_spans, map_field_spans
 from serving.adapter_router import Route, RoutingError, route
 from serving.doc_type_classifier import Classifier
+from serving.value_flags import near_tie_flags, route_served, routed_paths
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +111,13 @@ class ExtractionRequest:
     #: them reversed, so the engine batches them differently, and measures whether
     #: the same document reads the same (``run_to_run_agreement``).
     send_order: str = "planned"
+    #: The text the printed-values check holds a policy's values to (page number
+    #: -> text), when it is not the text the model read: the golden eval's noisy
+    #: mode shows the model degraded OCR and checks its values against the
+    #: document's own text. None, the check reads ``page_texts`` (or the joined
+    #: ``ocr_text``), as it always has. Also what the role check
+    #: (``role_mismatch``) reads the labels' values from.
+    printed_texts: Mapping[int, str] | None = None
 
 
 @dataclass
@@ -153,6 +161,16 @@ class ExtractionResult:
     #: tokens, seconds and outcome - where the time went. Not in the served
     #: JSON; the test runners record it.
     window_stats: list[dict[str, Any]] = field(default_factory=list)
+    #: Each field's feature vector as the release's calibrators scored it
+    #: (``calibration.features.FieldFeatures`` by values-view path), so its
+    #: confidence can be computed again on the page text that arrives after
+    #: fields first served it (``calibration.post_text``). Not served: not in
+    #: :meth:`as_dict`.
+    confidence_features: dict[str, Any] = field(default_factory=dict, repr=False)
+    #: The release calibrators and thresholds this result was scored with
+    #: (:class:`CalibratedWith`), for that second scoring; None when it had none.
+    #: Not served, never copied with the result.
+    calibrated_with: Any = field(default=None, repr=False, compare=False)
 
     @property
     def needs_review(self) -> bool:
@@ -180,6 +198,27 @@ class ExtractionResult:
             # Loss Runs only, so every other type's output is unchanged.
             **({"reconciliation": self.reconciliation} if self.reconciliation is not None else {}),
         }
+
+
+class CalibratedWith:
+    """The release calibrators and thresholds a result was scored with, kept
+    on it (``ExtractionResult.calibrated_with``) for fields first's second
+    scoring once the page text arrives (``serving.fields_first.add_full_text``).
+    Shared, never copied: a copy of the result (the fields served at the gate)
+    is scored with the same release."""
+
+    def __init__(self, calibrators: Any, thresholds: Any) -> None:
+        self.calibrators = calibrators
+        self.thresholds = thresholds
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> CalibratedWith:
+        return self
+
+    def __copy__(self) -> CalibratedWith:
+        return self
+
+    def __repr__(self) -> str:
+        return "CalibratedWith(<the release's calibrators and thresholds>)"
 
 
 def _resolve_route(request: ExtractionRequest, classifier: Classifier, *,
@@ -401,11 +440,16 @@ def _parse_generation(
             # JSON object, so this is the same generation failure as unparseable
             # output and is reported as one.
             raise TypeError(f"expected a JSON object, got {type(extraction).__name__}")
+        # Each token's best alternative too, where the backend gave one: each
+        # value's near-tie margin (serving.value_flags.near_tie_flags).
+        top2 = getattr(result, "token_top2_logprobs", None) or None
         if compact:
-            spans = map_compact_field_spans(result.text, result.tokens, result.token_logprobs)
+            spans = map_compact_field_spans(result.text, result.tokens, result.token_logprobs,
+                                            token_top2_logprobs=top2)
             extraction = expand_answer(extraction)
         else:
-            spans = map_field_spans(result.text, result.tokens, result.token_logprobs)
+            spans = map_field_spans(result.text, result.tokens, result.token_logprobs,
+                                    token_top2_logprobs=top2)
     except (ValueError, TypeError, SpanMapError) as exc:
         raise PipelineError(
             f"the model did not return parseable JSON for {route_.schema_doc_type}: "
@@ -536,20 +580,30 @@ def _extract_policy_windows(
     compact = {group: fast_layout(route_.schema_doc_type, route_.schema_acord_form, lob, group)
                for group in shapes}
 
+    # Each window's messages until its answer is settled: the prompt's length
+    # the backend reports is held to what its pages imply (_check_prompt_tokens).
+    prompts: dict[tuple[str, tuple[int, ...]], list[dict[str, Any]]] = {}
+    warned: list[str] = []
+
     def settle(window: _Planned, result: Any, attempt: int) -> _Settled:
-        return _settle(request.source_id, route_, window, result, attempt,
-                       declarations_page=declarations_page, shapes=shapes[window.group],
-                       compact=compact[window.group])
+        settled = _settle(request.source_id, route_, window, result, attempt,
+                          declarations_page=declarations_page, shapes=shapes[window.group],
+                          compact=compact[window.group])
+        _check_prompt_tokens(request.source_id, settled.stat, result,
+                             prompts.pop((window.group, tuple(window.pages)), None), warned)
+        return settled
 
     def window_request(group: str, pages: list[int]) -> tuple[Any, ...]:
-        return (*_build_request(
+        messages, schema = _build_request(
             model, route_,
             [_image_for(request, page) for page in pages],
             None if image_only else [texts.get(page) or _EMPTY_PAGE for page in pages],
             request.modality_mode,
             page_numbers=pages, total_pages=page_count,
             lob=lob, sections=group,
-        ), _window_answer_cap(group, route_.schema_doc_type))
+        )
+        prompts[(group, tuple(pages))] = messages
+        return messages, schema, _window_answer_cap(group, route_.schema_doc_type)
 
     read_with = _read_as_answered if can_submit(model) else _read_in_rounds
     read = read_with(request, model, route_, plan, window_request, settle)
@@ -788,6 +842,36 @@ def _window_stat(group: str, pages: list[int], attempt: int, result: Any, outcom
     }
 
 
+def _check_prompt_tokens(source_id: str, stat: dict[str, Any], result: Any,
+                         messages: list[dict[str, Any]] | None, warned: list[str]) -> None:
+    """The prompt's length the backend reports (``prompt_tokens``), held to
+    what the window's pages and text imply (``inference_core.prompt_tokens``),
+    recorded in the window's stat as ``prompt_check``. One implausible length
+    is warned about once per document: a server that resizes pages to another
+    budget than the request's shows the model pages it was not trained on, and
+    nothing else would say so. Never fails a window."""
+    if messages is None or not isinstance(result, Generation) or result.prompt_tokens is None:
+        return
+    from inference_core.prompt_tokens import check_prompt, expected_prompt
+
+    try:
+        checked = check_prompt(result.prompt_tokens, expected_prompt(messages))
+    except Exception as exc:  # noqa: BLE001 - a diagnostic: it never costs the window
+        log.debug("%s: the prompt-length check could not run: %s", source_id, exc)
+        return
+    if checked is None:
+        return
+    stat["prompt_check"] = checked
+    if not checked["plausible"] and not warned:
+        warned.append(source_id)
+        log.warning(
+            "%s: the model server counted %d prompt tokens for a window over pages %s, where its "
+            "pages are %d image tokens at the pixel budget sent (ratio %s, expected %s): the server "
+            "may resize pages to another budget than the request's (mm_processor_kwargs) - the model "
+            "then reads pages it was not trained on", source_id, checked["prompt_tokens"],
+            stat.get("pages"), checked["image_tokens"], checked["ratio"], checked["expected"])
+
+
 def _read_in_rounds(request: ExtractionRequest, model: LoadedModel, route_: Route,
                     plan: list[_Planned], window_request: Any, settle: Any) -> _WindowsRead:
     """Every window in calls of up to :data:`MAX_WINDOWS_PER_BATCH`; the failed
@@ -970,6 +1054,36 @@ def _likely_missed(extraction: dict[str, Any], page_texts: dict[int, str], lob: 
     return likely_missed(extraction, page_texts, sorted(page_texts), declaration_objects(lob))
 
 
+def _role_mismatches(extraction: dict[str, Any], page_texts: Mapping[int, str], lob: Any) -> list[str]:
+    """Declarations values served under a field whose printed label is followed
+    by another value on every line it opens (serving.conventions)."""
+    from serving.conventions import declaration_objects, role_mismatches
+
+    try:
+        blocks = declaration_objects(lob)
+    except Exception:  # noqa: BLE001 - a line with no declarations group has nothing to hold
+        return []
+    return role_mismatches(extraction, page_texts, sorted(page_texts), blocks)
+
+
+def _printed_texts(request: ExtractionRequest) -> dict[int, str] | None:
+    """The page text a policy's values are held to (``serving.printed_values``):
+    the request's ``printed_texts`` when it carries one (the golden eval's noisy
+    mode: the model read degraded text, its values are held to the document's
+    own), else the text it read - None for an image-only read, which has none
+    until fields first's MinerU text arrives."""
+    if request.printed_texts is not None:
+        held_to: dict[int, str] = {}
+        for page, text in request.printed_texts.items():
+            if isinstance(page, bool) or not str(page).strip().isdigit():
+                raise PipelineError(f"{request.source_id}: printed_texts key {page!r} is not a page number")
+            held_to[int(str(page).strip())] = text or ""
+        return held_to
+    if request.modality_mode == "image_only":
+        return None
+    return dict(request.page_texts) or dict(enumerate(_all_page_texts(request), start=1))
+
+
 #: A coverage served with no unit while the answer holds several units of a kind.
 UNIT_LINK_FLAG = "applies_to:unit_link_unknown"
 
@@ -1072,10 +1186,13 @@ def attach_full_text(result: ExtractionResult, page_texts: dict[int, str], *, lo
     if page_texts and result.doc_type == "policy" and result.mode == "image_only":
         # Read from the images alone, the fields were never looked for on the
         # page text: a declarations field left empty while a page prints its
-        # label and a value is flagged now, as extract flags it with text.
+        # label and a value is flagged now, as extract flags it with text - and
+        # so is one served under a label that prints another value.
         missed = _likely_missed(result.extraction, page_texts, lob)
+        missed += _role_mismatches(result.extraction, page_texts, lob)
         if missed:
             result.review_flags = sorted({*result.review_flags, *missed})
+            route_served(result.extraction, result.review_flags)
     if NO_FULL_TEXT_FLAG not in result.review_flags or not page_texts:
         return result
     pages = [page_texts.get(page) or "" for page in sorted(page_texts)]
@@ -1348,6 +1465,7 @@ def _feature_calibrated(
     page_text: str | None,
     common_model: bool = False,
     page_texts: dict[int, str] | None = None,
+    modality_mode: str | None = None,
 ) -> CalibratedResult:
     """Per-field-type feature calibration (arch v2.1 §5.1-5.4).
 
@@ -1371,22 +1489,23 @@ def _feature_calibrated(
     result = CalibratedResult()
     usable: list[float] = []
 
-    # The span mapper returns FieldSpan objects; the feature builder takes raw
-    # logprob lists. Unmapped spans are dropped here rather than passed as empty
-    # ones — an empty list is indistinguishable from a null, and a field the
-    # mapper could not locate is a different problem from a field the model
-    # deliberately left empty.
-    logprobs_by_path = {
-        path: span.token_logprobs
-        for path, span in spans.items()
-        if getattr(span, "mapped", False)
-    }
+    # The mapped FieldSpan objects themselves: beside their token logprobs the
+    # feature builder reads whether the printed text was written apart from the
+    # value (the span is the envelope's raw: r_written) and how near another
+    # token came (top2_margin). Unmapped spans are dropped here rather than
+    # passed as empty ones — an empty list is indistinguishable from a null, and
+    # a field the mapper could not locate is a different problem from a field
+    # the model deliberately left empty.
+    mapped_spans = {path: span for path, span in spans.items() if getattr(span, "mapped", False)}
     # A common-model line's fields are typed as its schema declares them, as
     # calibration fitting types them (validation_generation.calibration_samples).
     for features in build_document_features(
-        extraction=extraction, spans=logprobs_by_path, page_text=page_text,
-        common_model=common_model, page_texts=page_texts,
+        extraction=extraction, spans=mapped_spans, page_text=page_text,
+        common_model=common_model, page_texts=page_texts, modality_mode=modality_mode,
     ):
+        # Kept, so the text-dependent features can be computed again when the
+        # page text arrives after the fields (calibration.post_text).
+        result.features[features.field_path] = features
         confidence = calibrators.predict(features) if calibrators else None
         needs_review = (
             thresholds.needs_review(features.field_type, confidence)
@@ -1756,11 +1875,18 @@ def extract(
         # Printed values only (decision 2026-10-24): a value the answer holds
         # that no page prints is taken out of the JSON and listed for review
         # (serving.printed_values). With no page text (image only) nothing can be
-        # checked yet: fields first checks it when MinerU's text arrives.
+        # checked yet: fields first checks it when MinerU's text arrives. The
+        # text is the request's printed_texts when it carries one (the golden
+        # eval's noisy mode), else the text the model read.
         from serving.printed_values import hold_to_printed
 
-        held = hold_to_printed(extraction, all_spans, None if request.modality_mode == "image_only" else (
-            dict(request.page_texts) or dict(enumerate(_all_page_texts(request), start=1))), lob=lob)
+        checked_texts = _printed_texts(request)
+        if common_model and checked_texts:
+            # Right value, wrong role: a declarations label printing another value
+            # than the one served under it. Before the check, so its flags follow
+            # their values (held.joined).
+            merge_flags.extend(_role_mismatches(extraction, checked_texts, lob))
+        held = hold_to_printed(extraction, all_spans, checked_texts, lob=lob)
         extraction, all_spans, printed_check = held.extraction, held.spans, held.record
         # Flags raised before it follow their values; a value taken out keeps one.
         merge_flags = held.joined(merge_flags)
@@ -1841,6 +1967,7 @@ def extract(
             # Each page's own text, so a value is grounded on the pages it cites.
             page_texts=None if request.modality_mode == "image_only" else (
                 {int(p): t for p, t in request.page_texts.items()} or None),
+            modality_mode=request.modality_mode,
         )
     else:
         log.warning(
@@ -1866,6 +1993,9 @@ def extract(
         values, route_.schema_doc_type,
         ocr_meta=request.ocr_meta, pages_used=pages_used,
     )
+    # A value whose tokens all but chose another (serving.value_flags): on the
+    # spans as served, after the merge and the printed-values check.
+    merge_flags.extend(near_tie_flags(all_spans))
     flags = merge_review_flags(
         completeness, calibrated.review_flags + route_.review_flags + merge_flags
         + ([LOB_FALLBACK_FLAG] if lob_fallback_used else [])
@@ -1882,10 +2012,14 @@ def extract(
         incomplete = tuple(
             flag.split(":", 1)[0] for flag in flags if is_row_completeness_flag(flag)
         )
+        # Values a flag sends to review though they are served: printed only off
+        # the pages they cite, a near tie, a label printing another value
+        # (serving.value_flags).
+        routed = routed_paths(flags)
         scores = {
             path: (
                 f.confidence,
-                f.needs_review or any(
+                f.needs_review or path in routed or any(
                     path == name or path.startswith((f"{name}[", f"{name}."))
                     for name in incomplete
                 ),
@@ -1984,6 +2118,8 @@ def extract(
         text_coverage=coverage,
         window_stats=window_stats,
         printed_check=printed_check,
+        confidence_features=dict(calibrated.features),
+        calibrated_with=CalibratedWith(calibrators, thresholds) if calibrators is not None else None,
     )
 
     log.info(

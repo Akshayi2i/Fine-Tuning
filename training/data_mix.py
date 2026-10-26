@@ -4,14 +4,20 @@
 The corpus is built once and the adapter reads a view of it
 (:mod:`training.corpus_view`), so the shares are applied where the view is
 written: it keeps, line by line, every real document and the synthetic ones
-that bring the line to its configured shares. Verified real golds always
-train. Validation and test are never sampled.
+that bring the line to its configured shares - the same ones in every epoch.
+Verified real golds always train. Validation and test are never sampled.
+
+``twins_per_seed_per_epoch`` (null: every twin, every epoch) rotates the twins
+a seed trains instead: each epoch takes that many of the seed's kept twins, the
+next epoch the next ones, so every twin is seen over the epochs
+(:func:`plan_twin_rotation`).
 
 Configured in the training config::
 
     data_mix:
       synthetic_fraction: 0.8   # synthetic share of a line's train documents
       scanned_share: null       # scanned share of a line's train documents
+      twins_per_seed_per_epoch: null   # twins of a seed per epoch, rotated
       lines:                    # per line, over the defaults above
         homeowners: {scanned_share: 0.4}
 
@@ -20,11 +26,13 @@ A per-line ``null`` (or a share left out) takes the default; a default of
 document trains, as before these settings existed. Counted in documents, as
 ``line_balance`` counts them: a long policy has many rows and is one example.
 
-The input-mode mix (50% OCR text and images, 20% corrupted OCR and images, 30%
-images only) is a separate setting: :data:`common.constants.MODALITY_MIX` is
-the global default, and the training config may override it with
-``modality_mix:``. Modes are drawn when the corpus is built, so the corpus
-records the mix it was drawn with and a run that wants another is refused
+The input-mode mix is a separate setting: :data:`common.constants.MODALITY_MIX`
+is the global default (50% OCR text and images, 20% corrupted OCR and images,
+30% images only - the ``standard`` format profile), and the training config may
+override it with ``modality_mix:``. The ``fast`` profile, shipped since
+2026-10-26, does: 25% / 5% / 70% images only (``format_profiles.fast`` in
+configs/training/unified.yaml). Modes are drawn when the corpus is built, so the
+corpus records the mix it was drawn with and a run that wants another is refused
 (:func:`assert_corpus_mix`).
 """
 
@@ -42,6 +50,8 @@ from common.constants import MODALITY_MIX, MODALITY_MODES
 log = logging.getLogger(__name__)
 
 SHARES = ("synthetic_fraction", "scanned_share")
+#: ``data_mix`` keys beside the shares (scope-wide only, never per line).
+TWIN_ROTATION = "twins_per_seed_per_epoch"
 
 
 class DataMixError(RuntimeError):
@@ -55,6 +65,8 @@ class MixSettings:
     synthetic_fraction: float | None = None
     scanned_share: float | None = None
     lines: dict[str, dict[str, float | None]] = field(default_factory=dict)
+    #: Twins of a seed per epoch, rotated (:func:`plan_twin_rotation`); None: all.
+    twins_per_seed_per_epoch: int | None = None
 
     def for_line(self, line: str) -> tuple[float | None, float | None]:
         entry = self.lines.get(line, {})
@@ -73,7 +85,8 @@ class MixSettings:
 
     def as_dict(self) -> dict[str, Any]:
         return {"synthetic_fraction": self.synthetic_fraction, "scanned_share": self.scanned_share,
-                "lines": {line: dict(entry) for line, entry in sorted(self.lines.items())}}
+                "lines": {line: dict(entry) for line, entry in sorted(self.lines.items())},
+                TWIN_ROTATION: self.twins_per_seed_per_epoch}
 
 
 def _share(value: Any, where: str) -> float | None:
@@ -89,9 +102,14 @@ def parse_settings(raw: dict[str, Any] | None, *, lines: frozenset[str] = frozen
     lines a per-line entry may name: a misspelt line would otherwise fall back
     to the defaults without a word."""
     raw = raw or {}
-    unknown = set(raw) - {*SHARES, "lines"}
+    unknown = set(raw) - {*SHARES, TWIN_ROTATION, "lines"}
     if unknown:
-        raise DataMixError(f"data_mix has unknown key(s) {sorted(unknown)}; expected {[*SHARES, 'lines']}")
+        raise DataMixError(f"data_mix has unknown key(s) {sorted(unknown)}; "
+                           f"expected {[*SHARES, TWIN_ROTATION, 'lines']}")
+    twins = raw.get(TWIN_ROTATION)
+    if twins is not None and (isinstance(twins, bool) or not isinstance(twins, int) or twins < 1):
+        raise DataMixError(f"data_mix.{TWIN_ROTATION} must be a whole number of twins of at least 1, "
+                           f"or null; got {twins!r}")
     per_line: dict[str, dict[str, float | None]] = {}
     for line, entry in (raw.get("lines") or {}).items():
         if lines and not set(str(line).split(",")) <= lines:
@@ -106,7 +124,8 @@ def parse_settings(raw: dict[str, Any] | None, *, lines: frozenset[str] = frozen
         per_line[key] = {k: share for k, v in entry.items()
                          if (share := _share(v, f"data_mix.lines.{line}.{k}")) is not None}
     return MixSettings(_share(raw.get("synthetic_fraction"), "data_mix.synthetic_fraction"),
-                       _share(raw.get("scanned_share"), "data_mix.scanned_share"), per_line)
+                       _share(raw.get("scanned_share"), "data_mix.scanned_share"), per_line,
+                       twins_per_seed_per_epoch=twins)
 
 
 def mix_settings() -> MixSettings:
@@ -325,3 +344,63 @@ def select_documents(rows: list[dict[str, Any]], settings: MixSettings, *, seed:
         if record[line].note:
             log.warning("data mix, %s: %s", line, record[line].note)
     return keep, record
+
+
+# --------------------------------------------------------------------------
+# Rotating the twins of a seed over the epochs
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class TwinRotation:
+    """Which twins rest in which epoch (``data_mix.twins_per_seed_per_epoch``)."""
+
+    per_seed: int = 0
+    #: epoch -> source_ids that do not train in it (the seed's other twins do).
+    rested: dict[int, set[str]] = field(default_factory=dict)
+    #: line -> seeds, twins, twins_per_epoch and the twins seen by the end of each epoch.
+    lines: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"enabled": True, "twins_per_seed_per_epoch": self.per_seed, "lines": self.lines}
+
+
+def plan_twin_rotation(rows: list[dict[str, Any]], per_seed: int, *, seed: int, epochs: int,
+                       line_of: Any) -> TwinRotation:
+    """``per_seed`` twins of every seed in each epoch, the next ones the next epoch.
+
+    A twin is a synthetic document's (line, family, twin_index): its renders
+    are one twin, and render rotation picks which of them trains. A seed's twins
+    are ordered by a seeded hash; epoch ``e`` takes ``per_seed`` of them from
+    position ``(e - 1) * per_seed`` on, wrapping, so every twin is seen within
+    ``ceil(twins / per_seed)`` epochs and a rebuild takes the same ones. Real
+    documents, and synthetic ones with no twin index, train every epoch.
+    ``rows`` are one epoch's train rows, after the shares chose the documents.
+    """
+    docs: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        docs.setdefault(str(row.get("source_id")), row)
+    twins: dict[tuple[str, str], dict[int, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for source_id, row in docs.items():
+        if row.get("synthetic") and row.get("twin_index") is not None:
+            family = str(row.get("group_id") or source_id)
+            twins[(line_of(row), family)][int(row["twin_index"])].append(source_id)
+    plan = TwinRotation(per_seed=per_seed, rested={e: set() for e in range(1, epochs + 1)})
+    for (line, family), by_index in sorted(twins.items()):
+        order = sorted(by_index, key=lambda t: (_hash(f"twin_rotation:{family}:{t}", seed), t))
+        k = min(per_seed, len(order))
+        record = plan.lines.setdefault(line, {"seeds": 0, "twins": 0, "twins_per_epoch": 0,
+                                              "twins_seen_by_epoch": {e: 0 for e in range(1, epochs + 1)}})
+        record["seeds"] += 1
+        record["twins"] += len(order)
+        record["twins_per_epoch"] += k
+        seen: set[int] = set()
+        for epoch in range(1, epochs + 1):
+            start = (epoch - 1) * k
+            chosen = {order[(start + i) % len(order)] for i in range(k)}
+            seen |= chosen
+            record["twins_seen_by_epoch"][epoch] += len(seen)
+            for index in order:
+                if index not in chosen:
+                    plan.rested[epoch].update(by_index[index])
+    return plan

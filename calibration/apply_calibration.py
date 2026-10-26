@@ -52,6 +52,11 @@ class CalibratedResult:
     fields: dict[str, CalibratedField] = field(default_factory=dict)
     overall_confidence: float = 0.0
     review_flags: list[str] = field(default_factory=list)
+    #: Each field's feature vector (``calibration.features.FieldFeatures``) by
+    #: its values-view path, where a feature calibrator scored it. Kept so the
+    #: text-dependent features can be computed again when a page's text arrives
+    #: after its fields were read from the image (``calibration.post_text``).
+    features: dict[str, Any] = field(default_factory=dict)
 
     @property
     def needs_review(self) -> bool:

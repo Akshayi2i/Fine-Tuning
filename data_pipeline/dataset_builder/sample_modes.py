@@ -21,6 +21,13 @@ epoch count or discarding anything.
 The corpus materializes four epoch files regardless of how many a run uses
 (§8.1), because the §11a epoch sweep tests up to four passes and a sweep that
 regenerates its own data is not comparing what it thinks it is.
+
+A three-epoch run reads the first three as its passes; the others are not
+wasted. With ``line_balance.distinct_repeats`` or ``hard_examples`` on, the
+adapter's view (``training.corpus_view``) fills a repeated document's extra
+copies in one epoch from the NEXT epoch files - the fourth included - so each
+copy has its own independently drawn mode and windows instead of being the
+same row again.
 """
 
 from __future__ import annotations
@@ -35,7 +42,9 @@ from common.constants import MODALITY_MIX, MODALITY_MODES
 
 log = logging.getLogger(__name__)
 
-#: Always materialized, whatever a given run uses (arch v2.1 §6.1).
+#: Always materialized, whatever a given run uses (arch v2.1 §6.1). A
+#: three-epoch run trains on the first three; the view's distinct repeats draw
+#: on all four (see the module docstring).
 EPOCH_FILES = 4
 
 #: Below this many draws the mix check only warns. A regime's realised share has

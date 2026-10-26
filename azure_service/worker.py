@@ -42,6 +42,13 @@ fields were served but whose full text fails for good ends ``done`` with
 On SIGTERM (a scale-in, a new revision) the worker takes no new job and makes
 its jobs visible again at once, for the next replica.
 
+**Retention for review is off by default** (:mod:`azure_service.retention`,
+decision 2026-10-26). Only for a tenant named in ``REVIEW_RETENTION_TENANTS``, a
+job that ends ``done`` flagged, below the confidence threshold or in the
+sample has its PDF, result and a manifest copied to ``REVIEW_CONTAINER`` before
+its PDF is deleted. A failed copy is logged and never fails the job; nothing
+of it shows in the job's status or result.
+
 **Nothing of a document is logged**: job ids, sizes, counts and timings only.
 """
 
@@ -103,7 +110,7 @@ class Worker:
     """Reads queued jobs fields first on one GPU; see the module's docstring."""
 
     def __init__(self, store: JobStore, queue_: JobQueue, runtime: ServingRuntime, settings: Any, *,
-                 webhooks: Any, links: Any = None, clock: Any = time.time) -> None:
+                 webhooks: Any, links: Any = None, clock: Any = time.time, retention: Any = None) -> None:
         from serving.fields_first import GpuTurns
 
         self.store = store
@@ -113,6 +120,8 @@ class Worker:
         self.webhooks = webhooks
         #: Page images published for the model to fetch (PAGE_IMAGES=link).
         self.links = links
+        #: :class:`azure_service.retention.ReviewRetention`, or None (the default: off).
+        self.retention = retention
         self.clock = clock
         self.turns = GpuTurns(settings.text_max_wait_s)
         self._text: queue.Queue[_Phase2] = queue.Queue()
@@ -228,6 +237,8 @@ class Worker:
         if record is None or record.get("status") in FINAL:
             # Deleted since, or a second delivery of a job already finished.
             self._delete(ref["job_id"], Lease(message))
+            if record is not None and record.get("status") == "done":
+                self._retain(record)         # a worker that died between `done` and its retention
             return
         job_id = record["job_id"]
         lease = Lease(message)
@@ -294,7 +305,9 @@ class Worker:
             self._assert_current(record, lease)
             # The checkpoint first: a restart from here on resumes phase 2.
             self.store.write_checkpoint(tenant, job_id, {
-                "answer": json.loads(json.dumps(dataclasses.asdict(result), default=str)),
+                # Not the calibrators: phase 2 takes them from the release (below), never a repr.
+                "answer": json.loads(json.dumps(dataclasses.asdict(dataclasses.replace(result, calibrated_with=None)),
+                                                default=str)),
                 "page_count": count,
                 "cited_texts": {str(page): text for page, text in fields["cited_texts"].items()},
             })
@@ -352,9 +365,14 @@ class Worker:
             result = restore_result(checkpoint["answer"])
             known = {int(page): text for page, text in (checkpoint.get("cited_texts") or {}).items()}
             pdf = self.store.read_pdf(tenant, job_id)
+            # The release's calibrators and thresholds, as phase 1 scored with: the
+            # result restored from its checkpoint does not carry them, and without
+            # them its confidence is not scored again on the full text.
+            reading = self.runtime.tenant(tenant).reading(record["lob"])
             full = add_full_text(pdf, result, name=record["document"], lob=record["lob"],
                                  reader=self.runtime.reader, pages_dir=folder / "pages",
-                                 page_count=int(checkpoint["page_count"]), turns=self.turns, known_texts=known)
+                                 page_count=int(checkpoint["page_count"]), turns=self.turns, known_texts=known,
+                                 calibrators=reading.calibrators, thresholds=reading.thresholds)
             now = self.clock()
             record.setdefault("timings_s", {}).update(full["timings_s"])
             record["timings_s"]["total"] = round(now - record["submitted"], 2)
@@ -449,10 +467,23 @@ class Worker:
     def _finish(self, record: dict[str, Any], lease: Lease, event: str) -> None:
         job_id = record["job_id"]
         self._delete(job_id, lease)
+        if event == "done":
+            self._retain(record)                 # before the PDF is deleted
         if not self.settings.keep_files:
             self.store.delete_transient(record["tenant"], job_id)
         self._clean_local(job_id)
         self.webhooks.notify(record, event)
+
+    def _retain(self, record: dict[str, Any]) -> None:
+        """Keep a finished job for review when its tenant is opted in and its result
+        calls for it (:mod:`azure_service.retention`; off by default). It never
+        fails or delays the job's end beyond the copy, and logs no content."""
+        if self.retention is None:
+            return
+        try:
+            self.retention.keep(self.store, record)
+        except Exception as exc:  # noqa: BLE001 - the job is done whatever happens here
+            log.warning("job %s: not retained for review (%s)", record.get("job_id"), type(exc).__name__)
 
     def _clean_local(self, job_id: str) -> None:
         if not self.settings.keep_files:
@@ -508,9 +539,10 @@ class Worker:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from azure_service.retention import review_retention
     from azure_service.runtime import load_runtime
     from azure_service.settings import Settings, SettingsError
-    from azure_service.store import job_queue, jobs_client, registry_client
+    from azure_service.store import blob_backend, job_queue, jobs_client, registry_client
     from azure_service.webhooks import WebhookSender
     from serving.vllm_entrypoint import ColdStartError
 
@@ -522,7 +554,17 @@ def main(argv: list[str] | None = None) -> int:
         log.error("not configured: %s", exc)
         return 2
     log.info("worker settings: %s", settings.describe())
-    jobs = jobs_client(settings)
+    backend = blob_backend(settings)
+    jobs = jobs_client(settings, backend)
+    # Retention for review: None unless REVIEW_RETENTION_TENANTS names a tenant (off by default).
+    retention = review_retention(settings, backend)
+    if retention is not None:
+        try:
+            retention.check()
+        except Exception as exc:  # noqa: BLE001 - extraction runs on; nothing is retained
+            log.error("retention for review is OFF: the review container %s cannot be written (%s)",
+                      settings.review_container, type(exc).__name__)
+            retention = None
     links = None
     if settings.images == "link":
         import socket
@@ -538,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     settings.work_dir.mkdir(parents=True, exist_ok=True)
     worker = Worker(JobStore(jobs), job_queue(settings), runtime, settings, webhooks=WebhookSender(settings),
-                    links=links)
+                    links=links, retention=retention)
 
     def stop(signum: int, _frame: Any) -> None:
         log.info("signal %d received", signum)

@@ -96,7 +96,11 @@ def test_a_wrong_code_costs_that_code_alone(name, index, code):
     assert full.metrics["false_null_rate"] == 0.0
     assert full.metrics["list_field_recall"] == 1.0
     assert full.metrics["coverage_code_accuracy"] == 0.75
-    assert full.metrics["auto_accept_error_rate"] == 0.0
+    # No accepted value is wrong: 0.0 where values were accepted; absent (not
+    # measured) for an answer served without calibrators, every value flagged.
+    assert full.metrics.get("auto_accept_error_rate", 0.0) == 0.0
+    # The code is the model's, not a reading: field match without codes is whole.
+    assert full.metrics["field_normalized_match_without_codes"] == 1.0
 
 
 @pytest.mark.parametrize("name", SOURCES)

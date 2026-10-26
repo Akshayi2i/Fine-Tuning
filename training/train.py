@@ -40,6 +40,7 @@ from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
 from common.adapter import ADAPTER
 from common.config import (
+    CONTINUED_DATA_KEYS,
     base_model_config,
     base_model_dir,
     base_model_source,
@@ -56,7 +57,7 @@ from registry_utils.models import (
     RunManifest,
     TrainingConfig,
 )
-from registry_utils.write_run_manifest import capture_git_commit, is_dirty_worktree, write_manifest
+from registry_utils.write_run_manifest import capture_git_commit, write_manifest
 from training.base_precision import manifest_descriptor, swift_quantization_args, technique
 from training.corpus_view import materialize
 
@@ -115,6 +116,34 @@ _ATTN_IMPL = {"flash_attention_2": "flash_attn"}
 #: Evaluations a run should get at least, so early checkpoints are saved and
 #: checkpoint selection has several to choose between.
 MIN_EVALUATIONS = 5
+
+#: ``batch`` keys that change a run's speed and never what it learns. Each is
+#: passed to ms-swift only when set; null leaves ms-swift's own default, which
+#: is what every run before them trained with. Left out of the run fingerprint.
+THROUGHPUT_KEYS = ("vit_gradient_checkpointing", "dataloader_num_workers", "per_device_eval_batch_size")
+
+
+def throughput_args(batch: dict[str, Any]) -> dict[str, Any]:
+    """The set throughput levers (:data:`THROUGHPUT_KEYS`), as ms-swift arguments.
+
+    Raises TrainingError on a value of the wrong kind, before anything is staged.
+    """
+    out: dict[str, Any] = {}
+    for key in THROUGHPUT_KEYS:
+        value = batch.get(key)
+        if value is None:
+            continue
+        if key == "vit_gradient_checkpointing":
+            ok = isinstance(value, bool)
+        else:
+            low = 0 if key == "dataloader_num_workers" else 1
+            ok = isinstance(value, int) and not isinstance(value, bool) and value >= low
+        if not ok:
+            want = "true or false" if key == "vit_gradient_checkpointing" else (
+                "a whole number >= " + ("0" if key == "dataloader_num_workers" else "1"))
+            raise TrainingError(f"batch.{key} is {value!r}; it must be {want}, or null for ms-swift's default")
+        out[key] = value
+    return out
 
 
 def _eval_interval(
@@ -241,6 +270,68 @@ def resumed_cadence(checkpoint: str | Path, evaluation: dict[str, Any]) -> dict[
     }
 
 
+def planned_steps(train_rows: int | None, effective_batch: int) -> int | None:
+    """Optimizer steps a run of ``train_rows`` rows takes; None when unknown."""
+    if not train_rows:
+        return None
+    return max(1, -(-int(train_rows) // max(1, int(effective_batch))))
+
+
+def keep_two_thirds_limit(total_steps: int, save_steps: int) -> int:
+    """The smallest ``save_total_limit`` that keeps the checkpoint nearest
+    two-thirds of a ``total_steps`` run that saves every ``save_steps``.
+
+    The trainer rotates the OLDEST checkpoints away, so the two-thirds one
+    survives when the limit covers every save from it to the end - ms-swift
+    saves the last step as well - plus one slot for the best-loss checkpoint
+    rotation also keeps, and one for a step count a save off this estimate.
+    Checkpoint selection scores that checkpoint as a candidate (evaluation.
+    checkpoint_eval), so rotation must never be what decides it is gone.
+    """
+    total, every = max(1, int(total_steps)), max(1, int(save_steps))
+    saves = list(range(every, total + 1, every))
+    if not saves or saves[-1] != total:
+        saves.append(total)
+    target = 2 * total / 3
+    nearest = min(saves, key=lambda step: (abs(step - target), step))
+    return sum(1 for step in saves if step >= nearest) + 2
+
+
+def _keep_two_thirds(args: dict[str, Any], total_steps: int | None) -> None:
+    """Raise ``args["save_total_limit"]`` to :func:`keep_two_thirds_limit`, never lower it."""
+    if not total_steps or not args.get("save_steps") or args.get("save_total_limit") is None:
+        return
+    needed = keep_two_thirds_limit(total_steps, int(args["save_steps"]))
+    if needed > int(args["save_total_limit"]):
+        log.info("save_total_limit %s -> %d, so the checkpoint nearest two-thirds of the run's %d "
+                 "steps is kept", args["save_total_limit"], needed, total_steps)
+        args["save_total_limit"] = needed
+
+
+def two_thirds_checkpoint(output_dir: str | Path) -> dict[str, Any] | None:
+    """The finished run's checkpoint nearest two-thirds of its final step.
+
+    ``{"final_step", "two_thirds_target", "two_thirds_step", "two_thirds_checkpoint"}``,
+    or None when the run left no checkpoint. Read from the checkpoint
+    directories of the most recent run under ``output_dir`` (ms-swift writes
+    ``output_dir/v<n>-<time>/checkpoint-<step>``), as checkpoint selection reads them.
+    """
+    import re
+
+    root = Path(output_dir)
+    found = [(int(m.group(1)), path) for path in root.rglob("checkpoint-*")
+             if path.is_dir() and (m := re.fullmatch(r"checkpoint-(\d+)", path.name))] if root.is_dir() else []
+    if not found:
+        return None
+    latest = max({path.parent for _, path in found}, key=lambda d: d.stat().st_mtime)
+    steps = sorted((step, path) for step, path in found if path.parent == latest)
+    final = steps[-1][0]
+    target = 2 * final / 3
+    step, path = min(steps, key=lambda item: (abs(item[0] - target), item[0]))
+    return {"final_step": final, "two_thirds_target": round(target, 1),
+            "two_thirds_step": step, "two_thirds_checkpoint": str(path)}
+
+
 #: Written beside the adapter checkpoints when ms-swift returns successfully.
 #: The pipeline's "trained" means this file, never the directory: ms-swift
 #: creates the directory when training STARTS, so a crashed run looked finished
@@ -252,14 +343,64 @@ def training_completed(output_dir: str | Path) -> bool:
     return (Path(output_dir) / TRAINING_COMPLETE).is_file()
 
 
-def mark_training_complete(output_dir: str | Path, run_id: str) -> None:
+def mark_training_complete(output_dir: str | Path, run_id: str,
+                           summary: dict[str, Any] | None = None) -> None:
+    """Write :data:`TRAINING_COMPLETE`, with ``summary`` (:func:`training_summary`) in it."""
     import json
     from datetime import UTC, datetime
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     (Path(output_dir) / TRAINING_COMPLETE).write_text(json.dumps({
-        "run_id": run_id, "completed_at": datetime.now(UTC).isoformat(),
+        **(summary or {}), "run_id": run_id, "completed_at": datetime.now(UTC).isoformat(),
     }), encoding="utf-8")
+
+
+def read_training_summary(output_dir: str | Path) -> dict[str, Any]:
+    """What :data:`TRAINING_COMPLETE` records (``two_thirds_step`` ...); {} without one."""
+    import json
+
+    try:
+        data = json.loads((Path(output_dir) / TRAINING_COMPLETE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def training_summary(output_dir: str | Path, *, lora_dropout: float | None = None) -> dict[str, Any]:
+    """What a finished run left on disk, for :data:`TRAINING_COMPLETE`.
+
+    The checkpoint nearest two-thirds of the final step (:func:`two_thirds_checkpoint`),
+    with a warning when rotation took the one that was nearer; and the dropout
+    the last checkpoint's ``adapter_config.json`` was saved with, against the
+    one the manifest records.
+    """
+    import json
+
+    summary: dict[str, Any] = dict(two_thirds_checkpoint(output_dir) or {})
+    if not summary:
+        log.warning("%s holds no checkpoint, so no two-thirds checkpoint could be recorded", output_dir)
+        return summary
+    final = Path(summary["two_thirds_checkpoint"]).parent / f"checkpoint-{summary['final_step']}"
+    try:
+        state = json.loads((final / "trainer_state.json").read_text(encoding="utf-8"))
+        save_steps = int(state.get("save_steps") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        save_steps = 0
+    if save_steps and abs(summary["two_thirds_step"] - summary["two_thirds_target"]) > save_steps:
+        log.warning("the checkpoint nearest two-thirds of the run (step ~%s) is gone: the nearest left "
+                    "is %s. save_total_limit rotated it away.", summary["two_thirds_target"],
+                    summary["two_thirds_step"])
+    try:
+        saved = json.loads((final / "adapter_config.json").read_text(encoding="utf-8"))
+        dropout = saved.get("lora_dropout") if isinstance(saved, dict) else None
+    except (OSError, ValueError):
+        dropout = None
+    if dropout is not None:
+        summary["adapter_lora_dropout"] = dropout
+        if lora_dropout is not None and _number(dropout) != _number(lora_dropout):
+            log.warning("the adapter was saved with lora_dropout %s, the manifest records %s",
+                        dropout, lora_dropout)
+    return summary
 
 
 RUN_FINGERPRINT = "run_fingerprint.json"
@@ -340,21 +481,33 @@ def _settings_hash() -> str | None:
     try:
         import yaml
 
-        from common.config import SHARED_SEQUENCE_CONFIG, SHARED_VISION_CONFIG, training_config
+        from common.config import (
+            BASE_MODEL_CONFIG,
+            SHARED_FORMAT_CONFIG,
+            SHARED_SEQUENCE_CONFIG,
+            SHARED_VISION_CONFIG,
+            training_config,
+        )
 
         cfg = json.loads(json.dumps(training_config(name), default=str))
         cfg.pop("distributed", None)
         batch = dict(cfg.get("batch") or {})
+        # The throughput levers too: they change how fast, never what is learned.
         for key in ("per_device_train_batch_size", "per_device_eval_batch_size",
-                    "gradient_accumulation_steps"):
+                    "gradient_accumulation_steps", *THROUGHPUT_KEYS):
             batch.pop(key, None)
         cfg["batch"] = batch
+        # The format profile (what a row looks like) and the base model (which
+        # weights, which precision) shape the run as much as the training file.
         shared = [yaml.safe_load(path.read_text(encoding="utf-8")) for path in
-                  (SHARED_VISION_CONFIG, SHARED_SEQUENCE_CONFIG)]
+                  (SHARED_VISION_CONFIG, SHARED_SEQUENCE_CONFIG, SHARED_FORMAT_CONFIG)]
+        base = yaml.safe_load(BASE_MODEL_CONFIG.read_text(encoding="utf-8")) or {}
+        # Where a pod keeps the weights, not which weights: resuming elsewhere is the point.
+        (base.get("model") or {}).pop("local_dir", None)
     except Exception as exc:  # noqa: BLE001 - a fingerprint must not stop a run from starting
         log.warning("the run fingerprint could not read the training settings: %s", exc)
         return None
-    body = json.dumps([cfg, shared], sort_keys=True, default=str)
+    body = json.dumps([cfg, shared, base], sort_keys=True, default=str)
     return hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -481,6 +634,8 @@ def build_training_config(
     resume_from: str | None = None,
     config_name: str | None = None,
     train_rows: int | None = None,
+    lora_dropout: float | None = None,
+    lora_dropout_choice: dict[str, Any] | None = None,
 ) -> tuple[SwiftConfig, TrainingConfig]:
     """Assemble the ms-swift arguments and the manifest's record of them.
 
@@ -490,10 +645,17 @@ def build_training_config(
     ``corpus_paths`` are the materialized epoch files, in order. The run reads the
     first ``num_train_epochs`` of them **once each** — see the epoch comment
     below for why ms-swift is told one epoch.
+
+    ``lora_dropout`` is the value :func:`resolve_lora_dropout` chose (and
+    ``lora_dropout_choice`` why); without it, the config's number, or for
+    ``auto`` with no corpus counted, the pilot-scale value.
     """
     base = base_model_config()
     cfg = training_config(config_name or ADAPTER.training_config)
     lora, batch = cfg["lora"], cfg["batch"]
+    if lora_dropout is None:
+        lora_dropout, default_choice = configured_dropout(lora)
+        lora_dropout_choice = lora_dropout_choice or default_choice
     # A run continuing an adapter trains with the config's continued_training
     # values where it sets them (fewer passes, a lower rate), else as a fresh run.
     opt = optimization_for(cfg, continuing=resume_from is not None)
@@ -553,7 +715,7 @@ def build_training_config(
         "train_type": "lora",
         "lora_rank": lora["rank"],
         "lora_alpha": lora["alpha"],
-        "lora_dropout": lora["dropout"],
+        "lora_dropout": lora_dropout,
         "target_modules": target_modules,
         "use_rslora": bool(lora.get("use_rslora", False)),
         # bf16 frozen base by default; 4-bit NF4 only when the config asks for it
@@ -582,6 +744,9 @@ def build_training_config(
         # GPUs = the configured effective batch (training_gpus, _accumulation_steps).
         "gradient_accumulation_steps": accumulation,
         "gradient_checkpointing": batch["gradient_checkpointing"],
+        # vit_gradient_checkpointing, dataloader_num_workers,
+        # per_device_eval_batch_size: only those the config sets.
+        **throughput_args(batch),
         "dataset_num_proc": max(1, min(int(batch.get("dataset_num_proc", 1)), os.cpu_count() or 1)),
         "bf16": batch["bf16"],
         "torch_dtype": "bfloat16" if batch["bf16"] else "float32",
@@ -636,6 +801,10 @@ def build_training_config(
         "report_to": "none",
         "seed": cfg["seed"],
     }
+    # Rotation must leave the checkpoint nearest two-thirds of the run for
+    # checkpoint selection, whatever save_total_limit says.
+    _keep_two_thirds(args, planned_steps(
+        train_rows, int(batch["per_device_train_batch_size"]) * accumulation * gpus))
 
     distributed = cfg.get("distributed", {})
     if deepspeed:
@@ -662,7 +831,8 @@ def build_training_config(
         base_quantization=manifest_descriptor(base),
         lora_rank=lora["rank"],
         lora_alpha=lora["alpha"],
-        lora_dropout=lora["dropout"],
+        lora_dropout=lora_dropout,
+        lora_dropout_choice=lora_dropout_choice,
         bias=lora["bias"],
         learning_rate=opt["learning_rate"],
         lr_scheduler=opt["lr_scheduler_type"],
@@ -750,7 +920,8 @@ def optimization_for(cfg: dict[str, Any], *, continuing: bool) -> dict[str, Any]
     opt = dict(cfg["optimization"])
     if continuing:
         for key, value in (cfg.get("continued_training") or {}).items():
-            if value is not None:
+            # Rehearsal's keys choose the data (training.corpus_view), not the optimizer.
+            if value is not None and key not in CONTINUED_DATA_KEYS:
                 opt[key] = value
     return opt
 
@@ -770,10 +941,11 @@ def build_manifest(
 ) -> RunManifest:
     """Build the run manifest. Written to Blob even while weights are staged."""
     base = base_model_config()["model"]
-    if is_dirty_worktree():
+    dirty, diff_sha256 = worktree_state()
+    if dirty:
         log.warning(
             "the working tree has uncommitted changes, so code_git_commit does not fully "
-            "describe what ran — this run is not exactly reproducible."
+            "describe what ran — this run is not exactly reproducible (diff sha256 %s).", diff_sha256
         )
 
     return RunManifest(
@@ -793,6 +965,8 @@ def build_manifest(
             base_model=f"{base['model_id']}@{base['revision']}",
             corpus_version=corpus_version,
             code_git_commit=capture_git_commit(),
+            code_dirty=dirty,
+            code_diff_sha256=diff_sha256,
             mineru_version=corpus_manifest.get("mineru_version"),
             ocr_device=corpus_manifest.get("ocr_device"),
             schema_version=str(corpus_manifest.get("schema_versions", {})),
@@ -802,6 +976,63 @@ def build_manifest(
         data_stats=data_stats,
         artifacts=Artifacts(status="staged", staging_path=staging_path),
         status="training",
+    )
+
+
+#: The repository this code runs from: the tree whose state a run records.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: Set to 1 to train on a working tree with uncommitted changes: what
+#: ``--allow-dirty`` does for a run started through the pipeline.
+ALLOW_DIRTY_ENV = "FIDEON_ALLOW_DIRTY_TREE"
+
+
+def worktree_state() -> tuple[bool | None, str | None]:
+    """``(dirty, sha256 of the changes)`` of the code's git working tree.
+
+    The changes are ``git diff HEAD`` (staged or not) and the names of the
+    untracked files git does not ignore - by name only, not their contents.
+    ``(False, None)`` on a clean tree, ``(None, None)`` where git cannot be
+    read (a tarball on a pod): unknown, which the manifest records as such.
+    """
+    import hashlib
+    import subprocess
+
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", *args], cwd=REPO_ROOT, capture_output=True, timeout=30,
+                              check=True).stdout
+
+    try:
+        status = git("status", "--porcelain")
+        if not status.strip():
+            return False, None
+        digest = hashlib.sha256(git("diff", "HEAD", "--binary"))
+        digest.update(b"\0untracked\0" + git("ls-files", "--others", "--exclude-standard"))
+    except Exception:  # noqa: BLE001 - no git, not a repository, a timeout: unknown
+        return None, None
+    return True, digest.hexdigest()
+
+
+def assert_clean_tree(allow_dirty: bool = False) -> None:
+    """Refuse a real run on a working tree with uncommitted changes.
+
+    ``code_git_commit`` names a commit; with changes on top of it, the run's
+    code is not that commit and cannot be checked out again. ``allow_dirty``
+    (``--allow-dirty``, or :data:`ALLOW_DIRTY_ENV`) trains anyway, said, and
+    the manifest records ``code_dirty`` and the diff's hash.
+    """
+    dirty, digest = worktree_state()
+    if not dirty:
+        return
+    if allow_dirty or os.environ.get(ALLOW_DIRTY_ENV) == "1":
+        log.warning("training on a working tree with uncommitted changes (diff sha256 %s), as asked; "
+                    "the manifest records it", digest)
+        return
+    raise TrainingError(
+        f"the working tree at {REPO_ROOT} has uncommitted changes, so the run's code would not be "
+        "the commit its manifest names, and the run could not be reproduced. Commit them, or pass "
+        f"--allow-dirty ({ALLOW_DIRTY_ENV}=1 for a pipeline run) to train anyway: the manifest "
+        "then records code_dirty and the hash of the changes."
     )
 
 
@@ -863,6 +1094,7 @@ def train(
     tenant_id: str | None = None,
     parent_run_id: str | None = None,
     fresh_reason: str | None = None,
+    allow_dirty: bool = False,
 ) -> tuple[SwiftConfig, RunManifest]:
     """Configure and launch one training run.
 
@@ -882,10 +1114,13 @@ def train(
         dry_run: assemble and record everything without launching.
         tenant_id: whose corpus to read. Omitting it reads the default tenant's
             files, which for any other tenant do not exist — or worse, do.
+        allow_dirty: train on a working tree with uncommitted changes, which a
+            real run otherwise refuses (:func:`assert_clean_tree`).
     """
     validate_all(require_pinned_revision=not dry_run)
     if not dry_run:
         assert_on_pod()
+        assert_clean_tree(allow_dirty)
     if train_vit:
         # Refused, not attempted. The LoRA targets are the decoder's projection
         # names; Qwen3-VL's vision blocks use different ones, and ms-swift only
@@ -910,8 +1145,10 @@ def train(
     except DataMixError as exc:
         raise TrainingError(str(exc)) from exc
     # The run reads a VIEW of the corpus (training.corpus_view): its policy rows,
-    # with line balance and render rotation applied.
-    view = materialize(corpus_version, client, tenant_id=tenant_id)
+    # with line balance and render rotation applied - and, for a continued run,
+    # rehearsal; the parent (or promoted) run's validation errors pick the hard examples.
+    view = materialize(corpus_version, client, tenant_id=tenant_id,
+                       parent_run_id=parent_run_id if continue_from else None, out_version=out_version)
     from common.adapter import AdapterError, assert_one_output_shape
     from training.corpus_view import trained_lobs
 
@@ -938,7 +1175,11 @@ def train(
         # model card.
         "data_mix": {"settings": view.mix_settings, "lines": view.data_mix,
                      "rested_documents": view.rested_documents,
-                     "render_rotation": view.render_rotation},
+                     "render_rotation": view.render_rotation,
+                     # Empty when off: which documents were new and which old
+                     # ones each epoch rehearsed; twins per epoch; hard examples.
+                     "rehearsal": view.rehearsal, "twin_rotation": view.twin_rotation,
+                     "hard_examples": view.hard_examples, "line_balance": view.line_balance},
         "examples_by_line": view.examples_by_line,
     }
     data_stats = data_stats.model_copy(update=update)
@@ -971,6 +1212,15 @@ def train(
             f"{list(ADAPTER.doc_types)} to fill a validation split."
         )
 
+    # lora.dropout: a number as it is; auto from this corpus at a run from the
+    # base, the parent adapter's own at a continued one.
+    dropout, dropout_choice = resolve_lora_dropout(
+        training_config(ADAPTER.training_config)["lora"],
+        train_lines=view.examples_by_line.get("train"), continue_from=continue_from,
+        parent_run_id=parent_run_id, client=client, dry_run=dry_run)
+    if dropout_choice["source"] != "config":
+        log.info("lora_dropout %s (%s: %s)", dropout, dropout_choice["source"], dropout_choice.get("reason"))
+
     # Built against the Blob keys first: this is where the epoch count and every
     # other configuration error surfaces, still before any download.
     swift, recorded = build_training_config(
@@ -981,6 +1231,8 @@ def train(
         deepspeed=deepspeed,
         resume_from=continue_from,
         train_rows=train_rows,
+        lora_dropout=dropout,
+        lora_dropout_choice=dropout_choice,
     )
 
     # Before the manifest is rewritten and every page image is staged: a resume
@@ -1020,7 +1272,10 @@ def train(
         )
         swift.args["dataset"] = staged.epoch_files
         swift.args["val_dataset"] = [staged.val_path]
-        _assert_rows_fit(swift, [*staged.epoch_files, staged.val_path], staged.output_caps)
+        lengths = _assert_rows_fit(swift, [*staged.epoch_files, staged.val_path], staged.output_caps,
+                                   groups=staged.groups, stats_files=staged.epoch_files)
+        # The rows' lengths and the answer tokens per section group, on the manifest.
+        data_stats = data_stats.model_copy(update={"token_stats": lengths.summary()})
         _assert_masking(staged.epoch_files, swift)
 
     # Only the epochs this run uses. Four files are always materialized because
@@ -1067,6 +1322,8 @@ def train(
                 log.info("resuming on the run's own checkpoint cadence (this pod's would be "
                          "otherwise): %s", changed)
             swift.args.update(cadence)
+        # ...and still never rotating away the two-thirds checkpoint.
+        _keep_two_thirds(swift.args, planned_steps(train_rows, int(recorded.effective_batch_size)))
         log.info("resuming the unfinished run from %s", resumed)
 
 
@@ -1135,13 +1392,18 @@ def _assert_masking(files: list[str], swift: SwiftConfig) -> None:
 
 
 def _assert_rows_fit(
-    swift: SwiftConfig, files: list[str], output_caps: dict[str, list[int]] | None = None
-) -> None:
+    swift: SwiftConfig, files: list[str], output_caps: dict[str, list[int]] | None = None,
+    *, groups: dict[str, list[str]] | None = None, stats_files: list[str] | None = None,
+):
     """Refuse the run before launch if any staged row is over ``max_length``.
 
     Under strict encoding such a row stops the run when the trainer reaches it,
     possibly hours in. Measured here instead, with the real tokenizer and the
     real resize rule, it stops the run before any GPU time is spent on it.
+
+    Returns the :class:`~training.length_check.LengthReport`: the rows of
+    ``stats_files`` (the epoch files) as a length histogram and supervised
+    tokens per section group (``groups``, as staging records them).
     """
     from training.length_check import measure
 
@@ -1152,8 +1414,16 @@ def _assert_rows_fit(
         min_pixels=int(swift.env["MIN_PIXELS"]),
         max_pixels=int(swift.env["MAX_PIXELS"]),
         output_caps=output_caps,
+        groups=groups,
+        stats_files=stats_files,
     )
     log.info("length check: %d row(s), longest %d tokens", report.rows, report.longest)
+    summary = report.summary()
+    log.info("supervised tokens per group: %s", {
+        group: f"{counts['tokens']} ({counts['share']:.0%})"
+        for group, counts in summary["supervised_by_group"].items()})
+    for warning in report.warnings():
+        log.warning("length check: %s", warning)
     if not report.ok:
         worst = sorted(report.over, key=lambda o: -int(o["tokens"]))[:5]
         raise TrainingError(
@@ -1163,6 +1433,7 @@ def _assert_rows_fit(
             "these rows — fix it (cap_check) and rebuild, rather than letting the trainer "
             "reach them."
         )
+    return report
 
 
 #: Statuses a run can be overwritten from: one that never finished.
@@ -1220,6 +1491,122 @@ def assert_checkpoint_path(continue_from: str, *, must_exist: bool = False) -> N
             )
 
 
+def _number(value: Any) -> float | None:
+    return None if isinstance(value, bool) or not isinstance(value, (int, float)) else float(value)
+
+
+#: ``lora.dropout: auto`` (:func:`resolve_lora_dropout`).
+AUTO_DROPOUT = "auto"
+#: Real (not synthetic) training documents every line needs for the lower rate.
+AUTO_DROPOUT_MIN_REAL_DOCUMENTS = 200
+AUTO_DROPOUT_LARGE_CORPUS = 0.05
+AUTO_DROPOUT_SMALL_CORPUS = 0.10
+
+
+def is_auto_dropout(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() == AUTO_DROPOUT
+
+
+def configured_dropout(lora: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    """The config's dropout with no corpus to count: its number as it is, or
+    for ``auto`` the pilot-scale rate. Raises TrainingError on anything else."""
+    value = lora.get("dropout")
+    if is_auto_dropout(value):
+        return AUTO_DROPOUT_SMALL_CORPUS, {
+            "configured": AUTO_DROPOUT, "chosen": AUTO_DROPOUT_SMALL_CORPUS, "source": "default",
+            "reason": "no corpus was counted; auto falls back to the pilot-scale rate"}
+    number = _number(value)
+    if number is None or not 0.0 <= number < 1.0:
+        raise TrainingError(f"lora.dropout is {value!r}; it must be a number in [0, 1) or {AUTO_DROPOUT!r}")
+    return value, {"configured": value, "chosen": value, "source": "config"}
+
+
+def auto_dropout(train_lines: dict[str, dict[str, int]] | None) -> tuple[float, str]:
+    """The rate ``auto`` chooses for a run from the base, and why: 0.05 when
+    every line the run trains has at least 200 real training documents, else
+    0.10 (the config's own rule). ``train_lines`` is the view's
+    ``examples_by_line["train"]``: line -> {"documents", "real", "synthetic", "rows"}.
+    """
+    floor = AUTO_DROPOUT_MIN_REAL_DOCUMENTS
+    real = {line: int((counts or {}).get("real") or 0) for line, counts in (train_lines or {}).items()}
+    if not real:
+        return AUTO_DROPOUT_SMALL_CORPUS, "no trained line was counted"
+    short = {line: n for line, n in sorted(real.items()) if n < floor}
+    if short:
+        listed = ", ".join(f"{line} {n}" for line, n in sorted(short.items(), key=lambda kv: kv[1])[:5])
+        return AUTO_DROPOUT_SMALL_CORPUS, (
+            f"{len(short)} of {len(real)} trained line(s) have fewer than {floor} real training "
+            f"documents ({listed}{', ...' if len(short) > 5 else ''})")
+    return AUTO_DROPOUT_LARGE_CORPUS, (
+        f"every trained line has at least {floor} real training documents (fewest: {min(real.values())})")
+
+
+def parent_dropout(continue_from: str, parent_run_id: str | None = None,
+                   client: BlobClient | None = None) -> tuple[float | None, str]:
+    """The dropout the adapter a run continues was saved with, and where it was read.
+
+    Its ``adapter_config.json`` first - ms-swift trains a continued adapter
+    with that value whatever the command says - else its run's manifest
+    (a dry run, where the pod's volume is not visible).
+    """
+    import json
+
+    path = Path(continue_from.strip().rstrip("/\\")) / "adapter_config.json"
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = None
+    value = _number(saved.get("lora_dropout")) if isinstance(saved, dict) else None
+    if value is not None:
+        return value, f"saved in {path}"
+    if parent_run_id and client is not None:
+        from registry_utils.query_registry import RegistryQueryError
+        from registry_utils.query_registry import get as get_manifest
+
+        try:
+            return float(get_manifest(parent_run_id, client).training_config.lora_dropout), (
+                f"recorded on {parent_run_id}'s run manifest")
+        except (RegistryQueryError, KeyError, FileNotFoundError, ValueError):
+            pass
+    return None, f"neither {path} nor the parent run's manifest gives it"
+
+
+def resolve_lora_dropout(
+    lora: dict[str, Any],
+    *,
+    train_lines: dict[str, dict[str, int]] | None,
+    continue_from: str | None = None,
+    parent_run_id: str | None = None,
+    client: BlobClient | None = None,
+    dry_run: bool = False,
+) -> tuple[Any, dict[str, Any]]:
+    """The LoRA dropout a run trains with, and the record of why.
+
+    A number in the config is used as it is. ``auto``: a run continuing an
+    adapter keeps the adapter's own value (ms-swift would anyway, and so a
+    cycle never stops continuing over it); a run from the base chooses from
+    its corpus (:func:`auto_dropout`). Recorded on the manifest
+    (``training_config.lora_dropout`` and ``lora_dropout_choice``).
+    """
+    if not is_auto_dropout(lora.get("dropout")):
+        return configured_dropout(lora)
+    if continue_from:
+        inherited, where = parent_dropout(continue_from, parent_run_id, client)
+        if inherited is not None:
+            return inherited, {"configured": AUTO_DROPOUT, "chosen": inherited, "source": "parent",
+                               "reason": f"continues an adapter saved at {inherited} ({where})"}
+        if not dry_run:
+            raise TrainingError(
+                f"lora.dropout is auto and the run continues {continue_from!r}, whose dropout cannot "
+                f"be read ({where}). ms-swift would train with the adapter's own value, which the "
+                "manifest could not record."
+            )
+    value, reason = auto_dropout(train_lines)
+    if continue_from:
+        reason = f"the parent's value is not readable from here (a dry run); {reason}"
+    return value, {"configured": AUTO_DROPOUT, "chosen": value, "source": "corpus", "reason": reason}
+
+
 def adapter_config_mismatch(adapter_config: dict[str, Any], lora: dict[str, Any]) -> str | None:
     """The first LoRA setting an adapter was saved with that the config does not
     give it, or None when they agree.
@@ -1233,17 +1620,23 @@ def adapter_config_mismatch(adapter_config: dict[str, Any], lora: dict[str, Any]
 
     ``adapter_config`` is the parsed ``adapter_config.json`` (PEFT's names);
     ``lora`` is the training config's ``lora`` block.
+
+    ``dropout: auto`` asks for the adapter's own dropout on a continued run
+    (:func:`resolve_lora_dropout`), so any value it was saved with agrees -
+    as long as it was saved with one.
     """
     import math
 
-    def number(value: Any) -> float | None:
-        return None if isinstance(value, bool) or not isinstance(value, (int, float)) else float(value)
-
+    auto = is_auto_dropout(lora.get("dropout"))
     for key, wanted in (("r", lora["rank"]), ("lora_alpha", lora["alpha"]),
                         ("lora_dropout", lora["dropout"])):
         if adapter_config.get(key) is None:
             return f"{key} is missing from the adapter, {wanted} in the config"
-        have, want = number(adapter_config[key]), number(wanted)
+        have, want = _number(adapter_config[key]), _number(wanted)
+        if auto and key == "lora_dropout":
+            if have is None:
+                return f"{key} is {adapter_config[key]!r} in the adapter, not a number"
+            continue
         if have is None or want is None or not math.isclose(have, want, rel_tol=1e-9, abs_tol=1e-9):
             return f"{key} is {adapter_config[key]} in the adapter, {wanted} in the config"
     # Missing means PEFT's default, which is what from_pretrained would train with.
@@ -1335,7 +1728,12 @@ def launch_and_record(
     manifest.status = "trained"
     write_manifest(manifest, client)
     if manifest.artifacts and manifest.artifacts.staging_path:
-        mark_training_complete(manifest.artifacts.staging_path, manifest.run_id)
+        # The checkpoint nearest two-thirds of the run (checkpoint selection's
+        # candidate) and the dropout the adapter was saved with, beside the marker.
+        recorded = getattr(manifest, "training_config", None)
+        summary = training_summary(manifest.artifacts.staging_path,
+                                   lora_dropout=getattr(recorded, "lora_dropout", None))
+        mark_training_complete(manifest.artifacts.staging_path, manifest.run_id, summary)
     return manifest
 
 
@@ -1386,6 +1784,252 @@ def trainer_environment(environ: Any) -> dict[str, str]:
     }
 
 
+# --------------------------------------------------------------------------
+# Benchmark mode (--benchmark-steps): time a few steps, change one lever, repeat
+# --------------------------------------------------------------------------
+
+#: Written into :func:`benchmark_dir` by :func:`benchmark`.
+BENCHMARK_FILE = "benchmark.json"
+
+#: Training arguments a timing run has no use for: no evaluation, no checkpoint.
+_BENCHMARK_DROPPED = ("val_dataset", "save_steps", "eval_steps", "save_total_limit")
+
+
+def benchmark_dir(out_version: str) -> Path:
+    """Where a benchmark for ``out_version`` writes: beside the runs' staging,
+    never inside a run's own directory, so no checkpoint search ever sees it."""
+    return Path(paths.staging_root()) / "benchmarks" / ADAPTER.name / out_version
+
+
+def benchmark_args(steps: int) -> dict[str, Any]:
+    """What turns the training command into a timing run of ``steps`` optimizer steps."""
+    return {"max_steps": int(steps), "save_strategy": "no", "eval_strategy": "no",
+            "logging_steps": 1, "load_best_model_at_end": False}
+
+
+def read_step_log(path: str | Path) -> list[dict[str, Any]]:
+    """The entries of ms-swift's ``logging.jsonl``; unreadable lines are skipped."""
+    import json
+
+    entries = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def step_timings(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Seconds per optimizer step from ms-swift's per-step log (``logging_steps: 1``).
+
+    ms-swift logs ``global_step/max_steps`` ("7/30") and ``train_speed(iter/s)``,
+    the steps so far over the seconds since training began - so a step's
+    elapsed time is its number over that speed, and a step's own time the
+    difference from the step before. The first step carries the trainer's
+    start-up and is reported apart (``first_step``). ``memory(GiB)`` gives
+    the peak; ``train_runtime`` (the trainer's last log) the whole run.
+    """
+    elapsed: dict[int, float] = {}
+    peak: float | None = None
+    runtime: float | None = None
+    for entry in entries:
+        memory = _number(entry.get("memory(GiB)"))
+        if memory is not None:
+            peak = memory if peak is None else max(peak, memory)
+        if _number(entry.get("train_runtime")) is not None:
+            runtime = float(entry["train_runtime"])
+        speed = _number(entry.get("train_speed(iter/s)"))
+        try:
+            step = int(str(entry.get("global_step/max_steps", "")).split("/")[0])
+        except ValueError:
+            continue
+        if step > 0 and speed:
+            elapsed[step] = step / speed
+    ordered = sorted(elapsed.items())
+    per_step = [(t2 - t1) / (s2 - s1) for (s1, t1), (s2, t2) in zip(ordered, ordered[1:], strict=False)]
+    return {"first_step": ordered[0][1] / ordered[0][0] if ordered else None, "per_step": per_step,
+            "logged_steps": len(ordered), "peak_memory_gib": peak, "train_runtime": runtime}
+
+
+def _percentile(values: list[float], percent: int) -> float | None:
+    """Nearest-rank percentile (``percent`` a whole number); None for no values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = -(-percent * len(ordered) // 100)          # ceil, in integers
+    return ordered[min(len(ordered), max(1, rank)) - 1]
+
+
+def suggest_next_experiment(batch: dict[str, Any], *, peak_memory_gib: float | None,
+                            gpu_memory_gib: float | None) -> str:
+    """The next lever of the measurement plan (configs/training/unified.yaml,
+    ``batch``), one at a time: vision-tower checkpointing off, then two rows per
+    device if memory leaves room, then dataloader workers."""
+    if batch.get("vit_gradient_checkpointing") is not False:
+        return ("set batch.vit_gradient_checkpointing: false (the vision tower is frozen, so "
+                "recomputing its activations buys little memory) and benchmark again")
+    headroom = (peak_memory_gib is None or gpu_memory_gib is None
+                or peak_memory_gib <= 0.55 * gpu_memory_gib)
+    if int(batch.get("per_device_train_batch_size") or 1) == 1 and headroom:
+        return ("set batch.per_device_train_batch_size: 2 (gradient accumulation halves on its own, "
+                f"the effective batch stays {batch.get('effective_batch_size')}) and benchmark again; "
+                "keep it only if peak memory stays under ~90% of the card")
+    workers = batch.get("dataloader_num_workers")
+    if not workers:
+        return "set batch.dataloader_num_workers: 4 and benchmark again; then 8"
+    if int(workers) < 8:
+        return "set batch.dataloader_num_workers: 8 and benchmark again"
+    return ("every lever of the measurement plan is set: compare the benchmark.json files and keep "
+            "each lever that lowered the median step time by more than the p90-median spread")
+
+
+def _gpu_memory_gib() -> float | None:
+    """One visible GPU's memory, where torch sees one."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+    except Exception:  # noqa: BLE001 - no torch, no GPU: not known
+        pass
+    return None
+
+
+def benchmark_result(
+    swift: SwiftConfig, timings: dict[str, Any], lengths: Any, *, batch: dict[str, Any],
+    steps: int, wall_seconds: float | None = None, gpu_memory_gib: float | None = None,
+) -> dict[str, Any]:
+    """What :data:`BENCHMARK_FILE` holds: step time (median, p90), tokens/s,
+    peak memory, the row-length histogram, supervised tokens per group, the
+    levers it ran with, and the next lever to try.
+
+    Tokens per step are estimated: the effective batch's rows at the staged
+    rows' mean length (the rows are drawn at random, so the mean is fair).
+    """
+    import statistics
+
+    per_step = list(timings.get("per_step") or [])
+    median = statistics.median(per_step) if per_step else None
+    if median is None and timings.get("train_runtime") and steps:
+        median = float(timings["train_runtime"]) / steps          # no per-step log: the mean
+    summary = lengths.summary() if lengths is not None else {}
+    rows_per_step = (int(swift.args["per_device_train_batch_size"])
+                     * int(swift.args["gradient_accumulation_steps"])
+                     * max(1, int(swift.env.get("NPROC_PER_NODE") or 1)))
+    tokens_per_step = rows_per_step * int(summary.get("mean_tokens") or 0) or None
+    peak = timings.get("peak_memory_gib")
+    dirty, diff = worktree_state()
+    return {
+        "steps": steps,
+        "step_seconds": {"median": median, "p90": _percentile(per_step, 90),
+                         "mean": statistics.fmean(per_step) if per_step else None,
+                         "first_step": timings.get("first_step"), "timed_steps": len(per_step)},
+        "rows_per_step": rows_per_step,
+        "tokens_per_step_estimated": tokens_per_step,
+        "tokens_per_second_estimated": round(tokens_per_step / median, 1) if tokens_per_step and median else None,
+        "peak_memory_gib": peak,
+        "gpu_memory_gib": gpu_memory_gib,
+        "wall_seconds": wall_seconds,
+        "train_runtime": timings.get("train_runtime"),
+        "levers": {key: swift.args.get(key) for key in (
+            "per_device_train_batch_size", "gradient_accumulation_steps", "gradient_checkpointing",
+            *THROUGHPUT_KEYS, "padding_free", "max_length")},
+        "gpus": int(swift.env.get("NPROC_PER_NODE") or 1),
+        "length_histogram": summary.get("length_histogram", {}),
+        "histogram_bucket_tokens": summary.get("histogram_bucket_tokens"),
+        "supervised_by_group": summary.get("supervised_by_group", {}),
+        "supervised_tokens": summary.get("supervised_tokens"),
+        "code": {"commit": capture_git_commit(), "dirty": dirty, "diff_sha256": diff},
+        "next_experiment": suggest_next_experiment(batch, peak_memory_gib=peak, gpu_memory_gib=gpu_memory_gib),
+    }
+
+
+def benchmark(
+    *,
+    corpus_version: str,
+    out_version: str,
+    client: BlobClient,
+    steps: int,
+    continue_from: str | None = None,
+    parent_run_id: str | None = None,
+    dry_run: bool = False,
+    tenant_id: str | None = None,
+) -> dict[str, Any]:
+    """Time ``steps`` optimizer steps of the run ``out_version`` would be, on
+    its staged corpus, and write :data:`BENCHMARK_FILE` under :func:`benchmark_dir`.
+
+    The training command the run would launch, with ``--max_steps``, no
+    evaluation and no checkpoint (:func:`benchmark_args`): no manifest is
+    written, no version reserved, nothing selected. A dirty working tree is
+    allowed - measuring one lever at a time means editing the config between
+    benchmarks - and recorded in the file. A dry run returns the command.
+    """
+    import json
+    import time
+
+    if steps < 1:
+        raise TrainingError(f"--benchmark-steps must be at least 1, got {steps}")
+    validate_all(require_pinned_revision=not dry_run)
+    if not dry_run:
+        assert_on_pod()
+    view = materialize(corpus_version, client, tenant_id=tenant_id,
+                       parent_run_id=parent_run_id if continue_from else None, out_version=out_version)
+    cfg = training_config(ADAPTER.training_config)
+    epochs = int(optimization_for(cfg, continuing=continue_from is not None)["num_train_epochs"])
+    if continue_from:
+        assert_checkpoint_path(continue_from, must_exist=not dry_run)
+        if not dry_run:
+            assert_adapter_matches_config(continue_from)
+    dropout, choice = resolve_lora_dropout(
+        cfg["lora"], train_lines=view.examples_by_line.get("train"), continue_from=continue_from,
+        parent_run_id=parent_run_id, client=client, dry_run=dry_run)
+    root = benchmark_dir(out_version)
+    swift, _recorded = build_training_config(
+        corpus_paths=list(view.epoch_files), output_dir=str(root / "run"), resume_from=continue_from,
+        train_rows=sum(view.rows_by_epoch.get(e, 0) for e in range(1, epochs + 1)),
+        lora_dropout=dropout, lora_dropout_choice=choice)
+    for key in _BENCHMARK_DROPPED:
+        swift.args.pop(key, None)
+    swift.args.update(benchmark_args(steps))
+    if dry_run:
+        log.info("dry run - the benchmark would launch: %s", " ".join(swift.to_cli()))
+        return {"dry_run": True, "argv": swift.to_cli(), "steps": steps}
+
+    from training.stage_data import prune_image_caches, stage_training_data
+
+    prune_image_caches(paths.staging_train_images_dir(corpus_version, tenant_id))
+    staged = stage_training_data(
+        view.epoch_files[:len(swift.args["dataset"])], None, client, root / "data",
+        images_root=paths.staging_train_images_dir(corpus_version, tenant_id),
+        max_pixels=int(swift.env["MAX_PIXELS"]),
+    )
+    swift.args["dataset"] = staged.epoch_files
+    lengths = _assert_rows_fit(swift, staged.epoch_files, staged.output_caps, groups=staged.groups)
+    _assert_masking(staged.epoch_files, swift)
+
+    started = time.monotonic()
+    launch(swift)
+    wall = round(time.monotonic() - started, 1)
+    logs = sorted((root / "run").rglob("logging.jsonl"), key=lambda p: p.stat().st_mtime)
+    timings = step_timings(read_step_log(logs[-1])) if logs else step_timings([])
+    if not logs:
+        log.warning("ms-swift wrote no logging.jsonl under %s: no step times to read", root / "run")
+    result = benchmark_result(swift, timings, lengths, batch=dict(cfg["batch"]), steps=steps,
+                              wall_seconds=wall, gpu_memory_gib=_gpu_memory_gib())
+    result.update({"corpus_version": corpus_version, "out_version": out_version,
+                   "log": str(logs[-1]) if logs else None})
+    root.mkdir(parents=True, exist_ok=True)
+    (root / BENCHMARK_FILE).write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+    seconds = result["step_seconds"]
+    print(f"\nbenchmark ({steps} steps): median {seconds['median']} s/step, p90 {seconds['p90']}, "
+          f"~{result['tokens_per_second_estimated']} tokens/s, peak {result['peak_memory_gib']} GiB"
+          f"\n  written: {root / BENCHMARK_FILE}\n  next experiment: {result['next_experiment']}\n")
+    return result
+
+
 def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin CLI
     parser = argparse.ArgumentParser(description="Train the policy adapter LoRA")
     parser.add_argument("--corpus", required=True)
@@ -1395,15 +2039,26 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     parser.add_argument("--continue-from", default=None, help="a checkpoint DIRECTORY, not a run-id")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--tenant", default=None, help="whose corpus to read; defaults from env")
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="train on a working tree with uncommitted changes (recorded on the manifest)")
+    parser.add_argument("--benchmark-steps", type=int, default=None, metavar="N",
+                        help="time N optimizer steps on the staged corpus instead of training: no "
+                             "checkpoint, no evaluation, no manifest; writes benchmark.json")
     args = parser.parse_args(list(argv) if argv is not None else None)
     # On the pod, run detached in tmux: a closed laptop must not stop this job.
     from orchestration.detach import detach_module_if_needed
 
-    if detach_module_if_needed('training.train', argv):
+    if detach_module_if_needed('training.train', argv,
+                               hint="train-benchmark" if args.benchmark_steps else None):
         return 0
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     client = BlobClient()
+    if args.benchmark_steps is not None:
+        benchmark(corpus_version=args.corpus, out_version=args.out_version, client=client,
+                  steps=args.benchmark_steps, continue_from=args.continue_from,
+                  dry_run=args.dry_run, tenant_id=args.tenant)
+        return 0
     corpus_manifest = client.read_json(paths.corpus_manifest(args.corpus, args.tenant))
     counts = corpus_manifest.get("example_counts", {})
     train(
@@ -1421,6 +2076,7 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
         continue_from=args.continue_from,
         dry_run=args.dry_run,
         tenant_id=args.tenant,
+        allow_dirty=args.allow_dirty,
     )
 
     return 0

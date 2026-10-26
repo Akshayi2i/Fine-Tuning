@@ -93,9 +93,11 @@ def write_adapter(client: BlobClient, version: str, **config) -> None:
     from common.config import training_config
 
     lora = training_config("unified")["lora"]
+    # PEFT saves a number; under `auto`, the rate a small corpus is given.
+    dropout = 0.1 if lora["dropout"] == "auto" else lora["dropout"]
     blob_dir = paths.scoped_adapter_dir("policy", version)
     client.write_json(f"{blob_dir}/adapter_config.json", {
-        "r": lora["rank"], "lora_alpha": lora["alpha"], "lora_dropout": lora["dropout"],
+        "r": lora["rank"], "lora_alpha": lora["alpha"], "lora_dropout": dropout,
         "bias": lora["bias"], "use_rslora": bool(lora.get("use_rslora")),
         "target_modules": list(lora["target_modules"]), **config})
     client.write_bytes(f"{blob_dir}/adapter_model.safetensors", b"weights")
@@ -200,10 +202,12 @@ def test_a_parent_whose_adapter_is_not_in_blob_is_not_continued(released, contro
         None, f"policy-v1's adapter is not in Blob at {adapter} (no {gone})")
 
 
-@pytest.mark.parametrize("saved", [{"lora_dropout": 0.05}, {"use_rslora": True}, {"bias": "all"}])
+@pytest.mark.parametrize("saved", [{"use_rslora": True}, {"bias": "all"}])
 def test_a_parent_saved_with_other_lora_settings_is_not_continued(released, controller, saved):
-    """ms-swift continues an adapter with the settings it was saved with: a
-    dropout or rsLoRA change in the config would never apply to it."""
+    """ms-swift continues an adapter with the settings it was saved with: an
+    rsLoRA or bias change in the config would never apply to it. (Nor would a
+    numeric dropout change; the shipped `dropout: auto` keeps the parent's,
+    tests/test_review_training_engine.py.)"""
     write_adapter(released, "v1", **saved)
     parent, why = continuation(make_context(released, controller, out_version="v2"))
     assert parent is None
@@ -377,7 +381,10 @@ def test_the_shipped_config_trains_a_continued_run_as_a_fresh_one_until_measured
     from training.train import optimization_for
 
     cfg = training_config("unified")
-    assert cfg["continued_training"] == {"num_train_epochs": None, "learning_rate": None}
+    assert cfg["continued_training"] == {"num_train_epochs": None, "learning_rate": None,
+                                         # Rehearsal off: every document trains every epoch.
+                                         "rehearsal_old_share": None,
+                                         "rehearsal_weight_by_line_errors": False}
     assert optimization_for(cfg, continuing=True) == cfg["optimization"]
 
 
@@ -427,6 +434,8 @@ def _as_if_on_the_pod(monkeypatch, tmp_path):
 
     monkeypatch.setenv(T.OFF_POD_ENV, "1")
     monkeypatch.setenv("RUNPOD_VOLUME_MOUNT", str(tmp_path))
+    # A pod's clean checkout, whatever state this one is in (a real run refuses a dirty tree).
+    monkeypatch.setattr(T, "worktree_state", lambda: (False, None))
     monkeypatch.setattr(T, "_masking_encoder", lambda swift: _stub_masking_encoder())
     monkeypatch.setattr(T, "_token_counter", lambda: _stub_tokens)
     monkeypatch.setattr(T, "validate_all", lambda **_kw: None)
@@ -542,11 +551,12 @@ def _gate(evidence, **kwargs):
 def test_a_continued_run_that_lost_no_ground_passes():
     from evaluation.gating import LineEvidence
 
+    # 30 documents a line: the fewest a line is gated on (decision 2026-10-26).
     result = _gate(LineEvidence(compared=[
-        _compared("auto", [0.90] * 6, [0.90] * 6),
-        _compared("wc", [0.90] * 6, [0.95] * 6),
-        # A drop inside the margin (DEFAULT_DELTA), on every document alike.
-        _compared("homeowners", [0.90] * 6, [0.889] * 6),
+        _compared("auto", [0.90] * 30, [0.90] * 30),
+        _compared("wc", [0.90] * 30, [0.95] * 30),
+        # A drop inside the margin (LINE_PARENT_MARGIN), on every document alike.
+        _compared("homeowners", [0.90] * 30, [0.889] * 30),
     ], chain=["policy-v2", "policy-v1"]))
     assert result.passed, result.report()
     assert [v["line"] for v in result.line_verdicts] == ["auto", "homeowners", "wc"]
@@ -554,11 +564,11 @@ def test_a_continued_run_that_lost_no_ground_passes():
 
 
 def test_a_line_that_fell_beyond_the_margin_blocks_a_continued_run():
-    from evaluation.gating import DEFAULT_DELTA, LineEvidence
+    from evaluation.gating import LINE_PARENT_MARGIN, LineEvidence
 
-    assert DEFAULT_DELTA == 0.015
-    result = _gate(LineEvidence(compared=[_compared("auto", [0.95] * 6, [0.90] * 6),
-                                          _compared("wc", [0.90] * 6, [0.90] * 6)]))
+    assert LINE_PARENT_MARGIN == 0.015
+    result = _gate(LineEvidence(compared=[_compared("auto", [0.95] * 30, [0.90] * 30),
+                                          _compared("wc", [0.90] * 30, [0.90] * 30)]))
     assert result.failed_gates == ["line:auto"]
     [reason] = result.blocking_reasons
     assert "auto is not non-inferior to policy-v1" in reason and "0.9500 -> 0.9000" in reason
@@ -567,11 +577,12 @@ def test_a_line_that_fell_beyond_the_margin_blocks_a_continued_run():
 
 def test_a_drop_on_one_document_of_a_line_still_counts():
     """Paired over the line's documents: one document losing a third of its
-    values is not averaged away by five that held."""
+    values is not averaged away by the others that held."""
     from evaluation.gating import LineEvidence
 
-    result = _gate(LineEvidence(compared=[_compared(
-        "auto", [0.9, 0.8, 0.95, 0.7, 0.9, 0.85], [0.6, 0.8, 0.95, 0.7, 0.9, 0.85])]))
+    before = [0.9, 0.8, 0.95, 0.7, 0.9, 0.85] * 5
+    after = [0.6, *before[1:]]
+    result = _gate(LineEvidence(compared=[_compared("auto", before, after)]))
     assert result.failed_gates == ["line:auto"]
 
 
@@ -607,14 +618,21 @@ def test_a_continued_run_with_nothing_to_compare_against_is_blocked():
 
 
 def test_lines_with_too_few_documents_are_named_and_not_compared():
+    """Under 30 shared documents a line is warned, not gated (decision
+    2026-10-26); a line sharing none is named apart."""
     from evaluation.gating import LINE_MIN_DOCUMENTS, LineEvidence
 
-    assert LINE_MIN_DOCUMENTS == 5
-    result = _gate(LineEvidence(thin={"auto": 4, "wc": 0}))
+    assert LINE_MIN_DOCUMENTS == 30
+    result = _gate(LineEvidence(compared=[_compared("auto", [0.95] * 4, [0.60] * 4)],
+                                thin={"wc": 0}))
     assert result.passed, result.report()
-    assert any("fewer than 5 real documents" in w and "auto (4), wc (0)" in w
+    assert any("fewer than 30 real documents" in w and "auto (4, minimum detectable drop" in w
                for w in result.warnings), result.warnings
-    assert any("no line had 5 or more real documents" in w for w in result.warnings), result.warnings
+    assert any("no real document of the line scored in both reports" in w and "wc (0)" in w
+               for w in result.warnings), result.warnings
+    assert any("no line had 30 or more real documents" in w for w in result.warnings), result.warnings
+    [verdict] = result.line_verdicts
+    assert verdict["status"] == "warned" and verdict["non_inferior"] is None
 
 
 def test_a_run_from_the_base_is_not_held_to_a_parent():
@@ -710,20 +728,27 @@ def _reports(client, **by_version: dict) -> None:
 ROOTED = {"policy-v2": "policy-v1", "policy-v1": None}
 
 
-def test_each_line_is_held_to_its_best_since_the_run_from_the_base(client, controller, monkeypatch):
-    """Slow drift: auto slipped under δ each cycle (0.95, 0.94, 0.93), which the
-    parent alone would pass; held to the best since the base, it blocks."""
+def test_each_line_is_held_to_its_parent_and_to_the_run_from_the_base(client, controller, monkeypatch):
+    """Decision 2026-10-26: the reference is the PARENT, and the run from the
+    base is the cumulative-drift reference. auto slipped 0.01 a cycle (0.95,
+    0.94, 0.93): within the parent margin, and 0.02 in all, within the drift
+    margin, so it passes - the drift check blocks once the losses pass 0.03."""
     from evaluation.gating import promotion_gate
 
     ctx = _chain_context(client, controller, monkeypatch, ROOTED)
-    _reports(client, v1=_report({"auto": [0.95] * 6, "wc": [0.80] * 6}),
-             v2=_report({"auto": [0.94] * 6, "wc": [0.85] * 6}),
-             v3=_report({"auto": [0.93] * 6, "wc": [0.85] * 6}))
+    _reports(client, v1=_report({"auto": [0.95] * 30, "wc": [0.80] * 30}),
+             v2=_report({"auto": [0.94] * 30, "wc": [0.85] * 30}),
+             v3=_report({"auto": [0.93] * 30, "wc": [0.85] * 30}))
     evidence, why = line_evidence(ctx, "policy-v2")
     assert why is None and evidence.chain == ["policy-v2", "policy-v1"]
-    assert {c.line: c.reference for c in evidence.compared} == {"auto": "policy-v1", "wc": "policy-v2"}
+    assert {c.line: c.reference for c in evidence.compared} == {"auto": "policy-v2", "wc": "policy-v2"}
+    assert evidence.drift_reference == "policy-v1" and evidence.drift_reference_is_fresh
+    assert {c.line: c.reference for c in evidence.drift} == {"auto": "policy-v1", "wc": "policy-v1"}
     result = promotion_gate(_metrics(), None, continued_from="policy-v2", line_evidence=evidence)
-    assert result.failed_gates == ["line:auto"]
+    assert result.passed, result.report()
+    assert {(v["line"], v["check"], v["held_to"]) for v in result.line_verdicts} == {
+        ("auto", "parent", "policy-v2"), ("wc", "parent", "policy-v2"),
+        ("auto", "drift", "policy-v1"), ("wc", "drift", "policy-v1")}
 
 
 def test_on_a_tie_the_nearer_run_is_held_to(client, controller, monkeypatch):
@@ -781,14 +806,20 @@ def test_the_chain_stops_where_a_manifest_cannot_be_read_and_never_loops(client,
 
 
 def test_a_line_with_too_few_shared_documents_is_named_not_compared(client, controller, monkeypatch):
+    """Every line sharing a document is passed on, with its documents; the gate
+    decides it has too few to gate (decision 2026-10-26) and warns."""
+    from evaluation.gating import promotion_gate
+
     ctx = _chain_context(client, controller, monkeypatch, ROOTED)
     _reports(client, v1=_report({"auto": [0.9] * 4}), v2=_report({"auto": [0.9] * 4}),
              v3=_report({"auto": [0.9] * 6, "wc": [0.9] * 6}))
     evidence, _why = line_evidence(ctx, "policy-v2")
-    assert evidence.compared == []
-    assert evidence.thin == {"auto": 4}
+    assert [(c.line, len(c.candidate_scores)) for c in evidence.compared] == [("auto", 4)]
+    assert evidence.thin == {}
     # wc is new: nothing before it scored it, so it is added, not thin.
     assert evidence.added == ["wc"] and evidence.dropped == []
+    result = promotion_gate(_metrics(), None, continued_from="policy-v2", line_evidence=evidence)
+    assert result.passed and {v["status"] for v in result.line_verdicts} == {"warned"}
 
 
 def test_lines_the_parent_s_release_served_and_the_candidate_does_not_are_dropped(
@@ -826,8 +857,8 @@ def test_a_continued_cycle_that_held_every_line_is_released(released, controller
 def test_a_continued_cycle_that_lost_a_line_is_blocked_at_the_gate(released, controller):
     report, decision = _continued_v2_gate(
         released, controller,
-        parent=_report({"auto": [0.95] * 6}, policy=200),
-        candidate=_report({"auto": [0.90] * 6}, policy=200))
+        parent=_report({"auto": [0.95] * 30}, policy=200),
+        candidate=_report({"auto": [0.90] * 30}, policy=200))
     assert report.blocked_at == "evaluation_gate"
     assert "line:auto" in decision["failed_gates"]
     assert any("auto is not non-inferior to policy-v1" in r for r in decision["blocking_reasons"])

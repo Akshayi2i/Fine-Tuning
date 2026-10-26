@@ -175,8 +175,10 @@ def test_promote_needs_a_version_and_a_name():
 
 
 def test_promote_rolls_back_to_an_older_release(client, controller, monkeypatch, capsys):
-    """v2 replaced v1 at package; promoting v1 by name puts it back and
-    archives v2. Both run manifests follow, so the registry shows v1 is live."""
+    """v2 replaced v1; promoting v1 by name puts it back and archives v2. Both
+    run manifests follow, so the registry shows v1 is live. A rollback needs no
+    shadow check and no --accept-interim (decision 2026-10-26): it was accepted
+    once, and a rollback is usually urgent - these dry-run releases are interim."""
     from registry_utils.query_registry import get
 
     _released(client, controller, "v1", "v2")
