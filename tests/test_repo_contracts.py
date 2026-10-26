@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CODE_PACKAGES = (
     "common", "artifact_registry", "registry_utils", "data_pipeline", "inference_core",
     "training", "evaluation", "calibration", "serving", "postprocessing", "testing",
-    "orchestration", "pilot",
+    "orchestration", "pilot", "azure_service",
 )
 
 

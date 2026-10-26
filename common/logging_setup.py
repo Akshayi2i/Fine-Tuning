@@ -21,7 +21,7 @@ FORMAT = "%(levelname)s %(name)s %(message)s"
 OWN_PACKAGES = frozenset({
     "artifact_registry", "calibration", "common", "data_pipeline", "evaluation", "inference_core",
     "orchestration", "pilot", "postprocessing", "registry_utils", "scripts", "serving", "testing",
-    "training",
+    "training", "azure_service",
 })
 
 _level = logging.INFO

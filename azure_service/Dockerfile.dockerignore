@@ -1,0 +1,25 @@
+# The build context of azure_service/Dockerfile (BuildKit reads <Dockerfile>.dockerignore; keep .dockerignore at the root the same).
+# Everything is left out but the code the image copies: the repository's working tree
+# holds client documents and labels that must never be sent to a builder.
+*
+!pyproject.toml
+!common/
+!artifact_registry/
+!registry_utils/
+!data_pipeline/
+!inference_core/
+!calibration/
+!serving/
+!postprocessing/
+!evaluation/
+!orchestration/
+!scripts/__init__.py
+!scripts/served_adapter.py
+!configs/
+!schemas/
+!prompts/
+!azure_service/
+**/__pycache__
+**/*.pyc
+**/*.pdf
+**/.env

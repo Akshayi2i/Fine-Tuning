@@ -46,7 +46,7 @@ import copy
 import logging
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
@@ -162,7 +162,8 @@ def verify_fields(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, 
 
 def read_fields(pdf: bytes, *, name: str, lob: str, source_id: str, model: Any, reader: Any, pages_dir: Path,
                 classifier: Any, calibration: Any, publish_pages: Any = None,
-                turns: GpuTurns | None = None, verify: bool = True) -> dict[str, Any]:
+                turns: GpuTurns | None = None, verify: bool = True,
+                extract_options: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Phase 1: the pages rendered, the model reading their images, and the
     fields held to the pages they cite (:func:`verify_fields`).
 
@@ -172,7 +173,9 @@ def read_fields(pdf: bytes, *, name: str, lob: str, source_id: str, model: Any, 
     pages the fields cite have no text, so that nothing could be checked -
     ``served`` is None and ``verified`` False: nothing is served before the full
     text. ``verify=False`` serves the answer unchecked, flagged
-    ``fields:unverified`` - for timing tests only.
+    ``fields:unverified`` - for timing tests only. ``extract_options`` go to
+    :func:`serving.pipeline.extract` as they are: the release's calibrators and
+    thresholds, the serving thresholds.
     """
     from serving.pipeline import ExtractionRequest, extract
 
@@ -188,7 +191,8 @@ def read_fields(pdf: bytes, *, name: str, lob: str, source_id: str, model: Any, 
             source_id=source_id, image_paths=read["images"], page_texts={}, modality_mode="image_only",
             known_doc_type="policy", known_lob=lob, source_file_name=name,
         )
-        result = extract(request, model, classifier, calibration, strict_schema=False)
+        result = extract(request, model, classifier, calibration, strict_schema=False,
+                         **dict(extract_options or {}))
         answered = time.perf_counter()
         checked: dict[str, Any] | None = None
         served: Any = None

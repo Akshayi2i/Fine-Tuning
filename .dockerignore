@@ -1,0 +1,24 @@
+# The repository's build context, for any builder that reads only a root .dockerignore
+# (az acr build, the classic builder): the same list as azure_service/Dockerfile.dockerignore.
+*
+!pyproject.toml
+!common/
+!artifact_registry/
+!registry_utils/
+!data_pipeline/
+!inference_core/
+!calibration/
+!serving/
+!postprocessing/
+!evaluation/
+!orchestration/
+!scripts/__init__.py
+!scripts/served_adapter.py
+!configs/
+!schemas/
+!prompts/
+!azure_service/
+**/__pycache__
+**/*.pyc
+**/*.pdf
+**/.env

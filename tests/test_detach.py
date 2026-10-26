@@ -92,6 +92,11 @@ QUICK = {
     "scripts/check_section_builder.py", "scripts/served_adapter.py",
 }
 
+#: The Azure service's processes: each is its container's main process, so it
+#: must stay in the foreground - a detach would end the container at once and
+#: Container Apps would restart it in a loop. They never run on the pod.
+CONTAINER_MAINS = {"azure_service/api.py", "azure_service/worker.py"}
+
 
 def _entry_points() -> list[Path]:
     found = []
@@ -110,7 +115,7 @@ def test_every_entry_point_is_either_detached_or_known_to_be_quick():
     for path in _entry_points():
         rel = path.relative_to(ROOT).as_posix()
         text = path.read_text(encoding="utf-8")
-        if rel in QUICK:
+        if rel in QUICK or rel in CONTAINER_MAINS:
             continue
         if not any(name in text for name in ("detach_module_if_needed", "detach_script_if_needed")):
             unguarded.append(rel)

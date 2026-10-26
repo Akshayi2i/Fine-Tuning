@@ -309,6 +309,28 @@ def classifier_for(classifier: Any, model: Any, plan: Any, *, detect_lob: bool) 
     return built
 
 
+def load_release_calibration(release: Any, client: BlobClient) -> ReleaseRuntime:
+    """A release's fitted calibrators and thresholds, read from Blob; no adapter.
+
+    Also what the Azure worker (azure_service.runtime) serves with: the pod's
+    vLLM applies the adapter there, by name.
+    """
+    from calibration.feature_calibrator import CalibratorSet
+    from calibration.thresholds import ThresholdSet
+
+    runtime = ReleaseRuntime(release_id=release.release_id)
+    if release.calibrators and client.exists(release.calibrators):
+        body = client.read_json(release.calibrators)
+        runtime.calibrators = CalibratorSet.from_dict(body["calibrators"])
+        runtime.thresholds = ThresholdSet.from_dict(body["thresholds"])
+    else:
+        log.warning(
+            "release %s has no calibrators at %s; its fields are served with the v1 fallback",
+            release.release_id, release.calibrators,
+        )
+    return runtime
+
+
 def load_release_runtimes(
     plan: Any,
     client: BlobClient,
@@ -326,23 +348,11 @@ def load_release_runtimes(
     is applied as its LoRA. The adapter is copied from Blob to ``adapter_root``
     once, here.
     """
-    from calibration.feature_calibrator import CalibratorSet
-    from calibration.thresholds import ThresholdSet
-
     served = list(plan.served)
     as_lora = serves_base_with_loras(plan)
     runtimes: dict[str, ReleaseRuntime] = {}
     for release in served:
-        runtime = ReleaseRuntime(release_id=release.release_id)
-        if release.calibrators and client.exists(release.calibrators):
-            body = client.read_json(release.calibrators)
-            runtime.calibrators = CalibratorSet.from_dict(body["calibrators"])
-            runtime.thresholds = ThresholdSet.from_dict(body["thresholds"])
-        else:
-            log.warning(
-                "release %s has no calibrators at %s; its fields are served with the v1 fallback",
-                release.release_id, release.calibrators,
-            )
+        runtime = load_release_calibration(release, client)
         if as_lora:
             if not release.adapter_dir:
                 raise ColdStartError(
