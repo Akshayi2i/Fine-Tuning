@@ -73,6 +73,7 @@ def _extract(client, backend) -> None:
     )
 
 
+@pytest.mark.format_profile("standard")
 def test_the_longest_answers_are_sent_first_and_otherwise_as_planned():
     pending = [("decl", [1, 2, 3, 4, 5]), ("arrays", [1, 2, 3]), ("arrays", [3, 4]),
                ("lineblk", [1, 2, 3, 4, 5]), ("decl", [6, 7])]
@@ -81,6 +82,7 @@ def test_the_longest_answers_are_sent_first_and_otherwise_as_planned():
     assert _send_order(pending, "policy") == [3, 1, 2, 0, 4]
 
 
+@pytest.mark.format_profile("standard")
 def test_a_policy_goes_in_one_call_longest_first_and_each_answer_keeps_its_window(client, monkeypatch):
     merged: list[tuple[str, list[int], dict]] = []
     real_merge = policy_merge.merge_policy_windows

@@ -49,9 +49,33 @@ def _compact_auto():
     return gold
 
 
+def _request_of(content) -> str:
+    """A window's own request: under the fast format profile the group's block,
+    the user turn's last text (every group of a window shares the system prompt
+    and the pages there); none under the standard one."""
+    text = content if isinstance(content, str) else "".join(
+        part.get("text", "") for part in content if isinstance(part, dict))
+    at = text.rfind("\n\n# Request: ")
+    return text[at:] if at >= 0 else ""
+
+
+def _replay_key(row) -> tuple:
+    """The key :class:`_Replay` finds a training row's window by."""
+    return (row["messages"][0]["content"], _request_of(row["messages"][1]["content"]), tuple(row["window_pages"]))
+
+
+def _full_answer(row) -> dict:
+    """A training row's target in the full ``raw``/``parsed``/``page_ref`` form,
+    whichever form the row was written in (a fast-profile row is compact); the
+    pipeline reads a full answer as it is."""
+    from common.canonical import expand_answer
+
+    return expand_answer(json.loads(row["messages"][-1]["content"]))
+
+
 class _Replay(ModelBackend):
     """Answers a window with the target training built for it, found by the
-    window's system prompt and page markers."""
+    window's system prompt, its own request and its page markers."""
 
     def __init__(self, answers):
         self.answers = answers
@@ -62,7 +86,7 @@ class _Replay(ModelBackend):
 
     def generate(self, messages, config, adapter=None) -> Generation:
         pages = tuple(int(n) for n in re.findall(r"<page (\d+) of", json.dumps(messages[1]["content"])))
-        key = (messages[0]["content"], pages)
+        key = (messages[0]["content"], _request_of(messages[1]["content"]), pages)
         self.asked.append(key)
         text = self.answers[key]
         tokens = [text[i:i + 4] for i in range(0, len(text), 4)]
@@ -87,8 +111,7 @@ def _serve_replay(gold, pages, lob="personal_auto", *, strict=False, edit=None):
     doc = SourceDocument(source_id="pa_1", doc_type="policy", golden_label=gold, ocr_pages=texts,
                          image_paths=images, lob=lob, tenant_id="default")
     rows, _ = expand_document(doc, "train", modes=("ocr_plus_image",))
-    answers = {(r["messages"][0]["content"], tuple(r["window_pages"])): r["messages"][-1]["content"]
-               for r in rows}
+    answers = {_replay_key(r): r["messages"][-1]["content"] for r in rows}
     if edit is not None:
         answers = {key: edit(answer) for key, answer in answers.items()}
     backend = _Replay(answers)
@@ -165,6 +188,7 @@ def test_the_served_answer_carries_what_the_pipeline_supplies():
                 and re.search(r"(unit_id|applies_to|coverage_code|limit_type|ref)", f)]
 
 
+@pytest.mark.format_profile("standard")
 def test_a_link_its_window_could_not_see_is_lost_but_the_rows_are_not():
     """Vehicles on page 2, their coverages on pages 4-5: two schedule windows.
     Each coverage is served, without the vehicle it applies to - the cost the
@@ -351,6 +375,7 @@ def test_the_every_key_fill_adds_no_annotation_keys(lob):
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.format_profile("standard")
 def test_the_ceiling_counts_links_apart_from_values(no_window_overlap):
     from evaluation.windowing_ceiling import ceiling, oracle
 

@@ -40,7 +40,9 @@ from calibration.list_completeness import (
 from calibration.logprob_confidence import field_confidences
 from common.canonical import (
     collapse_spans,
+    compact_schema,
     envelope,
+    expand_answer,
     is_field_value,
     values_view,
     with_output_dates,
@@ -49,6 +51,7 @@ from common.canonical import (
 )
 from common.constants import DEFAULT_REVIEW_CONFIDENCE_THRESHOLD
 from common.full_text import build_text_sections, text_coverage
+from common.prompts import fast_layout
 from common.schemas import (
     is_canonical,
     is_common_model,
@@ -61,7 +64,7 @@ from common.schemas import (
 )
 from inference_core.input_builder import EMPTY_PAGE_TEXT, build_messages
 from inference_core.model_runner import Generation, LoadedModel, generate, generate_batch
-from inference_core.span_map import SpanMapError, map_field_spans
+from inference_core.span_map import SpanMapError, map_compact_field_spans, map_field_spans
 from serving.adapter_router import Route, RoutingError, route
 from serving.doc_type_classifier import Classifier
 
@@ -345,6 +348,10 @@ def _build_request(
         )
         if getattr(model.config, "structured_outputs", False) else None
     )
+    if schema is not None and built.answer_format is not None:
+        # The fast profile's compact answer (configs/shared/format.yaml): the
+        # same schema, its envelopes written {"r", "v", "p"}, as trained.
+        schema = compact_schema(schema)
     return built.messages, schema
 
 
@@ -357,7 +364,7 @@ def _window_answer_cap(group: str, doc_type: str | None) -> int:
 
 
 def _parse_generation(
-    result: Generation, route_: Route, *, refuse_truncated: bool = False
+    result: Generation, route_: Route, *, refuse_truncated: bool = False, compact: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """``(extraction, spans)`` from one generation, or :class:`PipelineError`.
 
@@ -369,6 +376,13 @@ def _parse_generation(
     even when what was cut still parses. A window can afford that: it is retried
     over fewer pages. Parsing a truncated answer as complete would drop every
     row after the cut with nothing to say so.
+
+    ``compact``: the answer is in the fast profile's compact form
+    (``common.canonical.to_compact_answer``). It is expanded to the full
+    envelope here, and its spans keyed as the full form's
+    (``span_map.map_compact_field_spans``), so nothing after this - the shape
+    check, the page check, the merge, the printed-values check, calibration -
+    ever sees the compact form.
     """
     if refuse_truncated and result.truncated():
         raise PipelineError(
@@ -387,7 +401,11 @@ def _parse_generation(
             # JSON object, so this is the same generation failure as unparseable
             # output and is reported as one.
             raise TypeError(f"expected a JSON object, got {type(extraction).__name__}")
-        spans = map_field_spans(result.text, result.tokens, result.token_logprobs)
+        if compact:
+            spans = map_compact_field_spans(result.text, result.tokens, result.token_logprobs)
+            extraction = expand_answer(extraction)
+        else:
+            spans = map_field_spans(result.text, result.tokens, result.token_logprobs)
     except (ValueError, TypeError, SpanMapError) as exc:
         raise PipelineError(
             f"the model did not return parseable JSON for {route_.schema_doc_type}: "
@@ -513,10 +531,15 @@ def _extract_policy_windows(
         for window in plan_windows(lob, every_page, declarations_page, None if image_only else texts)
     ]
     shapes = {group: _section_shapes(route_, lob, group) for group in {window.group for window in plan}}
+    # Which groups answer compact: all of them under the fast profile
+    # (common.prompts.fast_layout), none otherwise.
+    compact = {group: fast_layout(route_.schema_doc_type, route_.schema_acord_form, lob, group)
+               for group in shapes}
 
     def settle(window: _Planned, result: Any, attempt: int) -> _Settled:
         return _settle(request.source_id, route_, window, result, attempt,
-                       declarations_page=declarations_page, shapes=shapes[window.group])
+                       declarations_page=declarations_page, shapes=shapes[window.group],
+                       compact=compact[window.group])
 
     def window_request(group: str, pages: list[int]) -> tuple[Any, ...]:
         return (*_build_request(
@@ -598,12 +621,14 @@ PAGE_REF_OUTSIDE_WINDOW_FLAG = "page_ref_outside_window"
 
 def _settle(source_id: str, route_: Route, window: _Planned, result: Any, attempt: int, *,
             declarations_page: int | None = None,
-            shapes: Mapping[str, str] | None = None) -> _Settled:
+            shapes: Mapping[str, str] | None = None, compact: bool = False) -> _Settled:
     """What one window's answer comes to (see :func:`_extract_policy_windows`).
 
     ``shapes`` is the JSON type each section of the window's schema must be
     (:func:`_section_shapes`); an answer giving another is refused as one that
-    does not parse is.
+    does not parse is. ``compact``: the answer is in the fast profile's compact
+    form, expanded to full envelopes before anything reads it
+    (:func:`_parse_generation`).
     """
     from serving.policy_merge import PolicyWindow
 
@@ -611,7 +636,7 @@ def _settle(source_id: str, route_: Route, window: _Planned, result: Any, attemp
     try:
         if isinstance(result, Exception):
             raise PipelineError(str(result))
-        extraction, spans = _parse_generation(result, route_, refuse_truncated=True)
+        extraction, spans = _parse_generation(result, route_, refuse_truncated=True, compact=compact)
         _check_section_shapes(extraction, shapes or {}, route_)
     except PipelineError as exc:
         if len(pages) > 1:
@@ -860,8 +885,28 @@ def _send_order(pending: list[Any], doc_type: str | None) -> list[int]:
     the short ones instead of after them. The validation orders its calls the
     same way (evaluation.validation_generation), by the gold answer's length,
     which serving does not have. A wrong guess costs speed, never an answer.
+
+    Under the fast format profile every group reads the same windows, and a
+    window's requests share every token up to their group block: they go
+    together, so the engine admits them one after another and each after the
+    first finds the pages' prefill in the prefix cache, not evicted by the time
+    the window's last group comes round. Windows in the same order as above -
+    the one with the largest reservation among its groups, then more pages -
+    and within a window its groups by their reservation.
     """
+    from common.config import fast_profile
+
     caps = {window[0]: _window_answer_cap(window[0], doc_type) for window in pending}
+    if doc_type == "policy" and fast_profile():
+        widest: dict[tuple[int, ...], int] = {}
+        for group, pages, *_rest in pending:
+            widest[tuple(pages)] = max(widest.get(tuple(pages), 0), caps[group])
+
+        def by_window(position: int) -> tuple[Any, ...]:
+            group, pages = pending[position][0], tuple(pending[position][1])
+            return (-widest[pages], -len(pages), pages, -caps[group])
+
+        return sorted(range(len(pending)), key=by_window)
     return sorted(range(len(pending)),
                   key=lambda position: (-caps[pending[position][0]], -len(pending[position][1])))
 

@@ -202,6 +202,7 @@ def test_a_row_carries_the_documents_page_markers():
     assert "<page 1 of 1>" not in text
 
 
+@pytest.mark.format_profile("standard")
 def test_a_row_prompts_for_its_slice_only():
     rows, _ = expand_document(_document(), "train", modes=("ocr_plus_image",))
     decl = next(r for r in rows if r["sections"] == "decl")["messages"][0]["content"]
@@ -269,6 +270,7 @@ def _decl_response():
     }
 
 
+@pytest.mark.format_profile("standard")
 def test_serving_asks_the_windows_training_built(client, monkeypatch):
     """The one property the whole design rests on. A served window that no
     training row had is a shape the model was never taught."""

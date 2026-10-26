@@ -339,6 +339,7 @@ def test_a_flat_document_type_also_returns_mm_dd_yyyy(client):
     assert result.extraction["claims"][0]["loss_date"] == "01/01/2024"
 
 
+@pytest.mark.format_profile("standard")
 def test_a_known_lob_selects_its_canonical_schema(client, monkeypatch):
     """The line is the caller's to give. It selects the schema the model is
     shown, constrained to and validated against."""
@@ -865,6 +866,7 @@ def test_without_a_calibrator_set_the_v1_path_is_a_knowing_downgrade(model, capl
     assert any("length-biased" in r.getMessage() for r in caplog.records), caplog.text
 
 
+@pytest.mark.format_profile("standard")
 def test_serving_generation_is_constrained_to_the_routed_schema(client, monkeypatch):
     """structured_outputs and logprobs_mode sat in vllm_serving.yaml and reached
     nothing: generation ran unconstrained, so the §13b 100% schema-validity floor

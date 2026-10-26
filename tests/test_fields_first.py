@@ -108,7 +108,7 @@ def _model(mode, edit):
     from data_pipeline.dataset_builder.build_jsonl import SourceDocument, expand_document
     from inference_core.model_runner import load_model
     from tests.test_printed_values import _texts
-    from tests.test_schema2_serving import _compact_auto, _Replay
+    from tests.test_schema2_serving import _compact_auto, _full_answer, _Replay, _replay_key
 
     gold = _compact_auto()
     texts = _texts(gold, 3)
@@ -119,9 +119,9 @@ def _model(mode, edit):
     rows, _ = expand_document(doc, "train", modes=(mode,))
     answers = {}
     for row in rows:
-        answer = json.loads(row["messages"][-1]["content"])
+        answer = _full_answer(row)
         edit(answer)
-        answers[(row["messages"][0]["content"], tuple(row["window_pages"]))] = json.dumps(answer)
+        answers[_replay_key(row)] = json.dumps(answer)
     client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
     return load_model("base", client, backend_impl=_Replay(answers)), gold
 

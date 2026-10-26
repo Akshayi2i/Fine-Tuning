@@ -17,3 +17,20 @@ def no_window_overlap(monkeypatch):
     import common.schema_sections
 
     monkeypatch.setattr(common.schema_sections, "run_overlap", lambda lob=None: 0)
+
+
+@pytest.fixture(autouse=True)
+def _format_profile(request, monkeypatch):
+    """``@pytest.mark.format_profile("standard")``: the test runs in that format
+    profile instead of the shipped one (configs/shared/format.yaml, ``fast``).
+
+    For tests of the standard format's own windows, prompts and answers, which
+    stay as they were for any corpus built in it. Everything else runs in the
+    shipped profile, the one production reads.
+    """
+    marker = request.node.get_closest_marker("format_profile")
+    if marker is not None:
+        import common.config
+
+        profile = marker.args[0]
+        monkeypatch.setattr(common.config, "shared_format_config", lambda: {"profile": profile})

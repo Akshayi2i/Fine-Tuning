@@ -140,6 +140,7 @@ def test_a_deductible_is_a_plain_closed_object_and_a_limit_splits_only_on_its_pe
         assert all("const" not in v["properties"]["limit_type"] for v in variants)
 
 
+@pytest.mark.format_profile("standard")
 def test_a_flat_deductible_whose_amount_is_on_another_page_is_still_taught(no_window_overlap):
     """The amount on page 3, the peril on page 4: the window over pages 4-6
     holds a flat deductible with no amount. The view required one, so the target
@@ -245,6 +246,7 @@ def test_a_part_of_a_line_read_as_this_one_is_written_as_this_line():
 # T5 - only a printed value identifies a row -------------------------------
 
 
+@pytest.mark.format_profile("standard")
 def test_a_coverage_fragment_without_its_name_is_an_orphan(no_window_overlap):
     """Collision's premium also printed on page 2, and the liability's first
     limit on page 3: the window over pages 1-3 shows neither coverage's name.

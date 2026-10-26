@@ -800,6 +800,125 @@ def field_paths(node: Any, path: str = "") -> set[str]:
     return out
 
 
+# --------------------------------------------------------------------------
+# Compact answers (the fast format profile, configs/shared/format.yaml)
+# --------------------------------------------------------------------------
+#
+# Under the fast profile the model writes each envelope with short keys and
+# leaves out the printed form when it reads as the value itself:
+#
+#     {"raw": "Toledo", "parsed": "Toledo", "page_ref": [1]}  ->  {"v": "Toledo", "p": [1]}
+#     {"raw": "$1,000", "parsed": 1000, "page_ref": [2]}      ->  {"r": "$1,000", "v": 1000, "p": [2]}
+#
+# ``r`` comes first when written, as ``raw`` does in the full form: it is the
+# reading of the page, and the value's confidence is read from its tokens
+# (``collapse_spans``); written, ``v`` follows from it. Training targets are
+# written compact; serving decodes against the compact schema and expands every
+# answer back to the full envelope before anything else reads it, so the merge,
+# the printed-values check, calibration and the canonical output never see the
+# compact form.
+
+#: Recorded on every compact row and in the format identity: bumped whenever
+#: the compact form changes.
+COMPACT_ANSWER_FORMAT = "compact-1"
+
+#: The compact envelope's keys, in the order they are written: the full form's
+#: ``raw``, ``parsed`` and ``page_ref``.
+COMPACT_KEYS: dict[str, str] = {"raw": "r", "parsed": "v", "page_ref": "p"}
+_FULL_KEYS: dict[str, str] = {short: full for full, short in COMPACT_KEYS.items()}
+
+
+def as_printed(value: Any) -> str | None:
+    """How ``value`` is printed when its printed form is the value itself: a
+    string as it is, a number as JSON writes it; None for anything else (a
+    yes/no, a null), which always has its printed form written."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        import json
+
+        return json.dumps(value)
+    return None
+
+
+def is_compact_value(node: Any) -> bool:
+    """Whether ``node`` is a compact envelope: ``v`` and at most ``r`` and ``p``.
+
+    No schema object has only keys among these (tests/test_fast_profile.py
+    checks every line's), so this cannot take a section or a row for one.
+    """
+    return isinstance(node, dict) and "v" in node and set(node) <= set(_FULL_KEYS)
+
+
+def to_compact_answer(node: Any) -> Any:
+    """A model-form answer (a training target) with every envelope compact.
+
+    ``r`` is left out exactly when the printed form reads as the value
+    (:func:`as_printed`), so :func:`expand_answer` gives the same envelope back.
+    """
+    if is_field_value(node):
+        out: dict[str, Any] = {}
+        raw, parsed = node.get("raw"), node.get("parsed")
+        if raw is None or raw != as_printed(parsed):
+            out["r"] = raw
+        out["v"] = parsed
+        if "page_ref" in node:
+            out["p"] = node["page_ref"]
+        return out
+    if isinstance(node, dict):
+        return {key: to_compact_answer(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [to_compact_answer(value) for value in node]
+    return node
+
+
+def expand_answer(node: Any) -> Any:
+    """A compact answer as the full model form: ``raw``, ``parsed``, ``page_ref``.
+
+    ``raw`` is ``r`` where it was written, else the value's printed form
+    (:func:`as_printed`). A no-op on an answer with no compact envelope.
+    """
+    if is_compact_value(node):
+        value = node.get("v")
+        out = {"raw": node["r"] if "r" in node else as_printed(value), "parsed": value}
+        if "p" in node:
+            out["page_ref"] = node["p"]
+        return out
+    if isinstance(node, dict):
+        return {key: expand_answer(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [expand_answer(value) for value in node]
+    return node
+
+
+def compact_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """The decoding schema of a compact answer: every envelope schema (an object
+    declaring ``raw``, ``parsed`` and ``page_ref``) with those keys renamed
+    ``r``, ``v``, ``p`` - in that order - and ``r`` never required. A copy."""
+    import copy
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        props = node.get("properties")
+        if isinstance(props, dict) and {"raw", "parsed", "page_ref"} <= set(props):
+            out = {key: copy.deepcopy(value) for key, value in node.items()
+                   if key not in ("properties", "required")}
+            out["properties"] = {
+                **{COMPACT_KEYS[key]: copy.deepcopy(props[key]) for key in ("raw", "parsed", "page_ref")},
+                **{key: walk(value) for key, value in props.items() if key not in COMPACT_KEYS},
+            }
+            required = [COMPACT_KEYS.get(key, key) for key in node.get("required") or () if key != "raw"]
+            if required:
+                out["required"] = required
+            return out
+        return {key: walk(value) for key, value in node.items()}
+
+    return walk(schema)
+
+
 def collapse_spans(spans: Mapping[str, Any]) -> dict[str, Any]:
     """Re-key token spans from envelope paths to values-view paths.
 

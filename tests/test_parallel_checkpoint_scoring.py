@@ -163,6 +163,7 @@ def test_a_worker_writes_each_checkpoints_score_or_why_it_has_none(monkeypatch, 
     assert json.loads(out.read_text())["/out/checkpoint-18"]["metrics"]["field_normalized_match"] == 0.9
 
 
+@pytest.mark.format_profile("standard")
 @pytest.mark.parametrize("gpus,parallel", [(["0", "1", "2", "3"], True), (["0"], False)])
 def test_selection_scores_in_parallel_when_training_had_several_gpus(monkeypatch, gpus, parallel):
     from orchestration import pipeline_dag

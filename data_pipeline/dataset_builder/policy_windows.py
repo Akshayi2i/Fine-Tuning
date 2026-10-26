@@ -200,7 +200,7 @@ def window_plan_id() -> str:
     import json
 
     from common.config import CONFIG_DIR, load_yaml, sequence_for_task
-    from common.prompts import prompt_hash
+    from common.prompts import format_identity, prompt_hash
     from common.schema_sections import task_for
     from data_pipeline.dataset_builder.cap_check import (
         CHARS_PER_TOKEN,
@@ -219,8 +219,22 @@ def window_plan_id() -> str:
         "page_estimates": [OCR_TOKENS_PER_PAGE, CHARS_PER_TOKEN, TEMPLATE_OVERHEAD_TOKENS],
         "prompt_hash": prompt_hash(),
     }
+    # Under the fast profile its windows are another rule (one plan for every
+    # group, ALIGNED_WINDOW_PLAN) and its answers another form: named in the id
+    # itself, so the corpus manifest and the release bundle record them, and a
+    # plan of one profile can never equal the other's.
+    identity = format_identity()
+    version = WINDOW_PLAN_VERSION
+    if identity is not None:
+        inputs["format"] = {**identity, "windows": ALIGNED_WINDOW_PLAN}
+        version += f"+{identity['profile']}.{ALIGNED_WINDOW_PLAN}.{identity['answer_format']}"
     digest = hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode()).hexdigest()
-    return f"{WINDOW_PLAN_VERSION}:{digest[:12]}"
+    return f"{version}:{digest[:12]}"
+
+
+#: How the fast profile cuts a policy (:func:`_plan_aligned`): one window plan
+#: for every section group of the document. Bumped whenever that rule changes.
+ALIGNED_WINDOW_PLAN = "aligned-1"
 
 
 def assert_window_plan(corpus_manifest: dict[str, Any], *, what: str = "this run") -> None:
@@ -255,7 +269,11 @@ def plan_windows(
     page order; a window whose pages' text would run past the call's budget is
     split (``expand_tasks.fit_windows_to_text``). None for ``image_only``, whose
     pages carry no text: a window is then sized by its page count alone.
+
+    Under the fast format profile every group reads the same windows
+    (:func:`_plan_aligned`).
     """
+    from common.prompts import fast_layout
     from common.schema_sections import groups_for, leading_pages, pages_for, run_overlap
     from data_pipeline.dataset_builder.expand_tasks import (
         fit_windows_to_text,
@@ -270,6 +288,9 @@ def plan_windows(
         texts = (dict(page_texts) if isinstance(page_texts, Mapping)
                  else dict(enumerate(page_texts, start=1)))
     total = max(every_page, default=0)
+    groups = groups_for(lob)
+    if groups and fast_layout("policy", None, lob, groups[0]):
+        return _plan_aligned(lob, groups, every_page, declarations_page, texts)
     plans: list[PolicyWindowPlan] = []
     for group in groups_for(lob):
         pages = pages_for(group, list(every_page))
@@ -293,6 +314,73 @@ def plan_windows(
             for index, window in enumerate(windows)
         )
     return plans
+
+
+def _plan_aligned(
+    lob: str | list[str] | None,
+    groups: Sequence[str],
+    every_page: Sequence[int],
+    declarations_page: int | None,
+    texts: dict[int, str | None] | None,
+) -> list[PolicyWindowPlan]:
+    """The fast profile's plan: ONE set of windows, read by every group.
+
+    Each window's request is the shared system message, the window's pages,
+    then its group's block (``common.prompts.render_group_block``); with the
+    same windows for every group, every request of a window is the same tokens
+    up to that block, and the engine's prefix cache reads the window's pages
+    once for all its groups instead of once per group.
+
+    The windows are planned once, as the most demanding group's would be:
+
+    - **the declarations lead** - the declarations group's leading pages and
+      the page the declarations were found on open the document, together,
+      exactly as that group's windows open (:func:`leading_pages`). Every group
+      reads them there; only a group the declarations lead (``decl``, ``dtd``)
+      marks its window as led by them (:attr:`PolicyWindowPlan.leads`);
+    - **the fewest pages any group's call has room for**: the smallest page
+      count (``pages_per_extraction_call``) and the smallest text room
+      (``window_page_room``) of the line's groups, so no group's request runs
+      past its sequence cap or its reserved answer;
+    - **runs overlap** as the line's map says (``run_overlap``), the page
+      after the leading ones included (``expand_tasks.plan_aligned_windows``).
+
+    A function of the line, the page count, the declarations page and the text
+    - never of a gold label - as the standard plan is, and called by the
+    dataset build and by serving alike.
+    """
+    from common.schema_sections import leading_pages, pages_for, reads_declarations, run_overlap
+    from data_pipeline.dataset_builder.expand_tasks import (
+        page_tokens,
+        pages_per_extraction_call,
+        plan_aligned_windows,
+        window_page_room,
+    )
+
+    pages = pages_for(groups[0], list(every_page))
+    total = max(every_page, default=0)
+    leaders = [group for group in groups if reads_declarations(group)]
+    lead = leading_pages(leaders[0], pages, declarations_page=declarations_page) if leaders else []
+    capacity = min(pages_per_extraction_call("policy", None, lob, group) for group in groups)
+    overlap = run_overlap(lob)
+    cost = room = None
+    if texts is not None:
+        costs = {page: max(page_tokens(texts.get(page), page, total, group) for group in groups)
+                 for page in pages}
+        cost = costs.__getitem__
+        room = min(window_page_room("policy", None, lob, group) for group in groups)
+    lead_windows, others = plan_aligned_windows(
+        pages, pages_per_window=capacity, leading=lead, overlap=overlap, cost=cost, room=room)
+    windows = lead_windows + others
+    home = _home_window(windows, lead, declarations_page)
+    single = len(windows) == 1
+    return [
+        PolicyWindowPlan(group, index, tuple(window), single=single,
+                         leads=reads_declarations(group) and index == home,
+                         homed=single or (reads_declarations(group) and home is not None))
+        for group in groups
+        for index, window in enumerate(windows)
+    ]
 
 
 def _home_window(windows: list[list[int]], lead: Sequence[int], declarations_page: int | None) -> int | None:

@@ -246,6 +246,7 @@ def test_an_unknown_selection_mode_is_refused(monkeypatch):
         pipeline_dag._selection_settings(SimpleNamespace())
 
 
+@pytest.mark.format_profile("standard")
 def test_the_configured_selection_judges_two_finalists_in_valid_modes():
     from common.config import training_config
     from common.constants import MODALITY_MODES

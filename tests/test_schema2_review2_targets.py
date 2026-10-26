@@ -68,6 +68,7 @@ def _named_on_page_3(index):
 # T1 - a fragment is an orphan only when its values are taught elsewhere ----
 
 
+@pytest.mark.format_profile("standard")
 def test_a_coverage_split_at_the_window_boundary_keeps_its_values(no_window_overlap):
     """The liability's limits and $410 premium are printed only on page 4. Left
     out of the 4-6 window as a nameless fragment, they were taught nowhere."""
@@ -83,6 +84,7 @@ def test_a_coverage_split_at_the_window_boundary_keeps_its_values(no_window_over
     assert values_view(fragment["premium"]) == 410.0
 
 
+@pytest.mark.format_profile("standard")
 def test_a_collision_split_at_the_window_boundary_keeps_its_deductible(no_window_overlap):
     targets, report = _targets(_named_on_page_3(1))
     _assert_writable(targets)
@@ -93,6 +95,7 @@ def test_a_collision_split_at_the_window_boundary_keeps_its_deductible(no_window
     assert values_view(fragment["premium"]) == 380.0
 
 
+@pytest.mark.format_profile("standard")
 def test_a_fragment_holding_one_value_printed_only_here_is_kept():
     """Collision's premium is also printed on page 4, where its row is taught
     whole; its deductible only on page 2. The deductible would be lost."""
@@ -113,6 +116,7 @@ def test_a_fragment_holding_one_value_printed_only_here_is_kept():
     (0, "X_VEHICLE_LIABILITY", 410.0, 455.0),
     (1, "X_COLLISION", 380.0, 420.0),
 ])
+@pytest.mark.format_profile("standard")
 def test_a_coverage_split_at_the_window_boundary_is_served_with_its_own_values(index, code, own, other):
     """Replayed through serving, the row named on page 3 joins its own amounts
     from page 4. With the fragment orphaned it joined the other vehicle's row

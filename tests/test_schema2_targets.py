@@ -67,6 +67,7 @@ def test_ids_are_counted_from_one_in_each_window():
     assert all(v["garaging_location_ref"] == "loc_1" for v in vehicles)
 
 
+@pytest.mark.format_profile("standard")
 def test_a_reference_to_a_row_the_window_does_not_hold_is_left_out_and_counted(no_window_overlap):
     """The coverages on pages 4-5 apply to vehicles read in the window before."""
     targets, report = _targets(AUTO, "personal_auto", [1, 2, 3, 4, 5, 6])

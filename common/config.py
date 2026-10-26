@@ -39,6 +39,14 @@ SHARED_VISION_CONFIG = CONFIG_DIR / "shared" / "vision.yaml"
 SHARED_SEQUENCE_CONFIG = CONFIG_DIR / "shared" / "sequence.yaml"
 #: The served MinerU the corpus and serving both read pages with (arch §8a).
 SHARED_OCR_CONFIG = CONFIG_DIR / "shared" / "ocr.yaml"
+#: The format profile training rows and serving requests are written in.
+SHARED_FORMAT_CONFIG = CONFIG_DIR / "shared" / "format.yaml"
+
+#: The format profiles ``format.yaml`` may name. ``standard`` is the format
+#: every adapter so far trained on; ``fast`` the latency profile.
+STANDARD_PROFILE = "standard"
+FAST_PROFILE = "fast"
+FORMAT_PROFILES = (STANDARD_PROFILE, FAST_PROFILE)
 
 
 class ConfigError(RuntimeError):
@@ -109,7 +117,6 @@ def serving_config() -> dict[str, Any]:
     return load_yaml(SERVING_CONFIG)
 
 
-@cache
 def training_config(name: str) -> dict[str, Any]:
     """Load ``configs/training/{name}.yaml``.
 
@@ -117,8 +124,25 @@ def training_config(name: str) -> dict[str, Any]:
     its own keys laid over it, mappings merged key by key. An adapter's config
     names only what it changes (its data mix, say), so the two cannot drift
     apart on everything else.
+
+    Its ``format_profiles`` block holds what changes under a format profile
+    (``format.yaml``): the active profile's keys are laid over the config the
+    same way, and the block itself is never part of the result - under the
+    standard profile the config is exactly what it was before the block existed.
     """
-    return _training_config(name, ())
+    return _profiled_training_config(name, format_profile())
+
+
+@cache
+def _profiled_training_config(name: str, profile: str) -> dict[str, Any]:
+    data = copy.deepcopy(_training_config(name, ()))
+    profiles = data.pop("format_profiles", None) or {}
+    unknown = sorted(set(profiles) - set(FORMAT_PROFILES))
+    if unknown:
+        raise ConfigError(f"configs/training/{name}.yaml format_profiles names {unknown}; "
+                          f"the profiles are {list(FORMAT_PROFILES)}")
+    overlay = profiles.get(profile)
+    return _merged(data, copy.deepcopy(overlay)) if overlay else data
 
 
 def _training_config(name: str, chain: tuple[str, ...]) -> dict[str, Any]:
@@ -164,6 +188,30 @@ def shared_sequence_config() -> dict[str, Any]:
     return load_yaml(SHARED_SEQUENCE_CONFIG)
 
 
+@lru_cache(maxsize=1)
+def shared_format_config() -> dict[str, Any]:
+    return load_yaml(SHARED_FORMAT_CONFIG)
+
+
+def format_profile() -> str:
+    """The format profile (``configs/shared/format.yaml``): ``standard`` or ``fast``.
+
+    One switch read by the dataset build, training and serving alike. A profile
+    it does not know is refused, never read as either: a typo must not serve a
+    model inputs in a format it was not trained on.
+    """
+    profile = str(shared_format_config().get("profile") or STANDARD_PROFILE)
+    if profile not in FORMAT_PROFILES:
+        raise ConfigError(f"profile is {profile!r} in {SHARED_FORMAT_CONFIG.name}; "
+                          f"expected one of {list(FORMAT_PROFILES)}")
+    return profile
+
+
+def fast_profile() -> bool:
+    """Whether the fast format profile is on (:func:`format_profile`)."""
+    return format_profile() == FAST_PROFILE
+
+
 def served_mineru() -> dict[str, str]:
     """``{"version", "tier"}``: the served MinerU every page text comes from,
     for the training corpus and for serving alike."""
@@ -184,12 +232,24 @@ def vision_for_task(task: str) -> dict[str, Any]:
 
     An unlisted task falls back to ``defaults``, which is the extraction budget:
     a new task is then expensive but correct, rather than silently unbudgeted.
+
+    Under a format profile other than standard (:func:`format_profile`), every
+    full-resolution task takes that profile's budget (``profiles:`` in
+    vision.yaml): the corpus is sized, the trainer resizes and the engine
+    resizes at it, since all three read it here.
     """
-    from common.tasks import parse
+    from common.tasks import FULL_RESOLUTION_TASKS, parse
 
     config = shared_vision_config()
     resolved = dict(config.get("defaults", {}))
     resolved.update(config.get("tasks", {}).get(str(parse(task)), {}))
+    profile = format_profile()
+    if profile != STANDARD_PROFILE and parse(task) in FULL_RESOLUTION_TASKS:
+        budget = (config.get("profiles") or {}).get(profile)
+        if not budget or "max_pixels" not in budget:
+            raise ConfigError(f"the {profile} format profile has no pixel budget: add "
+                              f"profiles.{profile}.max_pixels to {SHARED_VISION_CONFIG.name}")
+        resolved.update(budget)
     if "max_pixels" not in resolved:
         raise ConfigError(
             f"no max_pixels for task {task!r} and no defaults block in {SHARED_VISION_CONFIG.name}"

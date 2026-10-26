@@ -492,6 +492,7 @@ def test_an_endpoint_hint_that_agrees_lifts_an_uncertain_reading(client):
 # L7: the prompt hash covers what the classifier is shown
 # --------------------------------------------------------------------------
 
+@pytest.mark.format_profile("standard")
 def test_the_prompt_hash_covers_the_classifiers_line_meanings():
     from common.config import CONFIG_DIR
     from common.prompts import prompt_input_files

@@ -322,6 +322,49 @@ def plan_policy_windows(
     return windows
 
 
+def plan_aligned_windows(
+    pages: list[int], *, pages_per_window: int, leading: Sequence[int] = (), overlap: int = 0,
+    cost: Callable[[int], int] | None = None, room: int | None = None,
+) -> tuple[list[list[int]], list[list[int]]]:
+    """One set of windows for every section group of a document (the fast
+    format profile): ``(lead windows, the other windows)``.
+
+    The declarations rule of :func:`plan_policy_windows` - the ``leading``
+    pages open the document, together, split evenly where they must be - then
+    every other page in runs, split with ``overlap`` shared pages. Each run that
+    starts right after a leading page also opens on the last ``overlap`` leading
+    pages before it: a group that does not read the declarations used to split
+    the document as one run, so a table crossing the page after the leading
+    ones was whole in one of its windows, and with every group on these windows
+    it stays so.
+
+    ``cost`` and ``room`` fit the windows to the pages' text as
+    :func:`fit_windows_to_text` does, the lead windows and the others apart: a
+    lead window and the window bridging it share pages, and refitted as one run
+    the leading pages would no longer lead. A window holding only pages a lead
+    window already reads is dropped - it would read nothing new.
+    """
+    if pages_per_window < 1:
+        raise ExpansionError(f"a window must hold at least one page, got {pages_per_window}")
+    ordered = sorted(set(pages))
+    lead = sorted(set(leading) & set(ordered))
+    rest = [page for page in ordered if page not in lead]
+    lead_windows = _split_evenly(lead, pages_per_window) if lead else []
+    bridged = set(rest)
+    if overlap and pages_per_window > overlap:
+        for run in _consecutive_runs(rest):
+            for back in range(1, overlap + 1):
+                if run[0] - back not in lead:
+                    break
+                bridged.add(run[0] - back)
+    windows = plan_policy_windows(sorted(bridged), pages_per_window=pages_per_window, overlap=overlap)
+    if cost is not None and room is not None:
+        lead_windows = fit_windows_to_text(lead_windows, cost, room, overlap=overlap)
+        windows = fit_windows_to_text(windows, cost, room, overlap=overlap)
+    shown = set(lead)
+    return lead_windows, [window for window in windows if not set(window) <= shown]
+
+
 def _consecutive_runs(pages: list[int]) -> list[list[int]]:
     """``[12, 140, 141, 142, 150]`` -> ``[[12], [140, 141, 142], [150]]``."""
     runs: list[list[int]] = []
@@ -406,7 +449,7 @@ def pages_per_extraction_call(
     attached rather than here as an empty window list.
     """
     from common.config import sequence_for_task, vision_for_task
-    from common.prompts import render_system_prompt
+    from common.prompts import prompt_text
     from data_pipeline.dataset_builder.cap_check import (
         CHARS_PER_TOKEN,
         TEMPLATE_OVERHEAD_TOKENS,
@@ -414,8 +457,10 @@ def pages_per_extraction_call(
 
     task = _call_task(sections)
     budget = sequence_for_task(task, doc_type)
+    # The system prompt - and under the fast layout the group block after the
+    # pages too: both are in every call.
     prompt = len(
-        render_system_prompt(doc_type, "ocr_plus_image", acord_form, lob, sections)
+        prompt_text(doc_type, "ocr_plus_image", acord_form, lob, sections)
     ) / CHARS_PER_TOKEN
     room = (
         budget["max_seq_len"]
@@ -451,12 +496,12 @@ def window_page_room(
     here fits with any answer the reservation allows.
     """
     from common.config import sequence_for_task
-    from common.prompts import render_system_prompt
+    from common.prompts import prompt_text
     from data_pipeline.dataset_builder.cap_check import TEMPLATE_OVERHEAD_TOKENS, estimate_text_tokens
 
     budget = sequence_for_task(_call_task(sections), doc_type)
     prompt = estimate_text_tokens(
-        render_system_prompt(doc_type, "ocr_plus_image", acord_form, lob, sections)
+        prompt_text(doc_type, "ocr_plus_image", acord_form, lob, sections)
     )
     return (int(budget["max_seq_len"]) - int(budget["max_output_tokens"])
             - TEMPLATE_OVERHEAD_TOKENS - prompt)

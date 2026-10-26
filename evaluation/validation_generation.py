@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -81,7 +81,10 @@ class ValidationGeneration:
 
     @property
     def page_text(self) -> str | None:
-        """The OCR text the prompt carried, for the OCR-agreement feature."""
+        """The OCR text the prompt carried, for the OCR-agreement feature: the
+        pages' text only, as serving's ``shown_ocr_text`` reads it. A fast-format
+        row ends its user turn with the window's request block (:data:`_REQUEST_BLOCK`),
+        which is prompt, not page."""
         from calibration.features import shown_ocr_text
 
         if self.row.get("modality_mode") == "image_only":
@@ -92,6 +95,7 @@ class ValidationGeneration:
             if message.get("role") == "user" and isinstance(message.get("content"), list)
             for part in message["content"]
             if isinstance(part, dict) and part.get("type") == "text"
+            and not (part.get("text") or "").startswith(_REQUEST_BLOCK)
         ])
 
 
@@ -119,13 +123,27 @@ class ValidationGeneration:
 #: A page's marker at the head of its text block (inference_core.input_builder.PAGE_MARKER).
 _PAGE_MARKER = re.compile(r"<page (\d+) of \d+>\s*")
 
+#: How the fast format's window request opens: the user turn's last text part,
+#: after the pages (common.prompts, the fast format profile).
+_REQUEST_BLOCK = "\n\n# Request: "
+
+
+def _compact(row: Mapping[str, Any]) -> bool:
+    """Whether ``row`` was written in the fast profile's compact answer form."""
+    from common.canonical import COMPACT_ANSWER_FORMAT
+
+    return row.get("answer_format") == COMPACT_ANSWER_FORMAT
+
 
 def read_rows(text: str) -> list[dict[str, Any]]:
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
 def split_prompt(row: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """The prompt messages and the golden label from one corpus row."""
+    """The prompt messages and the golden label from one corpus row, the label in
+    the full model form (a compact target expanded, ``common.canonical.expand_answer``)."""
+    from common.canonical import expand_answer
+
     messages = list(row.get("messages") or [])
     if not messages or messages[-1].get("role") != "assistant":
         raise ValueError(
@@ -135,7 +153,7 @@ def split_prompt(row: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, A
     content = messages[-1].get("content")
     if isinstance(content, list):
         content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
-    return messages[:-1], json.loads(content)
+    return messages[:-1], expand_answer(json.loads(content))
 
 
 #: Rows per ``generate_batch`` call when the serving config names none. vLLM
@@ -225,6 +243,12 @@ def generate_validation(
                 )
                 if constrain else None
             )
+            if schema is not None and _compact(row):
+                # Decoded as it was trained: the fast format's adapter never
+                # learned the full envelope the grammar would otherwise force.
+                from common.canonical import compact_schema
+
+                schema = compact_schema(schema)
         except Exception as exc:  # noqa: BLE001 - one bad row must not lose the rest
             _record_failure(entry, exc, "setup")
             continue
@@ -295,8 +319,8 @@ def _record_failure(entry: ValidationGeneration, exc: BaseException, kind: str,
 
 def _finish(entry: ValidationGeneration, result: Any) -> None:
     """Parse one generation into ``entry``, or record why it failed."""
-    from common.canonical import collapse_spans, with_output_dates
-    from inference_core.span_map import map_field_spans
+    from common.canonical import collapse_spans, expand_answer, with_output_dates
+    from inference_core.span_map import map_compact_field_spans, map_field_spans
 
     if isinstance(result, BaseException):
         _record_failure(entry, result, "setup")
@@ -307,8 +331,14 @@ def _finish(entry: ValidationGeneration, result: Any) -> None:
             raise TypeError(f"expected a JSON object, got {type(extraction).__name__}")
         # Keyed and formatted exactly as serving does it (serving.pipeline), or
         # the calibrators are fitted on paths and values serving never looks up.
-        spans = collapse_spans(map_field_spans(result.text, result.tokens, result.token_logprobs))
-        extraction = with_output_dates(extraction)
+        # A compact answer (the fast profile) is mapped and expanded to the
+        # full form, as serving expands it before anything reads it.
+        if _compact(entry.row):
+            spans = collapse_spans(map_compact_field_spans(result.text, result.tokens, result.token_logprobs))
+            extraction = with_output_dates(expand_answer(extraction))
+        else:
+            spans = collapse_spans(map_field_spans(result.text, result.tokens, result.token_logprobs))
+            extraction = with_output_dates(extraction)
     except Exception as exc:  # noqa: BLE001 - one bad row must not lose the rest
         truncated = bool(getattr(result, "truncated", lambda: False)())
         text = getattr(result, "text", "") or ""
@@ -344,21 +374,37 @@ def score_generations(
     (``generate_validation(order="reversed")``): each answer is compared with
     its second reading, as the gate compares them - ``run_to_run_agreement``,
     and ``document_run_to_run_agreement`` over whole documents.
+
+    An image-only row carries no page text: its values are checked for
+    invention on its document's page text borrowed from the same document's
+    ocr_plus_image rows among ``generations`` (``run_eval.build_report``,
+    decision 2026-10-26). What that could not cover is counted beside the rate
+    (:func:`_invention_coverage`), never read as nothing invented.
     """
     from evaluation.run_eval import build_report
 
     rows = [(g.golden, g.extraction or {}, g.metadata) for g in generations]
     if repeat is not None:
         rows = _with_repeat(rows, [(g.golden, g.extraction or {}, g.metadata) for g in repeat])
-    metrics = dict(build_report(model_version, rows).gate_metrics())
+    report = build_report(model_version, rows)
+    metrics = {**report.gate_metrics(), **_invention_coverage(report)}
     if any(_is_window(g) for g in generations):
         documents = merged_documents(generations)
         if repeat is not None:
             documents = _with_repeat(documents, merged_documents(repeat))
-        whole = build_report(model_version, documents).gate_metrics()
+        whole_report = build_report(model_version, documents)
+        whole = {**whole_report.gate_metrics(), **_invention_coverage(whole_report)}
         metrics.update({f"document_{name}": value for name, value in whole.items()
                         if isinstance(value, (int, float)) and not isinstance(value, bool)})
     return metrics
+
+
+def _invention_coverage(report: Any) -> dict[str, int]:
+    """The counts beside hallucination_rate (``EvalReport.invention_coverage``),
+    as ``hallucination_<count>``: readings checked on borrowed page text, the
+    pages they cite with none, and readings left unscored. Only those above
+    zero: a pass every reading of which had its own text reports as before."""
+    return {f"hallucination_{name}": count for name, count in report.invention_coverage().items() if count}
 
 
 def _with_repeat(first: list[tuple[Any, Any, dict[str, Any]]],

@@ -432,7 +432,7 @@ def _serve(mode, modality="native_pdf", *, page_texts=True):
     from inference_core.model_runner import load_model
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import ExtractionRequest, extract
-    from tests.test_schema2_serving import _compact_auto, _Replay
+    from tests.test_schema2_serving import _compact_auto, _full_answer, _Replay, _replay_key
     from tests.test_serving_pipeline import CALIBRATION
 
     gold = _compact_auto()
@@ -442,8 +442,7 @@ def _serve(mode, modality="native_pdf", *, page_texts=True):
                          ocr_pages=[texts[p] for p in (1, 2, 3)], image_paths=images, lob="personal_auto",
                          tenant_id="default")
     rows, _ = expand_document(doc, "train", modes=(mode,))
-    answers = {(r["messages"][0]["content"], tuple(r["window_pages"])): _invent(r["messages"][-1]["content"])
-               for r in rows}
+    answers = {_replay_key(r): _invent(json.dumps(_full_answer(r))) for r in rows}
     client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
     request = ExtractionRequest(
         source_id="pa_1", image_paths=images, page_texts=texts if page_texts else {}, modality_mode=mode,

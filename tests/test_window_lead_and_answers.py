@@ -372,6 +372,7 @@ def test_a_run_split_by_its_text_alone_shares_its_pages():
     assert fit_windows_to_text([[1, 2, 3]], cost, 13) == [[1, 2], [3]]
 
 
+@pytest.mark.format_profile("standard")
 def test_training_and_serving_plan_the_same_windows():
     """The dataset build's rows and the windows serving sends, on one synthetic
     personal-auto policy whose dense pages split windows by their text."""
@@ -406,6 +407,7 @@ def test_training_and_serving_plan_the_same_windows():
         assert not [w for w in windows if any(w < other for other in windows)]
 
 
+@pytest.mark.format_profile("standard")
 def test_a_window_plan_cut_before_these_rules_is_refused(monkeypatch):
     """The windows changed for the same input, so the plan's version did: a
     corpus, or a release, cut with the version-3 plan is refused."""

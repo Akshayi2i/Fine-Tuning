@@ -383,8 +383,19 @@ def break_tie(report: SelectionReport, full_scorer: Scorer, margin: float) -> Se
 #: Document-level metrics the finalists are judged on (validation_generation.score_generations).
 DOCUMENT_ACCURACY = "document_field_normalized_match"
 #: Values no page prints: of the finalists close enough on accuracy, the one
-#: inventing the fewest wins (decision 2026-10-24).
+#: inventing the fewest wins (decision 2026-10-24). Over every mode the pass
+#: reads: an image_only answer is checked on its document's page text borrowed
+#: from the same document's ocr_plus_image rows (decision 2026-10-26).
 DOCUMENT_INVENTION = "document_hallucination_rate"
+#: What that rate could not see, recorded beside it per finalist
+#: (validation_generation._invention_coverage): document readings checked on
+#: borrowed text, the pages they cite with none, and readings left unscored -
+#: no text to borrow, counted, never as nothing invented.
+DOCUMENT_INVENTION_COVERAGE = (
+    "document_hallucination_borrowed_text_readings",
+    "document_hallucination_cited_pages_without_text",
+    "document_hallucination_unscored_readings",
+)
 #: Lower is better: a finalist more than the guard margin above the best
 #: finalist's does not win.
 DOCUMENT_GUARDS = ("document_false_null_rate",)
@@ -411,6 +422,13 @@ def rows_in_modes(rows: list[dict[str, Any]], modes: Sequence[str] | None) -> li
             f"no validation row is read in {sorted(wanted)}: the finalists would be judged on no "
             "documents. Check selection_document_modes against the split's modality_mode values."
         )
+    from evaluation.run_eval import IMAGE_ONLY_MODE, TEXT_DONOR_MODE
+
+    if IMAGE_ONLY_MODE in wanted and TEXT_DONOR_MODE not in wanted:
+        # An image_only answer is checked for invention on page text borrowed
+        # from its document's ocr_plus_image rows (decision 2026-10-26).
+        log.warning("selection reads %s without %s: its image_only answers have no page text to borrow, "
+                    "so their values are unscored for invention", sorted(wanted), TEXT_DONOR_MODE)
     return kept
 
 
@@ -439,7 +457,10 @@ def choose_on_documents(
     3. Invention. Of those, the one inventing the fewest values wins
        (:data:`DOCUMENT_INVENTION`); ties go to the higher field match, then to
        the later step, as in :func:`select_best`. A finalist with nothing
-       checkable has no rate and ranks after one that has.
+       checkable has no rate and ranks after one that has. The rate covers
+       every mode read - image_only answers on page text borrowed from their
+       document's ocr_plus_image rows - and what it could not check is
+       recorded beside it (:data:`DOCUMENT_INVENTION_COVERAGE`).
 
     Guards that between them exclude every finalist exclude none. Without
     whole-document scores (no policy windows) the window-level metrics stand
@@ -501,10 +522,16 @@ def choose_on_documents(
         return invented is not None, -(invented or 0.0), accuracy(c), c.step
 
     winner = max(close, key=rank)
+    unscored = {c.checkpoint: int(v) for c in scored
+                if (v := metric(c, "document_hallucination_unscored_readings", "hallucination_unscored_readings"))}
+    if unscored:
+        log.warning("some finalists' readings had no page text, own or borrowed, so their values were not "
+                    "checked for invention (unscored, not clean): %s", unscored)
     report.document_choice = {
         "finalists": {c.checkpoint: {k: round(float(metrics[c.checkpoint][k]), 4)
                                      for k in (DOCUMENT_ACCURACY, DOCUMENT_INVENTION, *DOCUMENT_GUARDS,
-                                               DOCUMENT_AGREEMENT) if k in metrics[c.checkpoint]}
+                                               DOCUMENT_AGREEMENT, *DOCUMENT_INVENTION_COVERAGE)
+                                     if k in metrics[c.checkpoint]}
                       for c in scored},
         "guard_margin": guard_margin,
         # What the decision read: the whole-document pass's modes, or - when the

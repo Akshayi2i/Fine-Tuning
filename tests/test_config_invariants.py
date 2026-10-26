@@ -136,12 +136,17 @@ def test_every_task_is_budgeted_in_both_shared_files():
 
 def test_thumbnail_tasks_cost_an_order_of_magnitude_less_than_extraction():
     """classify recognises layout, not small print. Paying extraction
-    resolution for that is the most wasteful thing this pipeline could do."""
+    resolution for that is the most wasteful thing this pipeline could do.
+
+    At least 4x fewer pixels: the fast format profile halves extraction's
+    pixels (1,254,400, vision.yaml ``profiles.fast``), and classify's 262,144
+    (512 x 512) is still a thumbnail beside it - ~9.5x under standard, ~4.8x
+    under fast."""
     thumbnail = config.vision_for_task("classify")["max_pixels"]
     extraction = config.vision_for_task("extract")["max_pixels"]
-    assert thumbnail * 5 < extraction, (
+    assert thumbnail * 4 < extraction, (
         f"classify at {thumbnail:,}px vs extract at {extraction:,}px — a thumbnail task "
-        "budgeted near extraction resolution multiplies its cost by ~10x"
+        "budgeted near extraction resolution multiplies its cost several times over"
     )
 
 

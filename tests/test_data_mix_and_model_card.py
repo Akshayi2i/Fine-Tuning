@@ -175,6 +175,7 @@ def test_a_config_that_extends_itself_is_refused(tmp_path, monkeypatch):
 # The input-mode mix
 # --------------------------------------------------------------------------
 
+@pytest.mark.format_profile("standard")
 def test_the_mode_mix_is_the_global_default_unless_the_config_sets_one(monkeypatch):
     from common import config
 
@@ -184,6 +185,7 @@ def test_the_mode_mix_is_the_global_default_unless_the_config_sets_one(monkeypat
     assert configured_modality_mix() == own
 
 
+@pytest.mark.format_profile("standard")
 def test_a_run_on_a_corpus_drawn_with_another_mix_is_refused(monkeypatch):
     other = {"ocr_plus_image": 0.4, "noisy_ocr_image": 0.2, "image_only": 0.4}
     with pytest.raises(DataMixError, match="rebuild it"):

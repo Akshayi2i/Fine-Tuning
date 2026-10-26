@@ -35,8 +35,11 @@ from common.config import assert_resolution_parity, resolution_cap_px
 from common.constants import MODALITY_MODES
 from common.lob import normalize_lob
 from common.prompts import (
+    GROUP_BLOCK_SEPARATOR,
     PROMPT_TEMPLATE_VERSION,
+    fast_layout,
     prompt_fingerprint,
+    render_group_block,
     render_system_prompt,
 )
 from common.schemas import schema_version
@@ -112,6 +115,10 @@ class BuiltMessages:
     #: or ``None`` for the whole schema.
     sections: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: The form the answer is written in: ``common.canonical.COMPACT_ANSWER_FORMAT``
+    #: for a request in the fast layout (``common.prompts.fast_layout``), else
+    #: None - the full ``raw``/``parsed``/``page_ref`` envelope.
+    answer_format: str | None = None
 
     def system_prompt(self) -> str:
         return self.messages[0]["content"]
@@ -287,6 +294,14 @@ def build_messages(
             text = ocr_pages[index] if (ocr_pages[index] or "").strip() else EMPTY_PAGE_TEXT
             user_content.append({"type": "text", "text": marker + "\n\n" + text})
 
+    # The fast layout (configs/shared/format.yaml): the group's own instruction
+    # LAST, after the pages, so every group of a window shares the same tokens
+    # up to here - the system message is the same for all of them - and the
+    # engine's prefix cache reads the pages once for the lot.
+    group_block = render_group_block(doc_type, acord_form, lob, sections)
+    if group_block is not None:
+        user_content.append({"type": "text", "text": GROUP_BLOCK_SEPARATOR + group_block})
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system},
         {"role": "user", "content": user_content},
@@ -306,7 +321,18 @@ def build_messages(
         page_count=len(image_paths),
         lob=lob,
         sections=sections,
+        answer_format=_answer_format(doc_type, acord_form, lob, sections),
     )
+
+
+def _answer_format(doc_type: str, acord_form: str | None, lob: str | list[str] | None,
+                   sections: str | None) -> str | None:
+    """The compact answer format for a fast-layout request, else None."""
+    if not fast_layout(doc_type, acord_form, lob, sections):
+        return None
+    from common.canonical import COMPACT_ANSWER_FORMAT
+
+    return COMPACT_ANSWER_FORMAT
 
 
 def build_training_row(
@@ -338,7 +364,20 @@ def build_training_row(
     ``1..n`` of an ``n``-page document, while the template tells the model that
     skipped numbers mean it is seeing selected pages. The model would be trained
     on a page map that contradicts the instruction describing it.
+
+    ``golden_json`` is the model-form target. A row in the fast layout
+    (``common.prompts.fast_layout``) is taught it compact
+    (``common.canonical.to_compact_answer``), here, where its prompt is chosen:
+    a fast prompt with a full answer, or the reverse, is a row serving never
+    sends. Such a row records its ``answer_format``.
     """
+    answer_format = _answer_format(doc_type, acord_form, lob, sections)
+    if answer_format is not None:
+        import json
+
+        from common.canonical import to_compact_answer
+
+        golden_json = json.dumps(to_compact_answer(json.loads(golden_json)), ensure_ascii=False)
     built = build_messages(
         doc_type, image_paths, ocr_pages, modality_mode,
         acord_form=acord_form, lob=lob, sections=sections, assistant_content=golden_json,
@@ -361,6 +400,9 @@ def build_training_row(
     # Only on a windowed row, so a whole-schema row is byte-identical to before.
     if sections:
         row["sections"] = sections
+    # Only on a fast-layout row, so a standard row is byte-identical to before.
+    if answer_format is not None:
+        row["answer_format"] = answer_format
     return row
 
 

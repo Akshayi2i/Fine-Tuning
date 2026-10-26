@@ -184,11 +184,19 @@ evaluation:
   # two is more than the guard margin below the best finalist's does not win.
   # Costs one more whole-document pass per finalist.
   selection_run_to_run_check: true
-  # The golden eval reads every document's main mode (ocr_plus_image) a second
-  # time, its windows sent in reverse order, and the gate holds the release to
-  # run_to_run_agreement (evaluation.golden_eval). Costs one more main-mode pass
-  # over the frozen set.
+  # The golden eval reads every document a second time in run_to_run_mode, its
+  # windows sent in reverse order, and the gate holds the release to
+  # run_to_run_agreement (evaluation.golden_eval). Costs one more pass in that
+  # mode over the frozen set.
   run_to_run_check: true
+  # The mode of that second reading: image_only, the mode production reads
+  # (fields first: the page images alone, the fields then checked on MinerU's
+  # text) - decision 2026-10-26; ocr_plus_image before it. One of
+  # ocr_plus_image, noisy_ocr_image, image_only. Recorded in the eval report
+  # (run_to_run_mode, and eval_set) and part of its yardstick: it is folded
+  # into the scoring fingerprint, so a report made on another repeat mode is
+  # neither reused for the gate nor compared with one made on this mode.
+  run_to_run_mode: image_only
   metric_for_best_model: "eval_loss"
   greater_is_better: false
   early_stopping_patience: 3
@@ -249,6 +257,32 @@ data_mix:
 #
 # Modes are drawn when the corpus is built, so a run on a corpus drawn with
 # another mix is refused.
+
+# What changes under a format profile (configs/shared/format.yaml): the active
+# profile's keys are laid over this config (common.config.training_config);
+# under `standard` nothing here applies.
+format_profiles:
+  fast:
+    # Mostly image-only reading (user decision 2026-10-26). Production serves
+    # fields first: every field served comes from an image_only read, so that
+    # is the mode the model is trained for. ocr_plus_image keeps a quarter: the
+    # standard path (short documents, a fallback) and the page text the
+    # selection borrows to count image_only inventions. noisy_ocr_image only
+    # protects the OCR paths, so it keeps a token share.
+    #   standard  0.5  / 0.2  / 0.3
+    #   fast      0.25 / 0.05 / 0.7
+    # Check before the corpus build: if image_only reads the pod run's scans
+    # more than ~2-3 points below ocr_plus_image, go back to 0.4 / 0.1 / 0.5
+    # and reconsider fields first.
+    modality_mix: {ocr_plus_image: 0.25, noisy_ocr_image: 0.05, image_only: 0.7}
+    evaluation:
+      # The finalists' whole-document pass reads image_only too: most of the
+      # train rows are in it, and a checkpoint is chosen on what it trains for.
+      # Its image_only answers are held to the fewest-invented-values rule on
+      # the page text of the same documents' ocr_plus_image rows, which this
+      # pass also reads (decision 2026-10-26); keep ocr_plus_image here, or
+      # those answers go unscored.
+      selection_document_modes: [ocr_plus_image, image_only]
 
 
 distributed:

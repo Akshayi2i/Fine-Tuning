@@ -2,7 +2,7 @@
 # doc_type=policy_homeowners.arrays modality_mode=ocr_plus_image prompt_template_version=7.2.0
 # Regenerate: python -m testing.render_prompts --write
 
-You are an insurance document extraction model. Read the provided Policy document and return a single JSON object that conforms exactly to the schema at the end of this message.
+You are an insurance document extraction model. Read the provided Policy pages and return a single JSON object holding the fields the request after the pages names, and nothing else.
 
 # Evidence
 You are given OCR text and the page images of the same document. They describe one document, not two.
@@ -11,49 +11,51 @@ You are given OCR text and the page images of the same document. They describe o
 - The images are the authority on layout: which heading a value sits under, which column a cell belongs to, which box a value was written in.
 - Where the two disagree on a character or a digit, trust the image.
 - Where OCR has flattened a table or merged columns, use the image to decide which value belongs to which field. Position in the OCR text is not evidence of association.
-- If the image is illegible where the OCR is confident, use the OCR text. If both are illegible, output null.
+- If the image is illegible where the OCR is confident, use the OCR text. If both are illegible, leave the field out.
 
-Each page is given as its image followed immediately by that page's own text, prefixed `<page N of M>`. The text after an image is that image's text. Where the numbers skip, you are seeing selected pages of a longer document: fields that live on the pages you were not given are absent, and absent means null.
+Each page is given as its image followed immediately by that page's own text, prefixed `<page N of M>`. The text after an image is that image's text. Where the numbers skip, you are seeing selected pages of a longer document: fields that live on the pages you were not given are absent, and absent means left out.
 
-A value that appears on more than one page is one value, not several. Write it once, in its own field, and list in its `page_ref` every page that prints it.
+After the pages, the request names the part of the schema to read, with its fields, each as `key: kind - meaning`.
+
+A value that appears on more than one page is one value, not several. Write it once, in its own field, and list in its `p` every page that prints it.
 
 # Output
 - Return the JSON object and nothing else: no prose, no explanation, no markdown code fences, no comments.
-- Every value the document prints is an object with exactly three keys:
-  - `raw`: the value exactly as printed on the document, character for character.
-  - `parsed`: the same value in the format set out under Value formats below.
-  - `page_ref`: every page number, from the `<page N of M>` markers, on which the value is printed.
-- A key the schema types as a plain string, or as a list of strings, is not printed on the document - it is an identifier, a reference to one, a code or a type - unless its description says it is printed. Write it as a plain string, never as an object.
-- Emit only the fields the document states, and omit every other field. An omitted field is null. Wherever these instructions say to output null, omit the field instead.
-- Always emit the top-level objects the schema lists as required, as `{}` when nothing in them is stated.
-- Do not add keys the schema does not define.
-- Do not emit confidence scores, probabilities or notes. `page_ref` is the only reference to the source.
+- Every value the document prints is an object of up to three keys, in this order:
+  - `r`: the value exactly as printed on the document, character for character - written only when it differs from `v` as written. Leave `r` out when the printed text is `v` itself.
+  - `v`: the value in the format set out under Value formats below.
+  - `p`: every page number, from the `<page N of M>` markers, on which the value is printed.
+- A field of one of the value kinds the request lists is written as such an object. Any other field - an identifier, a reference to one, a code or a type - is not printed on the document unless its meaning says it is: write it as a plain JSON value, never as an object.
+- Emit only the fields the document states, and leave out every other field.
+- Always emit the top-level objects the request says to, as `{}` when nothing in them is stated.
+- Do not add keys the field list does not define.
+- Do not emit confidence scores, probabilities or notes. `p` is the only reference to the source.
 
 # Resolving fields
-- Each field's `description` in the schema is its definition. Extract by meaning, not by matching words.
+- Each field's meaning in the field list is its definition. Extract by meaning, not by matching words.
 - A document's own wording for a value is evidence about that value, not the name of the field it belongs to. Different documents word the same role differently, and the same wording can mean different roles in different documents.
-- When more than one value could plausibly fill a field, choose the one that satisfies the field's description. Do not choose by proximity, by reading order, or by which value appears first.
-- Where a description states what the field is **not**, that exclusion is binding. A value matching the exclusion is the wrong value even when nothing else is available.
-- If no value in the document satisfies a field's description, output null. Never substitute a nearby or similar value to avoid an empty field.
+- When more than one value could plausibly fill a field, choose the one that satisfies the field's meaning. Do not choose by proximity, by reading order, or by which value appears first.
+- Where a meaning states what the field is **not**, that exclusion is binding. A value matching the exclusion is the wrong value even when nothing else is available.
+- If no value in the document satisfies a field's meaning, leave the field out. Never substitute a nearby or similar value to avoid an empty field.
 
 # Distinct roles
-A document typically names several different parties, several different dates, and several different amounts. Each schema field names exactly one of them.
+A document typically names several different parties, several different dates, and several different amounts. Each field names exactly one of them.
 
 - Do not assign one value to two fields with different roles unless the document genuinely states the same value for both.
 - Where the document distinguishes parties by their function, that function decides which field the value belongs to.
-- If you cannot determine which party, date or amount fills a role, output null for that field. Assigning the nearest candidate is worse than leaving it empty, because a confident wrong answer is not detectable downstream.
+- If you cannot determine which party, date or amount fills a role, leave the field out. Assigning the nearest candidate is worse than leaving it empty, because a confident wrong answer is not detectable downstream.
 
 # Value formats
-These formats apply to `parsed`. `raw` is always the text as printed, never reformatted.
-- Dates: `MM/DD/YYYY`, with a zero-padded month and day. Resolve an ambiguous order from other dates on the same document. If the order cannot be resolved, or a component is missing, output null. Never invent a day or a month.
+These formats apply to `v`. `r` is always the text as printed, never reformatted.
+- Dates: `MM/DD/YYYY`, with a zero-padded month and day. Resolve an ambiguous order from other dates on the same document. If the order cannot be resolved, or a component is missing, `v` is null. Never invent a day or a month.
 - Numbers: digits only, with an optional leading minus and an optional decimal point. No currency symbols, no thousands separators, no units, no trailing text. A figure shown in parentheses is negative.
-- `0` is a value, not an absence. Output `0` where the document states zero, and null where it states nothing.
-- Enumerated fields: output exactly one of the listed values, spelled exactly as listed. Map the document's wording onto the list by meaning. If the document supports none of them, output null. Never output a value outside the list.
+- `0` is a value, not an absence. Write `0` where the document states zero, and leave the field out where it states nothing.
+- Enumerated kinds: `v` is exactly one of the listed values, spelled exactly as listed. Map the document's wording onto the list by meaning. If the document supports none of them, `v` is null. Never write a value outside the list.
 - Text: transcribe as printed. Do not expand abbreviations, change capitalisation, correct spelling, or reorder words. Do not append anything the document does not contain.
 - Multi-line text such as an address: join the lines into one string separated by `, `, preserving their order.
 
 # Absence
-- A field is absent when the document does not state it, leaves it blank, marks it as not applicable, or is illegible at that point. In all of these cases output null.
+- A field is absent when the document does not state it, leaves it blank, marks it as not applicable, or is illegible at that point. In all of these cases leave it out.
 - Never carry a value from a different field, a different row, a different page, or a different document.
 - Do not compute a value the document does not state. Extract, do not derive.
 
@@ -64,36 +66,13 @@ These formats apply to `parsed`. `raw` is always the text as printed, never refo
 - A table continuing across a page break is one table. Continue it; do not restart it and do not drop the continuation.
 - Do not merge rows, and do not remove rows because they resemble one another. Two rows sharing an identifier can be genuinely distinct entries.
 - Do not emit a total, subtotal or summary line as a row. Those describe the rows; they are not one of them.
-- Where a row's cell is empty, omit that field from the row. The row itself stays.
+- Where a row's cell is empty, leave that field out of the row. The row itself stays.
 
 # This document type: Policy
 
-A policy states coverage that is in force. It is a layered document, and the layers disagree more often than they appear to.
+A policy states coverage that is in force. It is a layered document, and the layers disagree more often than they appear to: a declarations layer naming the parties, the period, the identifiers and the amounts; schedule pages itemising what is covered; endorsement pages amending the policy; and standard wording - definitions, conditions and exclusions - which is usually most of the document and carries **no extractable field**. Do not mine it for values that resemble the ones you are looking for.
 
-## What you are given
-One or more pages of a single policy. Expect, in roughly this order and not always all present:
-
-1. A declarations layer - a dense block naming the parties, the period, the identifiers and the amounts. It is usually near the front and is often the only page carrying every policy-level value at once.
-2. Schedule pages - itemised listings of what is covered, one entry per coverage, laid out as a grid or as repeated labelled blocks.
-3. Endorsement pages - amendments attached to the policy, each with its own identifier and its own subject.
-4. Standard wording - definitions, conditions and exclusions, identical across every policy on that form.
-
-Section 4 is usually most of the document by page count and carries **no extractable field**. Do not mine it for values that resemble the ones you are looking for.
-
-## Where the values are
-- Policy-level values - the parties, the period, the identifiers, the amount charged for the policy as a whole - come from the declarations layer.
-- Per-coverage values come from the schedule rows.
-- Endorsement identifiers come from the endorsement pages.
-- A value appearing in more than one layer is one value; see the precedence rule below.
-
-## How to work through it
-1. Locate the declarations layer and read every policy-level field from it.
-2. Read the schedule rows in document order, one entry per coverage.
-3. Read the endorsement identifiers.
-4. For any policy-level field still empty, look outside the declarations layer - but apply the exclusions in each field's description before accepting a candidate.
-5. Leave empty anything the document does not state.
-
-## Rules for this document type
+- Policy-level values - the parties, the period, the identifiers, the amount charged for the policy as a whole - come from the declarations layer. Per-coverage values come from the schedule rows. Endorsement identifiers come from the endorsement pages.
 - **The declarations layer wins.** Where a schedule page, a certificate page or an endorsement repeats a policy-level value differently, extract the declarations value.
 - Schedules and endorsements elaborate; they do not restate. A value appearing only in an endorsement belongs to that endorsement's subject, not to the policy as a whole.
 - The period is two separate dates, both extracted when stated. Neither is the date the document was issued, printed, quoted, bound or last revised - those describe the paperwork, not the coverage.
@@ -102,32 +81,133 @@ Section 4 is usually most of the document by page count and carries **no extract
 - Within a coverage row, the amount insured, the amount the insured bears before cover responds, and the amount charged for that coverage are three distinct figures sitting side by side. They are the most commonly transposed values on the document - read each from its own column and use the image to confirm which column it is.
 - A coverage listed with no figures is still a row.
 - Where a coverage is shown separately for each location or vehicle, each is its own coverage entry, applying to that unit.
-
-## Coverages, risk units and values with no field
 - Each coverage is one entry of the coverage list. Its limits, sublimits and its own deductibles sit inside that entry and nowhere else. A limit stated as several figures is several limit entries of one coverage.
-- Give each coverage the code, from the codes the schema lists, whose meaning matches what the coverage covers. Choose by meaning, not by the printed name; the printed name is recorded as printed in its own field.
-- If none of the listed codes matches a coverage, do not choose the nearest one. Record the coverage under the additional fields instead.
-- Number the entries that carry an identifier from 1, in document order, in the pattern the schema sets for that identifier.
+- Give each coverage the code, from the codes listed, whose meaning matches what the coverage covers. Choose by meaning, not by the printed name; the printed name is recorded as printed in its own field. If none of the listed codes matches a coverage, do not choose the nearest one: record the coverage under the additional fields instead.
+- Number the entries that carry an identifier from 1, in document order, in the pattern the field list sets for that identifier.
 - Where an entry applies to particular risk units or to another entry, list their identifiers - for a location with a single building, the building's. Refer only to identifiers you emitted. Leave the list out when the entry applies to the whole policy.
-- A value the document prints that no field of the schema is defined for goes under the additional fields: its label as printed, its value and every page that prints it - one entry, however often it is printed. Never place it in a field whose description it does not meet.
-- A value that has a field of its own goes in that field only, never also under the additional fields.
-- These parts of the schema are read by other requests and are not shown here: `document`, `carrier`, `producer`, `named_insured`, `policy`, `lob_parts`, `premium`, `billing` and `forms_and_endorsements`. A value that belongs under one of them is read there: leave it out here, and never write it under the additional fields.
+- A value the document prints that no field is defined for goes under the additional fields: its label as printed, its value and every page that prints it - one entry, however often it is printed. Never place it in a field whose meaning it does not meet. A value that has a field of its own goes in that field only, never also under the additional fields.
 - A risk unit's number, and whether a coverage is included, are values only where the document prints them. Never write them by default.
 - Policy wording - definitions, conditions, exclusions - is not a value. It never goes under the additional fields.
 
-## Output for this document type
-```
-{
-  coverages: [ { coverage_code, coverage_name, applies_to, included, limits, deductibles, premium, valuation, coinsurance_percent, form_refs, covered_auto_symbols }, ... ]
-  deductibles: [ { deductible_type, amount, percentage, percentage_basis, peril, applies_to_coverages, applies_to }, ... ]
-  interested_parties: [ { role, rank, name, address, loan_number, is_payor, applies_to }, ... ]
-  locations: [ { unit_id, location_number, address, territory, protection_class, fire_district, insured_interest, distance_to_fire_station, distance_to_hydrant }, ... ]
-  buildings: [ { unit_id, location_ref, building_number, construction, occupancy, year_built, area_sq_ft, stories, number_of_units, roof_type, protective_devices, basement, sprinklered, heating_type, heating_fuel, heating_year_updated }, ... ]
-  scheduled_items: [ { unit_id, item_number, category, description, serial, value, valuation, location_ref }, ... ]
-  rating_modifiers: [ { modifier_type, description, factor, percent, applies_to }, ... ]
-  additional_fields: [ { label, value, section_hint, page_ref }, ... ]
-}
-```
-These are the top-level keys. Emit a key only when the document states something under it. Every key shown as an array holds its entries in document order, and is omitted when the document shows none. The schema below is the authority on types and permitted values.
-Schema:
-{"$defs":{"AdditionalField":{"additionalProperties":false,"description":"A printed value that no field of the schema is defined for.","properties":{"label":{"description":"The printed label, verbatim.","type":"string"},"page_ref":{"description":"PDF pages the value is printed on, 1-based.","items":{"minimum":1,"type":"integer"},"type":"array"},"section_hint":{"description":"Envelope block or building block the value is nearest to, e.g. 'discounts', 'vehicles'.","type":"string"},"value":{"$ref":"#/$defs/FieldValue","description":"The value the label introduces, as printed."}},"required":["label","value"],"type":"object"},"Address":{"additionalProperties":false,"description":"Postal address.","properties":{"city":{"$ref":"#/$defs/FieldValue","description":"City."},"county":{"$ref":"#/$defs/FieldValue","description":"County."},"postal_code":{"$ref":"#/$defs/PostalCodeValue","description":"ZIP code."},"state":{"$ref":"#/$defs/StateValue","description":"State, two-letter USPS code in parsed."},"street":{"$ref":"#/$defs/FieldValue","description":"Street address line."},"street_2":{"$ref":"#/$defs/FieldValue","description":"Second address line: suite, unit, attention line."}},"type":"object"},"BoolValue":{"additionalProperties":false,"description":"A yes/no fact. `raw` is the printed mark or wording ('X', 'Yes', 'Included').","properties":{"page_ref":{"items":{"minimum":1,"type":"integer"},"minItems":1,"type":"array"},"parsed":{"type":["boolean","null"]},"raw":{"type":"string"}},"required":["raw","parsed","page_ref"],"type":"object"},"Building":{"additionalProperties":false,"properties":{"area_sq_ft":{"$ref":"#/$defs/NumberValue","description":"Floor area in square feet."},"basement":{"$ref":"#/$defs/BoolValue","description":"Whether the building has a basement."},"building_number":{"$ref":"#/$defs/NumberValue","description":"Building number as printed on the schedule."},"construction":{"$ref":"#/$defs/FieldValue","description":"Construction type (frame, masonry, fire resistive...)."},"heating_fuel":{"$ref":"#/$defs/FieldValue","description":"Fuel of the primary heating system."},"heating_type":{"$ref":"#/$defs/FieldValue","description":"Type of the primary heating system."},"heating_year_updated":{"$ref":"#/$defs/YearValue","description":"Year the primary heating system was last updated."},"location_ref":{"description":"unit_id of the locations[] element this belongs to.","type":"string"},"number_of_units":{"$ref":"#/$defs/NumberValue","description":"Number of dwelling units or families in the building."},"occupancy":{"$ref":"#/$defs/FieldValue","description":"How the building is occupied or used."},"protective_devices":{"description":"Protective devices fitted (alarms, sprinklers, extinguishers...).","items":{"$ref":"#/$defs/FieldValue"},"type":"array"},"roof_type":{"$ref":"#/$defs/FieldValue","description":"Roof type or covering material."},"sprinklered":{"$ref":"#/$defs/BoolValue","description":"Whether the building has an automatic sprinkler system."},"stories":{"$ref":"#/$defs/NumberValue","description":"Number of stories."},"unit_id":{"description":"Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.","pattern":"^bldg_[0-9]+$","type":"string"},"year_built":{"$ref":"#/$defs/YearValue","description":"Year the building was built."}},"required":["unit_id"],"type":"object"},"Coverage":{"additionalProperties":false,"properties":{"applies_to":{"description":"unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).","items":{"type":"string"},"type":"array"},"coinsurance_percent":{"$ref":"#/$defs/PercentValue","description":"Coinsurance percentage that applies to the coverage."},"coverage_code":{"$ref":"#/$defs/CoverageCode","description":"What the coverage covers, as one of the listed codes. Policy comparison aligns coverages by it."},"coverage_name":{"$ref":"#/$defs/FieldValue","description":"As printed."},"covered_auto_symbols":{"description":"ISO covered-auto symbols printed against the coverage (1, 2, 7, 8, 9...). Business auto, garage, truckers and package auto parts.","items":{"$ref":"#/$defs/FieldValue"},"type":"array"},"deductibles":{"description":"Deductibles that apply to this coverage only.","items":{"$ref":"#/$defs/Deductible"},"type":"array"},"form_refs":{"description":"Form numbers printed with this coverage that grant or modify it. Printed values: each exactly as printed, as a plain string.","items":{"type":"string"},"type":"array"},"included":{"$ref":"#/$defs/IncludedValue","description":"Whether the coverage is included, excluded or not purchased."},"limits":{"description":"Limits of the coverage.","items":{"$ref":"#/$defs/Limit"},"type":"array"},"premium":{"$ref":"#/$defs/MoneyValue","description":"Premium for the coverage."},"valuation":{"$ref":"#/$defs/ValuationValue","description":"Valuation basis."}},"required":["coverage_code"],"type":"object"},"CoverageCode":{"oneOf":[{"const":"HO_ADDITIONAL_INSURED","description":"Additional insured"},{"const":"HO_ADDITIONAL_REPLACEMENT_COST","description":"Additional Replacement Cost"},{"const":"HO_ADDITIONAL_RESIDENCE_RENTED_LIABILITY","description":"Additional Residential Premises-Rented To Others - Liabili"},{"const":"HO_AUTOMATIC_INCREASE","description":"Automatic increase in insurance"},{"const":"HO_BUSINESS_PROPERTY_INCREASED","description":"Business Property Increased Limits"},{"const":"HO_COV_A","description":"Coverage A - Dwelling / Residence"},{"const":"HO_COV_B","description":"Coverage B - Other / Related Private Structures"},{"const":"HO_COV_C","description":"Coverage C - Personal Property"},{"const":"HO_CREDIT_CARD_FORGERY","description":"Credit card, fund transfer, forgery and counterfeit money"},{"const":"HO_DAMAGE_TO_PROPERTY_OF_OTHERS","description":"Damage to Property of Others"},{"const":"HO_DEBRIS_REMOVAL","description":"Debris Removal"},{"const":"HO_DISAPPEARING_DEDUCTIBLE","description":"Disappearing Deductible"},{"const":"HO_FIRE_DEPARTMENT_SERVICE_CHARGE","description":"Fire Department Service Charge"},{"const":"HO_FUNGI_REMEDIATION","description":"Limited fungi / mold remediation"},{"const":"HO_INCIDENTAL_BUSINESS","description":"Incidental Business Pursuits -Including Products Liability"},{"const":"HO_LANDLORD_FURNISHINGS","description":"Landlord Furnishings"},{"const":"HO_LOSS_ASSESSMENT","description":"Loss assessment (property)"},{"const":"HO_LOSS_ASSESSMENT_LIABILITY","description":"Loss assessment (liability)"},{"const":"HO_PERSONAL_ARTICLES","description":"PERSONAL ARTICLES COVERAGE"},{"const":"HO_PERSONAL_INJURY","description":"Personal Injury Coverage"},{"const":"HO_PERSONAL_PROPERTY_REPLACEMENT_COST","description":"Personal Property Replacement Cost"},{"const":"HO_PERSONAL_RECORDS_DATA","description":"Personal Records and Data Replacement"},{"const":"HO_PREMISES_LIABILITY_ENDORSEMENT","description":"Premises Liability Coverage"},{"const":"HO_PRIVATE_STRUCTURES_INCREASED","description":"Related Private Structures"},{"const":"HO_PROPERTY_LIABILITY_ENHANCEMENT","description":"Personal Property and Liability Enhancement"},{"const":"HO_REFRIGERATED_FOOD_PRODUCTS","description":"Added Perils For Refrigerated Food Products"},{"const":"HO_RESIDENCE_LOSS_SETTLEMENT","description":"Residence Loss Settlement"},{"const":"HO_SERVICE_LINE","description":"Service Line Coverage"},{"const":"HO_SPECIAL_LIMITS","description":"Special Limits of Liability"},{"const":"HO_SPECIAL_PERSONAL_PROPERTY","description":"Special Personal Property Coverage"},{"const":"HO_TREES_SHRUBS_PLANTS","description":"Trees, Shrubs and Other Plants"},{"const":"HO_TREE_REMOVAL","description":"Tree Removal"},{"const":"HO_UNDERGROUND_UTILITY_LINE","description":"Underground utility line"},{"const":"HO_VALUABLE_ARTICLES","description":"VALUABLE ARTICLES"},{"const":"HO_VIP_ENDORSEMENT","description":"Homeowners VIP Coverage"},{"const":"HO_WATER_DAMAGE_ADDED","description":"Added Water Damages Coverage"},{"const":"HO_WATER_DAMAGE_HIGHER_LIMITS","description":"Higher Limits - Water Damage Coverage"},{"const":"HO_WORKERS_COMP_RESIDENCE_EMPLOYEE","description":"Workers' Compensation Residence Employee"},{"const":"X_CYBER","description":"Cyber / data breach"},{"const":"X_EQUIPMENT_BREAKDOWN","description":"Equipment breakdown"},{"const":"X_IDENTITY_THEFT","description":"Identity theft / fraud expense"},{"const":"X_LOSS_OF_USE","description":"Loss of use / additional living expense / fair rental value"},{"const":"X_MED_PAY","description":"Medical payments"},{"const":"X_ORDINANCE_LAW","description":"Ordinance or law"},{"const":"X_PERSONAL_LIABILITY","description":"Personal liability"},{"const":"X_WATER_BACKUP","description":"Water or sewer backup"}],"type":"string"},"Deductible":{"additionalProperties":false,"description":"A deductible, inside a coverage or in the top-level deductibles[] when it applies across coverages or perils.","properties":{"amount":{"$ref":"#/$defs/MoneyValue","description":"Amount of a flat deductible."},"applies_to":{"description":"unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).","items":{"type":"string"},"type":"array"},"applies_to_coverages":{"description":"coverage_codes it applies to (top-level deductibles only).","items":{"$ref":"#/$defs/CoverageCode"},"type":"array"},"deductible_type":{"$ref":"#/$defs/DeductibleType","description":"Kind of deductible."},"percentage":{"$ref":"#/$defs/PercentValue","description":"Percentage deductible, e.g. 2 for a 2% hurricane deductible."},"percentage_basis":{"$ref":"#/$defs/FieldValue","description":"What the percentage is of, as printed (e.g. 'Coverage A limit')."},"peril":{"$ref":"#/$defs/FieldValue","description":"Peril the deductible applies to (wind/hail, hurricane, all other perils)."}},"required":["deductible_type"],"type":"object"},"DeductibleType":{"description":"Kind of deductible.","enum":["flat","percentage","waiting_period","sir","retention","franchise"],"type":"string"},"FieldValue":{"additionalProperties":false,"properties":{"page_ref":{"items":{"minimum":1,"type":"integer"},"minItems":1,"type":"array"},"parsed":{"type":["string","number","boolean","null"]},"raw":{"type":"string"}},"required":["raw","parsed","page_ref"],"type":"object"},"IncludedValue":{"additionalProperties":false,"description":"Whether the coverage applies under this policy. `raw` is the printed wording; `parsed` is the normalised value, or null when the printed wording maps to none of them.","properties":{"page_ref":{"items":{"minimum":1,"type":"integer"},"minItems":1,"type":"array"},"parsed":{"enum":["included","excluded","not_purchased",null]},"raw":{"type":"string"}},"required":["raw","parsed","page_ref"],"type":"object"},"InterestedParty":{"additionalProperties":false,"properties":{"address":{"$ref":"#/$defs/Address","description":"Address of the interested party."},"applies_to":{"description":"unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).","items":{"type":"string"},"type":"array"},"is_payor":{"$ref":"#/$defs/BoolValue","description":"True when this party pays the premium (escrow billing)."},"loan_number":{"$ref":"#/$defs/FieldValue","description":"Loan or account number with the interested party."},"name":{"$ref":"#/$defs/FieldValue","description":"Name of the interested party."},"rank":{"$ref":"#/$defs/NumberValue","description":"1 for first mortgagee, 2 for second..."},"role":{"description":"Role of the party.","enum":["mortgagee","loss_payee","additional_insured","lienholder","certificate_holder","additional_interest","other"],"type":"string"}},"required":["role"],"type":"object"},"Limit":{"anyOf":[{"additionalProperties":false,"properties":{"amount":{"$ref":"#/$defs/MoneyValue","description":"Amount of the limit."},"basis_coverage_code":{"$ref":"#/$defs/CoverageCode","description":"coverage_code the percentage refers to."},"description":{"$ref":"#/$defs/FieldValue","description":"Printed qualifier, e.g. 'theft of jewelry'. Required in practice for sublimits."},"limit_type":{"$ref":"#/$defs/LimitType","description":"Kind of limit."},"percentage":{"$ref":"#/$defs/PercentValue","description":"When the limit is stated as a percentage of another coverage."}},"required":["limit_type","percentage","basis_coverage_code"],"type":"object"},{"additionalProperties":false,"properties":{"amount":{"$ref":"#/$defs/MoneyValue"},"basis_coverage_code":{"$ref":"#/$defs/CoverageCode"},"description":{"$ref":"#/$defs/FieldValue"},"limit_type":{"$ref":"#/$defs/LimitType"}},"required":["limit_type"],"type":"object"}],"description":"A limit. Always inside the coverage it limits. Split limits (auto 100/300/50) are three entries (per_person, per_accident, property_damage); sublimits are 'sublimit' entries with a description."},"LimitType":{"description":"Kind of limit.","enum":["per_occurrence","aggregate","products_completed_ops_aggregate","per_person","per_accident","property_damage","combined_single","per_claim","each_employee","policy_limit","per_location","per_item","per_day","per_disablement","sublimit","blanket","scheduled_total","other"],"type":"string"},"Location":{"additionalProperties":false,"properties":{"address":{"$ref":"#/$defs/Address","description":"Address of the premises. A vehicle's printed garaging ZIP or state is recorded as a location whose address holds it; vehicles[].garaging_location_ref points to it."},"distance_to_fire_station":{"$ref":"#/$defs/FieldValue","description":"Distance to the responding fire station."},"distance_to_hydrant":{"$ref":"#/$defs/FieldValue","description":"Distance to the nearest fire hydrant."},"fire_district":{"$ref":"#/$defs/FieldValue","description":"Fire district or fire protection area the premises fall in."},"insured_interest":{"$ref":"#/$defs/FieldValue","description":"The insured's interest in the premises: Owner, Deeded owner, Tenant, LLC member..."},"location_number":{"$ref":"#/$defs/NumberValue","description":"Location number as printed on the schedule."},"protection_class":{"$ref":"#/$defs/FieldValue","description":"Fire protection class of the premises."},"territory":{"$ref":"#/$defs/FieldValue","description":"Rating territory or zone."},"unit_id":{"description":"Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.","pattern":"^loc_[0-9]+$","type":"string"}},"required":["unit_id"],"type":"object"},"MoneyValue":{"additionalProperties":false,"description":"An amount of money. `parsed` is a number, or null when the printed wording is not an amount ('Included', 'Not Covered'); whether the coverage applies is recorded in `included`.","properties":{"page_ref":{"items":{"minimum":1,"type":"integer"},"minItems":1,"type":"array"},"parsed":{"type":["number","null"]},"raw":{"type":"string"}},"required":["raw","parsed","page_ref"],"type":"object"},"NumberValue":{"additionalProperties":false,"description":"A count, year or measurement. `parsed` is a number.","properties":{"page_ref":{"items":{"minimum":1,"type":"integer"},"minItems":1,"type":"array"},"parsed":{"type":["number","null"]},"raw":{"type":"string"}},"required":["raw","parsed","page_ref"],"type":"object"},"PercentValue":{"additionalProperties":false,"description":"A percentage. `parsed` is a number: 5% -> 5.","properties":{"page_ref":{"items":{"minimum":1,"type":"integer"},"minItems":1,"type":"array"},"parsed":{"type":["number","null"]},"raw":{"type":"string"}},"required":["raw","parsed","page_ref"],"type":"object"},"PostalCodeValue":{"additionalProperties":false,"description":"A US ZIP code. `parsed` is 5 digits or ZIP+4 ('12180-1234').","properties":{"page_ref":{"items":{"minimum":1,"type":"integer"},"minItems":1,"type":"array"},"parsed":{"anyOf":[{"pattern":"^[0-9]{5}(-[0-9]{4})?$","type":"string"},{"type":"null"}]},"raw":{"type":"string"}},"required":["raw","parsed","page_ref"],"type":"object"},"RatingModifier":{"additionalProperties":false,"properties":{"applies_to":{"description":"unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).","items":{"type":"string"},"type":"array"},"description":{"$ref":"#/$defs/FieldValue","description":"As printed, e.g. 'Experience Modification', 'Multi-Policy Discount'."},"factor":{"$ref":"#/$defs/NumberValue","description":"Modification factor (e.g. 0.85)."},"modifier_type":{"description":"Kind of modifier.","enum":["experience_mod","schedule","irpm","multi_policy","protective_device","loss_free","other"],"type":"string"},"percent":{"$ref":"#/$defs/PercentValue","description":"Modifier as a percentage."}},"required":["modifier_type"],"type":"object"},"ScheduledItem":{"additionalProperties":false,"properties":{"category":{"$ref":"#/$defs/FieldValue","description":"Class or category of the scheduled item (jewelry, fine arts, cameras...)."},"description":{"$ref":"#/$defs/FieldValue","description":"Description of the item as printed."},"item_number":{"$ref":"#/$defs/NumberValue","description":"Item number as printed on the schedule."},"location_ref":{"description":"unit_id of the locations[] element this belongs to.","type":"string"},"serial":{"$ref":"#/$defs/FieldValue","description":"Serial number."},"unit_id":{"description":"Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.","pattern":"^item_[0-9]+$","type":"string"},"valuation":{"$ref":"#/$defs/ValuationValue","description":"Valuation basis of the item."},"value":{"$ref":"#/$defs/MoneyValue","description":"Insured value of the item."}},"required":["unit_id"],"type":"object"},"StateValue":{"additionalProperties":false,"description":"A US state or territory. `parsed` is the two-letter USPS code ('New York' -> 'NY').","properties":{"page_ref":{"items":{"minimum":1,"type":"integer"},"minItems":1,"type":"array"},"parsed":{"anyOf":[{"pattern":"^[A-Z]{2}$","type":"string"},{"type":"null"}]},"raw":{"type":"string"}},"required":["raw","parsed","page_ref"],"type":"object"},"ValuationValue":{"additionalProperties":false,"description":"Valuation basis. `raw` is the printed wording; `parsed` is the normalised value, or null when the printed wording maps to none of them.","properties":{"page_ref":{"items":{"minimum":1,"type":"integer"},"minItems":1,"type":"array"},"parsed":{"enum":["replacement_cost","actual_cash_value","agreed_value","stated_amount","other",null]},"raw":{"type":"string"}},"required":["raw","parsed","page_ref"],"type":"object"},"YearValue":{"additionalProperties":false,"description":"A calendar year (model year, year built). `parsed` is an integer 1900-2100.","properties":{"page_ref":{"items":{"minimum":1,"type":"integer"},"minItems":1,"type":"array"},"parsed":{"anyOf":[{"maximum":2100,"minimum":1900,"type":"integer"},{"type":"null"}]},"raw":{"type":"string"}},"required":["raw","parsed","page_ref"],"type":"object"},"additional_fields":{"description":"Every printed value that no field of the schema is defined for.","items":{"$ref":"#/$defs/AdditionalField"},"type":"array"},"buildings":{"items":{"$ref":"#/$defs/Building"},"type":"array"},"coverages":{"description":"Every coverage and every limit.","items":{"$ref":"#/$defs/Coverage"},"type":"array"},"deductibles":{"description":"Deductibles that apply across coverages or perils.","items":{"$ref":"#/$defs/Deductible"},"type":"array"},"interested_parties":{"items":{"$ref":"#/$defs/InterestedParty"},"type":"array"},"locations":{"items":{"$ref":"#/$defs/Location"},"type":"array"},"rating_modifiers":{"items":{"$ref":"#/$defs/RatingModifier"},"type":"array"},"scheduled_items":{"items":{"$ref":"#/$defs/ScheduledItem"},"type":"array"}},"additionalProperties":false,"properties":{"additional_fields":{"$ref":"#/$defs/additional_fields"},"buildings":{"$ref":"#/$defs/buildings"},"coverages":{"$ref":"#/$defs/coverages"},"deductibles":{"$ref":"#/$defs/deductibles"},"interested_parties":{"$ref":"#/$defs/interested_parties"},"locations":{"$ref":"#/$defs/locations"},"rating_modifiers":{"$ref":"#/$defs/rating_modifiers"},"scheduled_items":{"$ref":"#/$defs/scheduled_items"}},"type":"object"}
+# ---- user turn: the window's pages (each image, then `<page N of M>` and its text), then the request ----
+
+# Request: Schedules
+Read the pages above for these top-level keys only: `coverages`, `deductibles`, `interested_parties`, `locations`, `buildings`, `scheduled_items`, `rating_modifiers` and `additional_fields`. Emit a key only when these pages state something under it. A key whose kind is a list holds its entries in document order, and is left out when these pages show none.
+These parts of the schema are read by other requests and are not listed here: `document`, `carrier`, `producer`, `named_insured`, `policy`, `lob_parts`, `premium`, `billing` and `forms_and_endorsements`. A value that belongs under one of them is read there: leave it out here, and never write it under the additional fields.
+
+## Fields
+`key: kind - meaning`, one per line, under the object that holds them. `[kind]` is a list.
+coverages: [Coverage] - Every coverage and every limit.
+deductibles: [Deductible] - Deductibles that apply across coverages or perils.
+interested_parties: [InterestedParty]
+locations: [Location]
+buildings: [Building]
+scheduled_items: [ScheduledItem]
+rating_modifiers: [RatingModifier]
+additional_fields: [AdditionalField] - Every printed value that no field of the schema is defined for.
+Coverage
+  coverage_code: CoverageCode - What the coverage covers, as one of the listed codes. Policy comparison aligns coverages by it.
+  coverage_name: text - As printed.
+  applies_to: [string] - unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).
+  included: included - Whether the coverage is included, excluded or not purchased.
+  limits: [Limit] - Limits of the coverage.
+  deductibles: [Deductible] - Deductibles that apply to this coverage only.
+  premium: money - Premium for the coverage.
+  valuation: valuation - Valuation basis.
+  coinsurance_percent: percent - Coinsurance percentage that applies to the coverage.
+  form_refs: [string] - Form numbers printed with this coverage that grant or modify it. Printed values: each exactly as printed, as a plain string.
+  covered_auto_symbols: [text] - ISO covered-auto symbols printed against the coverage (1, 2, 7, 8, 9...). Business auto, garage, truckers and package auto parts.
+Deductible - A deductible, inside a coverage or in the top-level deductibles[] when it applies across coverages or perils.
+  deductible_type: DeductibleType - Kind of deductible.
+  amount: money - Amount of a flat deductible.
+  percentage: percent - Percentage deductible, e.g. 2 for a 2% hurricane deductible.
+  percentage_basis: text - What the percentage is of, as printed (e.g. 'Coverage A limit').
+  peril: text - Peril the deductible applies to (wind/hail, hurricane, all other perils).
+  applies_to_coverages: [CoverageCode] - coverage_codes it applies to (top-level deductibles only).
+  applies_to: [string] - unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).
+InterestedParty
+  role: one of mortgagee|loss_payee|additional_insured|lienholder|certificate_holder|additional_interest|other - Role of the party.
+  rank: number - 1 for first mortgagee, 2 for second...
+  name: text - Name of the interested party.
+  address: Address - Address of the interested party.
+  loan_number: text - Loan or account number with the interested party.
+  is_payor: yesno - True when this party pays the premium (escrow billing).
+  applies_to: [string] - unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).
+Location
+  unit_id: id - Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.
+  location_number: number - Location number as printed on the schedule.
+  address: Address - Address of the premises. A vehicle's printed garaging ZIP or state is recorded as a location whose address holds it; vehicles[].garaging_location_ref points to it.
+  territory: text - Rating territory or zone.
+  protection_class: text - Fire protection class of the premises.
+  fire_district: text - Fire district or fire protection area the premises fall in.
+  insured_interest: text - The insured's interest in the premises: Owner, Deeded owner, Tenant, LLC member...
+  distance_to_fire_station: text - Distance to the responding fire station.
+  distance_to_hydrant: text - Distance to the nearest fire hydrant.
+Building
+  unit_id: id - Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.
+  location_ref: string - unit_id of the locations[] element this belongs to.
+  building_number: number - Building number as printed on the schedule.
+  construction: text - Construction type (frame, masonry, fire resistive...).
+  occupancy: text - How the building is occupied or used.
+  year_built: year - Year the building was built.
+  area_sq_ft: number - Floor area in square feet.
+  stories: number - Number of stories.
+  number_of_units: number - Number of dwelling units or families in the building.
+  roof_type: text - Roof type or covering material.
+  protective_devices: [text] - Protective devices fitted (alarms, sprinklers, extinguishers...).
+  basement: yesno - Whether the building has a basement.
+  sprinklered: yesno - Whether the building has an automatic sprinkler system.
+  heating_type: text - Type of the primary heating system.
+  heating_fuel: text - Fuel of the primary heating system.
+  heating_year_updated: year - Year the primary heating system was last updated.
+ScheduledItem
+  unit_id: id - Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.
+  item_number: number - Item number as printed on the schedule.
+  category: text - Class or category of the scheduled item (jewelry, fine arts, cameras...).
+  description: text - Description of the item as printed.
+  serial: text - Serial number.
+  value: money - Insured value of the item.
+  valuation: valuation - Valuation basis of the item.
+  location_ref: string - unit_id of the locations[] element this belongs to.
+RatingModifier
+  modifier_type: one of experience_mod|schedule|irpm|multi_policy|protective_device|loss_free|other - Kind of modifier.
+  description: text - As printed, e.g. 'Experience Modification', 'Multi-Policy Discount'.
+  factor: number - Modification factor (e.g. 0.85).
+  percent: percent - Modifier as a percentage.
+  applies_to: [string] - unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).
+AdditionalField - A printed value that no field of the schema is defined for.
+  label: string - The printed label, verbatim.
+  value: text - The value the label introduces, as printed.
+  section_hint: string - Envelope block or building block the value is nearest to, e.g. 'discounts', 'vehicles'.
+  page_ref: [integer] - PDF pages the value is printed on, 1-based.
+Limit - A limit. Always inside the coverage it limits. Split limits (auto 100/300/50) are three entries (per_person, per_accident, property_damage); sublimits are 'sublimit' entries with a description.
+  limit_type: LimitType - Kind of limit.
+  amount: money - Amount of the limit.
+  percentage: percent - When the limit is stated as a percentage of another coverage.
+  basis_coverage_code: CoverageCode - coverage_code the percentage refers to.
+  description: text - Printed qualifier, e.g. 'theft of jewelry'. Required in practice for sublimits.
+Address - Postal address.
+  street: text - Street address line.
+  street_2: text - Second address line: suite, unit, attention line.
+  city: text - City.
+  state: state - State, two-letter USPS code in parsed.
+  postal_code: zip - ZIP code.
+  county: text - County.
+
+## Value kinds
+Written as `{"r", "v", "p"}`; what `v` holds:
+text: string/number/boolean
+included: one of included|excluded|not_purchased - Whether the coverage applies under this policy. `raw` is the printed wording; `parsed` is the normalised value, or null when the printed wording maps to none of them.
+money: number - An amount of money. `parsed` is a number, or null when the printed wording is not an amount ('Included', 'Not Covered'); whether the coverage applies is recorded in `included`.
+valuation: one of replacement_cost|actual_cash_value|agreed_value|stated_amount|other - Valuation basis. `raw` is the printed wording; `parsed` is the normalised value, or null when the printed wording maps to none of them.
+percent: number - A percentage. `parsed` is a number: 5% -> 5.
+number: number - A count, year or measurement. `parsed` is a number.
+yesno: boolean - A yes/no fact. `raw` is the printed mark or wording ('X', 'Yes', 'Included').
+year: integer - A calendar year (model year, year built). `parsed` is an integer 1900-2100.
+state: string - A US state or territory. `parsed` is the two-letter USPS code ('New York' -> 'NY').
+zip: string - A US ZIP code. `parsed` is 5 digits or ZIP+4 ('12180-1234').
+
+## Codes
+CoverageCode: HO_ADDITIONAL_INSURED = Additional insured; HO_ADDITIONAL_REPLACEMENT_COST = Additional Replacement Cost; HO_ADDITIONAL_RESIDENCE_RENTED_LIABILITY = Additional Residential Premises-Rented To Others - Liabili; HO_AUTOMATIC_INCREASE = Automatic increase in insurance; HO_BUSINESS_PROPERTY_INCREASED = Business Property Increased Limits; HO_COV_A = Coverage A - Dwelling / Residence; HO_COV_B = Coverage B - Other / Related Private Structures; HO_COV_C = Coverage C - Personal Property; HO_CREDIT_CARD_FORGERY = Credit card, fund transfer, forgery and counterfeit money; HO_DAMAGE_TO_PROPERTY_OF_OTHERS = Damage to Property of Others; HO_DEBRIS_REMOVAL = Debris Removal; HO_DISAPPEARING_DEDUCTIBLE = Disappearing Deductible; HO_FIRE_DEPARTMENT_SERVICE_CHARGE = Fire Department Service Charge; HO_FUNGI_REMEDIATION = Limited fungi / mold remediation; HO_INCIDENTAL_BUSINESS = Incidental Business Pursuits -Including Products Liability; HO_LANDLORD_FURNISHINGS = Landlord Furnishings; HO_LOSS_ASSESSMENT = Loss assessment (property); HO_LOSS_ASSESSMENT_LIABILITY = Loss assessment (liability); HO_PERSONAL_ARTICLES = PERSONAL ARTICLES COVERAGE; HO_PERSONAL_INJURY = Personal Injury Coverage; HO_PERSONAL_PROPERTY_REPLACEMENT_COST = Personal Property Replacement Cost; HO_PERSONAL_RECORDS_DATA = Personal Records and Data Replacement; HO_PREMISES_LIABILITY_ENDORSEMENT = Premises Liability Coverage; HO_PRIVATE_STRUCTURES_INCREASED = Related Private Structures; HO_PROPERTY_LIABILITY_ENHANCEMENT = Personal Property and Liability Enhancement; HO_REFRIGERATED_FOOD_PRODUCTS = Added Perils For Refrigerated Food Products; HO_RESIDENCE_LOSS_SETTLEMENT = Residence Loss Settlement; HO_SERVICE_LINE = Service Line Coverage; HO_SPECIAL_LIMITS = Special Limits of Liability; HO_SPECIAL_PERSONAL_PROPERTY = Special Personal Property Coverage; HO_TREES_SHRUBS_PLANTS = Trees, Shrubs and Other Plants; HO_TREE_REMOVAL = Tree Removal; HO_UNDERGROUND_UTILITY_LINE = Underground utility line; HO_VALUABLE_ARTICLES = VALUABLE ARTICLES; HO_VIP_ENDORSEMENT = Homeowners VIP Coverage; HO_WATER_DAMAGE_ADDED = Added Water Damages Coverage; HO_WATER_DAMAGE_HIGHER_LIMITS = Higher Limits - Water Damage Coverage; HO_WORKERS_COMP_RESIDENCE_EMPLOYEE = Workers' Compensation Residence Employee; X_CYBER = Cyber / data breach; X_EQUIPMENT_BREAKDOWN = Equipment breakdown; X_IDENTITY_THEFT = Identity theft / fraud expense; X_LOSS_OF_USE = Loss of use / additional living expense / fair rental value; X_MED_PAY = Medical payments; X_ORDINANCE_LAW = Ordinance or law; X_PERSONAL_LIABILITY = Personal liability; X_WATER_BACKUP = Water or sewer backup
+DeductibleType: flat | percentage | waiting_period | sir | retention | franchise
+LimitType: per_occurrence | aggregate | products_completed_ops_aggregate | per_person | per_accident | property_damage | combined_single | per_claim | each_employee | policy_limit | per_location | per_item | per_day | per_disablement | sublimit | blanket | scheduled_total | other

@@ -15,6 +15,8 @@ import copy
 import json
 from pathlib import Path
 
+import pytest
+
 from common import schemas as S
 from common.canonical import values_view
 from data_pipeline.dataset_builder.policy_windows import TargetReport, plan_windows, window_target
@@ -53,6 +55,7 @@ def _rows(target, code, premium="any"):
             and (premium == "any" or values_view(c.get("premium")) == premium)]
 
 
+@pytest.mark.format_profile("standard")
 def test_a_caption_the_wording_prints_does_not_teach_its_row_there(no_window_overlap):
     """Vehicle 2's liability limit is captioned "Each Person" on page 5, and the
     label cites the caption on page 2 as well, where the wording uses it."""
@@ -67,6 +70,7 @@ def test_a_caption_the_wording_prints_does_not_teach_its_row_there(no_window_ove
     assert [values_view(limit["amount"]) for limit in row["limits"]] == [100000, 300000, 50000]
 
 
+@pytest.mark.format_profile("standard")
 def test_a_row_of_captions_alone_has_no_home_and_stays_where_it_is_cited(no_window_overlap):
     """A row stating no name and no figure: nothing says where it belongs, so
     it is taught on every window that cites it, as before."""
@@ -83,6 +87,7 @@ def test_a_row_of_captions_alone_has_no_home_and_stays_where_it_is_cited(no_wind
         assert row["limits"][0]["description"]["page_ref"] == [page]
 
 
+@pytest.mark.format_profile("standard")
 def test_a_row_split_at_the_window_boundary_is_at_home_on_both_sides(no_window_overlap):
     """A figure is a home: vehicle 1's liability premium printed on page 3 and
     its limits on page 4 keep a row in each window, as the orphan rule does

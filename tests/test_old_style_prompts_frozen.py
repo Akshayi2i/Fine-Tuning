@@ -4,11 +4,18 @@ The common-model work (SPEC_21) changes code every policy runs through - the
 schema registry, the model view, the templates, the section map, the target
 builder. None of it may change what a self-contained line, ACORD form or Loss
 Run renders: those prompts are what their adapters train and serve on.
+
+Frozen in the standard format profile: the fast one writes a policy window
+another way by design (configs/shared/format.yaml).
 """
 
 import json
 
+import pytest
+
 from testing.render_prompts import FINGERPRINTS_PATH, old_style_fingerprints
+
+pytestmark = pytest.mark.format_profile("standard")
 
 
 def test_the_old_style_selectors_render_exactly_as_frozen():

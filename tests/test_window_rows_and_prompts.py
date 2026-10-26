@@ -9,6 +9,8 @@ values other windows read, contradicts the targets it is trained with.
 
 from __future__ import annotations
 
+import pytest
+
 from common.prompts import render_system_prompt
 from data_pipeline.dataset_builder.policy_windows import PolicyWindowPlan, printed_pages_in, window_target
 
@@ -66,6 +68,7 @@ def _prompt(group, lob="homeowners"):
     return render_system_prompt("policy", "ocr_plus_image", None, lob, group)
 
 
+@pytest.mark.format_profile("standard")
 def test_a_window_with_no_required_keys_reads_as_a_sentence():
     for group in ("arrays", "lineblk"):
         text = _prompt(group)
@@ -73,6 +76,7 @@ def test_a_window_with_no_required_keys_reads_as_a_sentence():
     assert "Emit `document`, `carrier`, `named_insured` and `policy` always" in _prompt("decl")
 
 
+@pytest.mark.format_profile("standard")
 def test_the_window_that_decides_extra_fields_is_told_what_other_windows_read():
     arrays = _prompt("arrays")
     assert ("read by other requests and are not shown here: `document`, `carrier`, `producer`, "
@@ -82,6 +86,7 @@ def test_the_window_that_decides_extra_fields_is_told_what_other_windows_read():
     assert "read by other requests" not in _prompt(None)
 
 
+@pytest.mark.format_profile("standard")
 def test_form_numbers_are_described_as_printed_and_the_rule_admits_them():
     arrays = _prompt("arrays")
     assert "Form numbers printed with this coverage" in arrays
@@ -89,6 +94,7 @@ def test_form_numbers_are_described_as_printed_and_the_rule_admits_them():
     assert "The value the label introduces, as printed." in arrays          # not "Insured value."
 
 
+@pytest.mark.format_profile("standard")
 def test_the_common_model_prompt_states_the_conventions():
     text = _prompt("arrays")
     assert "Write it once, in its own field, and list in its `page_ref` every page that prints it." in text

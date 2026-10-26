@@ -58,6 +58,25 @@ PRINTED_CHECK = "printed_check"
 #: run_to_run_agreement compares the answer with.
 REPEAT_ANSWER = "repeat_extraction"
 
+#: The reading mode whose page text an image-only reading borrows, so its
+#: values are checked for invention too (decision 2026-10-26): the same
+#: document's clean MinerU text, page by page. Production reads image_only and
+#: checks the fields on that text when it arrives (serving.fields_first).
+TEXT_DONOR_MODE = "ocr_plus_image"
+
+#: The mode that reads no page text: its readings borrow (:data:`TEXT_DONOR_MODE`).
+IMAGE_ONLY_MODE = "image_only"
+
+#: Where a reading's metadata says its printed-values record (:data:`PRINTED_CHECK`)
+#: was made on borrowed page text (:data:`BORROWED_TEXT`), not on text it was
+#: sent (golden_eval's image_only readings).
+PRINTED_TEXT = "printed_text"
+BORROWED_TEXT = "borrowed"
+
+#: Where such a reading's metadata lists the pages its values cite that have no
+#: text to borrow: what was looked up there is unchecked, never clean.
+UNREAD_PAGES = "printed_text_unread_pages"
+
 #: Gate metrics pooled over the whole set by their per-document weights - the
 #: values checked, the fields compared - rather than each doc type's rate
 #: weighted by its readings: hallucination_rate is every value no page prints
@@ -177,6 +196,9 @@ def eval_set_record(
         "frozen_at": manifest.get("frozen_at"),
         "frozen_from_corpus": manifest.get("frozen_from_corpus"),
         "scoring_fingerprint": scoring_fingerprint(),
+        # The mode the gate's run-to-run repeat reads (golden_eval.run_to_run_mode):
+        # part of the yardstick, folded into the fingerprint above.
+        **yardstick_settings(),
         "documents_by_doc_type": dict(sorted(Counter(t for t, _s in scored).items())),
         "real_documents_by_doc_type": dict(sorted(
             Counter(t for t, synthetic in scored if not synthetic).items())),
@@ -238,8 +260,25 @@ def scoring_fingerprint() -> str:
     fingerprint that moved on them would make every edit a reason to compare
     nothing. Any change to the code itself moves it, including one that turns
     out to change no score.
+
+    The yardstick's configured settings (:func:`yardstick_settings`: the mode the
+    run-to-run repeat reads) are folded in: run_to_run_agreement over image_only
+    readings is another number than over ocr_plus_image ones, so a report made
+    on another repeat mode is neither reused for the gate nor compared with it
+    as if comparable - wherever the fingerprint is compared (decision 2026-10-26).
     """
-    return _scoring_fingerprint()
+    settings = json.dumps(yardstick_settings(), sort_keys=True)
+    return hashlib.sha256(f"{_scoring_fingerprint()}\n{settings}".encode()).hexdigest()[:16]
+
+
+def yardstick_settings() -> dict[str, Any]:
+    """What the configuration sets about how the gate measures, recorded in
+    every eval report's ``eval_set`` and folded into :func:`scoring_fingerprint`:
+    the mode the golden eval reads a second time for run_to_run_agreement
+    (``run_to_run_mode``, ``evaluation.golden_eval.run_to_run_mode``)."""
+    from evaluation.golden_eval import run_to_run_mode
+
+    return {"run_to_run_mode": run_to_run_mode()}
 
 
 @functools.lru_cache(maxsize=1)
@@ -322,6 +361,10 @@ def yardstick_difference(
                 f"{promoted['frozen_at']} from {promoted['frozen_from_corpus']}, the candidate on "
                 f"the set frozen {candidate['frozen_at']} from {candidate['frozen_from_corpus']}, "
                 "so one source id may be another document or another gold")
+    modes = (promoted.get("run_to_run_mode"), candidate.get("run_to_run_mode"))
+    if all(modes) and modes[0] != modes[1]:
+        return (f"the two read their run-to-run repeat in different modes (the promoted release "
+                f"{modes[0]}, the candidate {modes[1]}), so their run_to_run_agreement are two numbers")
     if promoted["scoring_fingerprint"] != candidate["scoring_fingerprint"]:
         return (f"the two were scored by different scoring code (label rules, label verification "
                 f"or scorers; scoring fingerprint {promoted['scoring_fingerprint']} against "
@@ -529,6 +572,22 @@ class EvalReport:
                 weights.setdefault(name, {}).update(
                     {source: n * scale for source, n in items.items()})
         return {name: by_source for name, by_source in weights.items() if by_source}
+
+    def invention_coverage(self) -> dict[str, int]:
+        """What hallucination_rate could and could not check, over the full set
+        (:attr:`SubsetReport.printed_values`): the document readings checked on
+        page text borrowed from their document's :data:`TEXT_DONOR_MODE`
+        reading (image_only), the pages they cite that no reading has text for
+        (values there unchecked), and the readings that wrote values with no
+        text to check them on at all - unscored, never counted as clean."""
+        totals = {"borrowed_text_readings": 0, "cited_pages_without_text": 0, "unscored_readings": 0}
+        for report in self.full_set():
+            values = report.printed_values or {}
+            borrowed, unscored = values.get("borrowed_text") or {}, values.get("unscored") or {}
+            totals["borrowed_text_readings"] += int(borrowed.get("readings", 0))
+            totals["cited_pages_without_text"] += int(borrowed.get("cited_pages_without_text", 0))
+            totals["unscored_readings"] += int(unscored.get("readings", 0))
+        return totals
 
     def per_document_lines(self) -> dict[str, str]:
         """``{source_id: line}`` over the full set: each real document's line
@@ -885,10 +944,14 @@ def score_subset(
         report.per_document_items[name] = tally.weights()
         if tally.weight:
             report.pooled[name] = (tally.score, tally.weight)
-    if printed.weight:
+    # Also when nothing was checked but readings went unscored: a reading with
+    # no text to check is shown, never read as a clean one (decision 2026-10-26).
+    coverage = printed.coverage()
+    if printed.weight or coverage:
         report.printed_values = {
             "documents": len(printed.by_document), "checked": int(printed.weight),
             "not_printed": int(printed.score), "instances": printed.instances[:25],
+            **coverage,
         }
     if agreement.weight:
         report.run_to_run = {"documents": len(agreement.by_document),
@@ -974,8 +1037,11 @@ def score_subset(
         # actually printed — and those have different remedies. Through
         # serving, serving's own printed-values check (_printed_values).
         #
-        # Only readings that had text: against an image-only row's empty text
-        # every value the model read off the image would count as invented.
+        # Only readings with text: against an image-only row's empty text
+        # every value the model read off the image would count as invented. So
+        # an image-only reading is checked on its document's page text
+        # borrowed from its ocr_plus_image reading (decision 2026-10-26), and
+        # one with none to borrow is unscored, shown in printed_values.
         # Every value the model wrote counts, as serving counts it; the extra
         # fields are also reported alone where scored here: free text by
         # design, inside the one rate they can hide the schema's own fields.
@@ -1049,13 +1115,17 @@ def _error_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
 def _hallucination_rate(scored: list[tuple[Any, Any, dict[str, Any]]], common_model: list[bool],
                         score: Any, *, overflow: bool = False) -> float | None:
     """``score_hallucinations`` over the rows that were sent OCR text
-    (:func:`_reading_text`); ``None`` when nothing checkable was emitted on a
-    row that was sent text - not measured, rather than a perfect 0."""
-    sent = [
-        (*_read_values(expected, got, cm), text)
-        for (expected, got, metadata), cm in zip(scored, common_model, strict=True)
-        if (text := _reading_text(metadata)) is not None
-    ]
+    (:func:`_reading_text`), or borrow it (:func:`_invention_text`); ``None``
+    when nothing checkable was emitted on a row with text - not measured,
+    rather than a perfect 0."""
+    sent = []
+    for (expected, got, metadata), cm in zip(scored, common_model, strict=True):
+        if _reading_text(metadata) is None and _BORROWED_PAGES not in metadata:
+            continue
+        read = _read_values(expected, got, cm)
+        found = _invention_text(metadata, read[1])
+        if found is not None:
+            sent.append((*read, found[0]))
     report = score(sent, overflow=overflow) if sent else None
     return report.rate if report is not None and report.opportunities else None
 
@@ -1078,6 +1148,69 @@ def _reading_text(metadata: dict[str, Any]) -> Any:
     if not metadata.get("ocr_text"):
         return None
     return metadata.get(_DOCUMENT_PAGES) or metadata.get("ocr_pages") or str(metadata["ocr_text"])
+
+
+#: Where :func:`build_report` keeps, on an image-only reading's own copy of its
+#: metadata, the page text it borrows: every page of its document that the
+#: document's :data:`TEXT_DONOR_MODE` readings carry, prepared once.
+_BORROWED_PAGES = "_borrowed_pages"
+
+
+def _borrows_text(metadata: dict[str, Any]) -> bool:
+    """Whether a reading is checked on borrowed text: an image-only reading of
+    a document (it has a source id), sent no text, and not checked by serving
+    already (a reading served by the golden eval borrows there, golden_eval)."""
+    return (metadata.get("modality_mode") == IMAGE_ONLY_MODE and bool(metadata.get("source_id"))
+            and not metadata.get("ocr_text") and PRINTED_CHECK not in metadata)
+
+
+def cited_pages(answer: Any) -> set[int]:
+    """Every page a value of ``answer`` cites (its envelopes' ``page_ref``)."""
+    from evaluation.metrics.extraction_faults import _written
+
+    return {int(page) for _path, _forms, cited in _written(answer, bare_printed=False)
+            for page in cited if not isinstance(page, bool) and str(page).isdigit()}
+
+
+def page_has_text(page: Any) -> bool:
+    """Whether a page's text (a string, or prepared, ``common.grounding.TolerantPage``)
+    has anything to look a value up in; a page that is absent has none."""
+    from common.grounding import TolerantPage
+
+    if page is None:
+        return False
+    return (page if isinstance(page, TolerantPage) else TolerantPage(str(page))).has_text
+
+
+def _invention_text(metadata: dict[str, Any], got: Any) -> tuple[Any, list[int] | None] | None:
+    """The text a reading's written values are looked up in, and - for borrowed
+    text - the pages they cite that it has no text for; ``None`` with no text
+    at all, own or borrowed.
+
+    Its own text first (:func:`_reading_text`; the pages then ``None``). An
+    image-only reading has none and borrows its document's
+    (:data:`_BORROWED_PAGES`): there, a page it cites that no reading carries
+    text for is added blank, so a value found on no page with text while citing
+    it is unchecked (``common.grounding``: on an unread page), never invented
+    because the page was missing - and those pages are returned, to be counted."""
+    own = _reading_text(metadata)
+    if own is not None:
+        return own, None
+    borrowed = metadata.get(_BORROWED_PAGES)
+    if borrowed is None:
+        return None
+    unread = sorted(page for page in cited_pages(got) if not page_has_text(borrowed.get(page)))
+    missing = {page: "" for page in unread if page not in borrowed}
+    return ({**borrowed, **missing} if missing else borrowed), unread
+
+
+def _wrote_values(got: Any) -> bool:
+    """Whether an answer wrote any value a page could print (as
+    ``score_hallucinations`` reads it): a reading with none has nothing to check."""
+    from evaluation.metrics.extraction_faults import _has_envelope, _is_empty, _written
+
+    return any(not _is_empty(form) for _path, forms, _cited in _written(got, bare_printed=not _has_envelope(got))
+               for form in forms)
 
 
 @dataclass
@@ -1112,8 +1245,42 @@ class _Pooled:
         return {k: w for k, (_s, w) in self.by_document.items() if w and not k.startswith("#")}
 
 
+@dataclass
+class _Printed(_Pooled):
+    """hallucination_rate's counts (:class:`_Pooled`), and what they could not
+    see, by document reading - ``(source id, mode)``, one per document and mode."""
+
+    #: Readings checked on text borrowed from their document's donor reading.
+    borrowed: set[tuple[str, str]] = field(default_factory=set)
+    #: ``(source id, page)``: pages those readings cite that have no text.
+    unread_pages: set[tuple[str, int]] = field(default_factory=set)
+    #: Readings that wrote values with no text, own or borrowed, to check them on.
+    unscored: set[tuple[str, str]] = field(default_factory=set)
+
+    def coverage(self) -> dict[str, Any]:
+        """For :attr:`SubsetReport.printed_values`: empty when every reading
+        was checked on text it was sent."""
+        out: dict[str, Any] = {}
+        if self.borrowed:
+            out["borrowed_text"] = {
+                "from_mode": TEXT_DONOR_MODE,
+                "readings": len(self.borrowed),
+                "documents": len({source for source, _mode in self.borrowed}),
+                # Values citing these are unchecked unless another page prints them.
+                "cited_pages_without_text": len(self.unread_pages),
+                "pages_without_text": [f"{source} p{page}" for source, page in sorted(self.unread_pages)][:25],
+            }
+        if self.unscored:
+            out["unscored"] = {
+                "readings": len(self.unscored),
+                "by_mode": dict(sorted(Counter(mode for _source, mode in self.unscored).items())),
+                "documents": sorted({source for source, _mode in self.unscored})[:25],
+            }
+        return out
+
+
 def _printed_values(scored: Sequence[tuple[Any, Any, dict[str, Any]]], common_model: list[bool],
-                    score: Any) -> _Pooled:
+                    score: Any) -> _Printed:
     """hallucination_rate's counts, per document: of the values its readings
     wrote that the text could settle (the weight), those no page of the
     document prints (decision 2026-10-24).
@@ -1125,26 +1292,50 @@ def _printed_values(scored: Sequence[tuple[Any, Any, dict[str, Any]]], common_mo
     other reading that had text (a validation row) is scored here by the same
     matcher (``score_hallucinations``, OCR-tolerant over every page). A reading
     with nothing checked counts nowhere.
+
+    An image-only reading is sent no text: it is checked on the page text it
+    borrows from its document's ocr_plus_image reading (:func:`_invention_text`;
+    through serving, golden_eval borrows it and marks the record
+    :data:`BORROWED_TEXT`), as production checks its fields on MinerU's text
+    (decision 2026-10-26). A reading that wrote values with no text to check
+    them on - none sent, none to borrow, or a record of None - is counted
+    unscored (:meth:`_Printed.coverage`), never as a reading with nothing invented.
     """
-    tally = _Pooled()
+    tally = _Printed()
     for index, ((expected, got, metadata), cm) in enumerate(zip(scored, common_model, strict=True)):
+        source = str(metadata.get("source_id") or f"#{index}")
+        reading = (source, str(metadata.get("modality_mode") or ""))
         if PRINTED_CHECK in metadata:
             record = metadata[PRINTED_CHECK]
             if not isinstance(record, dict):
+                if _wrote_values(got):
+                    tally.unscored.add(reading)
                 continue
+            if metadata.get(PRINTED_TEXT) == BORROWED_TEXT:
+                tally.borrowed.add(reading)
+                tally.unread_pages.update((source, int(page)) for page in metadata.get(UNREAD_PAGES) or [])
             entries = [e for e in record.get("not_printed") or [] if isinstance(e, dict)]
             invented, checked = len(entries), int(record.get("checked") or 0)
             found = [{"field": e.get("path"), "emitted": str(e.get("raw"))[:80],
                       "pages": list(e.get("pages") or [])} for e in entries]
         else:
-            text = _reading_text(metadata)
-            if text is None:
+            if _reading_text(metadata) is None and _BORROWED_PAGES not in metadata:
+                if _wrote_values(got):
+                    tally.unscored.add(reading)
                 continue
-            fault = score([(*_read_values(expected, got, cm), text)])
+            read = _read_values(expected, got, cm)
+            found_text = _invention_text(metadata, read[1])
+            if found_text is None:
+                continue
+            text, unread = found_text
+            if unread is not None:
+                tally.borrowed.add(reading)
+                tally.unread_pages.update((source, page) for page in unread)
+            fault = score([(*read, text)])
             invented, checked, found = fault.hits, fault.opportunities, fault.instances
         if not checked:
             continue
-        tally.add(str(metadata.get("source_id") or f"#{index}"), invented, checked)
+        tally.add(source, invented, checked)
         tally.instances.extend({"source_id": metadata.get("source_id", ""), **entry} for entry in found)
     return tally
 
@@ -1317,6 +1508,11 @@ def build_report(
         document = (metadata.get("source_id"), metadata.get("modality_mode"))
         if document in pages:
             metadata = {**metadata, _DOCUMENT_PAGES: pages[document]}
+        elif _borrows_text(metadata) and (metadata.get("source_id"), TEXT_DONOR_MODE) in pages:
+            # An image-only reading, sent no text: its values are looked up on
+            # its document's pages as the ocr_plus_image readings carry them -
+            # the same pinned MinerU text (decision 2026-10-26).
+            metadata = {**metadata, _BORROWED_PAGES: pages[(metadata.get("source_id"), TEXT_DONOR_MODE)]}
         for subset in subset_of(metadata):
             buckets.setdefault((doc_type, subset), []).append((expected, got, metadata))
 

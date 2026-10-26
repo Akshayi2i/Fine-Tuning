@@ -286,6 +286,56 @@ def map_field_spans(
     return mapped
 
 
+def compact_envelope_paths(answer: Any, path: str = "") -> set[str]:
+    """The paths, as :func:`scan_json_spans` writes them, of every compact
+    envelope (``common.canonical.is_compact_value``) in a parsed answer."""
+    from common.canonical import is_compact_value
+
+    if is_compact_value(answer):
+        return {path or "<root>"}
+    found: set[str] = set()
+    if isinstance(answer, dict):
+        for key, value in answer.items():
+            found |= compact_envelope_paths(value, f"{path}.{key}" if path else key)
+    elif isinstance(answer, list):
+        for index, value in enumerate(answer):
+            found |= compact_envelope_paths(value, f"{path}[{index}]")
+    return found
+
+
+def map_compact_field_spans(
+    generated_text: str,
+    tokens: list[str],
+    token_logprobs: list[float],
+    *,
+    strict: bool = False,
+) -> dict[str, FieldSpan]:
+    """:func:`map_field_spans` for a compact answer (the fast format profile),
+    keyed as the same answer written in full: an envelope's ``r`` span as its
+    ``raw``, ``v`` as ``parsed``, ``p[i]`` as ``page_ref[i]``.
+
+    Confidence then reads the value's own tokens, as it does on a full answer
+    (``common.canonical.collapse_spans``): the printed text's, ``r``, where it
+    was written; ``v`` where it was not - the printed text IS the value then,
+    and ``v`` is where the model read it. Spans outside an envelope (a code, an
+    id) keep their paths.
+    """
+    spans = map_field_spans(generated_text, tokens, token_logprobs, strict=strict)
+    try:
+        envelopes = compact_envelope_paths(json.loads(generated_text))
+    except ValueError as exc:
+        raise SpanMapError(f"the generated text is not JSON: {exc}") from exc
+    full = {"r": "raw", "v": "parsed", "p": "page_ref"}
+    out: dict[str, FieldSpan] = {}
+    for path, span in spans.items():
+        head, _, tail = path.rpartition(".")
+        key, bracket, index = tail.partition("[")
+        if head in envelopes and key in full:
+            span.field_path = f"{head}.{full[key]}{bracket}{index}"
+        out[span.field_path] = span
+    return out
+
+
 def unmapped_fields(spans: dict[str, FieldSpan]) -> list[tuple[str, str]]:
     """``(field_path, reason)`` for every field that could not be mapped.
 

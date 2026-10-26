@@ -1,0 +1,42 @@
+# The format profile: how a policy window is written to the model, and how the
+# model writes its answer (arch §7, the latency work of 2026-10-24).
+#
+# Read by the dataset build, training AND serving (common.config.format_profile),
+# like vision.yaml and sequence.yaml: one switch, three readers. A row built in
+# one profile and a request served in the other are different inputs, so the
+# profile is part of the prompt hash and of the window plan id - an adapter
+# trained in one profile is refused by serving and promote in the other, and a
+# corpus built in one neither trains nor packages in the other.
+#
+#   standard  the format every adapter so far was trained on, unchanged byte for
+#             byte: each section group's own system prompt with its schema,
+#             windows planned per group, answers as {raw, parsed, page_ref}.
+#
+#   fast      the latency profile (a 200-page scan's fields in 2 minutes on one
+#             H100). Applied to canonical policy windows; every other request
+#             is written as in standard.
+#             - images first: one system instruction shared by every group; the
+#               user turn is the window's pages (image, then its marker and
+#               text); the group's own instruction and field list come LAST, in
+#               a final text block. Every group of a document reads the same
+#               windows, so the token prefix up to that block is identical and
+#               vLLM's prefix cache prefills each page once, not once per group.
+#             - a compact field list (key, kind, short meaning) in place of the
+#               schema JSON; the decoding grammar still holds the answer to the
+#               schema.
+#             - smaller page images: the extraction tasks' fast pixel budget
+#               (vision.yaml `profiles.fast`).
+#             - compact answers: {"r": raw, "v": parsed, "p": [pages]}, `r`
+#               written only when the printed text differs from `v`; serving
+#               expands every answer back to {raw, parsed, page_ref} before the
+#               merge, so everything downstream is unchanged.
+#             - a larger image_only share in training (training/unified.yaml
+#               `format_profiles.fast`).
+#
+# Changing it means rebuilding the corpus and retraining: the profile is read at
+# corpus build, at training and at serving, and each refuses the others'.
+#
+# fast since 2026-10-26 (user decision): the next corpus - the new training set -
+# is built, trained and served in it. No adapter was trained in standard on the
+# current window plan (4), so nothing served is lost.
+profile: fast

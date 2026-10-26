@@ -177,6 +177,7 @@ def test_a_long_policy_goes_to_the_model_in_bounded_batches(client, monkeypatch)
     assert sizes and max(sizes) <= 3 and sum(sizes) == len(served)
 
 
+@pytest.mark.format_profile("standard")
 def test_a_value_with_no_page_is_taught_in_the_window_the_declarations_lead():
     """The label rules could not place it on a page: a policy-level value, which
     the declarations print. Read over several windows, the declarations group
@@ -264,6 +265,7 @@ def _taught(rows, key):
             and key in (json.loads(r["messages"][-1]["content"]).get("policy") or {})]
 
 
+@pytest.mark.format_profile("standard")
 def test_the_declarations_led_window_is_the_one_holding_the_declarations_page():
     assert _home_window([[1, 2, 3], [4, 5, 9], [6, 7, 8]], [1, 2, 3, 4, 5, 9], 9) == 1
     assert _home_window([[1, 2, 3], [4, 5]], [1, 2, 3, 4, 5], 4) == 1

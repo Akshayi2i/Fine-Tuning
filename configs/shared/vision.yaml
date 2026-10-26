@@ -74,3 +74,14 @@ tasks:
     max_pixels: 2483200
     min_pixels: 200704
     note: "endorsement forms, often scanned inserts at a lower source quality"
+
+# The budget of every full-resolution task under a format profile other than
+# standard (configs/shared/format.yaml), read by common.config.vision_for_task,
+# so the corpus sizing, the trainer and the serving engine all take it. Unused
+# while the profile is standard.
+profiles:
+  fast:
+    # 1225 visual tokens a page (35 x 35 tokens of 32x32 px), about half the
+    # 2425 of the standard budget: ~1.25 MP, a US-Letter page at ~130 DPI.
+    max_pixels: 1254400
+    min_pixels: 200704

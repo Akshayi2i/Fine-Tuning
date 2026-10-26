@@ -139,7 +139,7 @@ CONDITIONAL_METRICS: frozenset[str] = frozenset({
     # measure it is blocked as unmeasured (a printed-values check that stopped
     # recording, say).
     "hallucination_rate",
-    # Only measured when the golden eval repeats the main mode
+    # Only measured when the golden eval repeats its ``run_to_run_mode`` reading
     # (``run_to_run_check`` in the adapter's training config, on by default). A
     # switch that blocked every release when used would not be a switch; once a
     # promoted release has measured it, every later candidate must too.

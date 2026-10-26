@@ -187,19 +187,31 @@ def _fake_extract(monkeypatch, calls, *, fail_repeat=False):
     monkeypatch.setattr("training.stage_data.localize_keys", lambda client, keys, root: {k: k for k in keys})
 
 
-def test_the_main_mode_is_read_again_with_its_windows_reversed_after_the_normal_passes(monkeypatch):
+def test_the_repeat_mode_is_read_again_with_its_windows_reversed_after_the_normal_passes(monkeypatch):
+    """The repeat reads image_only, the mode production reads (decision
+    2026-10-26; it read ocr_plus_image before), and the image_only reading is
+    checked for invented values on the document's page text it borrows."""
     from evaluation import golden_eval
+    from evaluation.run_eval import BORROWED_TEXT, PRINTED_TEXT
 
     calls: list[tuple[str, str, str]] = []
     _fake_extract(monkeypatch, calls)
-    triples = golden_eval.evaluate(_golden_docs(), object(), object(), "/tmp", run_to_run=True)
+    triples = golden_eval.evaluate(_golden_docs(), object(), object(), "/tmp", run_to_run=True,
+                                   repeat_mode="image_only")
     normal = [(s, m, "planned") for s in ("p1", "p2") for m in golden_eval.GOLDEN_MODES]
-    assert calls == normal + [("p1", "ocr_plus_image", "reversed"), ("p2", "ocr_plus_image", "reversed")]
+    assert calls == normal + [("p1", "image_only", "reversed"), ("p2", "image_only", "reversed")]
     assert len(triples) == 6                                     # the repeat adds no reading
-    main = [meta for _e, _g, meta in triples if meta["modality_mode"] == "ocr_plus_image"]
-    assert all(meta[REPEAT_ANSWER] == _answer(effective="02/01/2026") for meta in main)
-    assert all(REPEAT_ANSWER not in meta for _e, _g, meta in triples if meta["modality_mode"] != "ocr_plus_image")
-    assert [meta[PRINTED_CHECK] for _e, _g, meta in triples][:3] == [_check(2), _check(2), None]
+    repeated = [meta for _e, _g, meta in triples if meta["modality_mode"] == "image_only"]
+    # The repeat is held as served, as the first reading is (decision
+    # 2026-10-26): its number agrees, its date no page prints is taken out.
+    for meta in repeated:
+        assert meta[REPEAT_ANSWER]["policy"]["policy_number"]["parsed"] == "HO-1"
+        assert meta[REPEAT_ANSWER]["policy"]["effective_date"]["parsed"] is None
+    assert all(REPEAT_ANSWER not in meta for _e, _g, meta in triples if meta["modality_mode"] != "image_only")
+    assert [meta[PRINTED_CHECK] for _e, _g, meta in triples][:2] == [_check(2), _check(2)]
+    borrowed = triples[2][2]
+    assert borrowed[PRINTED_TEXT] == BORROWED_TEXT
+    assert (borrowed[PRINTED_CHECK]["checked"], borrowed[PRINTED_CHECK]["not_printed"]) == (2, [])
 
     metrics = build_report("v1", triples).gate_metrics()
     assert metrics["run_to_run_agreement"] == 0.5                # the dates differ, the numbers agree
@@ -217,7 +229,8 @@ def test_no_repeat_when_the_check_is_off_and_a_failed_repeat_is_an_empty_answer(
     calls.clear()
     _fake_extract(monkeypatch, calls, fail_repeat=True)
     triples = golden_eval.evaluate(_golden_docs(), object(), object(), "/tmp", run_to_run=True)
-    [p1] = [meta for _e, _g, meta in triples if meta["source_id"] == "p1" and meta["modality_mode"] == "ocr_plus_image"]
+    # The repeat reads image_only (decision 2026-10-26; ocr_plus_image before).
+    [p1] = [meta for _e, _g, meta in triples if meta["source_id"] == "p1" and meta["modality_mode"] == "image_only"]
     assert p1[REPEAT_ANSWER] == {} and "engine fell over" in p1["repeat_error"]
     assert build_report("v1", triples).gate_metrics()["run_to_run_agreement"] == 0.0
 

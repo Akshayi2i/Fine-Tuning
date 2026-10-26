@@ -25,10 +25,16 @@ Each document is run in all three input modes. ``noisy_ocr_image`` uses the
 corpus build's own seeded corruption, and renders the same prompt serving sends
 for clean OCR: the noise lives in the data, never in the instruction.
 
-Then each document's main mode is read once more, its windows sent in reverse
-order, so the engine batches them differently: how often the two answers agree
-is ``run_to_run_agreement`` (decision 2026-10-24). And each reading carries
-serving's own printed-values record, which ``hallucination_rate`` reads.
+Then each document is read once more in the repeat mode (``run_to_run_mode`` in
+the adapter's training config: image_only, the mode production reads), its
+windows sent in reverse order, so the engine batches them differently: how
+often the two answers agree is ``run_to_run_agreement`` (decisions 2026-10-24,
+2026-10-26). And each reading carries serving's own printed-values record,
+which ``hallucination_rate`` reads. An image_only reading is sent no text, so
+serving records none: its answer is checked here on the document's frozen page
+text - the text its ocr_plus_image reading is sent - as production checks the
+fields it read from the images on MinerU's text (:func:`borrowed_printed_check`).
+A document with no page text to borrow is unscored, and counted.
 """
 
 from __future__ import annotations
@@ -50,8 +56,14 @@ log = logging.getLogger(__name__)
 #: The modes every golden document is evaluated in.
 GOLDEN_MODES: tuple[str, ...] = ("ocr_plus_image", "noisy_ocr_image", "image_only")
 
-#: The mode read twice for run_to_run_agreement: the one production reads.
+#: The mode read with the document's clean page text: the one an image_only
+#: reading borrows its text from to be checked for invention.
 MAIN_MODE = "ocr_plus_image"
+
+#: The mode read twice for run_to_run_agreement when the config names none:
+#: image_only, the one production reads (fields first). ``run_to_run_mode`` under
+#: ``evaluation`` in the adapter's training config (:func:`run_to_run_mode`).
+RUN_TO_RUN_MODE = "image_only"
 
 _PAGE = re.compile(r"page_(\d+)\.(png|md)$")
 
@@ -192,6 +204,7 @@ def evaluate(
     modes: Sequence[str] = GOLDEN_MODES,
     seed: int = 42,
     run_to_run: bool | None = None,
+    repeat_mode: str | None = None,
 ) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
     """``(expected, got, metadata)`` triples for :func:`run_eval.build_report`.
 
@@ -199,31 +212,51 @@ def evaluate(
     dropped: dropping it would score the model on the documents it managed.
 
     ``run_to_run`` (default: :func:`run_to_run_check`): after the normal
-    passes, every document's main mode (:data:`MAIN_MODE`) is extracted again
-    with its windows sent in reverse order (``send_order="reversed"``), and the
-    second answer rides on the main-mode triple's metadata
-    (``run_eval.REPEAT_ANSWER``) for ``run_to_run_agreement``. It costs one more
-    main-mode pass over the whole set. A repeat that fails to extract is an
-    empty second answer, as a first pass that fails is an empty first one.
+    passes, every document's ``repeat_mode`` reading (default:
+    :func:`run_to_run_mode`, image_only) is extracted again with its windows
+    sent in reverse order (``send_order="reversed"``), and the second answer
+    rides on that reading's metadata (``run_eval.REPEAT_ANSWER``) for
+    ``run_to_run_agreement``. It costs one more pass in that mode over the
+    whole set; none when ``modes`` leaves the mode out. A repeat that fails to
+    extract is an empty second answer, as a first pass that fails is an empty
+    first one.
+
+    An image_only policy reading comes back from serving with no printed-values
+    record (no text was sent): it is checked on the document's own page text
+    (:func:`borrowed_printed_check`), marked ``run_eval.BORROWED_TEXT``. With
+    none to borrow its record stays None, and the report counts it unscored.
     """
     from dataclasses import replace
 
     from calibration.fit_calibration import CalibrationParams
     from data_pipeline.dataset_builder.noisy_ocr_augment import corrupt_ocr_pages
-    from evaluation.run_eval import PRINTED_CHECK, REPEAT_ANSWER
+    from evaluation.run_eval import (
+        BORROWED_TEXT,
+        IMAGE_ONLY_MODE,
+        PRINTED_CHECK,
+        PRINTED_TEXT,
+        REPEAT_ANSWER,
+        UNREAD_PAGES,
+    )
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import ExtractionRequest, extract
     from training.stage_data import localize_keys
 
     repeat = run_to_run_check() if run_to_run is None else run_to_run
+    repeat_mode = _known_mode(run_to_run_mode() if repeat_mode is None else repeat_mode)
+    if repeat and repeat_mode not in modes:
+        log.warning("golden eval: the run-to-run repeat reads %s, which this pass does not read (%s): "
+                    "nothing is read twice", repeat_mode, list(modes))
     local = localize_keys(
         client, sorted({key for doc in documents for key in doc.image_keys}), images_root
     )
-    #: The main-mode readings to repeat: what was sent, and the metadata the
-    #: second answer joins.
+    #: The readings to repeat: what was sent, and the metadata the second
+    #: answer joins.
     again: list[tuple[GoldenDocument, Any, Any, dict[str, Any]]] = []
     #: Policy readings sent page text that came back with no printed-values record.
     unchecked: list[str] = []
+    #: Image-only policy readings with no page text to borrow: unscored for invention.
+    unscored: list[str] = []
     triples = []
     for doc in documents:
         calibration = CalibrationParams(
@@ -257,7 +290,7 @@ def evaluate(
                 "held_out_carrier": doc.held_out_carrier,
                 "page_count": len(doc.image_keys),
             }
-            if repeat and mode == MAIN_MODE:
+            if repeat and mode == repeat_mode:
                 again.append((doc, request, calibration, metadata))
             try:
                 result = extract(
@@ -273,7 +306,19 @@ def evaluate(
             # values it could check and those no page prints, recorded before
             # strict mode removed any. None with no page text: nothing checked.
             metadata[PRINTED_CHECK] = getattr(result, "printed_check", None)
-            if (metadata[PRINTED_CHECK] is None and doc.doc_type == "policy" and mode != "image_only"
+            if metadata[PRINTED_CHECK] is None and doc.doc_type == "policy" and mode == IMAGE_ONLY_MODE:
+                # Read from the images alone, as production reads: checked on
+                # the document's page text, as production checks it on
+                # MinerU's (decision 2026-10-26).
+                held, unread = borrowed_printed_check(result, doc.page_texts)
+                if held is None:
+                    unscored.append(doc.source_id)
+                else:
+                    # Scored as served: the values no page prints taken out.
+                    result = held
+                    metadata.update({PRINTED_CHECK: held.printed_check, PRINTED_TEXT: BORROWED_TEXT,
+                                     UNREAD_PAGES: unread})
+            elif (metadata[PRINTED_CHECK] is None and doc.doc_type == "policy" and mode != IMAGE_ONLY_MODE
                     and any(str(text).strip() for text in texts.values())):
                 unchecked.append(f"{doc.source_id} ({mode})")
             metadata["field_confidence"] = {
@@ -298,6 +343,11 @@ def evaluate(
             "printed-values record, so hallucination_rate does not count their values: %s",
             len(unchecked), unchecked[:5],
         )
+    if unscored:
+        log.warning(
+            "golden eval: %d image_only policy reading(s) have no page text to borrow, so their values "
+            "are not checked for invention (unscored, never clean): %s", len(unscored), unscored[:5],
+        )
 
     # The repeat pass, after every document's own: the same request, its
     # windows sent in reverse order (the merge keeps planned order), so the
@@ -310,24 +360,86 @@ def evaluate(
                 calibrators=calibrators, thresholds=thresholds, strict_schema=False,
             )
         except Exception as exc:  # noqa: BLE001 - an empty second answer, not dropped
-            log.warning("golden eval: %s (%s, repeat) failed: %s", doc.source_id, MAIN_MODE, exc)
+            log.warning("golden eval: %s (%s, repeat) failed: %s", doc.source_id, repeat_mode, exc)
             metadata["repeat_error"] = f"{type(exc).__name__}: {exc}"
             metadata[REPEAT_ANSWER] = {}
             continue
+        if (getattr(result, "printed_check", None) is None and doc.doc_type == "policy"
+                and repeat_mode == IMAGE_ONLY_MODE):
+            # Held as the first reading was, so the two compare as served.
+            held, _unread = borrowed_printed_check(result, doc.page_texts)
+            result = held if held is not None else result
         metadata[REPEAT_ANSWER] = result.extraction
     return triples
 
 
 def run_to_run_check() -> bool:
-    """Whether the golden eval reads each document's main mode twice, for
-    ``run_to_run_agreement``: ``run_to_run_check`` under ``evaluation`` in the
+    """Whether the golden eval reads each document twice in :func:`run_to_run_mode`,
+    for ``run_to_run_agreement``: ``run_to_run_check`` under ``evaluation`` in the
     adapter's training config (configs/training/unified.yaml), on unless it says
-    false. On, it costs one more main-mode pass over the frozen set."""
+    false. On, it costs one more pass in that mode over the frozen set."""
     from common.adapter import ADAPTER
     from common.config import training_config
 
     evaluation = training_config(ADAPTER.training_config).get("evaluation") or {}
     return bool(evaluation.get("run_to_run_check", True))
+
+
+def run_to_run_mode() -> str:
+    """The mode the golden eval reads a second time for ``run_to_run_agreement``:
+    ``run_to_run_mode`` under ``evaluation`` in the adapter's training config,
+    :data:`RUN_TO_RUN_MODE` (image_only, the mode production reads) when it
+    names none (decision 2026-10-26). Part of the gate's yardstick
+    (``run_eval.yardstick_settings``): agreement over one mode's readings is
+    another number than over another's. A mode the gate does not read is
+    refused, never read as either."""
+    from common.adapter import ADAPTER
+    from common.config import training_config
+
+    evaluation = training_config(ADAPTER.training_config).get("evaluation") or {}
+    return _known_mode(str(evaluation.get("run_to_run_mode") or RUN_TO_RUN_MODE))
+
+
+def _known_mode(mode: str) -> str:
+    if mode not in GOLDEN_MODES:
+        raise GoldenEvalError(f"run_to_run_mode is {mode!r}; the golden eval reads {list(GOLDEN_MODES)}")
+    return mode
+
+
+def borrowed_printed_check(result: Any, page_texts: Any) -> tuple[Any | None, list[int]]:
+    """A result read from the page images alone, as production serves it once
+    the document's text is read: held to the document's page text (page number
+    -> text) by production's own fields-first check
+    (``serving.printed_values.hold_result_to_printed``) - a value no page prints
+    taken out under strict mode, its confidence, rows and flags with it - and
+    its ``printed_check`` the record of what was checked, made before anything
+    was taken out. Returns ``(that result, pages it cites that have no text)``;
+    the result given is left as it was.
+
+    The gate scores this result, not the model's raw answer (decision
+    2026-10-26): what a user receives. Invention is counted from the record.
+
+    A page it cites with no text is checked as blank: a value found on no page
+    with text while citing one is unchecked (on an unread page), kept, never
+    invented. ``(None, [])`` when no page has text, or the check cannot be made:
+    unscored, never counted as nothing invented."""
+    from evaluation.run_eval import cited_pages, page_has_text
+    from serving.printed_values import hold_result_to_printed
+
+    texts = {int(page): str(text or "") for page, text in (page_texts or {}).items()}
+    if not any(page_has_text(text) for text in texts.values()):
+        return None, []
+    unread = sorted(page for page in cited_pages(result.extraction) if not page_has_text(texts.get(page)))
+    texts.update({page: "" for page in unread if page not in texts})
+    held = copy.deepcopy(result)
+    try:
+        hold_result_to_printed(held, texts)
+    except Exception as exc:  # noqa: BLE001 - an answer the check cannot read is unscored, not clean
+        log.warning("golden eval: the printed-values check on borrowed text failed: %s", exc)
+        return None, []
+    if held.printed_check is None:
+        return None, []
+    return held, unread
 
 
 def assert_scoreable(
@@ -402,8 +514,11 @@ def evaluate_version(
     ``adapter_checkpoint`` names the checkpoint ``model`` applies (the pipeline
     passes it), recorded so the report is never reused for another one.
 
-    Each document's main mode is read twice when :func:`run_to_run_check` is
-    on (the default): one more main-mode pass, for ``run_to_run_agreement``.
+    Each document is read twice in :func:`run_to_run_mode` (image_only) when
+    :func:`run_to_run_check` is on (the default): one more pass in that mode,
+    for ``run_to_run_agreement``. The mode is recorded (``run_to_run_mode``,
+    and in ``eval_set``, whose fingerprint it is part of), so a report made on
+    another repeat mode is not reused or compared as if it were this one.
 
     ``lines`` are the lines of business the release serves: only frozen policies
     of one of them are scored, because serving sends every other policy (another
@@ -432,22 +547,32 @@ def evaluate_version(
         )
     from evaluation.release_measurements import GpuMemorySampler
 
-    # The repeat pass for run_to_run_agreement: one more main-mode pass.
-    repeat = run_to_run_check()
+    # The repeat pass for run_to_run_agreement: one more pass in the repeat
+    # mode - image_only, the mode production reads.
+    repeat, repeat_mode = run_to_run_check(), run_to_run_mode()
     with GpuMemorySampler() as memory:
         triples = evaluate(
             documents, model, client,
             paths.staging_train_images_dir(f"golden-{corpus_version}", tenant_id),
-            calibrators=calibrators, thresholds=thresholds, run_to_run=repeat,
+            calibrators=calibrators, thresholds=thresholds, run_to_run=repeat, repeat_mode=repeat_mode,
         )
     failed = sum(1 for _e, _g, meta in triples if meta.get("error"))
     report = build_report(version, triples, corpus_version=corpus_version)
     body = report.as_dict()
     body["documents_failed"] = failed
-    # Whether each document's main mode was read twice (run_to_run_agreement),
-    # and how many second readings failed (scored as empty answers).
+    # Whether each document was read twice (run_to_run_agreement), in which
+    # mode, and how many second readings failed (scored as empty answers). The
+    # mode is part of the yardstick too (eval_set, run_eval.yardstick_settings).
     body["run_to_run_check"] = repeat
+    body["run_to_run_mode"] = repeat_mode
     body["repeats_failed"] = sum(1 for _e, _g, meta in triples if meta.get("repeat_error"))
+    # What hallucination_rate could not check directly: image_only readings
+    # checked on the document's page text (borrowed: the text the
+    # ocr_plus_image reading is sent), the pages they cite with none, and the
+    # readings with no text at all - unscored, never counted clean.
+    from evaluation.run_eval import TEXT_DONOR_MODE
+
+    body["invention_coverage"] = {"borrowed_from": TEXT_DONOR_MODE, **report.invention_coverage()}
     # Which lines were scored (None: every frozen document), so the gate reuses
     # this report, or compares a baseline with it, only for the same lines.
     body["lines_scored"] = sorted(lines) if lines is not None else None

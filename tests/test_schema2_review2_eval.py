@@ -65,6 +65,7 @@ def _source(name: str) -> tuple[dict, dict]:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.format_profile("standard")
 def test_the_six_page_policy_is_served_with_every_coverage_link_lost():
     """The case the rest of this file is about, as serving produces it."""
     _gold, served = _served("auto6")

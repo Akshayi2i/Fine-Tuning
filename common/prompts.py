@@ -45,6 +45,18 @@ PROMPT_TEMPLATE_VERSION = "7.2.0"
 _SYSTEM_TEMPLATE = "system_prompt_template.jinja"
 _CLASSIFIER_TEMPLATE = "doc_type_classifier_prompt.jinja"
 
+#: The fast format profile's templates (configs/shared/format.yaml): the system
+#: message every group of a policy shares, and the group's own block, sent last.
+FAST_TEMPLATE_DIR = PROMPT_DIR / "fast"
+_FAST_SYSTEM_TEMPLATE = "fast/system.jinja"
+_FAST_GROUP_TEMPLATE = "fast/group.jinja"
+
+#: Bumped whenever the fast layout - its templates' output, the field list, or
+#: the rule that aligns a document's windows across groups - changes. Part of
+#: the fast profile's identity (:func:`format_identity`); the standard profile
+#: does not read it.
+FAST_LAYOUT_VERSION = "1"
+
 #: How the document type is named to the model in prose.
 _DOC_TYPE_LABELS: dict[str, str] = {
     "lossrun": "Loss Run",
@@ -208,8 +220,18 @@ def render_system_prompt(
 
     Returns:
         The system message, identical for the same inputs in every context.
+        Under the fast format profile a policy window's system message is the
+        instruction every group of the document shares; its group's own block
+        is :func:`render_group_block` (:func:`fast_layout`).
     """
     mode = effective_prompt_mode(modality_mode)
+    if fast_layout(doc_type, acord_form, lob, sections):
+        return _env().get_template(_FAST_SYSTEM_TEMPLATE).render(
+            doc_type_label=doc_type_label(doc_type, acord_form),
+            modality_mode=mode,
+            common_model=is_common_model(doc_type, acord_form, lob),
+            date_format=OUTPUT_DATE_LABEL,
+        ).strip()
     template = _env().get_template(_SYSTEM_TEMPLATE)
     return template.render(
         # `doc_type` selects the per-type rules block, `acord_form` the form
@@ -240,6 +262,282 @@ def render_system_prompt(
         date_format=OUTPUT_DATE_LABEL,
         schema_json=schema_json_for_prompt(doc_type, acord_form, lob, sections),
     ).strip()
+
+
+# --------------------------------------------------------------------------
+# The fast format profile (configs/shared/format.yaml)
+# --------------------------------------------------------------------------
+
+
+def fast_layout(
+    doc_type: str,
+    acord_form: str | None = None,
+    lob: str | list[str] | None = None,
+    sections: str | None = None,
+) -> bool:
+    """Whether a request is written in the fast layout: the fast profile is on
+    and it is a canonical policy window (a section group's slice). Every other
+    request - ACORD, Loss Run, a whole-schema call - is written as in standard.
+
+    The fast layout and the compact answer go together: a request written in
+    it is answered compact (``common.canonical.to_compact_answer``)."""
+    from common.config import fast_profile
+
+    return (bool(sections) and doc_type.lower() == "policy" and fast_profile()
+            and is_canonical(doc_type, acord_form, lob))
+
+
+def render_group_block(
+    doc_type: str,
+    acord_form: str | None = None,
+    lob: str | list[str] | None = None,
+    sections: str | None = None,
+) -> str | None:
+    """A fast-layout window's own instruction, sent after its pages: the group's
+    top-level keys and its fields, compactly (:func:`compact_fields_for_prompt`).
+    None for a request in the standard layout."""
+    if not fast_layout(doc_type, acord_form, lob, sections):
+        return None
+    from common.schema_sections import _rule
+
+    listing = compact_fields_for_prompt(doc_type, acord_form, lob, sections)
+    top = list(resolved_schema(doc_type, acord_form, lob, sections).get("properties") or {})
+    return _env().get_template(_FAST_GROUP_TEMPLATE).render(
+        title=str(_rule(str(sections)).get("title") or sections),
+        top_keys=_prose_list(top),
+        required_keys=_prose_list(required_fields(doc_type, acord_form, lob, sections)),
+        read_elsewhere=_read_elsewhere(doc_type, acord_form, lob, sections),
+        fields=listing["fields"],
+        kinds=listing["kinds"],
+        codes=listing["codes"],
+    ).strip()
+
+
+#: Between a fast-layout window's last page and its group block. The trainer
+#: and the chat template both join a turn's text parts with nothing between.
+GROUP_BLOCK_SEPARATOR = "\n\n"
+
+
+def prompt_text(
+    doc_type: str,
+    modality_mode: str,
+    acord_form: str | None = None,
+    lob: str | list[str] | None = None,
+    sections: str | None = None,
+) -> str:
+    """Every instruction one request carries: its system message, and in the
+    fast layout its group block. What a window is sized against; in the
+    standard layout exactly :func:`render_system_prompt`."""
+    system = render_system_prompt(doc_type, modality_mode, acord_form, lob, sections)
+    block = render_group_block(doc_type, acord_form, lob, sections)
+    return system if block is None else system + GROUP_BLOCK_SEPARATOR + block
+
+
+#: A value kind by its model-view definition; any other is named after its
+#: definition (``DateValue`` -> ``date``).
+_VALUE_KIND_NAMES = {"FieldValue": "text", "BoolValue": "yesno", "PostalCodeValue": "zip"}
+
+#: A meaning longer than this is cut to its first sentence.
+SHORT_MEANING_CHARS = 240
+
+
+def compact_fields_for_prompt(
+    doc_type: str,
+    acord_form: str | None = None,
+    lob: str | list[str] | None = None,
+    sections: str | None = None,
+) -> dict[str, str]:
+    """A schema slice as the fast layout lists it: ``{"fields", "kinds", "codes"}``.
+
+    ``fields``: one line per field, ``key: kind - meaning``, under the object
+    that holds it; each object definition is listed once, however many fields
+    hold one (an address under the carrier, the producer and the insured).
+    ``kinds``: each value kind used - what ``v`` holds, and its meaning.
+    ``codes``: each code list used, with each code's meaning.
+
+    Derived from :func:`common.schemas.resolved_schema`, the model view the
+    decoder is held to, so the list and the grammar cannot disagree.
+    """
+    return _CompactListing(resolved_schema(doc_type, acord_form, lob, sections)).render()
+
+
+def _short(text: Any) -> str:
+    """A meaning as the fast field list shows it: whole up to
+    :data:`SHORT_MEANING_CHARS`, else its first sentence."""
+    import re
+
+    if not isinstance(text, str):
+        return ""
+    text = " ".join(text.split())
+    if len(text) <= SHORT_MEANING_CHARS:
+        return text
+    for match in re.finditer(r"\.\s+(?=[A-Z`'\"(])", text):
+        head = text[:match.start()]
+        if not re.search(r"(?:\be\.g|\bi\.e|\betc|\bvs|\bNo)$", head):
+            return head + "."
+    return text[:SHORT_MEANING_CHARS - 3].rsplit(" ", 1)[0] + "..."
+
+
+class _CompactListing:
+    """One schema slice walked into the fast layout's field list."""
+
+    def __init__(self, schema: dict[str, Any]) -> None:
+        self.schema = schema
+        self.defs: dict[str, Any] = schema.get("$defs") or {}
+        self.kinds: dict[str, str] = {}
+        self.codes: dict[str, str] = {}
+        self.types: dict[str, dict[str, Any]] = {}
+        self.queue: list[str] = []
+
+    def deref(self, node: Any) -> tuple[Any, str | None]:
+        name = None
+        while isinstance(node, dict) and isinstance(node.get("$ref"), str):
+            ref = node["$ref"]
+            if not ref.startswith("#/$defs/"):
+                return {}, name
+            name = ref.rsplit("/", 1)[-1]
+            node = self.defs.get(name)
+        return node, name
+
+    @staticmethod
+    def _is_value(node: Any) -> bool:
+        props = node.get("properties") if isinstance(node, dict) else None
+        return isinstance(props, dict) and {"raw", "parsed", "page_ref"} <= set(props)
+
+    @staticmethod
+    def _types(node: dict[str, Any]) -> list[str]:
+        declared = node.get("type")
+        types = [declared] if isinstance(declared, str) else list(declared or ())
+        return [t for t in types if t != "null"]
+
+    def _register(self, name: str, node: dict[str, Any]) -> str:
+        if name not in self.types:
+            self.types[name] = node
+            self.queue.append(name)
+        return name
+
+    def kind(self, node: Any) -> str:
+        """The kind a field's line names, registering what it refers to."""
+        node, name = self.deref(node)
+        if not isinstance(node, dict):
+            return "any"
+        if self._is_value(node):
+            return self.value_kind(node, name)
+        branches = node.get("anyOf") or node.get("oneOf")
+        if branches and "properties" not in node and "items" not in node:
+            resolved = [self.deref(branch)[0] for branch in branches]
+            if all(isinstance(b, dict) and "const" in b for b in resolved):
+                label = name or "Code"
+                self.codes.setdefault(label, f"{label}: " + "; ".join(
+                    f"{b['const']} = {_short(b['description'])}" if b.get("description") else str(b["const"])
+                    for b in resolved))
+                return label
+            if name and all(isinstance(b, dict) and "properties" in b for b in resolved):
+                return self._register(name, self._union(resolved, node))
+            return " or ".join(self.kind(branch) for branch in branches)
+        if "enum" in node:
+            values = [str(v) for v in node["enum"] if v is not None]
+            if name and len(values) > 3:
+                self.codes.setdefault(name, f"{name}: " + " | ".join(values))
+                return name
+            return "one of " + "|".join(values)
+        if "const" in node:
+            return json.dumps(node["const"])
+        types = self._types(node)
+        if "array" in types or "items" in node:
+            return f"[{self.kind(node.get('items') or {})}]"
+        if "object" in types or "properties" in node:
+            return self._register(name, node) if name else "object"
+        if types == ["string"] and node.get("pattern"):
+            return "id"
+        return "/".join(types) or "any"
+
+    def value_kind(self, node: dict[str, Any], name: str | None) -> str:
+        label = _VALUE_KIND_NAMES.get(name or "") or (
+            name[:-len("Value")].lower() if name and name.endswith("Value") else (name or "value").lower())
+        if label not in self.kinds:
+            parsed = node["properties"]["parsed"]
+            parsed = self.deref(parsed)[0] if isinstance(parsed, dict) else {}
+            branches = [self.deref(b)[0] for b in (parsed.get("anyOf") or parsed.get("oneOf") or [parsed])
+                        ] if isinstance(parsed, dict) else []
+            if isinstance(parsed, dict) and "enum" in parsed:
+                holds = "one of " + "|".join(str(v) for v in parsed["enum"] if v is not None)
+            else:
+                types = [t for b in branches if isinstance(b, dict) for t in self._types(b)]
+                holds = "/".join(dict.fromkeys(types)) or "any"
+            meaning = _short(node.get("description"))
+            self.kinds[label] = f"{label}: {holds}" + (f" - {meaning}" if meaning else "")
+        return label
+
+    @staticmethod
+    def _union(variants: list[dict[str, Any]], node: dict[str, Any]) -> dict[str, Any]:
+        """Variant objects as one: every key any variant declares, in order,
+        each with the first meaning given for it."""
+        props: dict[str, Any] = {}
+        for variant in variants:
+            for key, sub in (variant.get("properties") or {}).items():
+                if key not in props or (not props[key].get("description") and sub.get("description")):
+                    props[key] = sub
+        return {"type": "object", "properties": props, "description": node.get("description")}
+
+    def lines(self, properties: dict[str, Any], indent: str) -> list[str]:
+        out: list[str] = []
+        for key, sub in properties.items():
+            node, name = self.deref(sub)
+            kind = self.kind(sub)
+            own = sub.get("description") if isinstance(sub, dict) else None
+            if not own and isinstance(node, dict) and kind not in self.types and not self._is_value(node):
+                own = node.get("description")
+            meaning = _short(own)
+            out.append(f"{indent}{key}: {kind}" + (f" - {meaning}" if meaning else ""))
+            if kind in ("object", "[object]"):
+                inner = node if kind == "object" else self.deref(node.get("items") or {})[0]
+                out += self.lines((inner or {}).get("properties") or {}, indent + "  ")
+        return out
+
+    def render(self) -> dict[str, str]:
+        out: list[str] = []
+        for key, sub in (self.schema.get("properties") or {}).items():
+            node, name = self.deref(sub)
+            if isinstance(node, dict) and "properties" in node and not self._is_value(node):
+                # A top-level object is listed under its own key.
+                if name:
+                    self.types.setdefault(name, node)
+                meaning = _short(node.get("description") or (sub.get("description") if isinstance(sub, dict) else None))
+                out.append(key + (f" - {meaning}" if meaning else ""))
+                out += self.lines(node.get("properties") or {}, "  ")
+            else:
+                out += self.lines({key: sub}, "")
+        while self.queue:
+            name = self.queue.pop(0)
+            node = self.types[name]
+            meaning = _short(node.get("description"))
+            out.append(name + (f" - {meaning}" if meaning else ""))
+            out += self.lines(node.get("properties") or {}, "  ")
+        return {"fields": "\n".join(out), "kinds": "\n".join(self.kinds.values()),
+                "codes": "\n".join(self.codes.values())}
+
+
+def format_identity() -> dict[str, Any] | None:
+    """What makes the active format profile a different input and answer from
+    the standard one, or None under the standard profile: the profile, the fast
+    layout's version, the answer format and the pixel budget. Folded into
+    :func:`prompt_hash` and the window plan id
+    (``policy_windows.window_plan_id``), so an adapter trained in one profile is
+    refused in the other, and a corpus built in one neither trains nor
+    packages in the other."""
+    from common.config import fast_profile, format_profile, pixel_budget
+
+    if not fast_profile():
+        return None
+    from common.canonical import COMPACT_ANSWER_FORMAT
+
+    return {
+        "profile": format_profile(),
+        "layout": FAST_LAYOUT_VERSION,
+        "answer_format": COMPACT_ANSWER_FORMAT,
+        "pixel_budget": list(pixel_budget()),
+    }
 
 
 def _read_elsewhere(
@@ -314,7 +612,8 @@ def prompt_fingerprint(
     """
     import hashlib
 
-    rendered = render_system_prompt(doc_type, modality_mode, acord_form, lob, sections)
+    # The whole instruction: in the fast layout the group block too.
+    rendered = prompt_text(doc_type, modality_mode, acord_form, lob, sections)
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
 
 
@@ -345,13 +644,21 @@ def prompt_input_files() -> list[Path]:
     give each code the meaning the prompt shows, so both are prompt input too.
     So is the classifier's: each line's meaning (``lob_meanings.yaml``) is
     written into its prompt.
+
+    The fast profile's templates (``prompts/fast/``) and its switch
+    (``configs/shared/format.yaml``) are prompt input only under that profile:
+    they shape no standard prompt, so the standard profile's files - and its
+    hash - are exactly what they were before the profile existed.
     """
-    from common.config import CONFIG_DIR
+    from common.config import CONFIG_DIR, SHARED_FORMAT_CONFIG, fast_profile
     from common.model_view import MODEL_VIEW_CONFIG
     from common.schemas import CANONICAL_DIR, COMMON_MODEL, SCHEMA_DIR
 
+    fast = fast_profile()
+    templates = [path for path in sorted(PROMPT_DIR.rglob("*.jinja"))
+                 if fast or FAST_TEMPLATE_DIR not in path.parents]
     return (
-        sorted(PROMPT_DIR.rglob("*.jinja"))
+        templates
         + sorted(SCHEMA_DIR.glob("*.json"))
         + sorted(CANONICAL_DIR.glob("*.json"))
         + [COMMON_MODEL]
@@ -359,11 +666,14 @@ def prompt_input_files() -> list[Path]:
         + [MODEL_VIEW_CONFIG]
         + [CONFIG_DIR / "schema_sections.yaml"]
         + [CONFIG_DIR / "lob_meanings.yaml"]
+        + ([SHARED_FORMAT_CONFIG] if fast else [])
     )
 
 
 def prompt_hash() -> str:
-    """SHA-256 over :func:`prompt_input_files`, each keyed by its repo path."""
+    """SHA-256 over :func:`prompt_input_files`, each keyed by its repo path,
+    and - under a format profile other than standard - its identity
+    (:func:`format_identity`)."""
     import hashlib
 
     root = PROMPT_DIR.parent
@@ -372,4 +682,8 @@ def prompt_hash() -> str:
         digest.update(path.relative_to(root).as_posix().encode())
         digest.update(b"\0")
         digest.update(path.read_bytes())
+    identity = format_identity()
+    if identity is not None:
+        digest.update(b"format_profile\0")
+        digest.update(json.dumps(identity, sort_keys=True).encode())
     return digest.hexdigest()

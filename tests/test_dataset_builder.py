@@ -810,7 +810,8 @@ def test_the_estimate_is_pessimistic_about_page_cost():
     rejection an operator sees; under-estimating costs silent truncation."""
     from data_pipeline.dataset_builder.cap_check import estimate_visual_tokens
 
-    assert estimate_visual_tokens(1, "extract") > estimate_visual_tokens(1, "classify") * 5
+    # >4x: extraction's pixels are halved under the fast format profile.
+    assert estimate_visual_tokens(1, "extract") > estimate_visual_tokens(1, "classify") * 4
     assert estimate_visual_tokens(3, "extract") == 3 * estimate_visual_tokens(1, "extract")
 
 

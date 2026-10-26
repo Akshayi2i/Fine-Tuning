@@ -27,7 +27,12 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from common.constants import ACORD_FORMS, ACTIVE_DOC_TYPES
-from common.prompts import PROMPT_TEMPLATE_VERSION, render_system_prompt
+from common.prompts import (
+    GROUP_BLOCK_SEPARATOR,
+    PROMPT_TEMPLATE_VERSION,
+    render_group_block,
+    render_system_prompt,
+)
 from common.schemas import SNAPSHOT_LINES
 
 log = logging.getLogger(__name__)
@@ -117,12 +122,25 @@ def prompt_path(
     return root / f"{stem(doc_type, acord_form, lob, sections)}{suffix}.prompt.txt"
 
 
+#: Stands for the window's pages between the system prompt and the group's
+#: request in a fast-format reference file: the pages are the document's, not
+#: the prompt's.
+PAGES_MARK = ("\n\n# ---- user turn: the window's pages (each image, then `<page N of M>` and its text), "
+              "then the request ----")
+
+
 def render(
     doc_type: str, modality_mode: str, acord_form: str | None = None, lob: str | None = None,
     sections: str | None = None,
 ) -> str:
-    """The prompt body exactly as ``common.prompts`` renders it."""
-    return render_system_prompt(doc_type, modality_mode, acord_form=acord_form, lob=lob, sections=sections)
+    """The prompt body exactly as ``common.prompts`` renders it: the system
+    prompt, and under the fast format profile (configs/shared/format.yaml) the
+    group's own request, which the model reads after the window's pages."""
+    system = render_system_prompt(doc_type, modality_mode, acord_form=acord_form, lob=lob, sections=sections)
+    block = render_group_block(doc_type, acord_form, lob, sections) if sections else None
+    if block is None:
+        return system
+    return system + PAGES_MARK + GROUP_BLOCK_SEPARATOR + block
 
 
 def file_contents(
