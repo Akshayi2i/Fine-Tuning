@@ -57,6 +57,31 @@ rule: absence is not success. A promoted release this code cannot read fails
 the check too - nothing could be compared - with the candidate's own numbers
 reported, for the person deciding whether to skip it in writing.
 
+**Time to the fields** (:func:`latency`, :func:`latency_check`). The
+production target (2026-10-24): a 200-page scan's fields in 2 minutes on one
+H100 (:data:`FIELDS_TARGET_SECONDS`, :data:`FIELDS_TARGET_PAGES`). Each
+candidate reading is timed from the PDF to its fields being ready - phase 1
+served, or, when nothing could be checked and the fields wait for the full
+text, the whole document read. Two rules, both on the candidate alone:
+
+* each document against its budget (:func:`fields_budget`: 2 minutes up to
+  200 pages, in proportion beyond): the slowest 5% may not exceed it;
+* a 200-page scan's time projected from the documents read
+  (:func:`projected_seconds`): a line through their times (an overhead plus
+  seconds a page), at 200 pages, raised by how far the slowest 5% ran above
+  the line. Most frozen policies are far shorter than 200 pages, so the first
+  rule alone would pass a release too slow for the long ones. The projection
+  needs :data:`MIN_PROJECTION_DOCUMENTS` documents of two lengths at least;
+  with fewer, the first rule decides and the report says so.
+
+The documents are read one at a time, each with the GPU to itself - as the
+Azure worker reads a job - and the time includes sending the pages from where
+the check runs: run it near the pod, as the worker runs, or the time measured
+is the upload's. A release slower than the target is promoted only knowingly:
+``promote --accept-latency "<why>"``, recorded with the person's name
+(``registry_utils.releases.promotion_clearance``). The promoted release's times
+are reported beside the candidate's, not ruled on.
+
 **Recorded, not ruled on**: each reading's ``prompt_check`` (``window_stats``):
 a window whose prompt length the server reported is implausible for the pages
 sent means vLLM resized the pages to another budget than the request's - a
@@ -71,6 +96,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -99,11 +125,20 @@ MIN_SCHEMA_VALIDITY_ALONE = 0.98
 READING_ATTEMPTS = 2
 #: The LoRAs the pod's vLLM must hold at once: the candidate and the promoted release.
 MAX_LORAS = 2
+#: The production target (2026-10-24): a scan of this many pages has its fields in this many seconds.
+FIELDS_TARGET_SECONDS = 120.0
+FIELDS_TARGET_PAGES = 200
+#: The share of documents held to their time: the slowest 5% may not exceed it.
+LATENCY_QUANTILE = 0.95
+#: Fewest timed documents (of two lengths at least) a 200-page scan's time is projected from.
+MIN_PROJECTION_DOCUMENTS = 10
 #: Salts the fixed order each line's documents are taken in.
 SELECTION_SALT = "shadow-check"
 #: The metrics compared, as ``EvalReport.gate_metrics`` names them.
 FIELD_MATCH, INVENTION, SCHEMA_VALIDITY = "field_normalized_match", "hallucination_rate", "schema_validity_rate"
 SHADOW_METRICS = (FIELD_MATCH, INVENTION, SCHEMA_VALIDITY)
+#: The time check's name, as the report and ``promote --accept-latency`` know it.
+LATENCY = "latency"
 CANDIDATE, PROMOTED = "candidate", "promoted"
 
 
@@ -114,7 +149,9 @@ class ShadowError(RuntimeError):
 def thresholds() -> dict[str, Any]:
     """The pass rule's numbers, as the report records them."""
     return {"max_field_match_drop": MAX_FIELD_MATCH_DROP, "max_invention_rise": MAX_INVENTION_RISE,
-            "min_schema_validity_alone": MIN_SCHEMA_VALIDITY_ALONE, "reading_attempts": READING_ATTEMPTS}
+            "min_schema_validity_alone": MIN_SCHEMA_VALIDITY_ALONE, "reading_attempts": READING_ATTEMPTS,
+            "fields_target_seconds": FIELDS_TARGET_SECONDS, "fields_target_pages": FIELDS_TARGET_PAGES,
+            "latency_quantile": LATENCY_QUANTILE, "min_projection_documents": MIN_PROJECTION_DOCUMENTS}
 
 
 # --------------------------------------------------------------------------
@@ -252,6 +289,8 @@ class Reading:
     result: Any = None
     pages: int = 0
     seconds: float = 0.0
+    #: From the PDF to the fields being ready, on the attempt that read it (:func:`read_once`).
+    fields_seconds: float | None = None
     attempts: int = 0
     route: str | None = None
     fields_served: bool | None = None
@@ -277,11 +316,13 @@ def _is_timeout(exc: BaseException | None) -> bool:
 
 
 def read_once(side: Side, doc: Any, line: str, pdf: bytes, *, reader: Any, tuning: dict[str, Any],
-              work_dir: Path) -> tuple[Any, int, str, bool]:
+              work_dir: Path) -> tuple[Any, int, str, bool, float]:
     """``doc`` read as the Azure worker reads a job: fields first, checked on
     the pages they cite, then the whole document's text
     (``azure_service.worker.Worker._read_fields`` and ``_full_text``). Returns
-    ``(result, pages, route, fields served)``."""
+    ``(result, pages, route, fields served, seconds to the fields)``: the
+    fields are ready when phase 1 serves them or, when it serves none (nothing
+    could be checked), once the whole document is read."""
     from azure_service.runtime import identity_calibration
     from serving.doc_type_classifier import StaticClassifier
     from serving.fields_first import add_full_text, read_fields
@@ -289,19 +330,24 @@ def read_once(side: Side, doc: Any, line: str, pdf: bytes, *, reader: Any, tunin
     reading = side.runtime.reading(line)
     folder = work_dir / side.name / doc.source_id
     name = f"{doc.source_id}.pdf"
+    began = time.perf_counter()
     try:
         fields = read_fields(
             pdf, name=name, lob=line, source_id=doc.source_id, model=reading.model, reader=reader,
             pages_dir=folder / "pages", classifier=StaticClassifier("policy"),
             calibration=identity_calibration(reading.model), verify=True,
             extract_options=reading.extract_options(tuning))
+        fields_ready = time.perf_counter() - began
         result, count = fields["result"], len(fields["images"])
         add_full_text(pdf, result, name=name, lob=line, reader=reader, pages_dir=folder / "pages",
                       page_count=count, known_texts=fields["cited_texts"],
                       calibrators=reading.calibrators, thresholds=reading.thresholds)
+        served = fields["served"] is not None
+        if not served:
+            fields_ready = time.perf_counter() - began
     finally:
         shutil.rmtree(folder, ignore_errors=True)
-    return result, count, reading.route, fields["served"] is not None
+    return result, count, reading.route, served, fields_ready
 
 
 def read_document(side: Side, doc: Any, line: str, pdf: bytes, *, reader: Any, tuning: dict[str, Any],
@@ -315,8 +361,9 @@ def read_document(side: Side, doc: Any, line: str, pdf: bytes, *, reader: Any, t
     for attempt in range(1, READING_ATTEMPTS + 1):
         reading.attempts = attempt
         try:
-            reading.result, reading.pages, reading.route, reading.fields_served = read_once(
-                side, doc, line, pdf, reader=reader, tuning=tuning, work_dir=work_dir)
+            (reading.result, reading.pages, reading.route, reading.fields_served,
+             reading.fields_seconds) = read_once(side, doc, line, pdf, reader=reader, tuning=tuning,
+                                                 work_dir=work_dir)
             reading.error, reading.timeout = None, False
             break
         except JobRefused as exc:
@@ -419,6 +466,103 @@ def failures(side: Side | None, readings: dict[str, Reading]) -> dict[str, Any]:
     timeouts = sum(1 for source_id in failed if readings[source_id].timeout)
     return {"count": len(failed) + (1 if side.error else 0), "timeouts": timeouts,
             "adapter_check": side.error, "documents": failed}
+
+
+# --------------------------------------------------------------------------
+# Time to the fields
+# --------------------------------------------------------------------------
+
+
+def fields_budget(pages: int) -> float:
+    """A document's time to its fields under the target: :data:`FIELDS_TARGET_SECONDS`
+    up to :data:`FIELDS_TARGET_PAGES` pages, in proportion beyond."""
+    return FIELDS_TARGET_SECONDS * max(1.0, pages / FIELDS_TARGET_PAGES)
+
+
+def _quantile(values: Sequence[float], q: float) -> float:
+    """The nearest-rank quantile: of 50 values, the 95th percentile is the 48th
+    smallest, so the slowest 5% are the two above it."""
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(q * len(ordered)) - 1)]
+
+
+def projected_seconds(timed: Sequence[tuple[int, float]]) -> dict[str, Any] | None:
+    """A 200-page scan's time to its fields, from ``(pages, seconds)`` of the
+    documents read; ``None`` with fewer than :data:`MIN_PROJECTION_DOCUMENTS`
+    or a single length.
+
+    A least-squares line, ``overhead + per_page x pages``, at
+    :data:`FIELDS_TARGET_PAGES`, times the :data:`LATENCY_QUANTILE` quantile of
+    each document's time over the line's (``spread``): the slowest 5% ran that
+    far above it. A line that does not rise with the pages, or reaches zero
+    within them, is noise on too narrow a range: the time is then taken in
+    proportion to the pages (``proportional``), which overstates a short
+    document's share and so errs slow.
+    """
+    timed = [(pages, seconds) for pages, seconds in timed if pages > 0]
+    if len(timed) < MIN_PROJECTION_DOCUMENTS or len({pages for pages, _ in timed}) < 2:
+        return None
+    count = len(timed)
+    mean_pages = sum(pages for pages, _ in timed) / count
+    mean_seconds = sum(seconds for _, seconds in timed) / count
+    spread_pages = sum((pages - mean_pages) ** 2 for pages, _ in timed)
+    per_page = sum((pages - mean_pages) * (seconds - mean_seconds) for pages, seconds in timed) / spread_pages
+    overhead, fit = mean_seconds - per_page * mean_pages, "least_squares"
+    if per_page <= 0 or any(overhead + per_page * pages <= 0 for pages, _ in timed):
+        per_page = sum(seconds for _, seconds in timed) / sum(pages for pages, _ in timed)
+        overhead, fit = 0.0, "proportional"
+    spread = (_quantile([seconds / (overhead + per_page * pages) for pages, seconds in timed], LATENCY_QUANTILE)
+              if per_page > 0 else 1.0)
+    return {"seconds": round((overhead + per_page * FIELDS_TARGET_PAGES) * spread, 1), "fit": fit,
+            "overhead_s": round(overhead, 2), "per_page_s": round(per_page, 3), "spread": round(spread, 3),
+            "documents": count, "longest_pages": max(pages for pages, _ in timed)}
+
+
+def latency(readings: dict[str, Reading]) -> dict[str, Any]:
+    """Time to the fields of the documents ``readings`` read: each against its
+    budget (:func:`fields_budget`) and a 200-page scan's projected
+    (:func:`projected_seconds`)."""
+    timed = sorted((r.pages, r.fields_seconds, source_id) for source_id, r in readings.items()
+                   if r.ok and r.fields_seconds is not None and r.pages > 0)
+    if not timed:
+        return {"documents": 0, "projection": None}
+    seconds = [s for _p, s, _id in timed]
+    shares = [s / fields_budget(p) for p, s, _id in timed]
+    return {
+        "documents": len(timed),
+        "pages": {"shortest": timed[0][0], "longest": timed[-1][0]},
+        "fields_seconds": {"median": round(_quantile(seconds, 0.5), 2),
+                           "p95": round(_quantile(seconds, LATENCY_QUANTILE), 2), "longest": round(max(seconds), 2)},
+        # The slowest 5%'s time as a share of their budget: above 1, more than 5% were over it.
+        "budget_share": round(_quantile(shares, LATENCY_QUANTILE), 3),
+        "over_budget": sorted(source_id for p, s, source_id in timed if s > fields_budget(p)),
+        "projection": projected_seconds([(p, s) for p, s, _id in timed]),
+    }
+
+
+def latency_check(measured: dict[str, Any]) -> dict[str, Any]:
+    """The time check on the candidate's :func:`latency`: the slowest 5% within
+    their budget and, where it could be projected, a 200-page scan's fields
+    within :data:`FIELDS_TARGET_SECONDS`. Nothing timed fails it."""
+    rule = f"{FIELDS_TARGET_PAGES} pages <= {FIELDS_TARGET_SECONDS:g} s"
+    if not measured.get("documents"):
+        return _check(LATENCY, False, "no document's fields were timed", rule=rule)
+    share, projection = measured["budget_share"], measured["projection"]
+    within = share <= 1.0 + 1e-9
+    over = measured["over_budget"]
+    slowest = f"the slowest {100 - round(LATENCY_QUANTILE * 100)}% at {share:.2f} of their budget"
+    parts = [slowest + (f" ({len(over)} of {measured['documents']} over it)" if over else "")]
+    projected = None
+    if projection is None:
+        parts.append(f"a {FIELDS_TARGET_PAGES}-page scan not projected ({measured['documents']} document(s) "
+                     f"timed; {MIN_PROJECTION_DOCUMENTS} of two lengths at least are needed)")
+    else:
+        projected = projection["seconds"]
+        within = within and projected <= FIELDS_TARGET_SECONDS + 1e-9
+        parts.append(f"a {FIELDS_TARGET_PAGES}-page scan projected at {projected:g} s from documents of "
+                     f"{measured['pages']['shortest']}-{measured['pages']['longest']} pages")
+    return _check(LATENCY, within, f"time to the fields: {'; '.join(parts)} (rule {rule})",
+                  budget_share=share, projected_seconds=projected, rule=rule)
 
 
 # --------------------------------------------------------------------------
@@ -659,6 +803,8 @@ def _report(client: BlobClient, version: str, tenant_id: str | None, *, bundle: 
     infrastructure = sum(f["count"] for f in failed.values())
     checks = verdict(candidate=paired_mine, promoted=paired_theirs if compared else None,
                      infrastructure=infrastructure, baseline_problem=baseline_problem)
+    timing = {CANDIDATE: latency(mine), PROMOTED: latency(theirs) if compared else None}
+    checks.append(latency_check(timing[CANDIDATE]))
     passed = all(check["passed"] for check in checks)
     lines: dict[str, int] = {}
     for _doc, line in chosen:
@@ -675,6 +821,9 @@ def _report(client: BlobClient, version: str, tenant_id: str | None, *, bundle: 
                 "ok": reading.ok, "error": reading.error if not reading.ok else None,
                 "timeout": reading.timeout, "not_served": reading.not_served, "attempts": reading.attempts,
                 "seconds": reading.seconds, "route": reading.route, "fields_served": reading.fields_served,
+                "fields_seconds": (round(reading.fields_seconds, 2) if reading.fields_seconds is not None
+                                   else None),
+                "pages": reading.pages,
                 "field_match": _rounded(scores.get(doc.source_id)),
                 "schema_valid": reading.result.schema_valid if reading.ok else None,
                 "invented": len(check.get("not_printed") or []) if isinstance(check, dict) else None,
@@ -705,6 +854,7 @@ def _report(client: BlobClient, version: str, tenant_id: str | None, *, bundle: 
         "metrics": {"paired": {CANDIDATE: paired_mine, PROMOTED: paired_theirs}, "candidate_all": own},
         "failures": failed,
         "prompt_check": {CANDIDATE: prompt_parity(mine), PROMOTED: prompt_parity(theirs) if compared else None},
+        "latency": timing,
         "thresholds": thresholds(),
         "checks": checks,
         "passed": passed,
@@ -749,6 +899,19 @@ def render(report: dict[str, Any]) -> str:
                f"{str(failed[CANDIDATE]['count']) + ' / ' + str(failed[CANDIDATE]['timeouts']):>11}"
                f"{str(failed[PROMOTED]['count']) + ' / ' + str(failed[PROMOTED]['timeouts']):>11}"
                f"{'':>9}  0 {'ok' if rules['infrastructure']['passed'] else 'FAIL'}")
+    timing = report.get("latency") or {}
+    if timing:
+        def p95(side: str) -> str:
+            measured = timing.get(side) or {}
+            seconds = (measured.get("fields_seconds") or {}).get("p95")
+            return f"{seconds:.1f} s" if isinstance(seconds, (int, float)) else "-"
+
+        check = rules.get(LATENCY, {})
+        projected = check.get("projected_seconds")
+        out.append(f"  {'fields time, p95':<24}{p95(CANDIDATE):>11}{p95(PROMOTED):>11}{'':>9}  "
+                   f"{check.get('rule', '')}; projected "
+                   f"{f'{projected:g} s' if isinstance(projected, (int, float)) else '-'} "
+                   f"{'ok' if check.get('passed') else 'FAIL'}")
     parity = report["prompt_check"]
     shown = [f"{side} {p['implausible']} of {p['windows_checked']}" for side, p in parity.items() if p]
     out.append(f"  {'prompt_check implausible':<24} {'; '.join(shown)}   (parity signal, not ruled on)")

@@ -378,6 +378,10 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--accept-interim", dest="accept_interim", action="store_true",
                          help="promote an interim-tier release (field match below the production bar, or "
                               "an eval set accepted small) knowingly")
+    promote.add_argument("--accept-latency", dest="accept_latency", default=None, metavar="WHY",
+                         help="promote a release whose shadow check failed on its time alone (a 200-page "
+                              "scan's fields slower than 2 minutes) knowingly: why, in 20 characters or more, "
+                              "recorded in the release with --by")
     promote.add_argument("--tenant", default=None)
 
     noise = sub.add_parser(
@@ -461,6 +465,13 @@ def flag_problem(args: argparse.Namespace) -> str | None:
                     "more: it is recorded in the release with --by")
         if args.skip_reason is not None and not args.skip_shadow:
             return "promote --reason is the written reason for --skip-shadow; give both or neither"
+        if args.accept_latency is not None:
+            if args.skip_shadow:
+                return ("promote --accept-latency accepts a shadow report's time; with --skip-shadow there is "
+                        "no report to accept")
+            if len(args.accept_latency.strip()) < SKIP_SHADOW_MIN_CHARS:
+                return (f"promote --accept-latency \"<why>\" needs {SKIP_SHADOW_MIN_CHARS} characters or more: "
+                        "it is recorded in the release with --by")
         return None
     if args.command == "shadow":
         return shadow_flag_problem(args)
@@ -525,6 +536,7 @@ def shadow_flag_problem(args: argparse.Namespace) -> str | None:
 def run_shadow_command(args: argparse.Namespace, *, client: BlobClient | None = None) -> int:
     """``shadow``: the check, its table, and 0 when it passed."""
     from orchestration.shadow import SHADOW_DOCUMENTS, ShadowError, render, run_shadow
+    from registry_utils.releases import latency_failure
 
     try:
         report = run_shadow(client or BlobClient(), args.version, model_url=args.model_url,
@@ -534,11 +546,13 @@ def run_shadow_command(args: argparse.Namespace, *, client: BlobClient | None = 
         print(f"shadow {args.version}: {exc}", file=sys.stderr)
         return 1
     print(render(report))
+    tenant = f" --tenant {args.tenant}" if args.tenant else ""
+    interim = " --accept-interim" if (report.get("candidate") or {}).get("tier") == "interim" else ""
+    promote = f"python -m orchestration.run promote --version {args.version} --by \"<person>\"{tenant}{interim}"
     if report["passed"]:
-        tenant = f" --tenant {args.tenant}" if args.tenant else ""
-        interim = " --accept-interim" if (report.get("candidate") or {}).get("tier") == "interim" else ""
-        print(f"  next: python -m orchestration.run promote --version {args.version} --by \"<person>\""
-              f"{tenant}{interim}")
+        print(f"  next: {promote}")
+    elif latency_failure(report):
+        print(f"  only its time failed; to promote it knowingly: {promote} --accept-latency \"<why>\"")
     return 0 if report["passed"] else 1
 
 
@@ -557,7 +571,9 @@ def promotion_evidence(client: BlobClient, version: str, tenant: str | None) -> 
         how = f"shadow check skipped by {last.get('promoted_by')}: {last.get('shadow_skipped_reason')}"
     tier = f"; tier {last['tier']}" if last.get("tier") else ""
     accepted = " (accepted as interim)" if last.get("accepted_interim") else ""
-    return f"promoted by {last.get('promoted_by')} at {last.get('promoted_at')} on {how}{tier}{accepted}"
+    slow = (f"; slower than the 2-minute target, accepted: {last['latency_accepted_reason']}"
+            if last.get("latency_accepted_reason") else "")
+    return f"promoted by {last.get('promoted_by')} at {last.get('promoted_at')} on {how}{tier}{accepted}{slow}"
 
 
 #: Stages removed from the pipeline, and why. Named by ``--from-stage`` they are
@@ -685,7 +701,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         try:
             archived = promote(client, args.version, args.tenant, promoted_by=args.promoted_by.strip(),
                                skip_shadow_reason=args.skip_reason if args.skip_shadow else None,
-                               accept_interim=args.accept_interim)
+                               accept_interim=args.accept_interim, accept_latency_reason=args.accept_latency)
         except ReleaseError as exc:
             print(exc, file=sys.stderr)
             return 1

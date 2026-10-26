@@ -496,6 +496,10 @@ class ReleasePromotion(_Base):
     shadow_problem: str | None = None
     #: The person promoted an interim-tier release knowingly (``--accept-interim``).
     accepted_interim: bool = False
+    #: Why the person promoted a release slower than the target (``--accept-latency``),
+    #: and what the shadow report's time check found.
+    latency_accepted_reason: str | None = None
+    latency_problem: str | None = None
     tier: Literal["production", "interim"] | None = None
     tier_confidence: Any = None
 

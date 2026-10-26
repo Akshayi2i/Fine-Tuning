@@ -104,11 +104,13 @@ python -m orchestration.run package --version v3
 #    when the bound >= 0.92), on >= 150 real policies.
 
 # 2b the shadow check, on the pod's real server path: ~50 frozen documents read by the candidate and by the
-#    promoted release (vLLM with both adapters, --max-loras 2), scored as the gate scores them
+#    promoted release (vLLM with both adapters, --max-loras 2), scored as the gate scores them, and timed:
+#    a 200-page scan's fields in 2 minutes (run it near the pod, as the worker runs)
 python -m orchestration.run shadow --version v3 --model-url https://<vllm> --mineru-url https://<mineru>
 # 2c promotion, by a person: refused without a passing shadow report (or --skip-shadow --reason "<why>");
-#    an interim-tier release also needs --accept-interim. The one it replaces is archived.
-python -m orchestration.run promote --version v3 --by "<person>" [--accept-interim]
+#    an interim-tier release also needs --accept-interim, and one that failed on its time alone
+#    --accept-latency "<why>". The one it replaces is archived.
+python -m orchestration.run promote --version v3 --by "<person>" [--accept-interim] [--accept-latency "<why>"]
 
 # resume a cycle, or rerun one that failed: name its version
 python -m orchestration.run finetune --version v3 --from-stage training
@@ -570,7 +572,8 @@ MinerU's turns are runs of at most 20 pages (`--run-pages`), so a document arriv
 On the pod's vLLM, besides the flags above: `--max-num-seqs` small enough that the running windows fit in memory
 (`first_token_s_max` in the window summary jumps when vLLM puts windows back and reads them again). Each window
 summary now gives every job's answer lengths (`by_group`: median, p95, longest): set the answer limits from them.
-Reaching 2 minutes also needs the next training cycle in the fast format profile (below).
+Reaching 2 minutes also needs the next training cycle in the fast format profile (below). Every release is held to
+it before promotion: the shadow check times each reading to its fields (see "Gated, then promoted by a person").
 
 ### The fast format profile
 
@@ -687,7 +690,12 @@ sequence for every tenant, because runs and weights are not kept per tenant. The
   path on the pod (fields first, the candidate and the promoted release as `policy-vN`/`policy-vK`, vLLM
   `--max-loras 2`) and passes when the candidate's served field match is at most 0.02 below the promoted
   one's, its invented-value rate at most 0.005 above, with no failures and no lower schema validity
-  (`releases/{tenant}/{vN}/shadow/shadow_report.json`). `promote --version vN --by "<person>"` then promotes
+  (`releases/{tenant}/{vN}/shadow/shadow_report.json`). It also times every reading to its fields and fails
+  when the slowest 5% of documents take longer than their budget (2 minutes up to 200 pages, in proportion
+  beyond) or when a 200-page scan, projected from the documents it read, would take longer than 2 minutes.
+  The time includes sending the pages from where the check runs, so run it near the pod, as the worker runs.
+  A release that failed on its time alone is promoted only with `--accept-latency "<why>"`, recorded with
+  the person's name. `promote --version vN --by "<person>"` then promotes
   it, refused without a passing shadow report for the release as packaged (or `--skip-shadow --reason`,
   recorded) and, for an interim-tier release, without `--accept-interim`. Every promotion is recorded on the
   bundle (`promotions`: who, when, the shadow report or skip reason, tier and tier confidence). The tenant

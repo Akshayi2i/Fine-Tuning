@@ -115,7 +115,8 @@ def _passing_report(client: BlobClient, version: str, *, compared_with: str | No
     body = client.read_json(paths.release_bundle(version))
     key = shadow_report_key(version)
     client.write_json(key, {"release_id": version, "bundle_created_at": body["created_at"],
-                            "promoted_release_id": compared_with, "passed": True, "reasons": [], **over})
+                            "promoted_release_id": compared_with, "passed": True, "reasons": [],
+                            "checks": [{"check": "latency", "passed": True, "detail": "within the target"}], **over})
     return key
 
 
@@ -479,7 +480,7 @@ def test_with_nothing_promoted_the_candidate_is_held_to_the_golds_alone(client, 
     _gated(client, "v3")
     report = _shadow(client, raw, documents, tmp_path, Models({"policy-v3": GOOD}))
     assert report["passed"] and report["baseline"] is None and report["promoted_release_id"] is None
-    assert [c["check"] for c in report["checks"]] == ["infrastructure", "schema_validity"]
+    assert [c["check"] for c in report["checks"]] == ["infrastructure", "schema_validity", "latency"]
     assert "nothing promoted" in S.render(report)
 
     _gated(client, "v4")
@@ -536,6 +537,120 @@ def test_shadow_refuses_a_release_promote_would_refuse_or_does_not_need(client, 
     promote_release(client, "v5", promoted_by="A. Reviewer")
     with pytest.raises(S.ShadowError, match="a rollback to it needs no shadow check"):
         _shadow(client, raw, documents, tmp_path, Models({}), version="v4")
+
+
+# --------------------------------------------------------------------------
+# shadow: time to the fields (a 200-page scan in 2 minutes)
+# --------------------------------------------------------------------------
+
+
+def _timed(*documents: tuple[int, float]) -> dict:
+    """Readings of ``(pages, seconds to the fields)``, as the shadow check records them."""
+    return {f"doc_{n:02d}": S.Reading(f"doc_{n:02d}", result=object(), pages=pages, fields_seconds=seconds)
+            for n, (pages, seconds) in enumerate(documents)}
+
+
+def test_each_document_has_two_minutes_up_to_200_pages():
+    assert S.fields_budget(5) == S.fields_budget(200) == 120.0
+    assert S.fields_budget(400) == 240.0
+
+
+def test_a_200_page_scan_is_projected_from_shorter_documents():
+    """8 s of overhead and half a second a page: 108 s at 200 pages. Too few
+    documents, or one length only, project nothing."""
+    exact = [(pages, 8 + 0.5 * pages) for pages in range(10, 110, 10)]
+    projection = S.projected_seconds(exact)
+    assert projection["fit"] == "least_squares"
+    assert (projection["overhead_s"], projection["per_page_s"], projection["spread"]) == (8.0, 0.5, 1.0)
+    assert projection["seconds"] == 108.0 and projection["longest_pages"] == 100
+    assert S.projected_seconds(exact[: S.MIN_PROJECTION_DOCUMENTS - 1]) is None
+    assert S.projected_seconds([(30, 20.0 + n) for n in range(12)]) is None
+
+    # The slowest 5% ran 20% over the line: the projection carries it.
+    slow_tail = [*exact[:-1], (100, (8 + 0.5 * 100) * 1.2)]
+    assert S.projected_seconds(slow_tail)["spread"] > 1.1
+
+    # Times that fall as the pages rise are noise on too narrow a range: in proportion to the pages.
+    falling = [(10 + n, 30.0 - n) for n in range(10)]
+    assert S.projected_seconds(falling)["fit"] == "proportional"
+
+
+def test_a_release_too_slow_for_200_pages_fails_though_every_document_was_in_time():
+    """Documents of 10-100 pages, each well inside 2 minutes, at 0.6 s a page
+    past an 8 s overhead: a 200-page scan would take 128 s."""
+    within = S.latency_check(S.latency(_timed(*[(pages, 8 + 0.5 * pages) for pages in range(10, 110, 10)])))
+    assert within["passed"] and within["projected_seconds"] == 108.0
+    assert "projected at 108 s from documents of 10-100 pages" in within["detail"]
+
+    measured = S.latency(_timed(*[(pages, 8 + 0.6 * pages) for pages in range(10, 110, 10)]))
+    assert measured["over_budget"] == [] and measured["budget_share"] < 1
+    check = S.latency_check(measured)
+    assert not check["passed"] and check["projected_seconds"] == 128.0 and check["rule"] == "200 pages <= 120 s"
+
+
+def test_the_slowest_five_percent_must_be_inside_their_budget():
+    """Of 4 documents the slowest is the 95th percentile: one over its budget
+    fails, and too few to project leaves the per-document rule to decide."""
+    check = S.latency_check(S.latency(_timed((20, 30.0), (40, 50.0), (60, 70.0), (80, 150.0))))
+    assert not check["passed"] and "(1 of 4 over it)" in check["detail"]
+    assert "not projected (4 document(s) timed" in check["detail"] and check["projected_seconds"] is None
+    assert S.latency_check(S.latency(_timed((20, 30.0), (300, 170.0))))["passed"]    # 300 pages: 180 s
+    nothing = S.latency_check(S.latency({"x": S.Reading("x", error="ConnectionError: down")}))
+    assert not nothing["passed"] and nothing["detail"] == "no document's fields were timed"
+
+
+def test_a_candidate_slower_than_the_target_is_promoted_only_knowingly(
+        client, raw, documents, tmp_path, monkeypatch, capsys):
+    """Every reading is timed to its fields; a release failing the time check
+    alone is refused, then promoted with --accept-latency, recorded with the
+    name - and a report written before the time check is not accepted."""
+    from registry_utils.releases import LATENCY_CHECK
+
+    assert S.LATENCY == LATENCY_CHECK
+    _gated(client, "v3")
+    monkeypatch.setattr(S, "FIELDS_TARGET_SECONDS", 1e-9)
+    report = _shadow(client, raw, documents, tmp_path, Models({"policy-v3": GOOD}))
+    assert not report["passed"]
+    assert [c["check"] for c in report["checks"] if not c["passed"]] == ["latency"]
+    row = report["per_document"][0]["candidate"]
+    assert row["fields_seconds"] is not None and row["pages"] == len(PAGES)
+    assert report["latency"]["candidate"]["documents"] == 4 and report["latency"]["promoted"] is None
+    assert "FAIL latency: time to the fields" in S.render(report)
+
+    with pytest.raises(ReleaseError, match="only its time failed: promote it knowingly with --accept-latency"):
+        promote(client, "v3", promoted_by="A. Reviewer")
+    with pytest.raises(ReleaseError, match="20 characters or more"):
+        promote(client, "v3", promoted_by="A. Reviewer", accept_latency_reason="slow pod")
+    monkeypatch.setattr(cli, "BlobClient", lambda *a, **k: client)
+    reason = "measured from the laptop; the Azure worker is not deployed yet"
+    assert cli.main(["promote", "--version", "v3", "--by", "A. Reviewer", "--accept-latency", reason]) == 0
+    assert f"slower than the 2-minute target, accepted: {reason}" in capsys.readouterr().out
+    [record] = client.read_json(paths.release_bundle("v3"))["promotions"]
+    assert record["latency_accepted_reason"] == reason and "time to the fields" in record["latency_problem"]
+    assert record["shadow_report"] == shadow_report_key("v3")
+
+    # --accept-latency never lets another failure through, and an untimed report is run again.
+    _gated(client, "v4")
+    _passing_report(client, "v4", compared_with="v3", passed=False, reasons=["served field match 0.8"],
+                    checks=[{"check": "latency", "passed": False, "detail": "slow"},
+                            {"check": "field_normalized_match", "passed": False, "detail": "0.8"}])
+    with pytest.raises(ReleaseError, match="the shadow check of v4 failed .served field match 0.8") as refused:
+        promote(client, "v4", promoted_by="A. Reviewer", accept_latency_reason=reason)
+    assert "only its time failed" not in str(refused.value)
+    _passing_report(client, "v4", compared_with="v3", checks=[])
+    with pytest.raises(ReleaseError, match="has no time check .it predates the 2-minute rule"):
+        promote(client, "v4", promoted_by="A. Reviewer")
+
+
+def test_accept_latency_flags_are_checked_before_anything_is_read(capsys):
+    for argv, words in (
+        (["--accept-latency", "slow pod"], "20 characters or more"),
+        (["--skip-shadow", "--reason", "a reason long enough to count here",
+          "--accept-latency", "and a second reason long enough"], "no report to accept"),
+    ):
+        with pytest.raises(SystemExit) as exited:
+            cli.main(["promote", "--version", "v3", "--by", "A. Reviewer", *argv])
+        assert exited.value.code == 2 and words in capsys.readouterr().err
 
 
 def test_prompt_check_warnings_are_counted_as_a_parity_signal():

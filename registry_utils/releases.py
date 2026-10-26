@@ -253,15 +253,31 @@ def promote_release(
     return archived
 
 
+#: The shadow report's time check (``orchestration.shadow.LATENCY``): a 200-page
+#: scan's fields in 2 minutes. A release failing it alone is promoted only with
+#: ``promote --accept-latency "<why>"``.
+LATENCY_CHECK = "latency"
+
+
+def latency_failure(report: dict[str, Any]) -> str | None:
+    """What the shadow report's time check found, when that check alone failed; else ``None``."""
+    failed = [check for check in report.get("checks") or [] if not check.get("passed")]
+    if failed and all(check.get("check") == LATENCY_CHECK for check in failed):
+        return str(failed[0].get("detail") or "slower than the target")
+    return None
+
+
 def shadow_problem(client: BlobClient, release_id: str, tenant_id: str | None = None,
-                   body: dict[str, Any] | None = None) -> str | None:
+                   body: dict[str, Any] | None = None, *, accept_latency: bool = False) -> str | None:
     """Why ``release_id``'s shadow report does not let it be promoted; ``None`` when it does.
 
     The report (:func:`shadow_report_key`, written by ``orchestration.run
     shadow``) must be this release's, of the bundle as it is now packaged
-    (``bundle_created_at``: a release packaged again is read again), passed,
-    and compared with the release promoted now - the one this promotion
-    archives - or with nothing, when nothing is promoted.
+    (``bundle_created_at``: a release packaged again is read again), timed
+    (a report without the time check predates it), passed - or failed on its
+    time alone, with ``accept_latency`` - and compared with the release
+    promoted now - the one this promotion archives - or with nothing, when
+    nothing is promoted.
     """
     key = shadow_report_key(release_id, tenant_id)
     if not client.exists(key):
@@ -274,9 +290,15 @@ def shadow_problem(client: BlobClient, release_id: str, tenant_id: str | None = 
     if report.get("bundle_created_at") != body.get("created_at"):
         return (f"the shadow report at {key} read {release_id} as packaged at {report.get('bundle_created_at')}, "
                 f"and it was packaged again at {body.get('created_at')}: run the shadow check again")
-    if report.get("passed") is not True:
+    if not any(check.get("check") == LATENCY_CHECK for check in report.get("checks") or []):
+        return (f"the shadow report at {key} has no time check (it predates the 2-minute rule): "
+                "run the shadow check again")
+    slow = latency_failure(report)
+    if report.get("passed") is not True and not (accept_latency and slow):
         reasons = "; ".join(str(r) for r in report.get("reasons") or []) or "see the report"
-        return f"the shadow check of {release_id} failed ({reasons}; {key})"
+        knowingly = (f"; only its time failed: promote it knowingly with --accept-latency \"<why, "
+                     f"{SKIP_SHADOW_MIN_CHARS} characters or more>\"" if slow else "")
+        return f"the shadow check of {release_id} failed ({reasons}; {key}){knowingly}"
     promoted_now = promoted_release_id(client, tenant_id, excluding=release_id)
     compared = report.get("promoted_release_id")
     if compared != promoted_now:
@@ -293,6 +315,7 @@ def promotion_clearance(
     body: dict[str, Any] | None = None,
     skip_shadow_reason: str | None = None,
     accept_interim: bool = False,
+    accept_latency_reason: str | None = None,
 ) -> dict[str, Any]:
     """What lets ``release_id`` be promoted, as its promotion records it, or
     the reason it may not be (decision 2026-10-26, #44).
@@ -305,7 +328,16 @@ def promotion_clearance(
       unless ``skip_shadow_reason`` - written, at least
       :data:`SKIP_SHADOW_MIN_CHARS` characters - says why not; the reason is
       recorded with what was wrong with the shadow.
+    * A shadow report that failed on its time alone (slower than a 200-page
+      scan's fields in 2 minutes) promotes with ``accept_latency_reason``,
+      written as long, recorded with what the time check found.
     """
+    latency_reason = (accept_latency_reason or "").strip() or None
+    if accept_latency_reason is not None and len(latency_reason or "") < SKIP_SHADOW_MIN_CHARS:
+        raise ReleaseError(
+            f"--accept-latency must say why {release_id} is promoted slower than the target, in "
+            f"{SKIP_SHADOW_MIN_CHARS} characters or more (got {len(latency_reason or '')})"
+        )
     if body is None:
         body, _bundle, decision = _promotable(client, release_id, tenant_id)
     else:
@@ -330,9 +362,14 @@ def promotion_clearance(
             f"{release_id} is {status!r}: a release is promoted from gated, after its shadow check, or "
             "rolled back to once it was promoted before."
         )
-    problem = shadow_problem(client, release_id, tenant_id, body)
+    problem = shadow_problem(client, release_id, tenant_id, body, accept_latency=latency_reason is not None)
     if problem is None:
-        return {**record, "shadow_report": shadow_report_key(release_id, tenant_id)}
+        key = shadow_report_key(release_id, tenant_id)
+        slow = latency_failure(client.read_json(key) or {})
+        if slow and latency_reason:
+            log.warning("%s is promoted slower than the target (%s): %s", release_id, slow, latency_reason)
+            record.update(latency_accepted_reason=latency_reason, latency_problem=slow)
+        return {**record, "shadow_report": key}
     reason = (skip_shadow_reason or "").strip()
     if not reason:
         tenant = f" --tenant {tenant_id}" if tenant_id else ""
@@ -360,6 +397,7 @@ def promote(
     promoted_by: str,
     skip_shadow_reason: str | None = None,
     accept_interim: bool = False,
+    accept_latency_reason: str | None = None,
 ) -> list[str]:
     """``python -m orchestration.run promote``: make ``release_id`` the tenant's
     promoted release, by a named person, on the evidence
@@ -377,7 +415,8 @@ def promote(
                  release_id, paths._tenant(tenant_id))
         return []
     record = promotion_clearance(client, release_id, tenant_id, body=body,
-                                 skip_shadow_reason=skip_shadow_reason, accept_interim=accept_interim)
+                                 skip_shadow_reason=skip_shadow_reason, accept_interim=accept_interim,
+                                 accept_latency_reason=accept_latency_reason)
     return promote_release(client, release_id, tenant_id, promoted_by=promoted_by.strip(), record=record)
 
 
