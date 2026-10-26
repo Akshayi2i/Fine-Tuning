@@ -554,3 +554,16 @@ resumes from the failed step. It never freezes an eval set or packages a release
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- `label-noise --version vN [--corpus-version V] [--limit N]`: the release reads the train documents; values it reads that the page prints but the gold lacks are queued for a person (`golden-labels/<tenant>/_review_queue/`), never written into a gold. The `active_learning` CLI is wired.
+- `--ocr-workers N`, `--allow-dirty`; stage times logged to MLflow (one run per run id) when configured; webhooks (HTTPS) on a stage failure, a gate block and a finished run (`orchestration/notify.py`).
+- Fresh-run rules (off by default): go fresh when new documents exceed a share of train, every N cycles, or when a gold the chain trained on changed (`gold_sha256` in the corpus manifest); the reason goes in `fresh_reason`.
+- The OCR pin is checked at corpus build, preflight and promotion (IMPL-03). Image staging is cached by content.
+
+## Changes of 2026-10-26 (gate and release decisions)
+
+- Stage 9 writes the release `gated` and archives nothing (#44); the run summary prints the next steps. `shadow --version vN --model-url URL --mineru-url URL [--documents 50]` (detached on the pod) reads about 50 frozen documents, lines in turn, real first, through the Azure worker's two phases with the candidate and the promoted release, scores both with build_report and writes `releases/{tenant}/{vN}/shadow/shadow_report.json`. Pass: served field match no more than 0.02 below the promoted release's, invented values no more than 0.005 above, no failures, schema validity not lower; with nothing promoted, no failures and schema validity >= 0.98.
+- `promote --version vN --by NAME [--accept-interim] [--skip-shadow --reason ...]`: serving and OCR-pin refusals first; a rollback to a release promoted before needs nothing else; an interim release needs `--accept-interim`; a gated release needs a passing shadow report for the bundle as packaged, against the release promoted now, or a written reason (>= 20 characters). `ReleaseBundle.promotions` records each one.
+- The gate's baseline goes through `promoted_baseline_report`: a promoted report on another yardstick only because of scoring code or settings is re-scored and compared (`baseline_rescored`). `continuation` re-scores a parent that differs only in yardstick and continues (`parent_report_rescored`); the per-line references are re-scored the same way.

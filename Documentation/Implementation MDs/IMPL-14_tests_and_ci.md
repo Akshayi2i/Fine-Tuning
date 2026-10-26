@@ -296,3 +296,11 @@ real vLLM engines (the tests fake the engine), and a real upload.
 
 - The suite runs in the shipped format profile (`fast`). A test of the standard format's own windows, prompts or answers carries `@pytest.mark.format_profile("standard")` (`tests/conftest.py`, an autouse fixture setting `common.config.shared_format_config`); `tests/test_old_style_prompts_frozen.py` is pinned whole. The replay model of `tests/test_schema2_serving.py` finds a window by its system prompt, its own request (`_request_of`) and its pages, and `_full_answer` gives a row's target in the full form, so the end-to-end replay tests - the printed-values removal of an invented value, fields first, the full-text tier - run in the fast profile. `test_fast_profile.py::test_fast_is_the_shipped_profile` records the decision. The thumbnail checks ask for classify at least 4x below extraction's pixels (~4.8x under fast).
 - `tests/test_image_only_invention.py` (12 tests): an image_only invention counted on borrowed text; no text to borrow is unscored, not clean; a cited page with no text is unchecked and counted; selection picks the finalist inventing less across both modes; the gate's repeat reads image_only and records it; another repeat mode is another yardstick. `tests/test_invention_and_agreement.py`: the golden repeat tests expect the image_only repeat.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- New test files for the review fixes: `tests/test_review_*.py` (training targets, rehearsal and mix, validation sample, training engine, selection sharding / measures / integration, gate metrics, calibration, error analysis, printed controls, decoding controls, pixel parity, confidence integration, OCR pin, OCR concurrency, tracking, cycle rules, label noise, allow-dirty).
+
+## Changes of 2026-10-26 (gate and release decisions)
+
+- `tests/test_decision_gate_served_tier.py`, `test_decision_gate_line_rule.py`, `test_decision_gate_line_rescore.py`, `test_decision_rescore.py`, `test_decision_promotion.py`, `test_decision_retention.py`: the six gate and release decisions of 2026-10-26.

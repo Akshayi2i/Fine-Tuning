@@ -419,3 +419,10 @@ corrected at bundling instead.
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- The OCR pin is enforced before a corpus can train: the corpus build (`assert_corpus_ocr_pin`), preflight (`check_ocr_done`) and promotion (`registry_utils.releases.ocr_pin_refusal`, the same check the Azure worker and `served_adapter` run, version AND tier) refuse text read by another MinerU. The fix command reads through the served MinerU; the in-process 3.4.5 venv can no longer produce a trainable corpus.
+- `run_mineru --workers N` (served MinerU only) reads documents concurrently, results as a serial run's; `finetune --ocr-workers N` does the same in stage 2. OCR is meant to run before the pod: against a dedicated MinerU 4.0.12/basic, from any machine, then `finetune --skip-ingest` on the pod finds every document read.
+- Under the fast profile the shared renderer (`render_only.render_pdf_pages`) resizes each page once (bicubic) to the `smart_resize` size of the fast budget, so ms-swift and vLLM both see an identity resize; `ocr_meta` records `page_pixel_budget`. Page images are cached by content (`train-images/<tenant>/by-content/`, tagged by checksum, MinerU version and tier, device, cap and render date) across cycles.
+- Not built: a small-print filter for image_only targets. The OCR stage stores no line or span boxes; it needs them first (`lines.json` per page) to measure glyph height at the fast budget.

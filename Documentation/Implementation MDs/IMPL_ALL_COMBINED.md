@@ -1069,7 +1069,7 @@ Scaffold the `insurance-extraction-finetuning` repo and create every config file
   - Continued training (decision 2026-10-23): `continued_training: {num_train_epochs: null, learning_rate: null}`. A cycle that continues the promoted adapter uses its non-null values instead of `optimization`'s (`training.train.optimization_for`); null trains as a fresh run. Set them from a measured continued run, not by guess.
   - Batch/memory: per-device train batch 1, grad accumulation 8, **effective batch 8** at pilot volume (kept when training data-parallel on several GPUs: accumulation shrinks), gradient checkpointing on, bf16, `dataset_num_proc: 8`; `use_logits_to_keep`, `padding_free`, and `length_grouped_sampling: false` (with one row per device and `padding_free` there is no padding to save, and on it made ms-swift encode every row before step 1).
   - Vision: `train_vit: false` (the §3 gate default), resolution cap inherited from `base_model.yaml`.
-  - Eval/checkpointing: eval and save every 50 steps, `save_total_limit: 4` (the candidates checkpoint selection scores), a resume point every 70 steps (`checkpoint_every_steps`), `load_best_model_at_end: false`; validation loss tracked (`metric_for_best_model: eval_loss`, `greater_is_better: false`) for the progress curve only — `early_stopping_patience` is in the file but not passed, since ms-swift 3 takes none. The validation cut: `evaluations_per_run: 10`, each in-training loss check on `loss_sample_rows: 160`; checkpoint selection on `validation_sample_rows: 400` in all modes, then `selection_document_finalists: 2` judged on whole validation documents in `selection_document_modes: [ocr_plus_image]` with `selection_guard_margin: 0.02`, and a near-tie (`selection_tie_break_margin: 0.015`) re-scored. `selection_run_to_run_check: true` reads the finalists' whole documents a second time in reverse order, and `run_to_run_check: true` repeats the golden eval's main mode the same way (run-to-run agreement, decision 2026-10-24, IMPL-08). What ships is chosen by generated accuracy (IMPL-06 §3), never by loss. Fixed recorded `seed: 42`, `logging_steps: 10`.
+  - Eval/checkpointing: eval and save every 50 steps, `save_total_limit: 4` (the candidates checkpoint selection scores), a resume point every 70 steps (`checkpoint_every_steps`), `load_best_model_at_end: false`; validation loss tracked (`metric_for_best_model: eval_loss`, `greater_is_better: false`) for the progress curve only — `early_stopping_patience` was in the file but not passed (removed 2026-10-26), since ms-swift 3 takes none. The validation cut: `evaluations_per_run: 10`, each in-training loss check on `loss_sample_rows: 160`; checkpoint selection on `validation_sample_rows: 400` in all modes, then `selection_document_finalists: 2` judged on whole validation documents in `selection_document_modes: [ocr_plus_image]` with `selection_guard_margin: 0.02`, and a near-tie (`selection_tie_break_margin: 0.015`) re-scored. `selection_run_to_run_check: true` reads the finalists' whole documents a second time in reverse order, and `run_to_run_check: true` repeats the golden eval's main mode the same way (run-to-run agreement, decision 2026-10-24, IMPL-08). What ships is chosen by generated accuracy (IMPL-06 §3), never by loss. Fixed recorded `seed: 42`, `logging_steps: 10`.
   - Corpus view: `line_balance` (`min_documents: 100`, `max_repeat: 3`) and `render_rotation: true` (one render per twin per epoch), applied in the adapter's view of the corpus.
   - Data mix: `data_mix` with `synthetic_fraction` and `scanned_share`, a default and optional per-line values under `lines:`, all `null` (unsteered) until set; the file may also set its own `modality_mix`. It is the one adapter's training config (`common.adapter.ADAPTER.training_config`).
   - Distributed: `deepspeed_config: null`, `sequence_parallel_size: 1`, `gpus: auto` (data-parallel on every GPU the pod has).
@@ -1381,6 +1381,13 @@ not yet read by the model view).
 ## Changes of 2026-10-26 (fast format shipped)
 
 - `configs/shared/format.yaml` ships `profile: fast` (user decision): the new training set is built, trained and served in it. No adapter was trained in `standard` on window plan 4, so nothing served is lost. `standard` stays for a corpus or adapter built in it; each refuses the other's.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- `lora.dropout: auto` (shipped): a fresh run takes 0.05 when every trained line has at least 200 real documents, else 0.10; a continued run keeps its parent's. Recorded as `lora_dropout_choice`.
+- New training config keys, every one off or neutral by default: `batch.vit_gradient_checkpointing`, `dataloader_num_workers`, `per_device_eval_batch_size`; `data_mix.twins_per_seed_per_epoch`; `line_balance.count` / `distinct_repeats`; `continued_training.rehearsal_old_share` / `rehearsal_weight_by_line_errors`; `hard_examples`; evaluation `validation_sample_by_empty_target`, `validation_rows_per_family_max`, `validation_sample_mode_shares`, `selection_two_thirds_candidate`, `calibration_reuses_selection`, `golden_noisy_share`, `run_to_run_share`, `golden_documents_in_flight`. `evaluation.early_stopping_patience` (read by nothing) is removed.
+- `orchestration/config/pipeline.yaml`: `defaults.ocr_workers`; a `notifications` block (`webhook_url_env`, `on_stage_failure`, `on_gate_block`, `on_run_complete`); `continued_training` fresh-run rules (`fresh_when_new_share_above`, `fresh_every_n_cycles`, `fresh_when_golds_changed`), all off.
+- `configs/inference/vllm_serving.yaml`: `generation.top_logprobs: 2`, `serving.near_tie_margin: 0.1`. New env vars: `FIDEON_ALLOW_DIRTY_TREE`, `FIDEON_NOTIFY_WEBHOOK_URL`.
 
 ---
 
@@ -2060,6 +2067,13 @@ corrected at bundling instead.
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- The OCR pin is enforced before a corpus can train: the corpus build (`assert_corpus_ocr_pin`), preflight (`check_ocr_done`) and promotion (`registry_utils.releases.ocr_pin_refusal`, the same check the Azure worker and `served_adapter` run, version AND tier) refuse text read by another MinerU. The fix command reads through the served MinerU; the in-process 3.4.5 venv can no longer produce a trainable corpus.
+- `run_mineru --workers N` (served MinerU only) reads documents concurrently, results as a serial run's; `finetune --ocr-workers N` does the same in stage 2. OCR is meant to run before the pod: against a dedicated MinerU 4.0.12/basic, from any machine, then `finetune --skip-ingest` on the pod finds every document read.
+- Under the fast profile the shared renderer (`render_only.render_pdf_pages`) resizes each page once (bicubic) to the `smart_resize` size of the fast budget, so ms-swift and vLLM both see an identity resize; `ocr_meta` records `page_pixel_budget`. Page images are cached by content (`train-images/<tenant>/by-content/`, tagged by checksum, MinerU version and tier, device, cap and render date) across cycles.
+- Not built: a small-print filter for image_only targets. The OCR stage stores no line or span boxes; it needs them first (`lines.json` per page) to measure glyph height at the fast budget.
 
 ---
 
@@ -2936,6 +2950,14 @@ lines holding none out, lines below the carrier minimum, frozen set, families mo
 - The fast modality mix: `ocr_plus_image` 0.25, `noisy_ocr_image` 0.05, `image_only` 0.7 (`unified.yaml` `format_profiles.fast`; user decision 2026-10-26): production serves fields first, so every served field is an image_only read. Back to 0.4 / 0.1 / 0.5 if the pod run reads image_only more than 2-3 points below ocr_plus_image. A corpus drawn under another mix is refused.
 - Measured on synthetic fixtures, not yet on a GPU: the group's own prompt text 63-91% shorter (the shared system message is prefix-cached); compact answers about 29% shorter; image tokens a page 49% fewer; a 114-page personal auto document 60 requests instead of 109, each window's pages prefilled once for its three groups instead of each page about 3.9 times. The answer reservations (`sequence.yaml`) are unchanged and are what holds fast windows to 7 pages: lower them after measuring compact answers on the new data.
 
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- Twin values filled from the seed's gold are verified ONCE per twin, on the digital render's clean text, with serving's matcher (`label_verification.verified_label(..., listed=True)`, `where_printed`): figures as figures, so `$250,000.00` is found where `$250,000` is printed. A value printed nowhere is listed in `unprinted_values` (its windows dropped), never deleted; the scanned render shares the digital render's verdict (`share_twin_text`).
+- Common-model lines: a stated value with no page is placed on every page whose clean text prints it (`policy_windows.with_placed_pages`); a value that cannot be placed costs its window, not the document. The audit warns `no_page_ref` and blocks a real gold only when the value is printed on no text page and not listed.
+- A window whose answer overruns its reservation is trained as serving's halves (`window_halves`, serving's `_halves`); rows carry `window_half`. The plan id is unchanged.
+- Under fast, validation documents are read in ocr_plus_image and image_only only. Rows carry `synthetic` and (val/test) `carrier_seen_in_train`. The manifest gains `target_stats` (rows, empty targets, values per row by line x group x mode) and `target_counts` (verification, placed pages, halves, windows dropped), and records `mineru_tier` and each gold's `gold_sha256`.
+- The corpus view (all off by default): `twins_per_seed_per_epoch` rotates twins per seed; `line_balance.count` counts families or real documents, and `distinct_repeats` fills repeats from the other epoch files; `hard_examples` repeats (at most `max_repeat`) the train windows holding the parent's or promoted run's worst fields (`validation_errors.json`). Page texts are read 16 at a time.
+
 ---
 
 # IMPL-06_training
@@ -2989,7 +3011,7 @@ Replaces v1's `train_foundation.py` and `train_adapter.py`. One entrypoint. Ever
 - **Evaluation during training** is validation **loss** on a fixed stratified sample of **`evaluation.loss_sample_rows` (160)** validation rows (`train.loss_sample_rows`, falling back to `validation_sample_rows`; chosen by `evaluation.validation_sample.validation_sample`, stratified by line × reading mode, by a stable hash). It only draws the progress curve: **no early stopping is passed to ms-swift** and **`load_best_model_at_end: false`**. The run is divided into **`evaluations_per_run` (10)** checks (`_eval_interval`: ⌈optimizer steps ÷ 10⌉; without the setting, the configured `eval_steps` shrunk so a run gets at least 5). `_checkpoint_cadence` then saves a resume point at least every **`checkpoint_every_steps` (70)** steps — multiplied by the GPU count, since n GPUs run n× the steps in the same hour — evaluates on every k-th save (`eval_steps` = `save_steps` × k), and sets `save_total_limit` to the configured 4 × k + 1, so the limit counts evaluation checkpoints and resume points never push a candidate out. `metric_for_best_model: eval_loss`, `greater_is_better: false` let the trainer record the best-loss checkpoint, one selection candidate. **Loss never selects what ships** — see §3 below.
 - **Staging:** the adapter and its `checkpoint-*` directories go to the RunPod staging volume under `staging/adapters/scope/policy/v{n}/`. Pushed to Blob by `package` (the checkpoint selection chose), or earlier with `finetune --push-adapters`, at the end of checkpoint selection (the same selected checkpoint) — the adapter's weights and config only (`push_scoped_adapter`), never a checkpoint's resume state. Each push records the checkpoint it pushed (`pushed` in the checkpoint selection), which `package --from-blob` checks (IMPL-13). A continued cycle first copies its parent's adapter from Blob to `staging/parent-adapters/policy/v{n}/` and starts from it.
 - **Manifest:** a `RunManifest` (IMPL-02) is written at status **`training`** before launch; `launch_and_record` flips it to `trained` when ms-swift returns, or **`failed`** when it raises, so the registry never claims weights a crashed run never wrote. It records the full config, data stats, LoB coverage, seed, git commit, corpus version, MinerU version, schema/prompt template versions, and the de-identification flag (recorded, not asserted: `false` under Option A, no de-identification — IMPL-05 §1). A model card is written beside it (`registry_utils/model_card.py`).
-- **The YAML's `evaluation:` block** is read in three places. `build_training_config` passes `eval_strategy`, `save_strategy`, `metric_for_best_model`, `greater_is_better` and `load_best_model_at_end` directly, and derives `eval_steps`, `save_steps` and `save_total_limit` from `evaluations_per_run`, `checkpoint_every_steps` and `save_total_limit`. Staging reads `loss_sample_rows`. Checkpoint selection reads `validation_sample_rows` and the `selection_*` keys (§3). `early_stopping_patience` is still in the YAML and passed nowhere: ms-swift 3 accepts none.
+- **The YAML's `evaluation:` block** is read in three places. `build_training_config` passes `eval_strategy`, `save_strategy`, `metric_for_best_model`, `greater_is_better` and `load_best_model_at_end` directly, and derives `eval_steps`, `save_steps` and `save_total_limit` from `evaluations_per_run`, `checkpoint_every_steps` and `save_total_limit`. Staging reads `loss_sample_rows`. Checkpoint selection reads `validation_sample_rows` and the `selection_*` keys (§3). `early_stopping_patience` was removed from the YAML (2026-10-26): it was passed nowhere, and ms-swift 3 accepts none.
 
 Flags: `--corpus vN`, `--out-version vN`, `--tenant`, `--deepspeed zero2|zero3`, `--train-vit` (refused, see *Current implementation*), `--continue-from <checkpoint dir>`, `--dry-run`. There is no `--scope` (decision 2026-10-22): the run always trains the policy adapter. Through `orchestration.run` the version is the cycle's (IMPL-13).
 
@@ -3031,9 +3053,9 @@ There is **no per-type training entrypoint** in the default topology. A per-type
 - contains `assert_masking_correct` / `verify_batch`, which verify masking on a sample batch — the highest-value correctness check in the system, because broken masking trains the model to reproduce its own prompt and is invisible in loss curves;
 - implements custom masking only if a genuine need arises (`custom_collator` raises until then).
 
-### 6. `training/callbacks/early_stopping.py`
+### 6. `training/callbacks/early_stopping.py` (removed 2026-10-26)
 
-**Not in the launch path.** `swift_early_stopping_args` (which emitted `early_stopping_patience`) is no longer called: ms-swift 3 accepts no patience argument, and stopping early would only remove candidates from checkpoint selection, which chooses by generated field accuracy over the evaluation checkpoints. `EarlyStoppingState` (a field-F1 tracker) remains in the module, exercised by tests only; neither the launch path nor `checkpoint_eval` imports it.
+Removed: imported by nothing, and its helper emitted a patience argument ms-swift 3 refuses. Stopping early would only remove candidates from checkpoint selection, which chooses by generated field accuracy over the evaluation checkpoints.
 
 ### 7. `training/vit_gate.py` (decision helper — arch §3)
 
@@ -3330,6 +3352,13 @@ reviewed before it trains again.
 
 - Under the fast format profile (`configs/shared/format.yaml`, IMPL-01) the trainer resizes pages to 1,254,400 px (the trainer env reads `vision_for_task`), the corpus is drawn with 70% of its rows `image_only` (IMPL-05), and checkpoint selection reads `ocr_plus_image` and `image_only` (`selection_document_modes`). Validation decodes compact rows against the compact schema and expands them before scoring (`evaluation.validation_generation`, IMPL-08). An adapter trained in one profile is refused by promote and serving in the other.
 
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- Continued runs (off by default): `continued_training.rehearsal_old_share` trains every new document plus a rotated, carrier-stratified share of the chain's documents per epoch, optionally weighted by the parent's line errors; recorded under `data_stats.data_mix.rehearsal`. The YAML documents the A/B for the first continued cycle (fresh 3 epochs at 1e-4 vs continued 1 epoch at 5e-5); `num_train_epochs` and `learning_rate` stay null until it is run.
+- `lora.dropout: auto` (IMPL-01). Throughput keys passed to ms-swift only when set; `--benchmark-steps N` writes `benchmark.json` (median and p90 step time, tokens/s, peak memory, lengths, supervised tokens per group) and suggests the next lever. Confirm `--vit_gradient_checkpointing`, `--dataloader_num_workers` and `--per_device_eval_batch_size` with `swift sft --help` on the pod.
+- `data_stats.token_stats`: supervised tokens per group and a length histogram; a warning when arrays and lineblk hold over 60% of them. The checkpoint nearest two-thirds of the run is kept (`keep_two_thirds_limit`) and recorded in `training_complete.json`.
+- The settings hash covers `format.yaml` and `base_model.yaml`. A real run on a dirty tree is refused unless `--allow-dirty` / `FIDEON_ALLOW_DIRTY_TREE=1`; the manifest records `code_dirty` and `code_diff_sha256`. `training/callbacks/early_stopping.py` (imported by nothing) is removed. flash-attn is pinned to 2.8.3.
+
 ---
 
 # IMPL-07_inference_core
@@ -3491,6 +3520,13 @@ A clean, low-level inference engine: given a resolved model version + a prepared
 
 - `build_messages` appends the group's request as the last user text part under the fast format profile (`common.prompts.render_group_block`, `GROUP_BLOCK_SEPARATOR`) and records `BuiltMessages.answer_format`; `build_training_row` writes such a row's target compact and adds `answer_format`. Standard rows are byte-identical to before.
 - `span_map.map_compact_field_spans`: a compact answer's spans keyed as the same answer written in full (`r` as `raw`, `v` as `parsed`, `p[i]` as `page_ref[i]`), so confidence reads the printed text's tokens where `r` was written and `v`'s where it was not.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- `top_logprobs: 2`: `Generation.token_top2_logprobs` carries each token's runner-up; `FieldSpan.top2_margin` is the smallest margin over a value's tokens (in-process, the server and HF alike).
+- `PINNED_SAMPLING` (`repetition_penalty 1.0`, `top_k -1`, no presence or frequency penalty) is sent to the server and used in-process. `inference_core/prompt_tokens.py` records each window's `prompt_check` against the image tokens it should hold and warns when implausible.
+- `structured_outputs_params()` prefers vLLM's `StructuredOutputsParams`, falls back to `GuidedDecodingParams`, and is fatal when neither imports while structured outputs are configured.
+- `tests/test_parity.py` covers fast-layout windows and compares the processors' `pixel_values` (GPU, on the pod).
 
 ---
 
@@ -3923,6 +3959,22 @@ extra.
 - The gate's `hallucination_rate` now includes image_only readings (before, they were left out).
 - The gate scores an image_only reading as production serves it (decision 2026-10-26): `golden_eval.borrowed_printed_check` holds a copy of the result to the document's page text with production's own fields-first check (`serving.printed_values.hold_result_to_printed`), so under strict mode a value no page prints is taken out - its confidence, rows and links with it - before accuracy, completeness and calibration are scored. Invention is counted from the record made before anything was taken out. The repeat answer is held the same way, so run-to-run agreement compares the two as served.
 
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- Selection: the finalists' repeat reads only the gate's `run_to_run_mode` rows (image_only); finalists' rows are sharded across every GPU with call-identical results (`ParallelScorer.sharded`). The checkpoint nearest two-thirds of the run is a candidate, and the summary says whether it won or tied.
+- Finalists are compared on `gate_mirror_accuracy` (image_only readings, merged whole, held to borrowed page text as served, real documents only) inside the guard margin; among those the fewest inventions still wins (decision 2026-10-24). After two cycles the summary predicts the gate's field match from the mean offset; the winner's mirror is on the run manifest and the gate decision, never gated.
+- The winner's validation error tallies go to `run-artifacts/{tenant}/{run_id}/validation_errors.json` (`by_field`, `by_line`, `by_group`, `by_mode`), and its generations to `validation_generations.jsonl`; calibration reuses them when checkpoint and settings match (0 rows generated under fast).
+- The golden eval: noisy readings read corrupted text but are held to the clean text (`printed_texts`); every reading is retried once and a reading that still fails is an infrastructure failure, on which the gate does not decide ("re-run the gate"); `golden_noisy_share` and `run_to_run_share` read deterministic subsets (part of the yardstick); readings run several at a time on a served engine. The gold is read the way training checks it (`listed=True`, unprinted values not expected).
+- Reported, never gated: `auto_accept_coverage` and by type, `selective_accuracy` with its Wilson lower bound, `field_normalized_match_without_codes`, ECE per mode and field type, and `error_analysis` (by carrier, mode, field, a field-confusion table, by seen/unseen carrier) with `field_delta_vs_promoted`. Auto-accept compares values by their declared type, and reads None (not measured) when nothing was accepted.
+- The scoring code changed: the next release is judged on floors only.
+
+## Changes of 2026-10-26 (gate and release decisions)
+
+- The gate's measure (#9): `served_field_match`, field match (mean over readings of correct/total) on the image_only readings of real documents as served, and `real_ocr_plus_image_accuracy`, both with per-document scores. `PRIMARY_METRICS = (served_field_match, list_field_recall)`; non-inferiority (margin 0.010) and the improvement rule read it. Both have 0.85 floors; `field_normalized_match` is floor-only and reported (`FLOOR_ONLY_METRICS`).
+- The tier (#11): production needs the gate passed, >= 150 real documents, `served_field_match` >= 0.92 and its one-sided 95% bootstrap lower bound (10,000 resamples, seed 42) >= 0.90; `tier_confidence` is "confirmed" at a bound >= 0.92, else "unconfirmed" (null when not production). The eval report carries `tier_evidence`; the decision and the run manifest carry tier, confidence and bound.
+- The per-line rule (#14), for continued runs: each line's per-document served match (falling back to the three-mode match per reference, recorded as `measure`) against the PARENT (margin 0.015) and against the run from the base (0.03, cumulative drift), one-sided, Holm step-down across lines at 0.05; gated from 30 shared real documents, below that a warning with the minimum detectable drop. Each verdict records n, delta, bound, p and its Holm-adjusted value.
+- Re-scoring (#15): the golden eval stores every reading's served answer and what build_report reads at `run-artifacts/{tenant}/{run_id}/eval_answers.jsonl.gz` (about 1-3 MB a release; `answers_stored`). `evaluation/rescore.py` scores a release's stored answers again with the current code and settings against the golds read as the gate reads them (`rescored_from`), and refuses (floors only, as before) for another frozen set or tenant, missing, changed or incomplete answers, a gold changed in place, or settings asking for a reading never made. It measures old answers under new scoring, not the old model under new serving code. Releases scored before 2026-10-26 have no stored answers: the first gate after it is floors only.
+
 ---
 
 # IMPL-09_calibration
@@ -4157,6 +4209,13 @@ back to the default target.
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- Thresholds by learn-then-test: tested from 0.99 down, the loosest that passed before the first failure (thresholds that could not pass even with no error are skipped), so the 95% promise holds.
+- 12 features: the two cross-mode features (never filled) retired; `r_written` (the compact answer wrote its printed form), `near_tie` and `near_tie_present` (from `FieldSpan.top2_margin`) added; a column constant at fit time is left out. Old calibrators still load.
+- Under fast, calibrators and thresholds are fitted on image_only readings with their document's text borrowed (`calibration.population`); ECE is reported per mode and field type. Standard fits every mode as before.
+- `calibration.post_text.recalibrate_after_text` scores a served result's confidence again once the page text arrives; fields first runs it at the gate (cited pages) and at the end, and the Azure worker passes the release's calibrators into phase 2.
 
 ---
 
@@ -4789,6 +4848,18 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - Jobs: the Storage Queue message holds only the job id and tenant; status, result and the phase-1 checkpoint are whole-object JSON blobs in a jobs container (the PDF and page images are deleted when a job ends). The lease is renewed while a job runs; after `MAX_ATTEMPTS` deliveries a job fails and never loops; a restart resumes phase 2 from the checkpoint, or reads the document again when the worker died in phase 1. Webhooks on `fields_ready`, `done` and `failed`, signed `X-Extraction-Signature: sha256=<HMAC>` with a per-tenant secret, and carrying no document content.
 - One worker replica per GPU: `GpuTurns` lives in the worker's process, so a second replica on the same GPU would run MinerU beside the other's fields. At start the worker checks the promoted release (`lora_on_base`, the MinerU pin, the prompt hash, the window plan, the base model) and that vLLM serves `policy-<release>`; the base-model fallback is off unless `ALLOW_BASE_FALLBACK` is set. `serving/vllm_entrypoint.py` is no longer the production entry point; its cold-start checks are reused. Not yet run against real Azure or a pod.
 
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- New checks in the printed-values hold: raw re-parsed against its parsed value by declared type (`serving/raw_parsed.py`; strict nulls a clear mismatch, flag `parsed_mismatch`); a value printed only off its cited pages is kept and flagged `printed_off_cited_page`; `role_mismatch` when every line opening with the field's label prints another value; coverage `form_refs` items printed nowhere are removed; `row_not_colocated` (flag only) when a row's printed values share no page. `serving/value_flags.py` sends `printed_off_cited_page`, `role_mismatch`, `near_tie` and `parsed_mismatch` values to review.
+- `near_tie` when a value's top-1 / top-2 margin is under `serving.near_tie_margin` (0.1 nats). The compact schema requires `r`, first, on yes/no envelopes (training already writes it).
+- `ExtractionRequest.printed_texts`: the hold reads it instead of the page text the model was sent.
+- Confidence: the mapped spans reach the feature builder; `ExtractionResult.confidence_features` and `calibrated_with` (not served) let fields first score confidence again on the text (`fields_first.rescore_on_text`) at the gate and at the end.
+- More values go to review than before (off-page, role, near-tie, parse mismatches), and strict mode removes values whose parse contradicts their print. A day-first date with both parts 12 or less is read the US way.
+
+## Changes of 2026-10-26 (gate and release decisions)
+
+- Retention for review (#43), OFF by default: for tenants listed in `REVIEW_RETENTION_TENANTS` (after legal and contract sign-off), the Azure worker copies a `done` job's PDF, result and a manifest to the separate `REVIEW_CONTAINER` (`retained/<tenant>/<job>/`) before the PDF is deleted, when a value needs a person (`REVIEW_RETENTION_FLAG_KINDS`: low or no confidence, not printed, parse or role mismatch, off its cited page, near tie, likely missed, unread page, a link to a removed row, a row-count mismatch, a failed window; document-level flags never do), its confidence is below `REVIEW_RETENTION_LOW_CONFIDENCE` (0.80), or it falls in the `REVIEW_RETENTION_SAMPLE` (5%). Kept `REVIEW_RETENTION_DAYS` (90). `python -m azure_service.retention purge | export | mark-reviewed`: export copies documents into the labelling intake unlabelled (never a gold); a failed copy never fails a job. See azure_service/DEPLOY.md section 9.
+
 ---
 
 # IMPL-12_testing_extraction_routine
@@ -5117,6 +5188,10 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 ## Changes of 2026-10-26 (fast format shipped)
 
 - `testing.render_prompts` renders a fast-format window's reference file as what the model reads: the shared system prompt, a line standing for the window's pages, then the group's request (`render_group_block`). The policy window references under `testing/prompts/` are regenerated in the fast format.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- `latency_check --repeat` reads every document twice, interleaved, on the server path and writes `run_to_run.json`.
 
 ---
 
@@ -5679,6 +5754,19 @@ resumes from the failed step. It never freezes an eval set or packages a release
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
 
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- `label-noise --version vN [--corpus-version V] [--limit N]`: the release reads the train documents; values it reads that the page prints but the gold lacks are queued for a person (`golden-labels/<tenant>/_review_queue/`), never written into a gold. The `active_learning` CLI is wired.
+- `--ocr-workers N`, `--allow-dirty`; stage times logged to MLflow (one run per run id) when configured; webhooks (HTTPS) on a stage failure, a gate block and a finished run (`orchestration/notify.py`).
+- Fresh-run rules (off by default): go fresh when new documents exceed a share of train, every N cycles, or when a gold the chain trained on changed (`gold_sha256` in the corpus manifest); the reason goes in `fresh_reason`.
+- The OCR pin is checked at corpus build, preflight and promotion (IMPL-03). Image staging is cached by content.
+
+## Changes of 2026-10-26 (gate and release decisions)
+
+- Stage 9 writes the release `gated` and archives nothing (#44); the run summary prints the next steps. `shadow --version vN --model-url URL --mineru-url URL [--documents 50]` (detached on the pod) reads about 50 frozen documents, lines in turn, real first, through the Azure worker's two phases with the candidate and the promoted release, scores both with build_report and writes `releases/{tenant}/{vN}/shadow/shadow_report.json`. Pass: served field match no more than 0.02 below the promoted release's, invented values no more than 0.005 above, no failures, schema validity not lower; with nothing promoted, no failures and schema validity >= 0.98.
+- `promote --version vN --by NAME [--accept-interim] [--skip-shadow --reason ...]`: serving and OCR-pin refusals first; a rollback to a release promoted before needs nothing else; an interim release needs `--accept-interim`; a gated release needs a passing shadow report for the bundle as packaged, against the release promoted now, or a written reason (>= 20 characters). `ReleaseBundle.promotions` records each one.
+- The gate's baseline goes through `promoted_baseline_report`: a promoted report on another yardstick only because of scoring code or settings is re-scored and compared (`baseline_rescored`). `continuation` re-scores a parent that differs only in yardstick and continues (`parent_report_rescored`); the per-line references are re-scored the same way.
+
 ---
 
 # IMPL-14_tests_and_ci
@@ -5981,6 +6069,14 @@ real vLLM engines (the tests fake the engine), and a real upload.
 
 - The suite runs in the shipped format profile (`fast`). A test of the standard format's own windows, prompts or answers carries `@pytest.mark.format_profile("standard")` (`tests/conftest.py`, an autouse fixture setting `common.config.shared_format_config`); `tests/test_old_style_prompts_frozen.py` is pinned whole. The replay model of `tests/test_schema2_serving.py` finds a window by its system prompt, its own request (`_request_of`) and its pages, and `_full_answer` gives a row's target in the full form, so the end-to-end replay tests - the printed-values removal of an invented value, fields first, the full-text tier - run in the fast profile. `test_fast_profile.py::test_fast_is_the_shipped_profile` records the decision. The thumbnail checks ask for classify at least 4x below extraction's pixels (~4.8x under fast).
 - `tests/test_image_only_invention.py` (12 tests): an image_only invention counted on borrowed text; no text to borrow is unscored, not clean; a cited page with no text is unchecked and counted; selection picks the finalist inventing less across both modes; the gate's repeat reads image_only and records it; another repeat mode is another yardstick. `tests/test_invention_and_agreement.py`: the golden repeat tests expect the image_only repeat.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- New test files for the review fixes: `tests/test_review_*.py` (training targets, rehearsal and mix, validation sample, training engine, selection sharding / measures / integration, gate metrics, calibration, error analysis, printed controls, decoding controls, pixel parity, confidence integration, OCR pin, OCR concurrency, tracking, cycle rules, label noise, allow-dirty).
+
+## Changes of 2026-10-26 (gate and release decisions)
+
+- `tests/test_decision_gate_served_tier.py`, `test_decision_gate_line_rule.py`, `test_decision_gate_line_rescore.py`, `test_decision_rescore.py`, `test_decision_promotion.py`, `test_decision_retention.py`: the six gate and release decisions of 2026-10-26.
 
 ---
 

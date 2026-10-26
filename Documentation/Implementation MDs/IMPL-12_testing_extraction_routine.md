@@ -322,3 +322,7 @@ python -m testing.compare_models --input <folder of document folders> --adapter 
 ## Changes of 2026-10-26 (fast format shipped)
 
 - `testing.render_prompts` renders a fast-format window's reference file as what the model reads: the shared system prompt, a line standing for the window's pages, then the group's request (`render_group_block`). The policy window references under `testing/prompts/` are regenerated in the fast format.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- `latency_check --repeat` reads every document twice, interleaved, on the server path and writes `run_to_run.json`.

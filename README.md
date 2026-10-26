@@ -62,6 +62,17 @@ Two decisions of 2026-10-24: nothing invented in the served JSON, and consistent
   value behind a blank `raw` in its printed forms. Yes/no readings and single characters stay unchecked.
   Rows are never renumbered after a removal, so a served row's id and links are the same at `fields_ready`,
   at `done` and on the standard path; a removed value is named `list[#N]` (its place in the model's answer).
+- **The tier** (decision 2026-10-26). The gate's primary measure is `served_field_match`: field match on the
+  image_only readings of REAL documents, as served (held to the document's page text), what users receive.
+  Production needs the gate passed, at least 150 real policies, `served_field_match` >= 0.92 and its
+  one-sided 95% bootstrap lower bound >= 0.90; `tier_confidence` is "confirmed" when the bound reaches 0.92.
+  Non-inferiority and the improvement rule read it too; `field_normalized_match` (three modes) is reported
+  with its 0.85 floor, and real ocr_plus_image accuracy has a 0.85 floor of its own. A continued run is held,
+  line by line on the served measure, to its parent (margin 0.015) and to the run from the base (0.03, a slow
+  drift), Holm-corrected across lines, on at least 30 shared real documents (fewer: a warning with the
+  smallest drop that could have been seen). Every gate stores the answers it scored; when only the scoring
+  code or settings changed, the promoted or parent release's stored answers are scored again (the model is
+  not run again), so the comparison and continuation still hold.
 - **Gated.** `hallucination_rate` (of the values checked, the share no page prints, counted before removal so
   it measures the model) and `run_to_run_agreement` (the golden eval reads each document's main mode a second
   time, its windows sent in reverse order, and counts the fields that agree) are gating metrics, each held to
@@ -78,7 +89,8 @@ Two decisions of 2026-10-24: nothing invented in the served JSON, and consistent
 python -m orchestration.run finetune --input ./intake
 python -m orchestration.run finetune --input ./intake --fresh     # from the base model
 
-# 2  calibrate -> GATE -> push the adapter + release bundle -> promote. Nothing is merged or quantized:
+# 2  calibrate -> GATE -> push the adapter + release bundle, written GATED (never promoted here). Nothing is
+#    merged or quantized:
 #    calibration and the gate score the base with the adapter applied, as it is served.
 python -m orchestration.run package --version v3
 #    The gate compares v3 with the tenant's promoted release. A release that improves no primary metric
@@ -87,7 +99,16 @@ python -m orchestration.run package --version v3
 #    another frozen set, tenant or scoring code is no baseline: the candidate is judged on floors alone.
 #    A failed gate ships only with a written override, naming real gates:
 #    --override-approver "<person>" --override-reason "<why, 20+ chars>" --override-gate <gate>
-#    A release that passes is promoted, and the one it replaces is archived.
+#    A release that passes is left gated; nothing is archived. Production tier: served field match (image_only
+#    readings of real documents, as served) >= 0.92 with its one-sided 95% lower bound >= 0.90 ("confirmed"
+#    when the bound >= 0.92), on >= 150 real policies.
+
+# 2b the shadow check, on the pod's real server path: ~50 frozen documents read by the candidate and by the
+#    promoted release (vLLM with both adapters, --max-loras 2), scored as the gate scores them
+python -m orchestration.run shadow --version v3 --model-url https://<vllm> --mineru-url https://<mineru>
+# 2c promotion, by a person: refused without a passing shadow report (or --skip-shadow --reason "<why>");
+#    an interim-tier release also needs --accept-interim. The one it replaces is archived.
+python -m orchestration.run promote --version v3 --by "<person>" [--accept-interim]
 
 # resume a cycle, or rerun one that failed: name its version
 python -m orchestration.run finetune --version v3 --from-stage training
@@ -109,7 +130,19 @@ python -m orchestration.run all --input ./intake
 
 # once, from the first real corpus build: the gate's frozen eval set
 python -m orchestration.run freeze-eval-set --corpus v1
+
+# a candidate label-noise list: the release reads the TRAIN documents; values it reads that the page prints
+# but the gold lacks go to a person's review queue (golds are never changed)
+python -m orchestration.run label-noise --version v3 [--limit 200]
+
+# training throughput: time N steps on the staged corpus (no checkpoint, no manifest), one lever at a time
+python -m training.train --corpus v3 --out-version v3 --benchmark-steps 30
 ```
+
+`finetune`/`all` take `--ocr-workers N` (served MinerU only) and `--allow-dirty` (a real training run on a
+working tree with uncommitted changes is refused otherwise; the manifest records the tree's state). Stage
+times go to MLflow when `MLFLOW_TRACKING_URI` is set; a stage failure, a gate block and a finished run are
+posted to `FIDEON_NOTIFY_WEBHOOK_URL` (HTTPS) when set.
 
 ## Pilot protocol (IMPL-15)
 
@@ -170,16 +203,21 @@ account SAS, which reaches the raw PDFs from every pod that holds it. Keep each 
 the first `;` or `&` (the bootstrap checks `export` and indented lines too, and lists
 half a SAS login under "Still to do").
 
-**OCR runs first, in its own environment**, then the pipeline:
+**OCR runs first, through the served MinerU 4.0.12 (`configs/shared/ocr.yaml`), best before the pod
+starts**: a corpus read by another MinerU version or tier is refused at corpus build, at preflight and at
+promotion. Run it from any machine with Blob raw access, against a dedicated MinerU 4.0.12/basic API (not
+production's), several documents at once:
 
 ```bash
-/workspace/venv-ocr/bin/python -m data_pipeline.ocr.run_mineru --doc-type policy --all-unprocessed
-source /workspace/venv/bin/activate
+MINERU_URL=https://<dedicated mineru> MINERU_TOKEN=... python -m data_pipeline.ocr.run_mineru \
+    --doc-type policy --all-unprocessed --workers 4 [--shard 1/2]
+python -m orchestration.preflight
+# then on the pod, MINERU_URL unset: stage 2 finds every document read at the pin and skips
 python -m orchestration.run finetune --skip-ingest
 ```
 
-`finetune` finds every document already OCR'd and skips that stage. If documents
-still need OCR it stops with the command above rather than failing on an import.
+If documents still need OCR, `finetune` stops with that command. `venv-ocr` (MinerU 3.4.5, in-process) can no
+longer produce a trainable corpus.
 
 ### One role at a time
 
@@ -205,7 +243,7 @@ Linux x86-64 / Python 3.11, so a pod set up next month runs the same stack.
 
 | Environment | torch | Key pins |
 |---|---|---|
-| train (`/workspace/venv`) | 2.8.0 (CUDA 12.8) | vLLM 0.11.0, transformers 4.57.6, ms-swift 3.12.6, flash-attn 2.x built on the pod |
+| train (`/workspace/venv`) | 2.8.0 (CUDA 12.8) | vLLM 0.11.0, transformers 4.57.6, ms-swift 3.12.6, flash-attn 2.8.3 (pinned; check its prebuilt wheel on the pod, or it compiles for 30-60 min) |
 | ocr (`/workspace/venv-ocr`) | 2.8.0 | mineru 3.4.5 (pipeline backend; PDF-Extract-Kit-1.0 weights at a pinned revision) |
 | serve | 2.8.0 | identical to train for every package they share |
 | quantize | 2.8.0 | llmcompressor 0.9 |
@@ -445,7 +483,9 @@ crosses the proxy; page images stay on the pod. Expose the port (8002) in the po
 # pod: vLLM started with these, among its own flags (--allowed-local-media-path only for --images file)
 #   --gpu-memory-utilization 0.80 --max-model-len 32768 --max-num-batched-tokens 16384 \
 #   --structured-outputs-config '{"backend":"xgrammar","disable_any_whitespace":true}' \
-#   --logprobs-mode raw_logprobs --allowed-local-media-path /workspace
+#   --logprobs-mode raw_logprobs --generation-config vllm --allowed-local-media-path /workspace
+#   (--generation-config vllm: the model's generation_config.json must not set the sampling; the routine
+#    sends repetition_penalty 1.0, top_k -1 and no penalties itself, and asks for the top 2 logprobs)
 FIDEON_REMOTE_TOKEN=<their token> python -m testing.extract_server --port 8002 \
     --model-url http://localhost:8000 --mineru-url http://localhost:8001 --images file
 ```
@@ -521,6 +561,9 @@ python -m testing.latency_check --model-url <vllm> --mineru-url <mineru> --runs 
 # MinerU's faster tier, timing only (the model is trained on the pinned tier's text):
 python -m testing.latency_check ... --runs standard --tier flash --any-mineru
 ```
+
+`latency_check --repeat` reads every document twice, interleaved with the others, on the server path, and
+writes `run_to_run.json` (per document and overall agreement).
 
 MinerU's turns are runs of at most 20 pages (`--run-pages`), so a document arriving mid full text waits about 25 s; a run waits at most `--text-max-wait` (600 s) for its turn. `latency_check` scores fields first when the fields come (`Exact match at fields`) and at the end. From the laptop with `--images link`, fields first puts the page upload before the model (1.5-2 min for 114 pages); on Azure it is seconds.
 
@@ -639,10 +682,19 @@ sequence for every tenant, because runs and weights are not kept per tenant. The
   end of checkpoint selection, and every push records which checkpoint it pushed. If the staging volume is
   lost, `package --version v3 --from-blob` scores and releases the adapter in Blob, with no upload. It is
   refused unless both adapter files are there and the recorded push is the selected checkpoint.
-- **Promoted.** `package` promotes a release whose gate passed. The tenant then has one promoted release:
-  serving reads it, and the next candidate is gated against it. The release it replaced is archived. A dry
-  run never promotes. A version already promoted or archived is not packaged again.
-- **Rollback.** `promote --version v2 --by "<person>"` makes v2 the promoted release again and archives the
+- **Gated, then promoted by a person** (decision 2026-10-26). `package` writes a release whose gate passed as
+  `gated` and archives nothing. `shadow --version vN` reads about 50 frozen documents through the production
+  path on the pod (fields first, the candidate and the promoted release as `policy-vN`/`policy-vK`, vLLM
+  `--max-loras 2`) and passes when the candidate's served field match is at most 0.02 below the promoted
+  one's, its invented-value rate at most 0.005 above, with no failures and no lower schema validity
+  (`releases/{tenant}/{vN}/shadow/shadow_report.json`). `promote --version vN --by "<person>"` then promotes
+  it, refused without a passing shadow report for the release as packaged (or `--skip-shadow --reason`,
+  recorded) and, for an interim-tier release, without `--accept-interim`. Every promotion is recorded on the
+  bundle (`promotions`: who, when, the shadow report or skip reason, tier and tier confidence). The tenant
+  then has one promoted release; the one it replaced is archived. A version already promoted or archived is
+  not packaged again.
+- **Rollback.** `promote --version v2 --by "<person>"` makes v2, promoted before, the promoted release again
+  (no shadow and no `--accept-interim` asked) and archives the
   current one. Nothing is deleted. It is refused when serving would refuse v2 at start-up (another prompt
   hash or window plan, or an adapter trained on another base): run `promote` from the code v2 was packaged
   with, and serve that code. The next cycle then continues v2.

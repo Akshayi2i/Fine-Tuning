@@ -155,3 +155,10 @@ A clean, low-level inference engine: given a resolved model version + a prepared
 
 - `build_messages` appends the group's request as the last user text part under the fast format profile (`common.prompts.render_group_block`, `GROUP_BLOCK_SEPARATOR`) and records `BuiltMessages.answer_format`; `build_training_row` writes such a row's target compact and adds `answer_format`. Standard rows are byte-identical to before.
 - `span_map.map_compact_field_spans`: a compact answer's spans keyed as the same answer written in full (`r` as `raw`, `v` as `parsed`, `p[i]` as `page_ref[i]`), so confidence reads the printed text's tokens where `r` was written and `v`'s where it was not.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- `top_logprobs: 2`: `Generation.token_top2_logprobs` carries each token's runner-up; `FieldSpan.top2_margin` is the smallest margin over a value's tokens (in-process, the server and HF alike).
+- `PINNED_SAMPLING` (`repetition_penalty 1.0`, `top_k -1`, no presence or frequency penalty) is sent to the server and used in-process. `inference_core/prompt_tokens.py` records each window's `prompt_check` against the image tokens it should hold and warns when implausible.
+- `structured_outputs_params()` prefers vLLM's `StructuredOutputsParams`, falls back to `GuidedDecodingParams`, and is fatal when neither imports while structured outputs are configured.
+- `tests/test_parity.py` covers fast-layout windows and compares the processors' `pixel_values` (GPU, on the pod).

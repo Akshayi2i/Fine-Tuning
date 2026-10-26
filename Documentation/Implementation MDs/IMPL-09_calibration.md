@@ -228,3 +228,10 @@ back to the default target.
 ## Changes of 2026-10-24 (architecture v2.7)
 
 - Header: aligned with `finetuning-architecture-v2.7.docx`, which records the decisions of 2026-10-23 and 2026-10-24: printed values only, consistent output, fields first, one MinerU, production on Azure.
+
+## Changes of 2026-10-26 (pipeline review fixes)
+
+- Thresholds by learn-then-test: tested from 0.99 down, the loosest that passed before the first failure (thresholds that could not pass even with no error are skipped), so the 95% promise holds.
+- 12 features: the two cross-mode features (never filled) retired; `r_written` (the compact answer wrote its printed form), `near_tie` and `near_tie_present` (from `FieldSpan.top2_margin`) added; a column constant at fit time is left out. Old calibrators still load.
+- Under fast, calibrators and thresholds are fitted on image_only readings with their document's text borrowed (`calibration.population`); ECE is reported per mode and field type. Standard fits every mode as before.
+- `calibration.post_text.recalibrate_after_text` scores a served result's confidence again once the page text arrives; fields first runs it at the gate (cited pages) and at the end, and the Azure worker passes the release's calibrators into phase 2.
