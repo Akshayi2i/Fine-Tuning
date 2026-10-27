@@ -154,7 +154,15 @@ def _fitz() -> Any:
 
 
 def _page_count(pdf_bytes: bytes) -> int:
+    """The page count; a PDF that needs a password to open is told apart from
+    a broken one (``common.pdf_access``): PyMuPDF's own words for it are
+    "document closed or encrypted", on the first page. One that only restricts
+    printing or copying renders as it is."""
+    from common.pdf_access import NEEDS_PASSWORD, UNLOCK_HINT, PdfLocked
+
     with _fitz().open(stream=pdf_bytes, filetype="pdf") as doc:
+        if doc.needs_pass:
+            raise PdfLocked(f"{NEEDS_PASSWORD}; {UNLOCK_HINT}")
         return doc.page_count
 
 

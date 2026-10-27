@@ -19,7 +19,7 @@ client --HTTPS--> extraction-api (Container App, external ingress)
 
 | Endpoint | Answer |
 |---|---|
-| `POST /v1/extractions?lob=<line>[&webhook_url=https://...][&name=a.pdf]` - body: the PDF (`application/pdf`), or `multipart/form-data` with `file` (`lob`, `webhook_url`, `name` as form fields) | `202 {"job_id", "status": "queued", "status_url", "result_url"}` |
+| `POST /v1/extractions?lob=<line>[&webhook_url=https://...][&name=a.pdf]` - body: the PDF (`application/pdf`), or `multipart/form-data` with `file` (`lob`, `webhook_url`, `name`, `password` as form fields); a PDF that needs a password to open comes with it as the form field `password` or the header `X-PDF-Password` | `202 {"job_id", "status": "queued", "status_url", "result_url"}` |
 | `GET /v1/extractions/{job_id}` | the job: `status` (`queued`, `running`, `fields_ready`, `done`, `failed`), `timings_s`, pages, model, release, attempts, error |
 | `GET /v1/extractions/{job_id}/result` | `fields_ready`: the checked fields (`final: false`); `done`: the final JSON (`final: true`); otherwise `409` |
 | `GET /healthz` | liveness (no key) |
@@ -32,7 +32,20 @@ curl -sS -X POST "https://$API_FQDN/v1/extractions?lob=personal_auto" \
      -H "Authorization: Bearer $KEY" -H "Content-Type: application/pdf" --data-binary @policy.pdf
 curl -sS -H "Authorization: Bearer $KEY" "https://$API_FQDN/v1/extractions/$JOB"
 curl -sS -H "Authorization: Bearer $KEY" "https://$API_FQDN/v1/extractions/$JOB/result"
+# A PDF that needs a password to open: the password beside it, never in the URL
+curl -sS -X POST "https://$API_FQDN/v1/extractions" -H "Authorization: Bearer $KEY" \
+     -F lob=personal_auto -F file=@locked-policy.pdf -F "password=$PDF_PASSWORD"
 ```
+
+**Encrypted PDFs** (`common/pdf_access.py`). A PDF that only restricts printing or copying is
+taken as it is. One that needs a password to open is read with the password sent beside it
+(form field `password` or header `X-PDF-Password`); without it, or with a wrong one, the
+request is refused (400) and nothing is stored. A password in the query string is refused:
+URLs are logged on the way. Either kind is stored **unencrypted** in the jobs container - the
+same handling as every other PDF, deleted with the job (and kept for review only if
+`REVIEW_RETENTION_*` is on) - and the job's status says how it came (`encrypted`:
+`password`, `restrictions` or null). The password is used once, in the API, and is never
+stored, logged, queued or echoed. Nothing tries to guess or break a password.
 
 A webhook (optional, `webhook_url`, HTTPS only) is POSTed on `fields_ready`, `done`
 and `failed`. Its body carries the job id, status and links - never document

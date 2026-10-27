@@ -298,7 +298,20 @@ def ocr_via_api(
 
     Every task must return each page it was sent (:func:`missing_pages`); the
     report holds every run's version and tier (``version_parts``, ``tier_parts``).
+
+    An encrypted PDF is sent unencrypted (``common.pdf_access.unlocked_pdf``):
+    one that restricts printing or copying is re-saved without it - its runs
+    already were (:func:`split_pdf`), a PDF sent whole was not - and one that
+    needs a password to open is refused here, before any upload.
     """
+    from common.pdf_access import UNLOCK_HINT, PdfLocked, unlocked_pdf
+
+    try:
+        pdf = unlocked_pdf(pdf)
+    except PdfLocked as exc:
+        raise PdfLocked(f"{filename}: {exc}; {UNLOCK_HINT}") from None
+    except Exception:  # noqa: BLE001 - a PDF PyMuPDF cannot open goes to MinerU as before, to be judged there
+        pass
     pieces = split_pdf(pdf, parts, run_pages=run_pages) if parts > 1 or run_pages else []
     if len(pieces) <= 1:
         _check_stop(stop, filename)

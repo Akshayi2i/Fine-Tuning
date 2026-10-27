@@ -107,6 +107,10 @@ def inspect_pdf(path: Path) -> dict[str, Any]:
             import pymupdf
 
             with pymupdf.open(str(path)) as document:
+                if document.needs_pass:
+                    from common.pdf_access import UNLOCK_HINT
+
+                    raise IngestionError(f"{path.name} needs a password to open; {UNLOCK_HINT}")
                 pages = document.page_count
                 sampled = min(3, pages)
                 text = "".join(document[i].get_text() for i in range(sampled))

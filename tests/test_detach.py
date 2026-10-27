@@ -90,6 +90,8 @@ QUICK = {
     "data_pipeline/ocr/mineru_config.py", "scripts/propose_field_types.py",
     "scripts/diagnose_windowing.py", "scripts/check_alias_coverage.py",
     "scripts/check_section_builder.py", "scripts/served_adapter.py",
+    # Unlocks one PDF in a second, asking for its password at the prompt: detached, nobody could type it.
+    "common/pdf_access.py",
 }
 
 #: The Azure service's processes: each is its container's main process, so it

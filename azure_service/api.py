@@ -4,7 +4,8 @@
 
     POST /v1/extractions?lob=personal_auto[&webhook_url=https://...][&name=a.pdf]
          body: the PDF (application/pdf), or multipart/form-data with `file`
-         (and `lob`, `webhook_url`, `name` as form fields)      -> 202 {"job_id", "status_url", "result_url"}
+         (and `lob`, `webhook_url`, `name`, `password` as form fields)
+         [X-PDF-Password: <the PDF's password>]                  -> 202 {"job_id", "status_url", "result_url"}
     GET  /v1/extractions/{job_id}          the state: queued, running, fields_ready, done or failed, with timings
     GET  /v1/extractions/{job_id}/result   the JSON: the checked fields at fields_ready, the final one at done;
                                            409 before either
@@ -16,9 +17,18 @@ tenant sees its own jobs only. Keys are compared as SHA-256 digests in constant
 time, against every configured key.
 
 Refused before anything is stored: a body over ``MAX_PDF_MB`` (413), one that
-is not a PDF or cannot be opened, is encrypted or has too many pages (400), a
-line of business with no canonical policy schema (400, by
-``serving.vllm_entrypoint.request_lob``), a webhook that is not HTTPS (400).
+is not a PDF or cannot be opened, needs a password and came without its own, or
+has too many pages (400), a line of business with no canonical policy schema
+(400, by ``serving.vllm_entrypoint.request_lob``), a webhook that is not HTTPS
+(400), a password in the URL (400).
+
+**Encrypted PDFs** (``common.pdf_access``). One that only restricts printing
+or copying is taken as it is. One that needs a password to open is read with
+the password sent beside it - the multipart field ``password`` or the
+``X-PDF-Password`` header, never the query string, which proxies log. Either
+is stored unencrypted, as every reader downstream opens it; the password is
+used once, here, and never stored, logged, queued or echoed. The job's record
+says how the PDF came (``encrypted``: ``password``, ``restrictions`` or null).
 
 The PDF goes to the jobs container (``transient/jobs/...``, never the raw
 documents' container) for the worker to read, the job's record beside it, and
@@ -59,6 +69,29 @@ class Refused(HTTPException):
         super().__init__(status_code=status, detail=reason)
 
 
+def unlock(pdf: bytes, password: str | None) -> tuple[bytes, str | None]:
+    """``pdf`` unencrypted (``common.pdf_access.unlocked_pdf``) and how it came
+    encrypted - ``"password"``, ``"restrictions"`` or None; refused when it
+    needs a password and came without its own. Never names the password."""
+    from common.pdf_access import PdfLocked, encryption_kind, unlocked_pdf
+
+    if not pdf.startswith(b"%PDF"):
+        raise Refused(400, "the body is not a PDF (it does not start with %PDF)")
+    try:
+        kind = encryption_kind(pdf)
+    except ImportError:                                  # pragma: no cover - the [data] extra has PyMuPDF
+        return pdf, None
+    except Exception:  # noqa: BLE001 - any reason is the same answer
+        raise Refused(400, "the PDF cannot be opened") from None
+    if kind is None:
+        return pdf, None
+    try:
+        return unlocked_pdf(pdf, password), kind
+    except PdfLocked as exc:
+        how = "" if password else ": send its password as the multipart field `password` or the X-PDF-Password header"
+        raise Refused(400, f"{exc}{how}") from None
+
+
 def pdf_pages(pdf: bytes, max_pages: int) -> int | None:
     """The page count of ``pdf``, once it is seen to be a PDF the worker can
     render; None when PyMuPDF is not installed (the worker then finds out)."""
@@ -73,8 +106,8 @@ def pdf_pages(pdf: bytes, max_pages: int) -> int | None:
     except Exception:  # noqa: BLE001 - any reason is the same answer
         raise Refused(400, "the PDF cannot be opened") from None
     with document:
-        if document.needs_pass:
-            raise Refused(400, "the PDF is encrypted: send it without a password")
+        if document.needs_pass:                           # unlock() opened it first
+            raise Refused(400, "the PDF needs a password to open: send it with its password")
         count = document.page_count
     if count < 1:
         raise Refused(400, "the PDF has no pages")
@@ -144,6 +177,9 @@ def create_app(settings: Settings, store: JobStore, queue: JobQueue) -> FastAPI:
 
     @app.post("/v1/extractions", status_code=202)
     async def submit(request: Request, tenant: str = Depends(tenant_of)) -> JSONResponse:
+        if any(key.lower() == "password" for key in request.query_params):
+            raise Refused(400, "never put the PDF's password in the URL: send it as the multipart field "
+                               "`password` or the X-PDF-Password header")
         declared = (request.headers.get("content-length") or "").strip()
         cap = settings.max_pdf_bytes + FORM_OVERHEAD
         limit = settings.max_pdf_bytes
@@ -157,8 +193,10 @@ def create_app(settings: Settings, store: JobStore, queue: JobQueue) -> FastAPI:
                 raise Refused(413, too_large)
         fields: dict[str, Any] = dict(request.query_params)
         kind = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        password = request.headers.get("x-pdf-password") or None
         if kind == "multipart/form-data":
-            pdf, name = await _from_form(request, bytes(body), fields)
+            pdf, name, form_password = await _from_form(request, bytes(body), fields)
+            password = form_password or password
         elif kind in PDF_TYPES:
             pdf, name = bytes(body), fields.get("name")
         else:
@@ -168,14 +206,15 @@ def create_app(settings: Settings, store: JobStore, queue: JobQueue) -> FastAPI:
         if len(pdf) > settings.max_pdf_bytes:
             raise Refused(413, too_large)
         record = await run_in_threadpool(accept, tenant, pdf, _file_name(name), fields.get("lob"),
-                                         fields.get("webhook_url"))
+                                         fields.get("webhook_url"), password)
         status_url = f"/v1/extractions/{record['job_id']}"
         return JSONResponse(
             {"job_id": record["job_id"], "status": record["status"], "status_url": status_url,
              "result_url": f"{status_url}/result"},
             status_code=202, headers={"Location": status_url})
 
-    async def _from_form(request: Request, body: bytes, fields: dict[str, Any]) -> tuple[bytes, str | None]:
+    async def _from_form(request: Request, body: bytes,
+                         fields: dict[str, Any]) -> tuple[bytes, str | None, str | None]:
         delivered = False
 
         async def receive() -> dict[str, Any]:
@@ -196,10 +235,15 @@ def create_app(settings: Settings, store: JobStore, queue: JobQueue) -> FastAPI:
             value = form.get(key)
             if isinstance(value, str) and value.strip():
                 fields[key] = value
-        return await upload.read(), fields.get("name") or upload.filename
+        # Kept apart from `fields`: the password goes to unlock() and nowhere else.
+        password = form.get("password")
+        return (await upload.read(), fields.get("name") or upload.filename,
+                password if isinstance(password, str) and password else None)
 
-    def accept(tenant: str, pdf: bytes, name: str, lob: str | None, webhook_url: str | None) -> dict[str, Any]:
+    def accept(tenant: str, pdf: bytes, name: str, lob: str | None, webhook_url: str | None,
+               password: str | None = None) -> dict[str, Any]:
         line = checked_lob(lob)
+        pdf, encrypted = unlock(pdf, password)
         pages = pdf_pages(pdf, settings.max_pages)
         if webhook_url:
             try:
@@ -210,7 +254,7 @@ def create_app(settings: Settings, store: JobStore, queue: JobQueue) -> FastAPI:
                 raise Refused(400, "webhooks are not configured for this tenant (no webhook secret)")
         job_id = uuid.uuid4().hex
         record = new_record(job_id, tenant, lob=line, name=name, size=len(pdf), pages=pages,
-                            webhook_url=webhook_url or None)
+                            webhook_url=webhook_url or None, encrypted=encrypted)
         store.put_pdf(tenant, job_id, pdf)
         store.write_status(record)
         try:
@@ -221,8 +265,8 @@ def create_app(settings: Settings, store: JobStore, queue: JobQueue) -> FastAPI:
             store.delete_transient(tenant, job_id)
             log.error("job %s could not be queued: %s", job_id, exc)
             raise Refused(503, "the job could not be queued; send it again") from exc
-        log.info("job %s queued: tenant %s, %d bytes, %s pages, lob %s%s", job_id, tenant, len(pdf), pages, line,
-                 ", webhook" if webhook_url else "")
+        log.info("job %s queued: tenant %s, %d bytes, %s pages, lob %s%s%s", job_id, tenant, len(pdf), pages, line,
+                 ", webhook" if webhook_url else "", f", unencrypted (it came with {encrypted})" if encrypted else "")
         return record
 
     @app.get("/v1/extractions/{job_id}")

@@ -625,6 +625,11 @@ Storage Queue, job state and results as JSON in Blob.
 
 - `POST /v1/extractions?lob=<line>[&webhook_url=https://...]` with the PDF as the body (or multipart `file`) and
   `Authorization: Bearer <key>` answers `202 {job_id, status_url, result_url}`.
+- A PDF that needs a password to open is read with its password, sent as the multipart field `password` or the
+  header `X-PDF-Password` (never in the URL), and stored unencrypted; the password is used once and kept nowhere.
+  One that only restricts printing or copying needs nothing. Without the password a locked PDF is refused (400):
+  nothing guesses or breaks one. To unlock a copy by hand (a training PDF the audit blocked, a document for
+  `latency_check`): `python -m common.pdf_access unlock locked.pdf unlocked.pdf` (the password is asked for).
 - `GET /v1/extractions/<id>`: `queued`, `running`, `fields_ready`, `done` or `failed`, with timings.
 - `GET /v1/extractions/<id>/result`: the checked fields from `fields_ready` (`final: false`), the final JSON at
   `done` (`final: true`); 409 before.

@@ -217,7 +217,9 @@ def _read_pdf(pdf: Path) -> tuple[list[str], str | None]:
     try:
         with pymupdf.open(pdf) as doc:
             if doc.needs_pass:
-                return [], "PDF is password-protected"
+                from common.pdf_access import UNLOCK_HINT
+
+                return [], f"PDF is password-protected (needs a password to open); {UNLOCK_HINT}"
             return [page.get_text() for page in doc], None
     except Exception as exc:  # noqa: BLE001 - any unreadable PDF is one finding
         return [], f"PDF cannot be opened ({type(exc).__name__}: {exc})"

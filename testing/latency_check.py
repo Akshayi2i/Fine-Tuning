@@ -112,6 +112,18 @@ def parse_doc(value: str) -> tuple[Path, str]:
     return Path(path), str(line)
 
 
+def _locked(pdf: Path) -> bool:
+    """Whether ``pdf`` needs a password to open: refused before the detach, by
+    name, rather than failing mid-run. A PDF PyMuPDF cannot open is left to
+    the reading to report, as before."""
+    from common.pdf_access import is_locked
+
+    try:
+        return is_locked(pdf.read_bytes())
+    except Exception:  # noqa: BLE001 - not a question of a password
+        return False
+
+
 def run_environment(detaching: bool) -> dict[str, str]:
     """The environment the run will have.
 
@@ -484,6 +496,10 @@ def main(argv: list[str] | None = None) -> int:
     missing = [str(pdf) for pdf, _lob in args.docs if not pdf.is_file()]
     if missing:
         parser.error(f"no such PDF: {', '.join(missing)}")
+    if locked := [str(pdf) for pdf, _lob in args.docs if _locked(pdf)]:
+        from common.pdf_access import UNLOCK_HINT
+
+        parser.error(f"these PDFs need a password to open: {', '.join(locked)}; {UNLOCK_HINT}")
 
     from orchestration.detach import detach_module_if_needed, should_detach
 

@@ -46,10 +46,13 @@ PRIVATE_KEYS = frozenset({"webhook_url"})
 
 
 def new_record(job_id: str, tenant: str, *, lob: str, name: str, size: int, pages: int | None,
-               webhook_url: str | None, now: float | None = None) -> dict[str, Any]:
+               webhook_url: str | None, now: float | None = None, encrypted: str | None = None) -> dict[str, Any]:
+    """A queued job's record. ``encrypted``: how the PDF came - ``"password"``
+    (opened with the password sent beside it), ``"restrictions"`` or None; it
+    is stored unencrypted either way, and the password nowhere."""
     return {
         "job_id": job_id, "tenant": tenant, "status": "queued", "lob": lob, "document": name,
-        "bytes": size, "pages": pages, "submitted": now if now is not None else time.time(),
+        "bytes": size, "pages": pages, "encrypted": encrypted, "submitted": now if now is not None else time.time(),
         "started": None, "fields_ready_at": None, "finished": None, "attempts": 0,
         "webhook_url": webhook_url, "error": None, "timings_s": {},
     }

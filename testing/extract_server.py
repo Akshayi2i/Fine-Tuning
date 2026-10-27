@@ -268,12 +268,22 @@ class ExtractService:
             threading.Thread(target=self._worker, name="extract-jobs", daemon=True).start()
             threading.Thread(target=self._text_worker, name="full-text", daemon=True).start()
 
-    def submit(self, pdf: bytes, *, name: str, lob: str, mode: str | None = None) -> Job:
+    def submit(self, pdf: bytes, *, name: str, lob: str, mode: str | None = None,
+               password: str | None = None) -> Job:
+        from common.pdf_access import PdfLocked, unlocked_pdf
         from serving.vllm_entrypoint import ServingError, request_lob
 
         mode = mode or self.default_mode
         if not pdf.startswith(b"%PDF"):
             raise RequestError("the body is not a PDF (it does not start with %PDF)")
+        try:
+            # As the Azure API takes it (common.pdf_access): stored unencrypted, the password nowhere.
+            pdf = unlocked_pdf(pdf, password)
+        except PdfLocked as exc:
+            raise RequestError(f"{exc}{'' if password else ': send its password as the X-PDF-Password header'}") \
+                from None
+        except Exception:  # noqa: BLE001 - a PDF PyMuPDF cannot open fails in the reading, as before
+            pass
         if mode not in MODES:
             raise RequestError(f"mode must be one of {list(MODES)}, got {mode!r}")
         if mode == FIELDS_FIRST and not hasattr(self.ocr, "ocr_text"):
@@ -638,9 +648,14 @@ def handler_for(service: ExtractService, token: str) -> type[BaseHTTPRequestHand
                 return
             query = {k: v[-1] for k, v in parse_qs(urlparse(self.path).query).items()}
             body = self.rfile.read(length)
+            if any(key.lower() == "password" for key in query):
+                self._send(400, {"error": "never put the PDF's password in the URL: send it as the "
+                                          "X-PDF-Password header"})
+                return
             try:
                 job = service.submit(body, name=query.get("name", "document.pdf"), lob=query.get("lob", ""),
-                                     mode=query.get("mode", service.default_mode))
+                                     mode=query.get("mode", service.default_mode),
+                                     password=self.headers.get("X-PDF-Password") or None)
             except RequestError as exc:
                 self._send(400, {"error": str(exc)})
                 return
