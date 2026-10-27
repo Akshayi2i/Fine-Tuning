@@ -83,6 +83,29 @@ one side. The split is drawn as the corpus build draws one
 (:func:`~data_pipeline.dataset_builder.split_groups.assign_group_splits`) and
 delivered in the metadata, so it is the same on every re-run and a smoke batch
 can be drawn from it; ``<out>/split.csv`` lists it for review.
+
+**Real documents of several lines** (the first commercial training set, 27
+October 2026), laid out by line and by how each was made:
+
+    <input>/pdf/<line>/<scanned|hybrid>/<name>.pdf
+    <input>/gold/<line>/<scanned|hybrid>/<name>.gold.json
+
+    python -m data_pipeline.ingestion.prepare_bundles --input "data/source data" --out data/bundles_c1
+
+Bundled as above, every line in one draw, balanced within each line and kind
+(:func:`~data_pipeline.dataset_builder.split_groups.assign_cell_splits`: three or
+more families of a line's scans, or of its hybrids, keep one in each of train,
+val and test); each becomes ``<line>__<kind>__<name>`` with ``document_kind``
+scanned or hybrid in its metadata. A folder's line is read
+as :func:`delivery_line` reads one (``cgl`` is ``gl``), and ``bop`` as boppr
+(:data:`LINE_FOLDERS`). Two more corrections, logged in ``corrections.csv`` like
+the others (:func:`own_line_gold`): a package policy's parts collapse to the
+one part of its folder's line, which carries every value its gold holds (the
+line's schema holds one part, ``policy_windows.with_own_part``), and a gold
+with no ``coverages`` gets an empty list - the schema requires the table, and
+a document that prints no coverage has none. ``reviews.csv`` may name a
+document by its path under ``gold/`` (``cgl/hybrid/name``), its folder name, its
+file name, or ``*`` for every document one person reviewed.
 """
 
 from __future__ import annotations
@@ -113,6 +136,15 @@ TWIN_MANIFEST = "split_manifest.csv"
 #: Real documents with no twins (:func:`prepare_original_bundles`).
 ORIGINAL_PDFS = "PDFs"
 ORIGINAL_GOLDS = "Gold JSON"
+#: Real documents of several lines, one folder per line, then per kind.
+LINE_PDFS = "pdf"
+LINE_GOLDS = "gold"
+#: How a document of that layout was made: a scan, or a PDF with a text layer.
+DOCUMENT_KINDS = ("scanned", "hybrid")
+#: A line folder that names no schema of its own, and the schema its documents
+#: are read with (user, 27 October 2026: a businessowners policy is read with the
+#: boppr schema, as its gold's own part says).
+LINE_FOLDERS = {"bop": "boppr"}
 TWIN_COLUMNS = ("split", "lob", "carrier", "seed", "twin", "digital", "scanned", "gold")
 
 #: A manifest's review columns: who reviewed a gold, when, and what drafted it.
@@ -607,7 +639,7 @@ def prepare_original_bundles(
     source: Path,
     out: Path = DEFAULT_OUT,
     *,
-    lob: str,
+    lob: str | None = None,
     lines: frozenset[str] | None = None,
     mode: str = "link",
     exclusions: dict[str, str] | None = None,
@@ -615,13 +647,18 @@ def prepare_original_bundles(
     seed: int = 42,
     frozen: bool = False,
 ) -> PrepareReport:
-    """Bundles from real documents of one line with no twins and no split.
+    """Bundles from real documents with no twins and no split.
 
-    ``<source>/PDFs/<carrier>/<name>.pdf`` with ``<source>/Gold JSON/<carrier>/
-    <name>.gold.json``. Each gold is corrected as a seed's is (:func:`corrected_gold`);
-    one outside the line's schema, or a package policy, is left out with the
-    reason. The split is drawn by insured family and written into each
-    document's metadata, so the corpus build uses it as delivered.
+    With ``lob``, one line: ``<source>/PDFs/<carrier>/<name>.pdf`` with
+    ``<source>/Gold JSON/<carrier>/<name>.gold.json``. Without, several:
+    ``<source>/pdf/<line>/<kind>/<name>.pdf`` with ``<source>/gold/<line>/<kind>/
+    <name>.gold.json`` (:func:`line_layout`), each gold first held to its folder's
+    line (:func:`own_line_gold`). Each gold is corrected as a seed's is
+    (:func:`corrected_gold`); one outside the line's schema, or a package policy,
+    is left out with the reason. The split is drawn by insured family, every line
+    in one draw - several lines balanced within each line and kind
+    (``assign_cell_splits``) - and written into each document's metadata, so the
+    corpus build uses it as delivered.
 
     A test document whose carrier no training document has is marked
     ``held_out_carrier``: the gate reports those documents apart, as the model's
@@ -632,25 +669,33 @@ def prepare_original_bundles(
     Never ``move``: a re-run leaves out a document whose PDF is gone, and removes
     its folder - the only copy of a moved PDF.
     """
-    from data_pipeline.dataset_builder.split_groups import GroupRecord, assign_group_splits
+    from data_pipeline.dataset_builder.split_groups import GroupRecord, assign_cell_splits, assign_group_splits
 
-    line = delivery_line(lob)
-    if not within_lines(line, lines):
-        raise BundleError(f"{line} is outside --lines {sorted(lines)}; add it, or leave --lines out")
     if mode not in ("link", "copy"):
         raise BundleError(f"mode {mode!r}: real documents are bundled by link or copy, never moved - "
                           "a re-run would remove the folder holding the only copy of a moved PDF")
-    pdf_root, gold_root = source / ORIGINAL_PDFS, source / ORIGINAL_GOLDS
-    pdfs = {p.relative_to(pdf_root).with_suffix(""): p for p in pdf_root.rglob("*.pdf")}
-    golds = {p.relative_to(gold_root).with_name(p.name[: -len(".gold.json")]): p
-             for p in gold_root.rglob("*.gold.json")}
+    by_line = lob is None
+    if by_line:
+        pdfs, golds, line_of, kind_of = line_layout(source, lines)
+    else:
+        one = delivery_line(lob)
+        if not within_lines(one, lines):
+            raise BundleError(f"{one} is outside --lines {sorted(lines)}; add it, or leave --lines out")
+        pdf_root, gold_root = source / ORIGINAL_PDFS, source / ORIGINAL_GOLDS
+        pdfs = {p.relative_to(pdf_root).with_suffix(""): p for p in pdf_root.rglob("*.pdf")}
+        golds = {p.relative_to(gold_root).with_name(p.name[: -len(".gold.json")]): p
+                 for p in gold_root.rglob("*.gold.json")}
+        line_of = dict.fromkeys(pdfs.keys() | golds.keys(), one)
+        kind_of = {}
     if not pdfs:
-        raise BundleError(f"no PDFs under {pdf_root}")
+        raise BundleError(f"no PDFs under {source}")
 
     recodes = read_recodes()
     report = PrepareReport(out=out, dry_run=dry_run)
     reviews = read_reviews(source / REVIEWS_FILE)
-    names = {key: f"{line}__{_slug(str(key.parent))}__{_slug(key.name)}" for key in pdfs.keys() | golds.keys()}
+    names = {key: (f"{line_of[key]}__{kind_of[key]}__{_slug(key.name)}" if by_line
+                   else f"{line_of[key]}__{_slug(str(key.parent))}__{_slug(key.name)}")
+             for key in pdfs.keys() | golds.keys()}
     clashes = Counter(names.values())
     if duplicate := sorted(n for n, count in clashes.items() if count > 1):
         raise BundleError(f"two documents would share the folder name(s) {duplicate}")
@@ -664,12 +709,15 @@ def prepare_original_bundles(
         if exclusions and name in exclusions:
             report.skipped[f"excluded: {exclusions[name]}"] += 1
             continue
+        gold = json.loads(golds[key].read_text(encoding="utf-8"))
+        held: list[tuple[str, str]] = []
+        if by_line:
+            gold, held = own_line_gold(gold, line_of[key])
         # No carrier from the folder: a folder is not always one carrier (a
         # broker's holds several), and a gold missing its carrier would be
         # filled with the broker's name.
-        gold, notes, problem = corrected_gold(
-            json.loads(golds[key].read_text(encoding="utf-8")), line,
-            carrier="", text_pdf=pdfs[key], recodes=recodes)
+        gold, notes, problem = corrected_gold(gold, line_of[key], carrier="", text_pdf=pdfs[key], recodes=recodes)
+        notes = held + notes
         if problem:
             report.skipped[f"gold left out: {problem.split(':', 1)[0]}"] += 1
             report.correction_rows.append((name, "left out", problem))
@@ -678,15 +726,26 @@ def prepare_original_bundles(
 
     # One family per insured, split as the corpus build splits a tenant with no
     # delivered split - so the documents are where the build would have put them.
-    family = {name: _insured_family(gold, line, name) for name, (_, gold, _, _) in kept.items()}
+    key_of = {name: key for key, name in names.items()}
+    family = {name: _insured_family(gold, line_of[key_of[name]], name) for name, (_, gold, _, _) in kept.items()}
     members: dict[str, list[str]] = {}
     for name, group in sorted(family.items()):
         members.setdefault(group, []).append(name)
-    records = [GroupRecord(group_id=group, doc_type="policy", source_ids=docs, line=line,
+    records = [GroupRecord(group_id=group, doc_type="policy", source_ids=docs, line=line_of[key_of[docs[0]]],
                            carrier=_printed_carrier_key(kept[docs[0]][1]))
                for group, docs in sorted(members.items())]
-    assignment = assign_group_splits({"policy": records}, seed=seed, with_test=not frozen,
-                                     hold_out_carriers=not frozen).assignment
+    if by_line:
+        # Balanced within each line AND kind: hashed by line alone, a line's few
+        # hybrid PDFs can all land in val and test and the model never train on
+        # one. A family of both kinds is drawn as its most common kind.
+        cell_of = {group: f"{line_of[key_of[docs[0]]]}/"
+                          f"{Counter(kind_of[key_of[doc]] for doc in docs).most_common(1)[0][0]}"
+                   for group, docs in members.items()}
+        assignment = assign_cell_splits(records, cell_of, seed=seed, with_test=not frozen,
+                                        hold_out_carriers=not frozen).assignment
+    else:
+        assignment = assign_group_splits({"policy": records}, seed=seed, with_test=not frozen,
+                                         hold_out_carriers=not frozen).assignment
     # Carriers the model trains on, by the key the draw counted them by; a test
     # document of any other is its reading of a carrier it never saw.
     # A placeholder carrier ("N/A", "Unknown", none at all) is no carrier, so
@@ -698,15 +757,15 @@ def prepare_original_bundles(
     unseen = {name for name in kept
               if assignment[family[name]] == "test" and carrier_of[name] not in trained
               and not is_placeholder_carrier(carrier_of[name])}
-    key_of = {name: key for key, name in names.items()}
 
     for name, (pdf, gold, notes, gold_path) in sorted(kept.items()):
         split = assignment[family[name]]
         for kind, detail in notes:
             report.corrections[kind] += 1
             report.correction_rows.append((name, kind, detail))
+        key = key_of[name]
         metadata = {
-            "lob": line,
+            "lob": line_of[key],
             "synthetic": False,
             "template_id": family[name],
             "split": split,
@@ -717,8 +776,12 @@ def prepare_original_bundles(
             "render_mode": None,
             "unprinted_values": _unprinted(notes),
             "held_out_carrier": name in unseen,
-            # From reviews.csv, by the gold's path under Gold JSON/ or the folder name.
-            **(reviews.get(key_of[name].as_posix()) or reviews.get(name) or row_review({})),
+            # A scan, or a PDF with a text layer (the several-lines layout's own folders).
+            **({"document_kind": kind_of[key]} if key in kind_of else {}),
+            # From reviews.csv: the gold's path under its gold folder, the folder
+            # name, (several lines) the file name, or * for every document.
+            **(reviews.get(key.as_posix()) or reviews.get(name)
+               or (reviews.get(key.name) if by_line else None) or reviews.get("*") or row_review({})),
         }
         report.written[(split, "real")] += 1
         report.unreviewed += _unreviewed(metadata)
@@ -752,6 +815,40 @@ def prepare_original_bundles(
             writer.writerows((name, family[name], assignment[family[name]], name in unseen)
                              for name in sorted(kept))
     return report
+
+
+def line_layout(source: Path, lines: frozenset[str] | None = None) -> tuple[
+        dict[PurePosixPath, Path], dict[PurePosixPath, Path], dict[PurePosixPath, str], dict[PurePosixPath, str]]:
+    """``(pdfs, golds, line_of, kind_of)`` of ``<source>/pdf/<line>/<kind>/`` and
+    ``<source>/gold/<line>/<kind>/``, keyed by ``<folder>/<kind>/<name>``.
+
+    A folder's line is read as a delivery's is (:func:`delivery_line`; ``cgl`` is
+    ``gl``), or by :data:`LINE_FOLDERS` (``bop`` is boppr); one naming no schema,
+    or a kind other than :data:`DOCUMENT_KINDS`, is refused - a typo would
+    otherwise bundle documents nobody can read. Lines outside ``lines`` are left out.
+    """
+    from common.lob import known_lines
+
+    pdfs: dict[PurePosixPath, Path] = {}
+    golds: dict[PurePosixPath, Path] = {}
+    line_of: dict[PurePosixPath, str] = {}
+    kind_of: dict[PurePosixPath, str] = {}
+    for root, suffix, found in ((source / LINE_PDFS, ".pdf", pdfs), (source / LINE_GOLDS, ".gold.json", golds)):
+        for path in sorted(root.rglob(f"*{suffix}")):
+            parts = path.relative_to(root).parts
+            if len(parts) != 3:
+                raise BundleError(f"{path}: expected {root.name}/<line>/<kind>/<name>{suffix}")
+            folder, kind, file = parts
+            line = LINE_FOLDERS.get(folder.lower()) or delivery_line(folder)
+            if line not in known_lines():
+                raise BundleError(f"{root.name}/{folder}: no canonical policy schema for {line!r}")
+            if kind not in DOCUMENT_KINDS:
+                raise BundleError(f"{root.name}/{folder}/{kind}: a kind is one of {list(DOCUMENT_KINDS)}")
+            if not within_lines(line, lines):
+                continue
+            key = PurePosixPath(folder, kind, file[: -len(suffix)])
+            found[key], line_of[key], kind_of[key] = path, line, kind
+    return pdfs, golds, line_of, kind_of
 
 
 def template_of(row: dict[str, str]) -> str:
@@ -860,6 +957,37 @@ def _amount(value: object) -> float | None:
         return round(float(parsed), 2) if parsed is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def own_line_gold(gold: dict, line: str) -> tuple[dict, list[tuple[str, str]]]:
+    """``(gold, [(kind, detail)])``: a real document's gold as its line's schema
+    holds it, before :func:`corrected_gold` (the several-lines layout).
+
+    * **package parts**: a gold listing several parts (``property``, ``bopgl``,
+      ``umbrella``), or a part of another line, keeps one part, of ``line`` - the
+      part of that line where it has one, else the first. Every value the gold
+      holds is already in ``line``'s terms (its codes are ``line``'s), and a
+      common-model line's schema holds one part of itself;
+    * **coverages missing**: an empty ``coverages`` table, which the schema
+      requires; a document that prints no coverage has none.
+    """
+    import copy
+
+    notes: list[tuple[str, str]] = []
+    parts = gold.get("lob_parts")
+    if isinstance(parts, list) and parts:
+        named = [part.get("lob") if isinstance(part, dict) else None for part in parts]
+        if len(parts) > 1 or delivery_line(str(named[0] or line)) != line:
+            gold = copy.deepcopy(gold)
+            own = next((part for part, name in zip(parts, named, strict=True)
+                        if isinstance(part, dict) and name and delivery_line(str(name)) == line), None)
+            kept = own if own is not None else (parts[0] if isinstance(parts[0], dict) else {})
+            gold["lob_parts"] = [{**kept, "lob": line}]
+            notes.append(("package parts", f"lob_parts {'+'.join(map(str, named))} -> {line}"))
+    if "coverages" not in gold:
+        gold = {**gold, "coverages": []}
+        notes.append(("coverages missing", "coverages = [] (the document prints no coverage table)"))
+    return gold, notes
 
 
 def corrected_gold(
@@ -1057,6 +1185,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lob", help="real documents alone (PDFs/ + Gold JSON/): the line every one is of")
     parser.add_argument("--frozen", action="store_true",
                         help="real documents alone: the tenant's eval set is frozen - draw train and val only")
+    # Real documents of several lines (pdf/<line>/<kind>/ + gold/<line>/<kind>/) need no --lob.
     args = parser.parse_args(argv)
     # On the pod, run detached in tmux: a closed laptop must not stop this job.
     from orchestration.detach import detach_module_if_needed
@@ -1066,7 +1195,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         lines = parse_lines(args.lines)
-        if (args.input / ORIGINAL_PDFS).is_dir() and (args.input / ORIGINAL_GOLDS).is_dir():
+        if (args.input / LINE_PDFS).is_dir() and (args.input / LINE_GOLDS).is_dir() and not args.lob:
+            if args.out is None:
+                print(f"pass --out for real documents of several lines (e.g. data/bundles_c1): the "
+                      f"default, {DEFAULT_OUT}, holds another delivery's bundles", file=sys.stderr)
+                return 1
+            report = prepare_original_bundles(args.input, args.out, lines=lines, mode=args.mode,
+                                              exclusions=read_exclusions(args.exclude),
+                                              dry_run=args.dry_run, frozen=args.frozen)
+        elif (args.input / ORIGINAL_PDFS).is_dir() and (args.input / ORIGINAL_GOLDS).is_dir():
             if not args.lob:
                 print(f"{args.input} holds real documents alone ({ORIGINAL_PDFS}/, {ORIGINAL_GOLDS}/): "
                       "pass --lob, the line they are all of", file=sys.stderr)

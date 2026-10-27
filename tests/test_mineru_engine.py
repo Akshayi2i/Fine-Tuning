@@ -127,6 +127,8 @@ def _fake_mineru(monkeypatch, content, *, scanned=False):
 
 @pytest.mark.parametrize("scanned,mode", [(True, "ocr"), (False, "txt")])
 def test_the_engine_returns_a_page_per_page_with_its_image(monkeypatch, scanned, mode):
+    # The per-document rule, as read_every_page_by_ocr off leaves it.
+    monkeypatch.setattr("common.config.ocr_every_page", lambda: False)
     calls = _fake_mineru(monkeypatch, CONTENT, scanned=scanned)
     pages = MinerUEngine().process(_pdf(3), device="cuda", max_long_side_px=800)
     assert [p.page_number for p in pages] == [1, 2, 3]

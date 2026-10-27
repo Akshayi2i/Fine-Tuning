@@ -573,8 +573,11 @@ def test_the_corpus_is_read_by_the_served_minerU_and_records_its_pin(tmp_path):
     finally:
         httpd.shutdown()
     assert meta["mineru_version"] == "4.0.12" and meta["mineru_backend"] == "api" and meta["mineru_tier"] == "basic"
-    assert meta["ocr_device"] == "cuda" and meta["page_count"] == 2 and not meta["read_by_ocr"]
-    assert "ocr_mode=txt" in _MinerU.posted[0]                         # a digital PDF: the OCR stage's rule
+    assert meta["ocr_device"] == "cuda" and meta["page_count"] == 2
+    # A digital PDF read by OCR all the same (configs/shared/ocr.yaml read_every_page_by_ocr),
+    # and the reading records it beside the version and the tier: all three are the pin.
+    assert meta["read_by_ocr"] and meta["read_every_page_by_ocr"] is True
+    assert "ocr_mode=ocr" in _MinerU.posted[0]
     assert client.read_text(paths.processed_page("policy", "policy_0001", 2, "md")).startswith("## Conditions")
     assert "_reprocessed" not in again and len(_MinerU.posted) == 1     # the same MinerU: not read again
 
@@ -593,7 +596,7 @@ def test_text_from_another_minerU_than_the_pinned_one_is_refused(tmp_path):
             ServedOcr(url, tier="flash", render_workers=1, expected_version="4.0.12",
                       expected_tier="flash").read(_pdf(2), tmp_path / "b")
         read = ServedOcr(url, render_workers=1).read(_pdf(2), tmp_path / "c")    # a timing test: anything goes
-        assert read["ocr"]["version"] == "4.0.12" and read["ocr"]["ocr_mode"] == "txt"
+        assert read["ocr"]["version"] == "4.0.12" and read["ocr"]["ocr_mode"] == "ocr"   # every page by OCR
     finally:
         httpd.shutdown()
 

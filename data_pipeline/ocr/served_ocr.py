@@ -295,8 +295,11 @@ class ServedMinerUEngine:
         return OcrEnvironment(mineru_version=self.version, device="cuda", gpu_name=None)
 
     def meta(self) -> dict[str, Any]:
-        """Added to each document's ``ocr_meta.json``."""
-        return {"mineru_backend": "api", "mineru_tier": self.tier}
+        """Added to each document's ``ocr_meta.json``: the tier and whether every
+        page was read by OCR, both part of the OCR pin."""
+        from common.config import ocr_every_page
+
+        return {"mineru_backend": "api", "mineru_tier": self.tier, "read_every_page_by_ocr": ocr_every_page()}
 
     def process(self, pdf_bytes: bytes, *, device: str, max_long_side_px: int,
                 modality: str | None = None, force_ocr: bool | None = None) -> list[Any]:

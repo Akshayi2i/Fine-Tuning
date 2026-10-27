@@ -93,6 +93,20 @@ def assert_ocr_pin(release_pin: dict[str, Any], pin: dict[str, str]) -> None:
             f"at tier {pin['tier']} (configs/shared/ocr.yaml): another tier reads a page with other models. "
             "Re-OCR the corpus with the served MinerU and train a new version."
         )
+    # Whether every page was read by OCR, where the corpus recorded it: a model
+    # trained on a hybrid PDF's text layer reads OCR text it never saw, and the
+    # other way round.
+    every_page = release_pin.get("read_every_page_by_ocr")
+    if every_page is not None:
+        from common.config import ocr_every_page
+
+        serving = pin.get("read_every_page_by_ocr", ocr_every_page())
+        if every_page != serving:
+            raise ServedAdapterError(
+                f"the release was trained on text read with read_every_page_by_ocr {every_page}, but serving "
+                f"reads with {serving} (configs/shared/ocr.yaml): a PDF with a text layer is read another "
+                "way. Re-OCR the corpus with the served setting and train a new version."
+            )
 
 
 def vllm_flags(name: str, rank: int, pod_path: str) -> str:

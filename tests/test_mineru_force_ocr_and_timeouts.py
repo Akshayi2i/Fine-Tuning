@@ -18,6 +18,14 @@ from tests.test_mineru_engine import CONTENT, _fake_mineru
 pymupdf = pytest.importorskip("pymupdf")
 
 
+@pytest.fixture(autouse=True)
+def _per_document_rule(monkeypatch):
+    """The per-document rule these tests pin is the one read_every_page_by_ocr
+    off leaves (configs/shared/ocr.yaml); on, every document is read by OCR
+    (tests/test_ocr_every_page.py)."""
+    monkeypatch.setattr("common.config.ocr_every_page", lambda: False)
+
+
 def _native(lines=3, glyph_paths=0):
     """A typed page; ``glyph_paths`` small filled outlines (curved, as a drawn
     digit is) beside the text."""

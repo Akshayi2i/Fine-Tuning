@@ -19,3 +19,12 @@ served_mineru:
   # Its quality/speed trade-off; part of the pin, since another tier reads a
   # page with other models. `basic`: its local lightweight models.
   tier: basic
+
+# Read every page by OCR - a scan and a PDF with a text layer ("hybrid") alike.
+# Decision 2026-10-27: production takes scanned and hybrid policies, and the
+# first commercial training set is both. With this on, the text the model reads
+# is MinerU's OCR of the page image in training and in serving, never a clean
+# text layer in one and OCR in the other. Part of the OCR pin: each reading
+# records it, a corpus read the other way is refused, and serving refuses a
+# release trained under the other setting (scripts.served_adapter.assert_ocr_pin).
+read_every_page_by_ocr: true

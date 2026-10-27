@@ -468,6 +468,60 @@ def _hash_split(group_id: str, seed: int, train_edge: float, val_edge: float) ->
     return "train" if position < train_edge else "val" if position < val_edge else "test"
 
 
+def assign_cell_splits(
+    records: list[GroupRecord],
+    cell_of: dict[str, str],
+    *,
+    seed: int = 42,
+    with_test: bool = True,
+    hold_out_carriers: bool = True,
+) -> GroupSplitAssignment:
+    """Assign real policy families to splits balanced within each cell - a line
+    and a document kind (``cell_of``: group id -> ``"boppr/hybrid"``, say).
+
+    :func:`assign_group_splits` balances a line, not the kinds in it: at pilot
+    size a line's three hybrid PDFs can all hash into val and test, and the model
+    never trains on one (the first commercial set, 2026-10-27). Here each cell of
+    at least :data:`MIN_GROUPS_TO_REPAIR` families keeps a train, a val and (with
+    ``with_test``) a test family, the rest in the volume ratio
+    (:func:`split_ratio_for`), in seeded-hash order; a smaller cell trains.
+    Unlike the hash draw, a family can change split as its cell grows - the cost
+    of measuring every cell at this size.
+
+    The line's carrier hold-out is then applied to this draw as to a drawn split
+    (:func:`held_out_carrier_per_line`): a held-out carrier's families go to test.
+    """
+    result = GroupSplitAssignment(seed=seed)
+    unique = sorted({r.group_id: r for r in records}.values(), key=lambda r: r.group_id)
+    ratio = split_ratio_for(sum(r.size for r in unique))
+    if not with_test:
+        share = ratio.train + ratio.val
+        ratio = SplitRatio(ratio.train / share, ratio.val / share, 0.0)
+    by_cell: dict[str, list[str]] = defaultdict(list)
+    for record in unique:
+        by_cell[cell_of[record.group_id]].append(record.group_id)
+    draw: dict[str, Split] = {}
+    for _cell, groups in sorted(by_cell.items()):
+        ordered = sorted(groups, key=lambda group: _stable_hash(group, seed))
+        if len(ordered) < MIN_GROUPS_TO_REPAIR:
+            draw.update(dict.fromkeys(ordered, "train"))
+            continue
+        tests = max(1, round(len(ordered) * ratio.test)) if with_test else 0
+        vals = max(1, round(len(ordered) * ratio.val))
+        trains = len(ordered) - tests - vals
+        for position, group in enumerate(ordered):
+            draw[group] = "train" if position < trains else "val" if position < trains + vals else "test"
+    if hold_out_carriers and with_test:
+        choice = held_out_carrier_per_line(unique, seed, dict(draw), min_carriers=MIN_CARRIERS_PER_LINE_FOR_HELD_OUT)
+        _record_hold_out(result, "policy", choice)
+        for record in unique:
+            if record.carrier and choice.held.get(record.line or "") == record.carrier:
+                draw[record.group_id] = "test"
+                result.held_out_source_ids.extend(record.source_ids)
+    result.assignment.update(draw)
+    return result
+
+
 def _record_hold_out(result: GroupSplitAssignment, doc_type: str, choice: CarrierHoldOut) -> None:
     """Write one doc type's carrier hold-out onto the assignment."""
     if choice.held:

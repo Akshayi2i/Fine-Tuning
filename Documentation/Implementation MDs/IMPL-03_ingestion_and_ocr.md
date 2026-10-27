@@ -255,6 +255,17 @@ than 10 characters read raises `MinerUError` (the document goes to review). The 
 so a timeout stops the wait, not MinerU. This repository's own serving endpoint runs no OCR: its requests carry
 page texts.
 
+**Every page read by OCR** (`configs/shared/ocr.yaml` `read_every_page_by_ocr: true`, decision 2026-10-27;
+`common.config.ocr_every_page`). Production takes scanned and hybrid policies, and the first commercial set is
+both, so `reads_by_ocr` sends every document through OCR, whatever its text layer or the caller says: the
+model reads MinerU's OCR of the page image in training and in serving, never a clean text layer in one and OCR
+in the other. The setting is part of the OCR pin, beside version and tier: the served engine records it in
+each `ocr_meta.json`; `run_mineru` reads again a stored reading that records the other value (one recording
+none, from before the setting, is held to version and tier alone); the corpus build refuses a labelled document
+read the other way and names the fix (`--force`); the corpus manifest and the release's `ocr_pin` record it;
+and `served_adapter.assert_ocr_pin` (serving, `promote`) refuses a release trained under the other setting.
+With it off, the per-document rule above applies.
+
 **After OCR** (`python -m data_pipeline.ocr_check --doc-type policy [--tenant T]`): every labelled value is
 compared with its page's OCR text, with the audit's matching, and reported per line, real apart from synthetic,
 and fields the fill-in added (`fideon:filled`) apart from the generator's own. It fails when fewer than half of
@@ -305,8 +316,25 @@ import bundles — `<out>/<document>/{document.pdf, golden.json, metadata.json}`
    `held_out_carrier: true` — never one of a placeholder carrier. `<out>/split.csv` lists document, family,
    split and `held_out_carrier`. Never `move`: a re-run removes the folder of a document left out, which would be
    the only copy of a moved PDF.
+4. **Real documents of several lines** (no `--lob`; `<input>/pdf/<line>/<scanned|hybrid>/<name>.pdf` with
+   `<input>/gold/<line>/<scanned|hybrid>/<name>.gold.json` — the first commercial training set, bundled with
+   `--input "data/source data" --out data/bundles_c1`): `--out` is required. A line folder is read as
+   `delivery_line` reads one (`cgl` is `gl`) or by `LINE_FOLDERS` (`bop` is boppr); a folder naming no schema,
+   or a kind other than scanned or hybrid, is refused. Each pair becomes `<line>__<kind>__<name>`, with
+   `document_kind` in its metadata. Before `corrected_gold`, `own_line_gold` holds each gold to its folder's
+   line, logged in `corrections.csv`: a package's `lob_parts` collapse to the one part of that line (or the
+   first, renamed to it), which carries every value the gold holds (`package parts`), and a gold with no
+   `coverages` gets `[]` — the document prints no coverage table (`coverages missing`). `reviews.csv` names a
+   document by its path under `gold/`, its folder name or its file name, or `*` for every document; a row of
+   its own wins over `*`. Families, review records, carriers and `--frozen` are as for shape 3, but the split
+   is balanced within each line **and kind** (`split_groups.assign_cell_splits`): hashed by line alone, the
+   set's three boppr hybrids all drew val or test and none trained. A line's scans, or its hybrids, of at least
+   three families keep one family in each of train, val and test (train and val once frozen), the rest in the
+   volume ratio (`split_ratio_for`), in seeded-hash order; fewer than three families train. A family of both
+   kinds is drawn as its most common kind. A line naming at least 10 carriers still holds one out, to test.
+   Unlike the hash draw, a family can change split as its cell grows.
 
-For shapes 2 and 3 every gold goes through `corrected_gold` (on common-model lines: coverage-code recodes, a
+For shapes 2, 3 and 4 every gold goes through `corrected_gold` (on common-model lines: coverage-code recodes, a
 premium written twice, a missing carrier, then the label rules — IMPL-04 — which also move a form's edition
 printed inside its form number to the form's empty `edition_date`, so the targets change and the bundles are
 prepared again); a gold still outside its line's schema, or a package
@@ -426,3 +454,8 @@ corrected at bundling instead.
 - `run_mineru --workers N` (served MinerU only) reads documents concurrently, results as a serial run's; `finetune --ocr-workers N` does the same in stage 2. OCR is meant to run before the pod: against a dedicated MinerU 4.0.12/basic, from any machine, then `finetune --skip-ingest` on the pod finds every document read.
 - Under the fast profile the shared renderer (`render_only.render_pdf_pages`) resizes each page once (bicubic) to the `smart_resize` size of the fast budget, so ms-swift and vLLM both see an identity resize; `ocr_meta` records `page_pixel_budget`. Page images are cached by content (`train-images/<tenant>/by-content/`, tagged by checksum, MinerU version and tier, device, cap and render date) across cycles.
 - Not built: a small-print filter for image_only targets. The OCR stage stores no line or span boxes; it needs them first (`lines.json` per page) to measure glyph height at the fast budget.
+
+## Changes of 2026-10-27 (first commercial training set)
+
+- `prepare_bundles` reads real documents of several lines laid out by line and kind (shape 4): `cgl` as gl, `bop` as boppr, `document_kind` in the metadata, package golds held to their folder's line and a missing `coverages` written `[]` (`own_line_gold`), `reviews.csv` keyed by path, folder, file name or `*`, and the split balanced within each line and kind (`split_groups.assign_cell_splits`).
+- Every page is read by OCR (`read_every_page_by_ocr`), part of the OCR pin from the reading to the served release.

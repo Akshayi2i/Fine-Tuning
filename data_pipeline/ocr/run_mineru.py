@@ -416,7 +416,11 @@ def process_document(
            else current_environment(device, strict=device == "cuda"))
     # A served MinerU's tier is part of its pin (configs/shared/ocr.yaml): a
     # reading at another tier was made by other models, another distribution.
-    tier = (engine.meta() if hasattr(engine, "meta") else {}).get("mineru_tier")
+    engine_meta = engine.meta() if hasattr(engine, "meta") else {}
+    tier = engine_meta.get("mineru_tier")
+    # And whether it reads every page by OCR: a hybrid PDF read from its text
+    # layer is other text than the same pages read by OCR.
+    every_page = engine_meta.get("read_every_page_by_ocr")
     cap = resolution_cap_px()
     meta_key = paths.ocr_meta(doc_type, source_id, tenant_id)
 
@@ -434,6 +438,7 @@ def process_document(
             and existing.get("ocr_device") == env.device
             and existing.get("resolution_cap_px") == cap
             and (tier is None or existing.get("mineru_tier") == tier)
+            and (every_page is None or existing.get("read_every_page_by_ocr") == every_page)
         )
         if unchanged:
             redo = _needs_ocr_now(existing, client, doc_type, source_id, tenant_id)
@@ -663,6 +668,13 @@ def find_unprocessed(client: BlobClient, doc_type: str, tenant_id: str | None = 
 
                 mineru_tier = served_mineru()["tier"]
             if recorded_tier != mineru_tier:
+                continue
+        # A reading that records the other OCR setting is not done: its hybrid
+        # pages were read another way (configs/shared/ocr.yaml).
+        if "read_every_page_by_ocr" in meta:
+            from common.config import ocr_every_page
+
+            if meta["read_every_page_by_ocr"] != ocr_every_page():
                 continue
         done.add(key.split("/")[3])
     return sorted(ingested - done)

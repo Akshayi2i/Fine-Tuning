@@ -222,6 +222,13 @@ def served_mineru() -> dict[str, str]:
     return {"version": str(block["version"]), "tier": str(block["tier"])}
 
 
+def ocr_every_page() -> bool:
+    """Whether MinerU reads every page by OCR, a PDF with a text layer too
+    (configs/shared/ocr.yaml ``read_every_page_by_ocr``; off when unset), for the
+    training corpus and serving alike."""
+    return bool(load_yaml(SHARED_OCR_CONFIG).get("read_every_page_by_ocr", False))
+
+
 def vision_for_task(task: str) -> dict[str, Any]:
     """The pixel budget for one task (arch v2.1 §7a).
 

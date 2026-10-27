@@ -341,6 +341,19 @@ everywhere (`common.lob.MERGED_LINES`), so Hagerty's classic-car policies train 
 are written. The audit accepts month/year dates (edition dates, kept as written) and
 word-valued indicator fields, and compares amounts by magnitude (a return is printed positive, recorded negative).
 
+**Real documents of several lines** (the first commercial training set, `data/source data`:
+`pdf/<line>/<scanned|hybrid>/` with `gold/<line>/<scanned|hybrid>/`) are bundled the same way, without `--lob`:
+
+```bash
+python -m data_pipeline.ingestion.prepare_bundles --input "data/source data" --out data/bundles_c1 --exclude data/bundle_exclusions_c1.csv
+```
+
+`cgl` reads as gl and `bop` as boppr; each bundle records `document_kind` (scanned or hybrid); a package gold is
+held to its folder's line and a gold with no `coverages` gets `[]` (both listed in `corrections.csv`). The split is
+by insured, balanced within each line and kind, so a line's few hybrid PDFs both train and are measured
+(`<out>/split.csv`). Every page, a hybrid's too, is read by MinerU's OCR in training and serving
+(`configs/shared/ocr.yaml` `read_every_page_by_ocr`, part of the OCR pin).
+
 **Labels come from the reviewed gold.** The generator's own labels cover ~29% of what a source's reviewed gold
 holds, and the model reads an omitted field as "not on the page". Two steps fix that without regenerating a PDF:
 the originals take their reviewed gold (fideon_synth `scripts/use_reviewed_gold.py`), and

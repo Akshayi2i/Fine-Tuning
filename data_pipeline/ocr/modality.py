@@ -107,10 +107,17 @@ def data_is_drawn(pdf_bytes: bytes) -> bool:
 def reads_by_ocr(pdf_bytes: bytes, *, modality: str | None = None, force_ocr: bool | None = None) -> bool:
     """Whether the document takes MinerU's OCR path.
 
+    Every document does when ``read_every_page_by_ocr`` is on
+    (``common.config.ocr_every_page``, configs/shared/ocr.yaml): training and
+    serving then read a hybrid PDF's pages as they read a scan's. Otherwise
     ``modality`` and ``force_ocr`` are the caller's when given and trusted as
-    given. Unset (the offline tools), the modality is detected and a native
+    given; unset (the offline tools), the modality is detected and a native
     document is checked for drawn figures.
     """
+    from common.config import ocr_every_page
+
+    if ocr_every_page():
+        return True
     detected = modality is None
     if detected:
         modality = detect_modality(pdf_bytes)
