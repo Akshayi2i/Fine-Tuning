@@ -41,6 +41,10 @@ data/CGL source data/
 data/cgl_bundles/
 data/bundle_exclusions.csv
 data/bundle_lob_overrides.csv
+# And everything else under data/: a new delivery's folder (bundles_c1, its
+# exclusions) was not listed above and showed as untracked, one `git add -A`
+# from a commit. Nothing under data/ is tracked.
+data/
 
 # Quotes gold-label values (VINs, postal codes, names): personal data, kept local.
 configs/field_types.proposed.yaml

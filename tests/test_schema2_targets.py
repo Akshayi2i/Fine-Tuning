@@ -115,7 +115,7 @@ def test_only_a_date_value_is_reformatted():
     assert decl["policy"]["effective_date"]["parsed"] == "04/01/2026"
     forms = next(t for p, t in targets if p.group == "forms" and "forms_and_endorsements" in t)[
         "forms_and_endorsements"]
-    assert forms[0]["edition_date"]["parsed"] == "09 18"            # a FieldValue, kept as printed
+    assert forms[0]["edition_date"]["parsed"] == "09/18"            # a FieldValue, kept as given
 
 
 def _envelopes(node):

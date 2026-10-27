@@ -1971,10 +1971,15 @@ import bundles — `<out>/<document>/{document.pdf, golden.json, metadata.json}`
    or a kind other than scanned or hybrid, is refused. Each pair becomes `<line>__<kind>__<name>`, with
    `document_kind` in its metadata. Before `corrected_gold`, `own_line_gold` holds each gold to its folder's
    line, logged in `corrections.csv`: a package's `lob_parts` collapse to the one part of that line (or the
-   first, renamed to it), which carries every value the gold holds (`package parts`), and a gold with no
-   `coverages` gets `[]` — the document prints no coverage table (`coverages missing`). `reviews.csv` names a
+   first, renamed to it); the other parts' printed title, form and premium become extra fields captioned by the
+   part's title (`package parts`: dropped, a window showing a part's premium was taught to leave it out), and a
+   gold with no `coverages` gets `[]` — the document prints no coverage table (`coverages missing`).
+   `<input>/exclusions.csv` (`document,reason`) is read on every run beside `--exclude`. `reviews.csv` names a
    document by its path under `gold/`, its folder name or its file name, or `*` for every document; a row of
-   its own wins over `*`. Families, review records, carriers and `--frozen` are as for shape 3, but the split
+   its own wins over `*`. A family is one insured as for shape 3, but joined on the policy number and the
+   mailing address too, across lines (`_insured_families`): keyed on the name alone, 13 pairs sharing a policy
+   or an address sat on both sides of the split, two in test. Review records, carriers and `--frozen` are as
+   for shape 3, but the split
    is balanced within each line **and kind** (`split_groups.assign_cell_splits`): hashed by line alone, the
    set's three boppr hybrids all drew val or test and none trained. A line's scans, or its hybrids, of at least
    three families keep one family in each of train, val and test (train and val once frozen), the rest in the
@@ -2107,6 +2112,13 @@ corrected at bundling instead.
 
 - `prepare_bundles` reads real documents of several lines laid out by line and kind (shape 4): `cgl` as gl, `bop` as boppr, `document_kind` in the metadata, package golds held to their folder's line and a missing `coverages` written `[]` (`own_line_gold`), `reviews.csv` keyed by path, folder, file name or `*`, and the split balanced within each line and kind (`split_groups.assign_cell_splits`).
 - Every page is read by OCR (`read_every_page_by_ocr`), part of the OCR pin from the reading to the served release.
+
+## Changes of 2026-10-27 (pre-cycle review)
+
+- Families are joined on the insured's name, the policy number or the mailing address, across lines; the importer records a canonical gold's `policy.policy_number`.
+- A package's dropped parts keep their printed title, form and premium as extra fields; `<input>/exclusions.csv` is read on every run.
+- A stored reading that records no `read_every_page_by_ocr` stands, with the setting on, only when it was read by OCR (`run_mineru.read_as_configured`): `find_unprocessed`, `process_document` and the corpus build agree, and the corpus manifest records the setting.
+- `smoke_run` needs `--batch` and, for its OCR step, `MINERU_URL`; it takes families of at most `--max-pages` (40) pages.
 
 ---
 
@@ -2372,6 +2384,10 @@ the bundles' `corrections.csv` and the delivery itself never changed:
   pages;
 - the **label rules** (`data_pipeline/ingestion/label_rules.py::apply_label_rules`), on the digital render's
   text layer:
+  - *edition parsed* (needing no text) — every form's `edition_date.parsed` is derived from its `raw` as
+    `MM/YY` (`edition_mm_yy`: "04 13", "0413", "04-13", "4/2013" give `04/13`; `None` when the print holds no
+    month and year), the schema's `fideon:code_parsed`. Training labels and served answers both pass through it
+    (`serving.conventions.conform`), so one shape is taught and served; the first commercial set wrote ~19.
   - *form edition moved* (first, and needing no text) — a form number that carries its edition in a shape no
     form number takes, with the form's `edition_date` empty, gives the edition to `edition_date` and keeps the
     number (`split_form_editions`, row by row through `split_form_edition`). Two shapes only: ISO's

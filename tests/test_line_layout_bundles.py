@@ -72,8 +72,18 @@ def test_a_package_keeps_the_part_of_its_folder_s_line_and_a_missing_table_is_em
     held, notes = P.own_line_gold(gold, "bopgl")
     assert [part["lob"] for part in held["lob_parts"]] == ["bopgl"]
     assert held["lob_parts"][0]["part_id"] == "part_2"            # the part of that line, where there is one
-    assert notes == [("package parts", "lob_parts property+bopgl+umbrella -> bopgl")]
+    assert notes == [("package parts", "lob_parts property+bopgl+umbrella -> bopgl; "
+                                       "2 value(s) of the others kept as extra fields")]
     assert len(gold["lob_parts"]) == 3                               # the delivered gold is never changed
+    # The other parts' printed titles stay, as extra fields: dropped, a window
+    # showing them was taught to leave them out.
+    assert [(entry["label"], entry["value"], entry["section_hint"]) for entry in held["additional_fields"]] == [
+        ("Coverage Part", gold["lob_parts"][0]["title"], "lob_parts"),
+        ("Coverage Part", gold["lob_parts"][2]["title"], "lob_parts")]
+    premium = copy.deepcopy(gold)
+    premium["lob_parts"][0]["premium"] = {**gold["lob_parts"][0]["title"], "raw": "$1,250", "parsed": 1250}
+    labels = [entry["label"] for entry in P.own_line_gold(premium, "bopgl")[0]["additional_fields"]]
+    assert f"{gold['lob_parts'][0]['title']['raw']} Premium" in labels
 
     # A part named for another line only (bop read as boppr): written as the line.
     held, notes = P.own_line_gold(_gold("boppr", "B CO", parts=("bopgl",)), "boppr")
@@ -148,6 +158,40 @@ def test_every_line_and_kind_of_three_or_more_trains_and_is_measured(tmp_path):
         assert "test" not in {row["split"] for row in csv.DictReader(fh)}
 
 
+def test_one_insured_by_policy_number_or_address_is_one_family_across_lines(tmp_path):
+    """The first commercial set had 13 pairs sharing a policy number or address
+    on both sides of the split: a renewal printing the insured's name another way."""
+    renewal = _gold("gl", "NORTHWIND HOLDINGS")
+    renewal["policy"]["policy_number"].update(raw="CGL 4471-0093", parsed="CGL 4471-0093")
+    first = _gold("gl", "NORTHWIND HLDGS GROUP")
+    first["policy"]["policy_number"].update(raw="CGL4471 0093", parsed="CGL4471 0093")
+    moved = _gold("wc", "BLUE HERON CAFE")
+    moved["named_insured"]["mailing_address"]["street"].update(raw="12 Elm St", parsed="12 Elm St")
+    same_place = _gold("boppr", "HERON CAFE OF TROY")
+    same_place["named_insured"]["mailing_address"]["street"].update(raw="12 ELM ST.", parsed="12 ELM ST.")
+    docs = {("cgl", "hybrid", "renewal"): renewal, ("cgl", "scanned", "first"): first,
+            ("wc", "scanned", "moved"): moved, ("bop", "scanned", "same_place"): same_place}
+    docs.update({("cgl", "hybrid", f"other_{n}"): _gold("gl", f"OTHER INSURED {n}") for n in range(6)})
+    out = tmp_path / "bundles"
+    P.prepare_original_bundles(_source(tmp_path, docs), out)
+
+    def family(name: str) -> str:
+        return json.loads((out / name / "metadata.json").read_text(encoding="utf-8"))["template_id"]
+
+    assert family("gl__hybrid__renewal") == family("gl__scanned__first")          # one policy number
+    assert family("wc__scanned__moved") == family("boppr__scanned__same_place")    # one address, two lines
+    assert len({family(f"gl__hybrid__other_{n}") for n in range(6)}) == 6
+    with (out / "split.csv").open(encoding="utf-8") as fh:
+        split_of = {row["document"]: row["split"] for row in csv.DictReader(fh)}
+    assert split_of["gl__hybrid__renewal"] == split_of["gl__scanned__first"]
+
+
+def test_the_importer_records_a_canonical_gold_s_policy_number():
+    assert P.gold_policy_number(_gold("gl", "A CO")) == _gold("gl", "A CO")["policy"]["policy_number"]["raw"]
+    assert P.gold_policy_number({"policy_number": "P-1"}) == "P-1"                # a flat label's
+    assert P.gold_policy_number({"policy": {}}) is None
+
+
 def test_a_line_s_held_out_carrier_still_goes_to_test():
     from data_pipeline.dataset_builder.split_groups import GroupRecord, assign_cell_splits
 
@@ -165,3 +209,14 @@ def test_the_command_bundles_the_layout_without_lob_and_asks_for_out(tmp_path, c
     assert "pass --out for real documents of several lines" in capsys.readouterr().err
     assert P.main(["--input", str(root), "--out", str(tmp_path / "b"), "--dry-run"]) == 0
     assert "1 document folder(s)" in capsys.readouterr().out
+
+
+def test_the_source_s_own_exclusions_hold_on_a_re_run_without_exclude(tmp_path):
+    """The 17-page boppr held for recheck went into train on a re-run that left
+    out --exclude."""
+    root = _source(tmp_path, {("cgl", "hybrid", f"g_{n}"): _gold("gl", f"INSURED {n}") for n in range(4)})
+    (root / "exclusions.csv").write_text("document,reason\ngl__hybrid__g_0,held for recheck\n", encoding="utf-8")
+    out = tmp_path / "bundles"
+    report = P.prepare_original_bundles(root, out)
+    assert not (out / "gl__hybrid__g_0").exists()
+    assert report.skipped["excluded: held for recheck"] == 1

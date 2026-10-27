@@ -744,7 +744,7 @@
    },
    "edition_date": {
     "raw": "09 18",
-    "parsed": "09 18",
+    "parsed": "09/18",
     "confidence": {
      "score": 1.0,
      "source": "deterministic"

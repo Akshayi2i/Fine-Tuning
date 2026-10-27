@@ -21,11 +21,13 @@ The rules, each logged as a correction (:func:`apply_label_rules`):
   the pages it cites: the same amount printed elsewhere may be another row's.
   A name or a phrase keeps every page it cites (it may be printed only in a
   logo), and another page is added only where it heads a line - a header, a
-  footer, a "Named Insured: ..." line - not where its words fall in a sentence
-  ("as shown in the Policy Declarations").
+  footer, a "Named Insured: ..." line, whole or followed by a break - not where
+  its words fall in a sentence ("as shown in the Policy Declarations"), nor
+  where a wrapped sentence starts with them ("Individual members of ...").
 * **extra field repeats a field** - folded into that field, as above. Only a
   value printed as itself (an identifier, a name, a large amount) that one
-  field holds: "$0.00", "$500" or "2015" in two places is not one value. A
+  field holds: "$0.00", "$500" or "2015" in two places is not one value, nor
+  is a status or a span ("NOT COVERED", "30 days": :func:`_generic`). A
   table row's value gains no page this way: a row is listed where its table
   lists it, not where it is mentioned.
 * **extra field merged** - the same label and value twice becomes one entry.
@@ -38,6 +40,10 @@ The rules, each logged as a correction (:func:`apply_label_rules`):
   ``edition_date`` empty, gives the edition to ``edition_date`` (parsed
   ``MM/YY``, the schema's code) and keeps the number. The labels did both, and
   the model learned both.
+* **edition parsed** - every form's ``edition_date.parsed`` is derived from its
+  ``raw`` as ``MM/YY`` (the schema's ``fideon:code_parsed``; ``None`` when the
+  print holds no month and year): the first commercial set wrote it some 19
+  ways.
 * **link names the building** - an entry that applies to a location with one
   building names the building, as the client's own example does (Coverage A
   and the mortgagee of homeowners_minimal.json name ``bldg_1``). The labels
@@ -192,6 +198,7 @@ def apply_label_rules(gold: dict[str, Any], pages: dict[int, str], *,
         texts = {}
     reliable = _reliable_pages(gold, texts) - set(scanned) if texts else set()
     notes: list[tuple[str, str]] = split_form_editions(gold)
+    notes += parse_form_editions(gold)
     _building_links(gold, notes)
     _extra_fields(gold, texts, reliable, notes)
     if texts:
@@ -274,6 +281,49 @@ def split_form_editions(gold: dict[str, Any]) -> list[tuple[str, str]]:
         notes.append(("form edition moved",
                       f"forms_and_endorsements[{index}].form_number {before!r} -> {form!r}, "
                       f"edition {printed!r}"))
+    return notes
+
+
+#: A month and a year as an edition prints them: "04 13", "04-13", "4/2013",
+#: "(Ed. 4-84)", "11.98" ...
+_EDITION_MONTH_YEAR = re.compile(r"(?<!\d)(?P<mm>0?[1-9]|1[0-2])\s*[-/. ]\s*(?P<yy>\d{4}|\d{2})(?!\d)")
+#: ... or run together: "0413".
+_EDITION_COMPACT = re.compile(r"(?<!\d)(?P<mm>0[1-9]|1[0-2])(?P<yy>\d{2})(?!\d)")
+
+
+def edition_mm_yy(text: Any) -> str | None:
+    """An edition's ``parsed``, derived from what it prints: ``MM/YY`` (the
+    schema's ``fideon:code_parsed``, CR-GL-17 - "04 13", "0413", "04-13" and
+    "4/2013" all give "04/13"), or ``None`` when the print holds no month and
+    year ("1.0")."""
+    value = str(text or "")
+    match = _EDITION_MONTH_YEAR.search(value) or _EDITION_COMPACT.search(value)
+    if match is None:
+        return None
+    return f"{int(match['mm']):02d}/{match['yy'][-2:]}"
+
+
+def parse_form_editions(gold: dict[str, Any]) -> list[tuple[str, str]]:
+    """Each form's ``edition_date.parsed`` derived from its ``raw``
+    (:func:`edition_mm_yy`), IN PLACE; one note per value changed.
+
+    The schema has the pipeline derive it (``fideon:code_parsed: MM/YY``), and
+    nothing did: the first commercial set taught it in some 19 shapes ("0916",
+    "04-13", "(Ed. 4-84)" beside "04/13"). Training labels and served answers
+    both pass through here, so the model is taught one shape and serves it.
+    """
+    from common.canonical import is_field_value
+
+    notes: list[tuple[str, str]] = []
+    for index, row in enumerate(gold.get("forms_and_endorsements") or []):
+        edition = row.get("edition_date") if isinstance(row, dict) else None
+        if not is_field_value(edition) or edition.get("raw") in (None, ""):
+            continue
+        parsed = edition_mm_yy(edition["raw"])
+        if edition.get("parsed") != parsed:
+            notes.append(("edition parsed", f"forms_and_endorsements[{index}].edition_date "
+                                            f"{edition.get('parsed')!r} -> {parsed!r}"))
+            edition["parsed"] = parsed
     return notes
 
 
@@ -506,14 +556,32 @@ def _on_page_edge(value: str, text: str) -> bool:
 
 
 def _heads_a_line(value: str, text: str) -> bool:
-    """Whether a normalised ``value`` begins a line of ``text``, or the part of
-    a line after its label ("Named Insured: Clemence Fairbank")."""
+    """Whether a normalised ``value`` heads a line of ``text``, or the part of a
+    line after its label ("Named Insured: Clemence Fairbank"): the whole of it,
+    or followed by a break - a bracket, a dash, a colon or a column gap
+    ("POLICY DECLARATIONS (continued)"). Not a wrapped sentence that starts with
+    its words: "Individual members of a joint venture ..." does not print an
+    entity type (the first commercial set gained 101 such pages)."""
     for line in text.splitlines():
         for part in (line, line.partition(":")[2]):
             words = grounding.normalise(part)
-            if words == value or words.startswith(f"{value} "):
+            if words == value or (words.startswith(f"{value} ") and _breaks_after(value, part)):
                 return True
     return False
+
+
+#: What ends a heading on its line: a bracket, a dash, a colon, a bar or a
+#: column gap (two spaces or a tab).
+_HEADING_BREAK = re.compile(r"^(?:\s*[(\[{:\-\u2013\u2014|/]|\s{2,}|\t)")
+
+
+def _breaks_after(value: str, part: str) -> bool:
+    """Whether ``part``, which starts with ``value``'s words, breaks right after them."""
+    count = len(value.split())
+    words = list(re.finditer(r"[^\W_]+", part))
+    if len(words) <= count:
+        return True
+    return bool(_HEADING_BREAK.match(part[words[count - 1].end():]))
 
 
 def _extra_fields(gold: dict[str, Any], texts: dict[int, grounding.PageText], reliable: set[int],
@@ -552,7 +620,7 @@ def _extra_fields(gold: dict[str, Any], texts: dict[int, grounding.PageText], re
         if _move_to_field(gold, label_n, value, notes, where):
             continue
         mates = core.get(value_n) if printed is not None and _distinctive(printed) else None
-        if mates and len(mates) == 1:
+        if mates and len(mates) == 1 and not _generic(printed):
             # One field holds this very value: the entry repeats it. Several do -
             # the value is not that field's alone - and the entry stays. A table
             # row keeps to the pages that list it: a coverage named again in an
@@ -583,6 +651,30 @@ def _extra_fields(gold: dict[str, Any], texts: dict[int, grounding.PageText], re
         if (texts and _has_digits(printed) and set(cited or texts) <= reliable
                 and grounding.ground(printed, cited, texts).status == grounding.NOT_PRINTED):
             notes.append((PRINTED_NOWHERE, f"additional_fields[{index}].value"))
+
+
+#: Words a status or a span is printed in: a value of these alone ("NOT
+#: COVERED", "30 days", "Included") reads the same in many fields.
+_GENERIC_WORDS = frozenset({
+    "not", "covered", "coverage", "included", "include", "excluded", "exclude", "excludes", "applies", "apply",
+    "applicable", "none", "n", "a", "na", "yes", "no", "see", "schedule", "per", "each", "day", "days", "week",
+    "weeks", "month", "months", "year", "years", "hour", "hours", "the", "of", "and", "or", "in", "all",
+    "any", "other", "same", "as", "above", "below", "shown", "stated", "only", "limit", "limits", "deductible",
+    "unlimited", "nil", "waived", "blanket", "actual", "loss", "sustained", "replacement", "cost", "acv", "rc",
+})
+
+
+def _generic(printed: Any) -> bool:
+    """Whether a value is a status or a span many fields print alike: its words
+    all :data:`_GENERIC_WORDS` or figures, with fewer than four figures. An
+    extra field of such a value ("NOT COVERED" under "Commercial Property
+    Coverage Part", "30 days" under a business-income option) is another
+    printed value that reads the same, not the field printed again: folded
+    into a coverage row, it was lost."""
+    if len(re.sub(r"\D", "", str(printed)).strip("0")) >= 4:
+        return False
+    words = grounding.normalise(printed).split()
+    return bool(words) and all(word in _GENERIC_WORDS or word.isdigit() for word in words)
 
 
 def _not_a_value(label: str, value: str) -> bool:

@@ -47,7 +47,7 @@ class _ConcurrentServed:
         return mv.OcrEnvironment("4.0.12", "cuda")
 
     def meta(self) -> dict:
-        return {"mineru_backend": "api", "mineru_tier": self.tier}
+        return {"mineru_backend": "api", "mineru_tier": self.tier, "read_every_page_by_ocr": True}
 
     def process(self, pdf_bytes: bytes, *, device: str, max_long_side_px: int) -> list[PageOutput]:
         with self.lock:

@@ -258,6 +258,10 @@ the bundles' `corrections.csv` and the delivery itself never changed:
   pages;
 - the **label rules** (`data_pipeline/ingestion/label_rules.py::apply_label_rules`), on the digital render's
   text layer:
+  - *edition parsed* (needing no text) — every form's `edition_date.parsed` is derived from its `raw` as
+    `MM/YY` (`edition_mm_yy`: "04 13", "0413", "04-13", "4/2013" give `04/13`; `None` when the print holds no
+    month and year), the schema's `fideon:code_parsed`. Training labels and served answers both pass through it
+    (`serving.conventions.conform`), so one shape is taught and served; the first commercial set wrote ~19.
   - *form edition moved* (first, and needing no text) — a form number that carries its edition in a shape no
     form number takes, with the form's `edition_date` empty, gives the edition to `edition_date` and keeps the
     number (`split_form_editions`, row by row through `split_form_edition`). Two shapes only: ISO's

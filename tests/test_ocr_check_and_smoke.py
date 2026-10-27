@@ -146,13 +146,46 @@ def test_the_smoke_subset_can_take_a_validation_and_a_test_source_of_every_line(
         folder.mkdir()
         (folder / "metadata.json").write_text(json.dumps(
             {"split": split, "lob": lob, "template_id": template, "synthetic": False}), encoding="utf-8")
-    args, _steps = parse_args(["--tenant", "smoke9", "--val-sources", "2", "--test-sources", "2"])
+    args, _steps = parse_args(["--batch", "b", "--tenant", "smoke9", "--val-sources", "2", "--test-sources", "2"])
     chosen = select_sources(tmp_path, train_sources=args.train_sources, val_sources=args.val_sources,
                             test_sources=args.test_sources)
     metas = [json.loads((f / "metadata.json").read_text("utf-8")) for f in chosen]
     for split in ("val", "test"):
         assert len({m["lob"] for m in metas if m["split"] == split}) == 2        # one per line first
-    assert parse_args(["--tenant", "smoke9"])[0].val_sources == 1                # as before by default
+    assert parse_args(["--batch", "b", "--tenant", "smoke9"])[0].val_sources == 1  # as before by default
+
+
+def test_the_smoke_subset_takes_families_of_few_pages_only(tmp_path):
+    """Training time follows pages: the first commercial set's alphabetical pick
+    held two 186-page policies, some 5 hours of training."""
+    import pymupdf
+
+    from orchestration.smoke_run import SmokeError, select_sources
+
+    _bundles(tmp_path)
+    for folder in tmp_path.iterdir():
+        doc = pymupdf.open()
+        for _ in range(30 if "h1" in folder.name else 2):
+            doc.new_page()
+        doc.save(folder / "document.pdf")
+    chosen = select_sources(tmp_path, train_sources=4, max_pages=40)
+    templates = {json.loads((f / "metadata.json").read_text("utf-8"))["template_id"] for f in chosen}
+    assert "A/homeowners/h1" not in templates                # 3 x 30 pages: over the limit
+    assert "A/homeowners/h2" in templates                    # the line's other family stands in
+    with pytest.raises(SmokeError, match="of at most 5 pages.*raise --max-pages"):
+        select_sources(tmp_path, max_pages=5)
+
+
+def test_the_smoke_run_needs_its_batch_named_and_a_served_mineru():
+    from orchestration.smoke_run import SmokeError, assert_served_ocr, parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["--tenant", "smoke9"])                   # the old default batch was other data
+    assert parse_args(["--batch", "c1"])[0].max_pages == 40
+    with pytest.raises(SmokeError, match="MINERU_URL is not set"):
+        assert_served_ocr(["select", "import", "ocr"], {})
+    assert_served_ocr(["select", "import", "ocr"], {"MINERU_URL": "https://mineru.example.test"})
+    assert_served_ocr(["check", "finetune"], {})             # no OCR step: nothing to read
 
 
 def test_the_smoke_subset_is_linked_not_moved(tmp_path):

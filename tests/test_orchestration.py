@@ -126,8 +126,10 @@ def seed_corpus(client: BlobClient) -> list[str]:
         client.write_bytes(paths.processed_page(doc_type, source_id, 1, "png"), b"\x89PNG fixture")
         client.write_json(paths.ocr_meta(doc_type, source_id), {
             "source_id": source_id, "doc_type": doc_type, "page_count": 1,
-            # Read by the served MinerU, as the OCR pin asks (configs/shared/ocr.yaml).
+            # Read by the served MinerU, as the OCR pin asks (configs/shared/ocr.yaml),
+            # every page by OCR, as a served reading records.
             "mineru_version": SERVED_MINERU["version"], "mineru_tier": SERVED_MINERU["tier"],
+            "read_every_page_by_ocr": True, "read_by_ocr": True,
             "ocr_device": "cuda", "resolution_cap_px": 1792,
             "source_checksum": f"sha-{source_id}", "table_row_counts": {"1": 0}, "failed_pages": [],
         })

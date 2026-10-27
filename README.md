@@ -345,13 +345,15 @@ word-valued indicator fields, and compares amounts by magnitude (a return is pri
 `pdf/<line>/<scanned|hybrid>/` with `gold/<line>/<scanned|hybrid>/`) are bundled the same way, without `--lob`:
 
 ```bash
-python -m data_pipeline.ingestion.prepare_bundles --input "data/source data" --out data/bundles_c1 --exclude data/bundle_exclusions_c1.csv
+python -m data_pipeline.ingestion.prepare_bundles --input "data/source data" --out data/bundles_c1
 ```
 
 `cgl` reads as gl and `bop` as boppr; each bundle records `document_kind` (scanned or hybrid); a package gold is
 held to its folder's line and a gold with no `coverages` gets `[]` (both listed in `corrections.csv`). The split is
-by insured, balanced within each line and kind, so a line's few hybrid PDFs both train and are measured
-(`<out>/split.csv`). Every page, a hybrid's too, is read by MinerU's OCR in training and serving
+by insured - documents sharing the insured's name, the policy number or the mailing address are one family,
+across lines - and balanced within each line and kind, so a line's few hybrid PDFs both train and are measured
+(`<out>/split.csv`). Documents held out of the set are listed in `<input>/exclusions.csv` (`document,reason`),
+read on every run beside `--exclude`. Every page, a hybrid's too, is read by MinerU's OCR in training and serving
 (`configs/shared/ocr.yaml` `read_every_page_by_ocr`, part of the OCR pin).
 
 **Labels come from the reviewed gold.** The generator's own labels cover ~29% of what a source's reviewed gold
@@ -443,7 +445,7 @@ documents. It fails when added fields are found on their page more than 5 points
 Before the real run, a smoke run proves the whole path on a few documents, under its own tenant and version:
 
 ```bash
-python -m orchestration.smoke_run          # select -> import -> OCR -> check -> finetune, tenant "smoke", v0
+MINERU_URL=<served MinerU> python -m orchestration.smoke_run --batch <batch>   # select -> import -> OCR -> check -> finetune, tenant "smoke", v0
 ```
 
 Before any `finetune`, the preflight checks everything it depends on in minutes, and builds the corpus in

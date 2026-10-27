@@ -50,15 +50,17 @@ def test_a_stored_reading_under_the_other_setting_is_not_done(monkeypatch):
 
     # The OCR stage's login: it may read raw-documents/.
     client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw", context="ocr")
-    for source_id, recorded in (("policy_0001", True), ("policy_0002", False), ("policy_0003", None)):
+    readings = {"policy_0001": {"read_every_page_by_ocr": True}, "policy_0002": {"read_every_page_by_ocr": False},
+                # From before the setting: one read by OCR, one a hybrid read from its text layer.
+                "policy_0003": {"read_by_ocr": True}, "policy_0004": {"read_by_ocr": False}}
+    for source_id, recorded in readings.items():
         client.write_json(paths.raw_metadata("policy", source_id), {"source_id": source_id})
-        meta = {"mineru_version": "4.0.12", "mineru_tier": "basic", "page_count": 1}
-        if recorded is not None:
-            meta["read_every_page_by_ocr"] = recorded
-        client.write_json(paths.ocr_meta("policy", source_id), meta)
-    # Read with the setting on, the reading that recorded it off is read again; one
-    # that recorded nothing (before the setting) is held to version and tier alone.
-    assert find_unprocessed(client, "policy", mineru_version="4.0.12") == ["policy_0002"]
+        client.write_json(paths.ocr_meta("policy", source_id),
+                          {"mineru_version": "4.0.12", "mineru_tier": "basic", "page_count": 1, **recorded})
+    # Read with the setting on: the reading that recorded it off is read again, and
+    # so is one from before the setting that read a text layer - taken as done, it
+    # trained on other text than serving reads, and no key told serving so.
+    assert find_unprocessed(client, "policy", mineru_version="4.0.12") == ["policy_0002", "policy_0004"]
     monkeypatch.setattr("common.config.ocr_every_page", lambda: False)
     assert find_unprocessed(client, "policy", mineru_version="4.0.12") == ["policy_0001"]
 

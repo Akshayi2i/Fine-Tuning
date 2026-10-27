@@ -125,6 +125,24 @@ def test_a_year_is_not_taken_for_a_repeat():
     assert [e["label"] for e in gold["additional_fields"]] == ["Trailer Information Year"]
 
 
+def test_a_wrapped_sentence_starting_with_a_value_does_not_print_it():
+    """Wording that wraps onto a line starting "Individual members ..." printed
+    no entity type; the first commercial set gained 101 such pages."""
+    gold = _gold(named_insured={"entity_type": _v("Individual", [1])})
+    pages = {**PAGES, 1: PAGES[1] + "\nEntity Type: Individual",
+             3: PAGES[3] + "\nIndividual members of a joint venture are insureds only while acting",
+             4: PAGES[4] + "\nIndividual  (see schedule)"}
+    apply_label_rules(gold, pages)
+    assert gold["named_insured"]["entity_type"]["page_ref"] == [1, 4]
+
+
+def test_a_status_phrase_is_not_folded_into_the_field_that_reads_the_same():
+    gold = _gold(additional_fields=[_extra("Commercial Property Coverage Part", "NOT COVERED", [2])])
+    gold["coverages"][0]["included"] = _v("NOT COVERED", [2])
+    apply_label_rules(gold, {**PAGES, 2: PAGES[2] + "\nCommercial Property Coverage Part NOT COVERED"})
+    assert [entry["label"] for entry in gold["additional_fields"]] == ["Commercial Property Coverage Part"]
+
+
 def test_an_extra_field_repeating_a_table_value_gives_its_row_no_page():
     gold = _gold(additional_fields=[_extra("Modifies coverage(s) at renewal", "Coverage A - Dwelling", [4])])
     gold["coverages"][0]["coverage_name"] = _v("Coverage A - Dwelling", [2])
@@ -557,7 +575,8 @@ def _stored_gold(client, source_id, lob, number="CG 00 01 04 13"):
     client.write_json(paths.golden_label("policy", source_id), _forms(number))
     client.write_json(paths.label_metadata("policy", source_id),
                       {"lob": lob, "reviewer_id": "a.reviewer", "review_date": "2026-10-20"})
-    client.write_json(paths.ocr_meta("policy", source_id), {"page_count": 1, "mineru_version": "3.4.5"})
+    client.write_json(paths.ocr_meta("policy", source_id), {"page_count": 1, "mineru_version": "3.4.5",
+                                                          "read_every_page_by_ocr": True})
     client.write_text(paths.processed_page("policy", source_id, 1, "md"), f"Forms {number}")
     client.write_bytes(paths.processed_page("policy", source_id, 1, "png"), b"\x89PNG")
 
@@ -594,3 +613,19 @@ def test_the_corpus_builds_verification_applies_the_rule_when_told_the_line():
     assert moved["forms_and_endorsements"][0]["edition_date"]["parsed"] == "04/13"
     assert verified_label(gold, ["text"], doc_type="policy", lob="equipment_breakdown") is gold
     assert gold == _forms("CG 00 01 04 13")
+
+
+def test_an_edition_is_parsed_as_mm_yy_from_what_it_prints():
+    """The schema derives it (fideon:code_parsed MM/YY); the first commercial set
+    taught it in some 19 shapes."""
+    from data_pipeline.ingestion.label_rules import edition_mm_yy
+
+    assert [edition_mm_yy(v) for v in ("04 13", "0413", "04-13", "4/2013", "(Ed. 4-84)", "1.0")] == [
+        "04/13", "04/13", "04/13", "04/13", "04/84", None]
+    gold = _gold(forms_and_endorsements=[
+        {"form_number": _v("CG 00 01", [3]), "edition_date": _v("0413", [3], "0413")},
+        {"form_number": _v("IL 00 17", [3]), "edition_date": _v("11 98", [3], "11/98")}])
+    notes = apply_label_rules(gold, PAGES)
+    assert [row["edition_date"]["parsed"] for row in gold["forms_and_endorsements"]] == ["04/13", "11/98"]
+    assert [row["edition_date"]["raw"] for row in gold["forms_and_endorsements"]] == ["0413", "11 98"]
+    assert ("edition parsed", "forms_and_endorsements[0].edition_date '0413' -> '04/13'") in notes

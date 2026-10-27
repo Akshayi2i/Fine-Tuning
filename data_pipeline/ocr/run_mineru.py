@@ -438,7 +438,7 @@ def process_document(
             and existing.get("ocr_device") == env.device
             and existing.get("resolution_cap_px") == cap
             and (tier is None or existing.get("mineru_tier") == tier)
-            and (every_page is None or existing.get("read_every_page_by_ocr") == every_page)
+            and (every_page is None or read_as_configured(existing, every_page))
         )
         if unchanged:
             redo = _needs_ocr_now(existing, client, doc_type, source_id, tenant_id)
@@ -615,6 +615,26 @@ def process_batch(
     return {"processed": processed, "skipped": skipped, "failed": failed}
 
 
+def read_as_configured(meta: dict, every_page: bool | None = None) -> bool:
+    """Whether a stored reading was read as configs/shared/ocr.yaml reads now
+    (``read_every_page_by_ocr``; ``every_page`` when given).
+
+    A reading that records the setting is held to it. One made before the
+    setting existed records none: with the setting on it stands only when it was
+    read by OCR (``read_by_ocr``) - a hybrid PDF read from its text layer is
+    other text than the same pages read by OCR, and taken as done it trained
+    while serving refused nothing (no key to compare). With the setting off,
+    such a reading stands, as before.
+    """
+    if every_page is None:
+        from common.config import ocr_every_page
+
+        every_page = ocr_every_page()
+    if "read_every_page_by_ocr" in meta:
+        return meta["read_every_page_by_ocr"] == every_page
+    return not every_page or bool(meta.get("read_by_ocr"))
+
+
 def find_unprocessed(client: BlobClient, doc_type: str, tenant_id: str | None = None,
                      mineru_version: str | None = None, mineru_tier: str | None = None,
                      meta_cache: dict[str, Any] | None = None) -> list[str]:
@@ -669,13 +689,10 @@ def find_unprocessed(client: BlobClient, doc_type: str, tenant_id: str | None = 
                 mineru_tier = served_mineru()["tier"]
             if recorded_tier != mineru_tier:
                 continue
-        # A reading that records the other OCR setting is not done: its hybrid
-        # pages were read another way (configs/shared/ocr.yaml).
-        if "read_every_page_by_ocr" in meta:
-            from common.config import ocr_every_page
-
-            if meta["read_every_page_by_ocr"] != ocr_every_page():
-                continue
+        # A reading under the other OCR setting is not done: its hybrid pages
+        # were read another way (configs/shared/ocr.yaml).
+        if not read_as_configured(meta):
+            continue
         done.add(key.split("/")[3])
     return sorted(ingested - done)
 

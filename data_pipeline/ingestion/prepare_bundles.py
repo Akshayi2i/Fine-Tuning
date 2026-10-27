@@ -92,6 +92,9 @@ October 2026), laid out by line and by how each was made:
 
     python -m data_pipeline.ingestion.prepare_bundles --input "data/source data" --out data/bundles_c1
 
+``<input>/exclusions.csv`` (``document,reason``, the bundle folder names) is read
+on every run, beside ``--exclude``, and ``<input>/reviews.csv`` gives the review records.
+
 Bundled as above, every line in one draw, balanced within each line and kind
 (:func:`~data_pipeline.dataset_builder.split_groups.assign_cell_splits`: three or
 more families of a line's scans, or of its hybrids, keep one in each of train,
@@ -111,6 +114,7 @@ file name, or ``*`` for every document one person reviewed.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import os
@@ -119,6 +123,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from common.lob import within_lines
 
@@ -151,6 +156,11 @@ TWIN_COLUMNS = ("split", "lob", "carrier", "seed", "twin", "digital", "scanned",
 REVIEW_COLUMNS = ("reviewer_id", "review_date", "draft_backend")
 #: Real documents alone: their review records, beside PDFs/ and Gold JSON/.
 REVIEWS_FILE = "reviews.csv"
+#: Real documents' own exclusions, beside their reviews (``document,reason``):
+#: read on every run, so a re-run that leaves out ``--exclude`` cannot bring
+#: back a document held out of the set (it did: the 17-page boppr held for
+#: recheck went into train).
+EXCLUSIONS_FILE = "exclusions.csv"
 
 #: Line names a delivery misspells, in its folders and its manifest's lob column.
 DELIVERY_SPELLINGS = {"motorcyle": "motorcycle"}
@@ -603,20 +613,83 @@ def _insured_key(name: str) -> str:
     return "_".join(word for word in _slug(name).split("_") if word not in _NAME_NOISE)
 
 
-def _insured_family(gold: dict, line: str, fallback: str) -> str:
-    """One insured's documents, as one family: ``<line>/<hash of the name>``.
+def _printed(node: Any) -> str:
+    """A gold value as printed: its ``raw``, else ``parsed``, else the value itself."""
+    if isinstance(node, dict):
+        node = node.get("raw") or node.get("parsed")
+    return str(node) if node not in (None, "") else ""
+
+
+def gold_policy_number(gold: dict) -> str | None:
+    """The policy number a gold prints: a canonical gold's ``policy.policy_number``,
+    a flat label's ``policy_number``."""
+    number = _printed((gold.get("policy") or {}).get("policy_number")) or _printed(gold.get("policy_number"))
+    return number or None
+
+
+def _identity_keys(gold: dict) -> list[str]:
+    """What says two golds are one insured's: the name (without case,
+    punctuation or legal-form words), the policy number, the mailing address
+    (street and ZIP). Any one shared joins them."""
+    import re
+
+    insured = gold.get("named_insured") or {}
+    keys = []
+    if name := _insured_key(_printed(insured.get("primary_name"))):
+        keys.append(f"name:{name}")
+    number = re.sub(r"[^A-Z0-9]", "", (gold_policy_number(gold) or "").upper())
+    if len(number) >= 6:                       # shorter is a form or line number, not a policy's
+        keys.append(f"policy:{number}")
+    address = insured.get("mailing_address") or {}
+    street = _slug(_printed(address.get("street")))
+    postal = re.sub(r"\D", "", _printed(address.get("postal_code")))[:5]
+    if street and len(postal) == 5:
+        keys.append(f"address:{street}:{postal}")
+    return keys
+
+
+def _insured_families(golds: dict[str, dict], line_of: dict[str, str]) -> dict[str, str]:
+    """``{document: family}``: one insured's documents, of every line, as one family.
 
     The declarations, the policy and its renewals print the same insured, and a
     model scored on one of them after training on another is scored on a
-    document it has as good as seen. Hashed so a family id does not spell the
-    name out.
+    document it has as good as seen. Keyed on the name alone, the first
+    commercial set put 13 pairs sharing a policy number or address on both
+    sides of the split (a renewal printing the name another way), two of them in
+    test; so documents sharing the name, the policy number or the mailing address
+    are one family, joined transitively, across lines too. ``<line>/<hash>``,
+    the line of its first document: hashed so the id does not spell the name out.
     """
     import hashlib
 
-    name = (gold.get("named_insured") or {}).get("primary_name")
-    name = name.get("raw") if isinstance(name, dict) else name
-    key = _insured_key(str(name)) if name else ""
-    return f"{line}/{hashlib.sha256((key or fallback).encode()).hexdigest()[:10]}"
+    parent = {name: name for name in golds}
+
+    def root(name: str) -> str:
+        while parent[name] != name:
+            parent[name] = parent[parent[name]]
+            name = parent[name]
+        return name
+
+    first_with: dict[str, str] = {}
+    keys_of = {name: _identity_keys(gold) for name, gold in sorted(golds.items())}
+    for name, keys in keys_of.items():
+        for key in keys:
+            if key in first_with:
+                parent[root(name)] = root(first_with[key])
+            else:
+                first_with[key] = name
+    members: dict[str, list[str]] = {}
+    for name in sorted(golds):
+        members.setdefault(root(name), []).append(name)
+    family: dict[str, str] = {}
+    for docs in members.values():
+        # The smallest name key the family prints, else its first document: the
+        # id stays put while documents of the same insured are added, and is the
+        # id the name alone gave before (a family nothing joins keeps its split).
+        names = sorted(k.removeprefix("name:") for doc in docs for k in keys_of[doc] if k.startswith("name:"))
+        digest = hashlib.sha256((names[0] if names else docs[0]).encode()).hexdigest()[:10]
+        family.update(dict.fromkeys(docs, f"{line_of[docs[0]]}/{digest}"))
+    return family
 
 
 def _printed_carrier_key(gold: dict) -> str | None:
@@ -693,6 +766,7 @@ def prepare_original_bundles(
     recodes = read_recodes()
     report = PrepareReport(out=out, dry_run=dry_run)
     reviews = read_reviews(source / REVIEWS_FILE)
+    exclusions = {**read_exclusions(source / EXCLUSIONS_FILE), **(exclusions or {})}
     names = {key: (f"{line_of[key]}__{kind_of[key]}__{_slug(key.name)}" if by_line
                    else f"{line_of[key]}__{_slug(str(key.parent))}__{_slug(key.name)}")
              for key in pdfs.keys() | golds.keys()}
@@ -727,7 +801,8 @@ def prepare_original_bundles(
     # One family per insured, split as the corpus build splits a tenant with no
     # delivered split - so the documents are where the build would have put them.
     key_of = {name: key for key, name in names.items()}
-    family = {name: _insured_family(gold, line_of[key_of[name]], name) for name, (_, gold, _, _) in kept.items()}
+    family = _insured_families({name: gold for name, (_, gold, _, _) in kept.items()},
+                               {name: line_of[key_of[name]] for name in kept})
     members: dict[str, list[str]] = {}
     for name, group in sorted(family.items()):
         members.setdefault(group, []).append(name)
@@ -965,9 +1040,13 @@ def own_line_gold(gold: dict, line: str) -> tuple[dict, list[tuple[str, str]]]:
 
     * **package parts**: a gold listing several parts (``property``, ``bopgl``,
       ``umbrella``), or a part of another line, keeps one part, of ``line`` - the
-      part of that line where it has one, else the first. Every value the gold
-      holds is already in ``line``'s terms (its codes are ``line``'s), and a
-      common-model line's schema holds one part of itself;
+      part of that line where it has one, else the first. Every other value the
+      gold holds is already in ``line``'s terms (its codes are ``line``'s), and a
+      common-model line's schema holds one part of itself. The other parts'
+      printed title, form and premium become extra fields (``additional_fields``,
+      captioned by the part's title): dropped, the windows showing a part's
+      premium were taught to leave a printed value out (57 values on the first
+      commercial set);
     * **coverages missing**: an empty ``coverages`` table, which the schema
       requires; a document that prints no coverage has none.
     """
@@ -983,11 +1062,37 @@ def own_line_gold(gold: dict, line: str) -> tuple[dict, list[tuple[str, str]]]:
                         if isinstance(part, dict) and name and delivery_line(str(name)) == line), None)
             kept = own if own is not None else (parts[0] if isinstance(parts[0], dict) else {})
             gold["lob_parts"] = [{**kept, "lob": line}]
-            notes.append(("package parts", f"lob_parts {'+'.join(map(str, named))} -> {line}"))
+            extras = _dropped_part_fields([part for part in parts if part is not kept and isinstance(part, dict)])
+            if extras:
+                gold["additional_fields"] = [*(gold.get("additional_fields") or []), *extras]
+            notes.append(("package parts", f"lob_parts {'+'.join(map(str, named))} -> {line}"
+                                           + (f"; {len(extras)} value(s) of the others kept as extra fields"
+                                              if extras else "")))
     if "coverages" not in gold:
         gold = {**gold, "coverages": []}
         notes.append(("coverages missing", "coverages = [] (the document prints no coverage table)"))
     return gold, notes
+
+
+#: A dropped package part's printed values, and the caption each is kept under
+#: after the part's title.
+_PART_FIELDS = (("title", "Coverage Part"), ("coverage_part_form", "Form"), ("premium", "Premium"))
+
+
+def _dropped_part_fields(parts: list[dict]) -> list[dict]:
+    """Extra-field entries holding what other package parts print: each part's
+    title, form and premium, captioned by the part's title."""
+    entries = []
+    for part in parts:
+        title = _printed(part.get("title")) or str(part.get("lob") or "")
+        for field_name, caption in _PART_FIELDS:
+            value = part.get(field_name)
+            if not isinstance(value, dict) or not _printed(value):
+                continue
+            label = caption if field_name == "title" else f"{title} {caption}"
+            entries.append({"label": label, "value": copy.deepcopy(value),
+                            "page_ref": list(value.get("page_ref") or []), "section_hint": "lob_parts"})
+    return entries
 
 
 def corrected_gold(

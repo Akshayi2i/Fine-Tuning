@@ -749,6 +749,9 @@ def test_engine_receives_the_configured_resolution_cap(ocr_client, monkeypatch):
 
 
 def test_find_unprocessed_lists_only_documents_without_ocr_meta(ocr_client, monkeypatch):
+    # The in-process engine's readings, from before every page was read by OCR:
+    # held to version and tier, as then (test_ocr_every_page holds the setting).
+    monkeypatch.setattr("common.config.ocr_every_page", lambda: False)
     monkeypatch.setattr(run_mineru, "current_environment",
                         lambda device=None, strict=True: mv.OcrEnvironment("1.4.2", "cuda"))
     _seed_raw_document(ocr_client, source_id="policy_0001")
@@ -763,6 +766,9 @@ def test_a_document_another_mineru_read_is_unprocessed_for_this_one(ocr_client, 
     """The model learns how MinerU formats its output: a tenant read partly by
     MinerU 1.x and partly by 3.x is two distributions, so --all-unprocessed reads
     the 1.x documents again."""
+    # The in-process engine's readings, from before every page was read by OCR:
+    # held to version and tier, as then (test_ocr_every_page holds the setting).
+    monkeypatch.setattr("common.config.ocr_every_page", lambda: False)
     monkeypatch.setattr(run_mineru, "current_environment",
                         lambda device=None, strict=True: mv.OcrEnvironment("1.3.12", "cuda"))
     _seed_raw_document(ocr_client, source_id="policy_0001")
@@ -1011,9 +1017,12 @@ class _ServedStub(StubEngine):
         return {"mineru_backend": "api", "mineru_tier": self.tier}
 
 
-def test_a_reading_at_another_tier_of_the_served_minerU_is_read_again(ocr_client):
+def test_a_reading_at_another_tier_of_the_served_minerU_is_read_again(ocr_client, monkeypatch):
     """The tier is part of the pin: another tier reads a page with other models,
     so a document read at it is another distribution, not an unchanged one."""
+    # The in-process engine's readings, from before every page was read by OCR:
+    # held to version and tier, as then (test_ocr_every_page holds the setting).
+    monkeypatch.setattr("common.config.ocr_every_page", lambda: False)
     _seed_raw_document(ocr_client)
     run_mineru.process_document("policy", "policy_0001", ocr_client, _ServedStub("flash"))
     assert run_mineru.find_unprocessed(ocr_client, "policy", mineru_version="4.0.12") == ["policy_0001"]

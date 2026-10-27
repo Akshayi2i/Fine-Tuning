@@ -1,12 +1,15 @@
 """A small end-to-end run on the pod, before the real one: does the whole path work?
 
-    python -m orchestration.smoke_run                      # every step
-    python -m orchestration.smoke_run --steps check,finetune
-    python -m orchestration.smoke_run --batch cgl-v1 --tenant smoke-cgl
+    MINERU_URL=https://... python -m orchestration.smoke_run --batch c1   # every step
+    python -m orchestration.smoke_run --batch c1 --steps check,finetune
 
-It takes a handful of source documents from the uploaded batch — each with all
-of its synthetic twins, so the delivered split stays intact (``--train-sources``,
-``--val-sources``, ``--test-sources``: 4, 1 and 1 by default) — and runs them
+It takes a handful of source documents from the uploaded batch (``--batch``,
+required: the default was an old batch, and a run without it smoke-tested other
+data) — each with all of its synthetic twins, so the delivered split stays
+intact (``--train-sources``, ``--val-sources``, ``--test-sources``: 4, 1 and 1
+by default), and only families of at most ``--max-pages`` pages (40 by default:
+on the first commercial set the alphabetical pick held two 186-page policies,
+about 380 training steps, some 5 hours) — and runs them
 through import, OCR, the post-OCR check and ``finetune``, under their own
 tenant (``smoke``) and version (``v0``). Nothing it writes touches the real
 data: corpus, labels and OCR output are tenant-scoped, and the model versions
@@ -47,11 +50,13 @@ class SmokeError(RuntimeError):
 
 
 def select_sources(bundles: Path, *, train_sources: int = 4, val_sources: int = 1,
-                   test_sources: int = 1) -> list[Path]:
+                   test_sources: int = 1, max_pages: int | None = None) -> list[Path]:
     """Folders of a few whole source families, spread across lines, split kept.
 
     A source is taken with every twin it has, so no family is cut in two, and
-    train sources are drawn from as many different lines as there are.
+    train sources are drawn from as many different lines as there are. With
+    ``max_pages``, only a family whose PDFs hold at most that many pages in all
+    is taken: training time follows pages, not documents.
     """
     families: dict[tuple[str, str], list[Path]] = defaultdict(list)
     line_of: dict[tuple[str, str], str] = {}
@@ -63,11 +68,16 @@ def select_sources(bundles: Path, *, train_sources: int = 4, val_sources: int = 
         key = (split, str(meta.get("template_id") or meta_path.parent.name))
         families[key].append(meta_path.parent)
         line_of[key] = str(meta.get("lob"))
+    if max_pages:
+        families = {key: folders for key, folders in families.items()
+                    if sum(_page_count(folder / "document.pdf") for folder in folders) <= max_pages}
     chosen: list[Path] = []
     for split, count in (("train", train_sources), ("val", val_sources), ("test", test_sources)):
         keys = sorted(k for k in families if k[0] == split)
         if len(keys) < count:
-            raise SmokeError(f"the batch has {len(keys)} {split} source(s); the smoke run needs {count}")
+            raise SmokeError(f"the batch has {len(keys)} {split} source(s)"
+                             f"{f' of at most {max_pages} pages' if max_pages else ''}; the smoke run "
+                             f"needs {count}" + ("; raise --max-pages" if max_pages else ""))
         picked: list[tuple[str, str]] = []
         seen_lines: set[str] = set()
         for key in keys:                                    # one per line first
@@ -80,6 +90,29 @@ def select_sources(bundles: Path, *, train_sources: int = 4, val_sources: int = 
         for key in picked:
             chosen += families[key]
     return chosen
+
+
+def _page_count(pdf: Path) -> int:
+    from common.pdf_access import unlocked_pdf
+
+    import pymupdf
+
+    with pymupdf.open(stream=unlocked_pdf(pdf.read_bytes()), filetype="pdf") as doc:
+        return doc.page_count
+
+
+def assert_served_ocr(steps: list[str], environ: dict[str, str] | None = None) -> None:
+    """Refuse an OCR step with no served MinerU named (``MINERU_URL``).
+
+    Without it the step reads with the OCR environment's MinerU, whose reading
+    the corpus build and preflight refuse unless it is the pinned version
+    (configs/shared/ocr.yaml) - found only after every page was read.
+    """
+    environ = os.environ if environ is None else environ
+    if "ocr" in steps and not (environ.get("MINERU_URL") or "").strip():
+        raise SmokeError("MINERU_URL is not set: the OCR step would read with the OCR environment's "
+                         "MinerU, not the pinned served one, and preflight would refuse every reading "
+                         "after the whole subset was read. Set MINERU_URL to the served MinerU.")
 
 
 def assert_fresh(client, tenant: str, version: str, steps: list[str]) -> None:
@@ -186,7 +219,7 @@ def commands(*, batch_dir: Path, subset_dir: Path, tenant: str, version: str,
 def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
     """The smoke run's arguments and its steps, refused when they cannot run."""
     parser = argparse.ArgumentParser(description="A small end-to-end run on the pod")
-    parser.add_argument("--batch", default="personal-v1", help="the uploaded batch under intake/")
+    parser.add_argument("--batch", required=True, help="the uploaded batch under intake/")
     parser.add_argument("--tenant", default=DEFAULT_TENANT)
     parser.add_argument("--version", default=DEFAULT_VERSION)
     parser.add_argument("--train-sources", type=int, default=4)
@@ -194,6 +227,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     # line give each line its own checkpoint and calibration documents.
     parser.add_argument("--val-sources", type=int, default=1)
     parser.add_argument("--test-sources", type=int, default=1)
+    parser.add_argument("--max-pages", type=int, default=40,
+                        help="take only families of at most this many pages in all (0: no limit)")
     parser.add_argument("--steps", default=",".join(STEPS), help=f"comma-separated, from {STEPS}")
     args = parser.parse_args(argv)
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
@@ -216,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
     from artifact_registry.blob_client import BlobClient
 
     try:
+        assert_served_ocr(steps)
         assert_fresh(BlobClient(), args.tenant, args.version, steps)
     except SmokeError as exc:
         print(f"smoke: {exc}", flush=True)
@@ -234,8 +270,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
             print(report.describe(), flush=True)
             if report.failed:
                 return 1
-        folders = select_sources(batch_dir, train_sources=args.train_sources,
-                                 val_sources=args.val_sources, test_sources=args.test_sources)
+        try:
+            folders = select_sources(batch_dir, train_sources=args.train_sources, val_sources=args.val_sources,
+                                     test_sources=args.test_sources, max_pages=args.max_pages or None)
+        except SmokeError as exc:
+            print(f"smoke: {exc}", flush=True)
+            return 1
         print(f"smoke subset: {stage_subset(folders, subset_dir)} document(s) in {subset_dir}", flush=True)
     env = {**os.environ, "FIDEON_DETACHED": "1"}          # already in tmux: steps run in place
     for step, command in commands(batch_dir=batch_dir, subset_dir=subset_dir, tenant=args.tenant,

@@ -568,6 +568,7 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
     unreviewed: list[tuple[str, str]] = []
     #: Documents read with the other read_every_page_by_ocr than configs/shared/ocr.yaml's.
     from common.config import ocr_every_page
+    from data_pipeline.ocr.run_mineru import read_as_configured
 
     every_page = ocr_every_page()
     other_setting: list[str] = []
@@ -605,7 +606,7 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
             read_by[version] = read_by.get(version, 0) + 1
             reading = (version, ocr_meta.get("mineru_tier"))
             readings[reading] = readings.get(reading, 0) + 1
-            if "read_every_page_by_ocr" in ocr_meta and ocr_meta["read_every_page_by_ocr"] != every_page:
+            if not read_as_configured(ocr_meta, every_page):
                 other_setting.append(source_id)
             page_keys.append([paths.processed_page(doc_type, source_id, page, "md", ctx.tenant_id)
                               for page in range(1, page_count + 1)])
@@ -1243,9 +1244,13 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
     # carries (registry_utils.releases.ocr_pin_refusal).
     if ocr_environment.get("mineru_tier"):
         manifest["mineru_tier"] = ocr_environment["mineru_tier"]
-    # And whether every page was read by OCR (configs/shared/ocr.yaml), where recorded.
-    if "read_every_page_by_ocr" in ocr_environment:
-        manifest["read_every_page_by_ocr"] = ocr_environment["read_every_page_by_ocr"]
+    # And whether every page was read by OCR (configs/shared/ocr.yaml): every
+    # document's reading was held to the setting (load_labeled_documents refuses
+    # one read otherwise), so it is the corpus's - not the first document's
+    # record alone, which a reading from before the setting does not carry.
+    from common.config import ocr_every_page
+
+    manifest["read_every_page_by_ocr"] = ocr_every_page()
     # Each kept gold's content as stored, so a later cycle can tell whether a gold
     # this corpus trained on has changed since (continued_training.fresh_when_golds_changed).
     manifest["gold_sha256"] = stored_gold_hashes(

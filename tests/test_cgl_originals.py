@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -28,6 +29,11 @@ def _gl_gold(insured: str = "TAYLOR SAMPLE", parts: tuple[str, ...] = ("gl",), c
     example = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     gold = {key: copy.deepcopy(example[key]) for key in ("document", "carrier", "named_insured", "policy")}
     gold["named_insured"]["primary_name"].update(raw=insured, parsed=insured)
+    # Each insured its own policy number and address: documents sharing either
+    # are one family (prepare_bundles._insured_families), as one shared name is.
+    tag = hashlib.sha256(insured.encode()).hexdigest()[:8].upper()
+    gold["policy"]["policy_number"].update(raw=f"GL-{tag}", parsed=f"GL-{tag}")
+    gold["named_insured"]["mailing_address"]["street"].update(raw=f"{tag} Elm St", parsed=f"{tag} Elm St")
     if carrier is not None:
         gold["carrier"]["name"].update(raw=carrier, parsed=carrier)
     gold["lob_parts"] = [{**copy.deepcopy(example["lob_parts"][0]), "part_id": f"part_{n}", "lob": lob}

@@ -244,6 +244,12 @@ def import_history(
     return [*(e for e in history if e != entry), entry]
 
 
+def _gold_policy_number(golden: dict) -> str | None:
+    from data_pipeline.ingestion.prepare_bundles import gold_policy_number
+
+    return gold_policy_number(golden)
+
+
 def import_bundle(
     bundle: LabeledPdf,
     doc_type: str,
@@ -285,9 +291,9 @@ def import_bundle(
         "lob": bundle.lob,
         "field_provenance": bundle.metadata.get("field_provenance", {}),
         "document_kind": bundle.metadata.get("document_kind"),
-        "policy_number": (
-            bundle.metadata.get("policy_number") or bundle.golden.get("policy_number")
-        ),
+        # A canonical gold holds it at policy.policy_number; read at the top
+        # level only, it was null for every one.
+        "policy_number": bundle.metadata.get("policy_number") or _gold_policy_number(bundle.golden),
         "template_id": bundle.metadata.get("template_id"),
         # Fideon SPEC_09 amendment item 8: every example carries its carrier and,
         # for a synthetic twin, which twin of its seed it is (the bundle's
