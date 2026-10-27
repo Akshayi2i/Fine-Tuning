@@ -1,0 +1,1137 @@
+# SPEC_21 4.2.4 coverage codes of boppr (schema 2.3.0, common model 1.4.0).
+# Built from the 5 single-LOB businessowners property seed documents of 3 carriers (Leatherstocking
+# Cooperative Insurance Company, Madison Mutual, Reinsure), read in place, and the pre-SPEC_21 boppr.json 1.5.0.
+# aliases: coverage names as the seeds print them (whitespace collapsed; a wrapped name joined with one space).
+# L1 codes a printed row by its name (fideon/l1/spec21.py coverage_code_for), so every name a seed prints
+# in a coverage schedule is an alias of exactly one code. Codes are LOB-prefixed (BOPPR_); a coverage the
+# common model shares across lines uses its X_ code (common_model.json fideon:shared_coverage_codes);
+# shared: true marks those. X_MED_PAY is listed here with this line's own default limit type (per_person:
+# a businessowners medical payments limit is a per-person limit unless the row prints otherwise).
+# Business liability rows (Coverage L, N, O, P) printed on a businessowners property declarations are coded
+# here under BOPPR_ codes; CR-BOPPR-01 asks for shared X_ codes so they align with gl and bopgl.
+# Rows that print an exclusion or a credit against a form number (LS-59 Lead Exclusion, BP 0331 Protective
+# Devices) are not coverages: their premium is forms_and_endorsements[].premium.
+# carriers: how many of the 3 seed carriers print one of the code's names.
+# 2.2.0 (25 October 2026, additive): G1/bop review. The two businessowners declarations of the folder (Utica First
+# Businessowners Special Policy with its Maximizer package endorsement; NYCM BP 00 03) print rows the line lacked: names of
+# an existing concept were added as aliases of its code, a concept no code covered got a code on both lines (counterpart
+# keys), and the printed package endorsements (Maximizer, Select Choice Plus, Policy Protector Pack, NYCM BOP Enhancement)
+# stay forms_and_endorsements[].premium, not coverages. Nothing is removed or renamed.
+
+# 2.3.0 (26 October 2026, additive): the coverage rows the G1 scanned and hybrid seeds printed that the line had no name or code for. Printed names
+# of an existing concept became aliases; a concept no code covered got a code (LOB prefix; counterpart keys between bopgl and boppr). Nothing is
+# removed or renamed.
+
+lob: boppr
+schema_version: 2.3.0
+common_model_version: 1.4.0
+code_prefix: BOPPR_
+codes:
+- code: BOPPR_BUILDING
+  name: Building (Coverage A)
+  aliases:
+  - Coverage A - Building - Fire
+  - Cov. A - Building
+  - Coverage A -- Building
+  - Coverage A - Building
+  - Building
+  # Cross-copied from BOPGL_BUILDING (same row on the businessowners declarations), 2.1.0:
+  - BUILDING LIMIT OF INSURANCE
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - BUILDING COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 3
+  counterpart: BOPGL_BUILDING
+- code: BOPPR_EC_BUILDING
+  name: Building - extended coverage perils
+  aliases:
+  - Coverage A - Building - Extended Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_BPP
+  name: Business personal property (Coverage B)
+  aliases:
+  - Coverage B - Business Property - Fire
+  - Coverage B -- Business Personal Property
+  - Coverage B - Business Property
+  - Business Personal Property
+  - Cov B - Business Property
+  # Cross-copied from BOPGL_BPP (same row on the businessowners declarations), 2.1.0:
+  - BUSINESS PERSONAL PROPERTY LIMIT OF INSURANCE
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+  counterpart: BOPGL_BPP
+- code: BOPPR_EC_BPP
+  name: Business personal property - extended coverage perils
+  aliases:
+  - Coverage B - Business Property - Extended Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_VMM_BPP
+  name: Business personal property - vandalism and malicious mischief
+  aliases:
+  - Coverage B - Business Property - Vandalism
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_SPECIAL_FORM_BPP
+  name: Business personal property - special form causes of loss (SF-4)
+  aliases:
+  - Coverage B - Business Property - SF-4
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_LOSS_OF_INCOME
+  name: Loss of income / business income (Coverage C)
+  aliases:
+  - Coverage C -- Loss Of Income (Actual Loss Sustained - 12 Months)
+  - Loss of Income - 3 Months Included
+  - Coverage C -- Loss Of Income
+  - Loss of Income
+  - Business Income
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Loss of Income - 12 Months Included
+  # Recurring wording of POLICIES-FINAL-V3 (printed in 5 or more documents of 2 or more carriers), 2.1.0:
+  - Business Income and Extra Expense
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+  counterpart: BOPGL_LOSS_OF_INCOME
+- code: BOPPR_LOSS_OF_INCOME_LIMIT
+  name: Loss of income included limit (SF-312A Loss of Income Special Limitations)
+  aliases:
+  - SF-312A - Loss of Income Included Limit
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_LOSS_OF_INCOME_LIMIT
+- code: BOPPR_ADDITIONAL_EXPENSE
+  name: Additional expense
+  aliases:
+  - Additional Expense
+  # Recurring wording of POLICIES-FINAL-V3 (printed in 5 or more documents of 2 or more carriers), 2.1.0:
+  - Extra Expense
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_ADDITIONAL_EXPENSE
+- code: BOPPR_DEBRIS_REMOVAL
+  name: Debris removal / additional debris removal expense
+  aliases:
+  - Debris Removal (Refer to SF-311S)
+  - Additional Debris Removal Expense
+  - Debris Removal
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Debris Removal (Refer to SF-311P)
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Additional Debris Removal
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+  counterpart: BOPGL_DEBRIS_REMOVAL
+- code: BOPPR_LIABILITY
+  name: Business liability - bodily injury and property damage (Coverage L)
+  aliases:
+  - Coverage L - Liability
+  - Cov. L - Bodily Injury and Property Damage
+  - 'Cov. L - Bodily Injury and Property Damage - Add''l Blgs'
+  - Coverage L -- Bodily Injury And Property Damage Liability
+  - Premises Liability
+  # Cross-copied from BOPGL_LIABILITY (same row on the businessowners declarations), 2.1.0:
+  - Liability and Medical Expenses (per occurrence limit)
+  - Liability and Medical Expenses
+  - Other than Products / Completed Operations Aggregate
+  - Other than Products / Completed Operations Annual Aggregate
+  - Cov L-Bodily Injury & Property Damage
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Each Occurrence Limit
+  - General Aggregate Limit – other than Products/Completed Work
+  - LIABILITY AND MEDICAL EXPENSES PER OCCURRENCE
+  - LIABILITY AND MEDICAL LIABILITY AGGREGATE
+  default_limit_types:
+  - per_occurrence
+  - aggregate
+  carriers: 3
+  counterpart: BOPGL_LIABILITY
+- code: BOPPR_PRODUCTS_COMPLETED_OPS
+  name: Products-completed operations (Coverage N)
+  aliases:
+  - Cov. N - Products/Completed Operations
+  - Products/Completed Work Hazard Aggregate Limit
+  # Cross-copied from BOPGL_PRODUCTS_COMPLETED_OPS (same row on the businessowners declarations), 2.1.0:
+  - Products / Completed Operations Aggregate
+  - Products / Completed Operations Annual Aggregate
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Aggregate Limit – Products/Completed Work
+  default_limit_types:
+  - products_completed_ops_aggregate
+  carriers: 2
+  counterpart: BOPGL_PRODUCTS_COMPLETED_OPS
+- code: X_MED_PAY
+  name: Medical payments (Coverage M)
+  aliases:
+  - Coverage M - Med Pay
+  - Cov. M - Medical Payments
+  - 'Cov. M - Medical Payments - Add''l Blgs'
+  - Coverage M -- Medical Payments
+  - Medical Payments
+  # Cross-copied from X_MED_PAY (same row on the businessowners declarations), 2.1.0:
+  - Medical Expenses (per person)
+  - Medical Expenses
+  - Cov. M - Medical Payments (Each Person) - Classic
+  - Cov. M - Medical Payments (Each Accident) - Classic
+  - Cov M-Premises Medical Payments
+  default_limit_types:
+  - per_person
+  carriers: 3
+  counterpart: X_MED_PAY
+  shared: true
+- code: BOPPR_FIRE_LEGAL_LIABILITY
+  name: Fire legal liability / damage to premises rented (Coverage O)
+  aliases:
+  - Fire Legal Liability
+  - Coverage O -- Fire Legal Liability
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Fire Legal Liability - Enhanced
+  # Cross-copied from BOPGL_DAMAGE_TO_PREMISES_RENTED (same row on the businessowners declarations), 2.1.0:
+  - Damage to Premises Rented To You (any one premises)
+  - Damage to Premises Rented To You
+  - Fire Legal Liability - Classic
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Fire Legal Liability Limit
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+  counterpart: BOPGL_DAMAGE_TO_PREMISES_RENTED
+- code: BOPPR_PERSONAL_INJURY
+  name: Personal and advertising injury liability (Coverage P)
+  aliases:
+  - Coverage P -- Personal And Advertising Injury Liability
+  - LS-49 Personal Injury Liability
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Personal and Advertising Injury Liability (Refer to SF-311P)
+  # Cross-copied from BOPGL_PERSONAL_INJURY (same row on the businessowners declarations), 2.1.0:
+  - PERSONAL INJURY
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Personal & Advertising Injury Limit
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+  counterpart: BOPGL_PERSONAL_INJURY
+- code: BOPPR_CANINE_LIABILITY
+  name: Canine liability
+  aliases:
+  - Canine Liability Limit
+  - Canine Liability
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_AUTO_INCREASE_BUILDING
+  name: Automatic increase in the building limit
+  aliases:
+  - 'SM-26 Automatic Increase, RC'
+  - Automatic Increase - Building - 3 Percent
+  - BUILDING INFLATION PROTECTION
+  # Cross-copied from BOPGL_AUTO_INCREASE_BUILDING (same row on the businessowners declarations), 2.1.0:
+  - BUILDING LIMIT - AUTOMATIC ANNUAL INCREASE (PERCENTAGE)
+  default_limit_types:
+  - other
+  carriers: 2
+  counterpart: BOPGL_AUTO_INCREASE_BUILDING
+- code: BOPPR_AUTO_INCREASE_BPP
+  name: Automatic increase in the business personal property limit
+  aliases:
+  - Automatic Increase - Business Personal Property - 3 Percent
+  default_limit_types:
+  - other
+  carriers: 1
+- code: BOPPR_REPLACEMENT_COST
+  name: Replacement cost provision
+  aliases:
+  - SF-27B Replacement Cost Provision
+  # Cross-copied from BOPGL_BPP_REPLACEMENT_COST (same row on the businessowners declarations), 2.1.0:
+  - Business Personal Property Replacement Coverage
+  default_limit_types:
+  - other
+  carriers: 1
+  counterpart: BOPGL_BPP_REPLACEMENT_COST
+- code: X_EQUIPMENT_BREAKDOWN
+  name: Equipment breakdown
+  aliases:
+  - Equipment Breakdown
+  # Cross-copied from X_EQUIPMENT_BREAKDOWN (same row on the businessowners declarations), 2.1.0:
+  - Optional Coverage - Equipment Breakdown Protection Coverage
+  - Equipment Breakdown Protection Coverage
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - EQUIPMENT BREAKDOWN COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+  counterpart: X_EQUIPMENT_BREAKDOWN
+  shared: true
+- code: BOPPR_SERVICE_LINE
+  name: Service line coverage
+  aliases:
+  - Service Line Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_ACCOUNTS_RECEIVABLE
+  name: Accounts receivable
+  aliases:
+  - Accounts Receivable
+  # Cross-copied from BOPGL_ACCOUNTS_RECEIVABLE (same row on the businessowners declarations), 2.1.0:
+  - Accounts Receivable (on premises/off premises)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_ACCOUNTS_RECEIVABLE
+- code: BOPPR_ANTENNAS_SIGNS
+  name: 'Outdoor property: antennas, fences or signs'
+  aliases:
+  - 'Antennas, Fences, Or Signs'
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_ANTENNAS_SIGNS
+- code: BOPPR_BUILDING_GLASS
+  name: Building glass
+  aliases:
+  - Building Glass (Including Breakage)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_BUILDING_OFF_PREMISES
+  name: Building property off premises
+  aliases:
+  - Building Property - Off Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_BUILDING_OFF_PREMISES
+- code: BOPPR_BPP_OFF_PREMISES
+  name: Business personal property off premises
+  aliases:
+  - Business Personal Property - Off Premises
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Business Property - Off Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_BPP_OFF_PREMISES
+- code: BOPPR_PORTABLE_STORAGE
+  name: Business personal property in portable storage units
+  aliases:
+  - Business Personal Property - Portable Storage Units
+  # Cross-copied from BOPGL_BPP_STORAGE_UNITS (same row on the businessowners declarations), 2.1.0:
+  - Business Personal Property Temporarily In Storage Units
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_BPP_STORAGE_UNITS
+- code: BOPPR_COUNTERFEIT_MONEY
+  name: Money orders and counterfeit money
+  aliases:
+  - Counterfeit Money Or Money Orders
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_COUNTERFEIT_MONEY
+- code: BOPPR_DATA_RECORDS
+  name: Electronic data records and programs
+  aliases:
+  - Data Records And Programs
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_DATA_RECORDS
+- code: BOPPR_DATA_DESTRUCTION
+  name: Destruction of electronic data records and programs
+  aliases:
+  - Destruction of Data Records And Programs
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_DEPENDENT_LOCATIONS
+  name: Business income from dependent properties
+  aliases:
+  - Earnings From Dependent Locations
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Loss of Income From Dependent Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_BI_DEPENDENT_PROPERTIES
+- code: BOPPR_FIRE_DEPT_SERVICE
+  name: Fire department service charge
+  aliases:
+  - Fire Department Service Charges
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_FIRE_DEPT_SERVICE
+- code: BOPPR_FORGERY
+  name: Forgery or alteration
+  aliases:
+  - Forgery
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_FORGERY
+- code: X_ORDINANCE_LAW
+  name: Ordinance or law (increased cost of construction)
+  aliases:
+  - Increased Costs - Ordinance Or Law
+  - Ordinance and Law Coverage
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Building Ordinance or Law Coverage
+  # Cross-copied from BOPGL_INCREASED_COST_CONSTRUCTION (same row on the businessowners declarations), 2.1.0:
+  - Increased Cost of Construction
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Increased Cost - Ordinance or Law
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_INCREASED_COST_CONSTRUCTION
+  shared: true
+- code: BOPPR_INVENTORY_APPRAISAL
+  name: Inventory and appraisal expenses
+  aliases:
+  - Inventory And Appraisal Expenses
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_INVENTORY_APPRAISAL
+- code: BOPPR_LOCK_KEY
+  name: Lock and key replacement
+  aliases:
+  - Lock And Key Replacement
+  # Cross-copied from BOPGL_LOCK_KEY (same row on the businessowners declarations), 2.1.0:
+  - Key and Lock Replacement
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Lock Replacement
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_LOCK_KEY
+- code: BOPPR_NEWLY_ACQUIRED_BUILDINGS
+  name: Newly acquired or constructed buildings
+  aliases:
+  - Newly Acquired Buildings
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Building - Newly Acquired or Constructed Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_NEWLY_ACQUIRED_BUILDINGS
+- code: BOPPR_NEWLY_ACQUIRED_BPP
+  name: Business personal property at newly acquired locations
+  aliases:
+  - Newly Acquired Locations - Business Personal Property
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Business Personal Property - Newly Acquired or Constructed Property
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Business Property At Newly Acquired Locations
+  - Business Property - Newly Acquired
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_NEWLY_ACQUIRED_BPP
+- code: BOPPR_NEWLY_ACQUIRED_LOI
+  name: Loss of income at newly acquired locations
+  aliases:
+  - Newly Acquired Locations - Loss Of Income
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_PERIOD_OF_LOSS_EXTENSION
+  name: Extended period of loss of income
+  aliases:
+  - Period Of Loss Extension - Loss Of Income
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Business Income - Extended Period of Indemnity
+  # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
+  - Extended Business Income - Extended Number of Days
+  - Business Income - Extended Number of Days for Ordinary Payroll Expenses
+  default_limit_types:
+  - other
+  carriers: 1
+  counterpart: BOPGL_EXTENDED_BUSINESS_INCOME
+- code: BOPPR_PERSONAL_EFFECTS
+  name: Personal effects
+  aliases:
+  - Personal Effects
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Personal Articles
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_PERSONAL_EFFECTS
+- code: BOPPR_POLLUTANT_CLEANUP
+  name: Pollutant clean up and removal
+  aliases:
+  - Pollutant Clean Up And Removal
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Pollutant Cleanup and Removal
+  default_limit_types:
+  - aggregate
+  carriers: 1
+  counterpart: BOPGL_POLLUTANT_CLEANUP
+- code: BOPPR_FIRE_EXTINGUISHER_RECHARGE
+  name: Fire extinguisher systems recharge expense
+  aliases:
+  - Recharge Of Fire Extinguishing Equipment
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Fire Protective Devices Recharge
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_FIRE_EXTINGUISHER_RECHARGE
+- code: BOPPR_SEASONAL_INCREASE
+  name: Seasonal increase in the business personal property limit
+  aliases:
+  - Seasonal Increase - 25 Percent
+  - SEASONAL VARIATION
+  # Cross-copied from BOPGL_SEASONAL_INCREASE (same row on the businessowners declarations), 2.1.0:
+  - SEASONAL INCREASE PERCENTAGE - BUSINESS PERSONAL PROPERTY
+  default_limit_types:
+  - other
+  carriers: 1
+  counterpart: BOPGL_SEASONAL_INCREASE
+- code: BOPPR_TREES_SHRUBS
+  name: 'Trees, shrubs and plants'
+  aliases:
+  - 'Trees, Shrubs, And Plants'
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_TREES_SHRUBS
+- code: BOPPR_VALUABLE_PAPERS
+  name: Valuable papers and records
+  aliases:
+  - Valuable Papers And Records
+  # Cross-copied from BOPGL_VALUABLE_PAPERS (same row on the businessowners declarations), 2.1.0:
+  - Valuable Papers and Records (on/off premises)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_VALUABLE_PAPERS
+- code: BOPPR_ADDED_WATER_DAMAGE
+  name: Added water damages coverage
+  aliases:
+  - Added Water Damages Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_APPURTENANT_STRUCTURES
+  name: Garages, storage buildings, and other appurtenant structures
+  aliases:
+  - GARAGES, STORAGE BUILDINGS, AND OTHER APPURTENANT STRUCTURES
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_APPURTENANT_STRUCTURES
+- code: BOPPR_ARSON_THEFT_REWARD
+  name: Arson and theft reward
+  aliases:
+  - ARSON AND THEFT REWARD
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_ARSON_REWARD
+- code: BOPPR_BI_OFF_PREMISES_OPERATIONS
+  name: Business income from off-premises operations
+  aliases:
+  - BUSINESS INCOME FROM OFF-PREMISES OPERATIONS
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_BI_OFF_PREMISES_OPERATIONS
+- code: BOPPR_BI_OFF_PREMISES_UTILITY
+  name: Business income for off-premises utility services
+  aliases:
+  - BUSINESS INCOME FOR OFF-PREMISES UTILITY SERVICES
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_BI_UTILITY_SERVICES
+- code: BOPPR_BI_WEBSITES
+  name: Business income from websites
+  aliases:
+  - BUSINESS INCOME FROM WEBSITES
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_BI_WEBSITES
+- code: BOPPR_BRANDS_LABELS
+  name: Brands and labels
+  aliases:
+  - BRANDS AND LABELS
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_BRANDS_LABELS
+- code: BOPPR_BUILDING_PROPERTY_OF_OTHERS
+  name: Building property of others
+  aliases:
+  - BUILDING PROPERTY OF OTHERS
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_BUILDING_PROPERTY_OF_OTHERS
+- code: BOPPR_CIVIL_AUTHORITY
+  name: Business income for civil authority orders
+  aliases:
+  - BUSINESS INCOME FOR CIVIL AUTHORITY ORDERS
+  # Cross-copied from BOPGL_CIVIL_AUTHORITY (same row on the businessowners declarations), 2.1.0:
+  - Civil Authority
+  default_limit_types:
+  - other
+  carriers: 1
+  counterpart: BOPGL_CIVIL_AUTHORITY
+- code: BOPPR_CLAIM_EXPENSE
+  name: Claim expense
+  aliases:
+  - CLAIM EXPENSE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_CLAIM_EXPENSE
+- code: BOPPR_COLLAPSE
+  name: Collapse
+  aliases:
+  - COLLAPSE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_COLLAPSE
+- code: BOPPR_COMPUTERS_WORLDWIDE
+  name: Computers worldwide
+  aliases:
+  - COMPUTERS WORLDWIDE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_COMPUTERS_WORLDWIDE
+- code: BOPPR_COMPUTER_OPERATIONS
+  name: Interruption of computer operations
+  aliases:
+  - INTERRUPTION OF COMPUTER OPERATIONS
+  default_limit_types:
+  - aggregate
+  carriers: 1
+  counterpart: BOPGL_COMPUTER_OPERATIONS
+- code: BOPPR_CONTRACT_PENALTIES
+  name: Contract penalties
+  aliases:
+  - CONTRACT PENALTIES
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_CONTRACT_PENALTIES
+- code: BOPPR_CYBER_VIRUS_MALWARE
+  name: Cyber virus and malware coverage
+  aliases:
+  - CYBER VIRUS AND MALWARE COVERAGE
+  default_limit_types:
+  - aggregate
+  carriers: 1
+  counterpart: BOPGL_CYBER_VIRUS_MALWARE
+- code: BOPPR_ELECTRONIC_DATA
+  name: Electronic data
+  aliases:
+  - ELECTRONIC DATA
+  default_limit_types:
+  - aggregate
+  carriers: 1
+  counterpart: BOPGL_ELECTRONIC_DATA
+- code: BOPPR_EMPLOYEE_DISHONESTY
+  name: Employee dishonesty coverage - excludes erisa - new york
+  aliases:
+  - EMPLOYEE DISHONESTY COVERAGE - EXCLUDES ERISA - NEW YORK
+  - EMPLOYEE DISHONESTY COVERAGE
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Employee Dishonesty
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+  counterpart: BOPGL_EMPLOYEE_DISHONESTY
+- code: BOPPR_EXPEDITING_EXPENSES
+  name: Expediting expenses
+  aliases:
+  - EXPEDITING EXPENSES
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - EXPEDITING EXPENSE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_EXPEDITING_EXPENSES
+- code: BOPPR_FINE_ARTS
+  name: Fine arts coverage - new york
+  aliases:
+  - FINE ARTS COVERAGE - NEW YORK
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_FINE_ARTS
+- code: BOPPR_FRAUDULENT_TRANSFER
+  name: Fraudulent transfer coverage
+  aliases:
+  - FRAUDULENT TRANSFER COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_FRAUDULENT_TRANSFER
+- code: BOPPR_GLASS_EXPENSE
+  name: Glass expense
+  aliases:
+  - GLASS EXPENSE
+  # Cross-copied from BOPGL_GLASS_EXPENSE (same row on the businessowners declarations), 2.1.0:
+  - Glass Expenses
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Glass Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_GLASS_EXPENSE
+- code: BOPPR_IDENTITY_RECOVERY
+  name: Identity recovery for busnessowners and employees
+  aliases:
+  - IDENTITY RECOVERY FOR BUSNESSOWNERS AND EMPLOYEES
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - IDENTITY RECOVERY ENDORSEMENT
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_IDENTITY_RECOVERY
+- code: BOPPR_LEASEHOLD_IMPROVEMENTS
+  name: Leasehold improvements
+  aliases:
+  - LEASEHOLD IMPROVEMENTS
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_LEASEHOLD_IMPROVEMENTS
+- code: BOPPR_LEASE_ASSESSMENT
+  name: Lease assessment
+  aliases:
+  - LEASE ASSESSMENT
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_LEASE_ASSESSMENT
+- code: BOPPR_LOST_KEYS
+  name: Lost keys
+  aliases:
+  - LOST KEYS
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_LOST_KEYS
+- code: BOPPR_MONEY_SECURITIES
+  name: Money and securities coverage
+  aliases:
+  - MONEY AND SECURITIES COVERAGE
+  - MONEY AND SECURITIES
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Money and Securities - On Premise
+  - Money and Securities - Off Premise
+  # Cross-copied from BOPGL_MONEY_SECURITIES (same row on the businessowners declarations), 2.1.0:
+  - Money and Securities (on/off premises)
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+  counterpart: BOPGL_MONEY_SECURITIES
+- code: BOPPR_NEWLY_ACQUIRED_PROPERTY
+  name: Newly acquired or constructed property
+  aliases:
+  - NEWLY ACQUIRED OR CONSTRUCTED PROPERTY
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_NEWLY_ACQUIRED_PROPERTY
+- code: BOPPR_NON_OWNED_TRAILERS
+  name: Non-owned detached trailers
+  aliases:
+  - NON-OWNED DETACHED TRAILERS
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_DETACHED_TRAILERS
+- code: BOPPR_OUTDOOR_PROPERTY
+  name: Outdoor property
+  aliases:
+  - OUTDOOR PROPERTY
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_OUTDOOR_PROPERTY
+- code: BOPPR_OUTDOOR_SIGNS
+  name: Outdoor signs on premises
+  aliases:
+  - OUTDOOR SIGNS ON PREMISES
+  # Cross-copied from BOPGL_OUTDOOR_SIGNS (same row on the businessowners declarations), 2.1.0:
+  - Outdoor Signs
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_OUTDOOR_SIGNS
+- code: BOPPR_PAIRS_SETS
+  name: Pairs or sets
+  aliases:
+  - PAIRS OR SETS
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_PAIRS_OR_SETS
+- code: BOPPR_PAVED_SURFACES
+  name: Paved surfaces
+  aliases:
+  - PAVED SURFACES
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_PAVED_SURFACES
+- code: BOPPR_PRESERVATION_OF_PROPERTY
+  name: Preservation of property
+  aliases:
+  - PRESERVATION OF PROPERTY
+  default_limit_types:
+  - other
+  carriers: 1
+  counterpart: BOPGL_PRESERVATION_OF_PROPERTY
+- code: BOPPR_PROPERTY_AWAY
+  name: While away from insured premises
+  aliases:
+  - WHILE AWAY FROM INSURED PREMISES
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_PROPERTY_OFF_PREMISES
+  name: Property off-premises
+  aliases:
+  - PROPERTY OFF-PREMISES
+  # Cross-copied from BOPGL_PERSONAL_PROPERTY_OFF_PREMISES (same row on the businessowners declarations), 2.1.0:
+  - Personal Property Off-Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_PERSONAL_PROPERTY_OFF_PREMISES
+- code: BOPPR_SALESPERSONS_SAMPLES
+  name: Salespersons samples
+  aliases:
+  - SALESPERSONS SAMPLES
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_SALESPERSONS_SAMPLES
+- code: BOPPR_SEWER_BACKUP
+  name: Back-up of sewers and drains coverage
+  aliases:
+  - BACK-UP OF SEWERS AND DRAINS COVERAGE
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Backup of Sewer and Drains
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_SEWER_BACKUP
+- code: BOPPR_SIGNS
+  name: Exterior signs
+  aliases:
+  - EXTERIOR SIGNS
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_SIGNS
+- code: BOPPR_SPOILAGE
+  name: Spoilage
+  aliases:
+  - SPOILAGE
+  - Refrigerated Food Products Food Spoilage
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Refrigerated Property
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Refrigerated Food Products
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+  counterpart: BOPGL_SPOILAGE
+- code: BOPPR_SPRINKLER_LEAKAGE
+  name: Sprinkler leakage
+  aliases:
+  - SPRINKLER LEAKAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BOPPR_STRETCH_BLANKET
+  name: 'STRETCH blanket limit (the property part''s blanket limit)'
+  aliases:
+  - 'STRETCH® PLUS Blanket Limit'
+  - 'STRETCH® Blanket Limit'
+  default_limit_types:
+  - blanket
+  carriers: 1
+  counterpart: BOPGL_STRETCH_PLUS_BLANKET
+- code: BOPPR_SUMP_OVERFLOW
+  name: Sump overflow or sump pump failure
+  aliases:
+  - SUMP OVERFLOW OR SUMP PUMP FAILURE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_SUMP_BACKUP
+- code: BOPPR_THEFT_DAMAGE_BUILDING
+  name: Theft damage to building
+  aliases:
+  - THEFT DAMAGE TO BUILDING
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_THEFT_DAMAGE_BUILDING
+- code: BOPPR_TRANSIT
+  name: Transit coverage
+  aliases:
+  - TRANSIT COVERAGE
+  # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
+  - Transportation - Business Property
+  - Transportation - Tools and Equipment
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Property In Transit
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_TRANSIT
+- code: BOPPR_TRANSIT_BI
+  name: Transit business income
+  aliases:
+  - TRANSIT BUSINESS INCOME
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_TRANSIT_BUSINESS_INCOME
+- code: BOPPR_UNAUTHORIZED_CARD_USE
+  name: Unauthorized business card use
+  aliases:
+  - UNAUTHORIZED BUSINESS CARD USE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_UNAUTHORIZED_CARD_USE
+- code: BOPPR_UTILITY_SERVICES_DIRECT
+  name: Off-premises utility services - direct damage
+  aliases:
+  - OFF-PREMISES UTILITY SERVICES - DIRECT DAMAGE
+  # Cross-copied from BOPGL_UTILITY_SERVICES_DIRECT (same row on the businessowners declarations), 2.1.0:
+  - Utility Services
+  - Utility Services - Direct Damage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_UTILITY_SERVICES_DIRECT
+- code: BOPPR_VALUATION_CHANGES_STOCK
+  name: 'Valuation changes: commodity, finished and mercantile stock'
+  aliases:
+  - 'VALUATION CHANGES: COMMODITY, FINISHED AND MERCANTILE STOCK'
+  default_limit_types:
+  - other
+  carriers: 1
+- code: BOPPR_WATER_DAMAGE
+  name: Water damage, other liquid, powder or molten material damage
+  aliases:
+  - WATER DAMAGE, OTHER LIQUID, POWDER OR MOLTEN MATERIAL DAMAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_WATER_DAMAGE
+# recurring wording of POLICIES-FINAL-V3 (counts only)
+- code: BOPPR_DATA_RESTORATION
+  name: Data restoration (cyber insurance endorsement)
+  aliases:
+  - Data Restoration
+  default_limit_types:
+  - other
+  carriers: 0
+  counterpart: BOPGL_DATA_RESTORATION
+# 2.2.0: shared code printed on the businessowners declarations (Utica First BOP, NYCM BOP)
+- code: X_HIRED_NONOWNED_AUTO
+  name: Hired and non-owned auto liability
+  aliases:
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Nonowned Hired Auto Liability
+  # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
+  - Hired/Non-Owned Auto Liability (per occurrence/aggregate)
+  default_limit_types:
+  - per_occurrence
+  - combined_single
+  carriers: 1
+  counterpart: X_HIRED_NONOWNED_AUTO
+  shared: true
+# 2.2.0: shared code printed on the businessowners declarations (Utica First BOP, NYCM BOP)
+- code: X_ADDITIONAL_INSURED
+  name: Additional insured
+  aliases:
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Lessor of Premises
+  - Additional Insured - Lessor of Leased Equipment
+  default_limit_types: []
+  carriers: 1
+  counterpart: X_ADDITIONAL_INSURED
+  shared: true
+# 2.2.0: shared code printed on the businessowners declarations (Utica First BOP, NYCM BOP)
+- code: X_CYBER
+  name: Cyber / data breach
+  aliases:
+  # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
+  - Cyber Liability
+  - Cyber Insurance Endorsement - New York
+  default_limit_types:
+  - per_claim
+  - aggregate
+  - sublimit
+  carriers: 1
+  counterpart: X_CYBER
+  shared: true
+# 2.2.0: concept printed by the businessowners declarations, no code on either line before
+- code: BOPPR_BPP_OF_OTHERS
+  name: Business personal property of others
+  aliases:
+  - Business Property Of Others
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_BPP_OF_OTHERS
+# 2.2.0: concept printed by the businessowners declarations, no code on either line before
+- code: BOPPR_COMPUTER_COVERAGE
+  name: Computer coverage
+  aliases:
+  - Computer Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_COMPUTER_COVERAGE
+# 2.2.0: concept printed by the businessowners declarations, no code on either line before
+- code: BOPPR_CREDIT_CARD_RECEIPTS
+  name: Credit card receipts
+  aliases:
+  - Credit Card Receipts Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_CREDIT_CARD_RECEIPTS
+# 2.2.0: concept printed by the businessowners declarations, no code on either line before
+- code: BOPPR_DEMOLITION
+  name: Demolition cost
+  aliases:
+  - Demolition Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_DEMOLITION
+# 2.2.0: concept printed by the businessowners declarations, no code on either line before
+- code: BOPPR_CREDIT_CARD_FORGERY
+  name: Business credit card, forgery and counterfeit money
+  aliases:
+  - Business Credit Card, Forgery, And Counterfeit Money
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_CREDIT_CARD_FORGERY
+# 2.2.0: concept printed by the businessowners declarations, no code on either line before
+- code: BOPPR_SIGNS_OFF_PREMISES
+  name: Signs away from the premises
+  aliases:
+  - Signs Away From The Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_SIGNS_OFF_PREMISES
+# 2.2.0: concept printed by the businessowners declarations, no code on either line before
+- code: BOPPR_UTILITY_INTERRUPTION
+  name: Utility interruption
+  aliases:
+  - Utility Interruption
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_UTILITY_INTERRUPTION
+# 2.2.0: concept printed by the businessowners declarations, no code on either line before
+- code: BOPPR_LOSS_OF_EARNINGS
+  name: Loss of earnings
+  aliases:
+  - Loss Of Earnings
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_LOSS_OF_EARNINGS
+# 2.2.0: concept printed by the businessowners declarations, no code on either line before
+- code: BOPPR_LIMITED_FUNGUS
+  name: Limited fungus and related perils
+  aliases:
+  - Limited Fungus And Related Perils
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_LIMITED_FUNGUS
+# 2.2.0: concept printed by the businessowners declarations, no code on either line before
+- code: BOPPR_HAZARDOUS_SUBSTANCES
+  name: Hazardous substances (equipment breakdown enhancement)
+  aliases:
+  - HAZARDOUS SUBSTANCES
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_HAZARDOUS_SUBSTANCES
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: BOPPR_BI_EXTENDED_DAYS
+  name: Business income extended number of days
+  aliases:
+  - Business income extended number of days
+  - Extended Business Income – Extended Number of Days
+  - Business Income – Extended Number of Days for Ordinary Payroll Expenses
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_EXTENDED_BUSINESS_INCOME
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: BOPPR_DO_LIABILITY
+  name: Directors and officers liability
+  aliases:
+  - Directors and officers liability
+  - Coverage Part A. Non Profit Directors & Officers LIMITS OF LIABILITY (EACH CLAIM)
+  - Coverage Part A. Non Profit Directors & Officers LIMITS OF LIABILITY (IN THE AGGREGATE)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: BOPPR_EPL
+  name: Employment practices liability
+  aliases:
+  - Employment practices liability
+  - Coverage Part B. Employment Practices LIMITS OF LIABILITY (EACH CLAIM)
+  - Coverage Part B. Employment Practices LIMITS OF LIABILITY (IN THE AGGREGATE)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_EPL
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: BOPPR_FIDUCIARY_LIABILITY
+  name: Fiduciary liability
+  aliases:
+  - Fiduciary liability
+  - Coverage Part C. Fiduciary Liability
+  - Coverage Part C. Fiduciary Liability RETENTION
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: BOPPR_UNMANNED_AIRCRAFT
+  name: Unmanned aircraft liability
+  aliases:
+  - Unmanned aircraft liability
+  default_limit_types:
+  - per_occurrence
+  carriers: 1

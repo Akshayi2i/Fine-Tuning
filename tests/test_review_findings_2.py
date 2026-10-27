@@ -220,17 +220,18 @@ def test_a_matched_rows_lost_value_is_a_merge_loss_not_an_unmatched_row(monkeypa
     from evaluation import windowing_ceiling
     from serving import policy_merge
 
-    label = {"policy": {"policy_number": _env("PA-1")},
-             "auto": {"vehicles": [{"vin": _env("1HGCM82633A004352"), "year": _env(2019)}]}}
+    label = {"policy": {"policy_number": _env("FM-1")},
+             "farm": {"scheduled_farm_equipment": [{"serial_number": _env("1HGCM82633A004352"),
+                                                    "year": _env(2019)}]}}
 
     def drop_year(windows, lob=None):
         merged = policy_merge.MergedPolicy()
-        merged.extraction = {"auto": {"vehicles": [{"vin": _env("1HGCM82633A004352")}]},
-                             "policy": {"policy_number": _env("PA-1")}}
+        merged.extraction = {"farm": {"scheduled_farm_equipment": [{"serial_number": _env("1HGCM82633A004352")}]},
+                             "policy": {"policy_number": _env("FM-1")}}
         return merged
 
     monkeypatch.setattr(policy_merge, "merge_policy_windows", drop_year)
-    result = windowing_ceiling.oracle("d", label, "commercial_auto", 1, None)
+    result = windowing_ceiling.oracle("d", label, "agriculture_farm", 1, None)
     assert dict(result.lost) == {"merge": 1}
 
 

@@ -323,12 +323,14 @@ def test_a_reference_to_no_unit_is_dropped_and_flagged():
 
 
 def test_a_self_contained_line_merges_exactly_as_before():
-    # Each line named: no line is the fallback, a common-model overlay since 1.1.0.
-    answer = {"auto": {"vehicles": [{"vin": _v("A")}]}}
+    # Each line named: no line is the fallback, a common-model overlay. Property
+    # and auto moved onto the common model; these two stay self-contained.
+    answer = {"equipment_breakdown": {"object_schedule": [{"serial_number": _v("A")}]}}
     assert merge_policy_windows([PolicyWindow("lineblk", [1], copy.deepcopy(answer))],
-                                lob="property").extraction == answer
+                                lob="equipment_breakdown").extraction == answer
+    answer = {"farm": {"scheduled_farm_equipment": [{"serial_number": _v("A")}]}}
     assert merge_policy_windows([PolicyWindow("lineblk", [1], copy.deepcopy(answer))],
-                                lob="commercial_auto").extraction == answer
+                                lob="agriculture_farm").extraction == answer
 
 
 # --------------------------------------------------------------------------
@@ -343,8 +345,8 @@ def test_system_fields_are_plain_values_on_a_common_model_line():
                                "page_count": 4, "source_file_name": "x.pdf"}
     assert out["lob_parts"] == [{"part_id": "part_1", "lob": "personal_auto"}]
     assert out["policy"]["is_package"] is False and out["coverages"] == []
-    # A self-contained line (general liability composes the common model since 1.1.0).
-    old = with_system_fields({}, page_count=4, source_file_name="x.pdf", lob="property")
+    # A self-contained line (general liability and property compose the common model).
+    old = with_system_fields({}, page_count=4, source_file_name="x.pdf", lob="equipment_breakdown")
     assert old["document"]["page_count"]["parsed"] == 4                     # an envelope, as before
 
 

@@ -1,0 +1,113 @@
+# SPEC_21 4.2.4 coverage codes of commercial_fire (schema 1.0.0, common model 1.1.0).
+# Built from the 7 single-LOB 'DECLARATION, Commercial Fire and Liability' seed documents of one carrier
+# (Leatherstocking Cooperative Insurance Company), read in place. There is no legacy schema: the line is new.
+# aliases: coverage names as the seeds print them (whitespace collapsed; a wrapped name joined with one space).
+# L1 codes a printed row by its name (fideon/l1/spec21.py coverage_code_for), so every name a seed prints
+# in a coverage schedule is an alias of exactly one code. Codes are LOB-prefixed (CF_); a coverage the
+# common model shares across lines uses its X_ code (common_model.json fideon:shared_coverage_codes);
+# shared: true marks those. X_MED_PAY is listed with this line's own default limit type (per_person: the
+# Coverage M each-person row; the each-accident row prints its own qualifier).
+# Coverage L (premises liability) and the LS-49 personal injury option use CF_ codes until shared business
+# liability codes exist (CR-BOPPR-01; CHANGE_REQUESTS_commercial_fire.md CR-CFIRE-01).
+# Rows that price an exclusion against a form number (LS-59 Lead, LS-89 Extended Pollution, LS-118 Silica)
+# are not coverages: their premium is forms_and_endorsements[].premium. The OLT classification rows
+# (Coverage L / M - Owners, Landlords, and Tenants (OLT), Classification N) price Coverage L and M: they are
+# premium.items with those coverages' codes.
+# carriers: how many seed carriers print one of the code's names; documents: how many of the 7 seeds do.
+lob: commercial_fire
+schema_version: 1.0.0
+common_model_version: 1.1.0
+code_prefix: CF_
+codes:
+- code: CF_BUILDING
+  name: Building - fire (Coverage A)
+  aliases:
+  - Coverage A - Building - Fire
+  - Coverage A - Building
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  documents: 7
+- code: CF_BUILDING_EC
+  name: Building - extended coverage perils
+  aliases:
+  - Coverage A - Building - Extended Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  documents: 7
+- code: CF_BPP
+  name: Business property - fire (Coverage B)
+  aliases:
+  - Coverage B - Business Property - Fire
+  - Coverage B - Business Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  documents: 6
+- code: CF_BPP_EC
+  name: Business property - extended coverage perils
+  aliases:
+  - Coverage B - Business Property - Extended Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  documents: 6
+- code: CF_BPP_VMM
+  name: Business property - vandalism and malicious mischief
+  aliases:
+  - Coverage B - Business Property - Vandalism
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  documents: 6
+- code: CF_BPP_SPECIAL_FORM
+  name: Business property - special form causes of loss (SF-4)
+  aliases:
+  - Coverage B - Business Property - SF-4
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  documents: 6
+- code: CF_LIABILITY
+  name: Liability - bodily injury and property damage (Coverage L)
+  aliases:
+  - Coverage L - Liability
+  default_limit_types:
+  - per_occurrence
+  - aggregate
+  carriers: 1
+  documents: 7
+- code: X_MED_PAY
+  name: Medical payments (Coverage M)
+  aliases:
+  - Coverage M - Med Pay
+  default_limit_types:
+  - per_person
+  carriers: 1
+  documents: 7
+  shared: true
+- code: CF_PERSONAL_INJURY
+  name: Personal injury liability (LS-49)
+  aliases:
+  - LS-49 Personal Injury Liability
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  documents: 2
+- code: CF_AUTO_INCREASE
+  name: Automatic increase in the building limit (SM-26)
+  aliases:
+  - 'SM-26 Automatic Increase, RC'
+  default_limit_types:
+  - other
+  carriers: 1
+  documents: 7
+- code: CF_REPLACEMENT_COST
+  name: Replacement cost provision (SF-27B)
+  aliases:
+  - SF-27B Replacement Cost Provision
+  default_limit_types:
+  - other
+  carriers: 1
+  documents: 7

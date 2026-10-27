@@ -1,0 +1,251 @@
+# SPEC_21 4.2.4 coverage codes of auto, commercial (business) auto (schema 2.0.0, common model 1.1.0).
+# Built from the 11 single-LOB seed documents of 5 carriers (Glatfelter / National Union, The Hartford, Merchants
+# Mutual, Preferred Mutual, Progressive), read in place: Item Two of the business auto declarations, each scheduled
+# auto's coverage lines, Items Four and Five, and Progressive's outline of coverage.
+# aliases: coverage names as the documents print them (whitespace collapsed). L1 codes a printed row by its name
+# (fideon/l1/spec21.py coverage_code_for). Codes are LOB-prefixed (AU_); a coverage the common model shares across
+# lines uses its X_ code (common_model.json fideon:shared_coverage_codes); shared: true marks those.
+# carriers: how many of the 5 carriers print the coverage.
+lob: auto
+schema_version: 2.0.0
+common_model_version: 1.1.0
+code_prefix: AU_
+codes:
+- code: X_VEHICLE_LIABILITY
+  name: Liability (bodily injury and property damage) for an auto
+  aliases:
+  - Liability
+  - Covered Autos Liability
+  - Covered Autos Liability (combined single limit)
+  - Liability To Others
+  - Liability To Others-Incl Supplemental Spousal
+  - Bodily Injury And Property Damage Liability
+  default_limit_types:
+  - combined_single
+  - per_person
+  - per_accident
+  - property_damage
+  shared: true
+  carriers: 5
+  note: 'Item Two''s liability row and each vehicle''s liability line. A combined single limit is one combined_single entry.'
+- code: AU_SUPPLEMENTAL_SPOUSAL_LIABILITY
+  name: Supplemental spousal liability (New York)
+  aliases:
+  - Supplemental Spousal Liability
+  - Supplemental Spousal Liability Coverage
+  - New York Supplemental Spousal Liability Coverage
+  default_limit_types: []
+  carriers: 3
+  note: 'Printed as a row of its own (Glatfelter) or as part of the liability row''s name (Progressive).'
+- code: X_PIP
+  name: 'Personal injury protection / no-fault (basic, mandatory)'
+  aliases:
+  - Personal Injury Protection
+  - Personal Injury
+  - Personal Injury Protection (No-Fault)
+  - Personal Injury Protection (or equivalent No-Fault coverage)
+  - Personal Injury Protection (or equivalent No Fault Coverage)
+  - Mandatory Personal Injury Protection
+  - PIP
+  default_limit_types:
+  - per_person
+  - other
+  - sublimit
+  shared: true
+  carriers: 5
+  note: 'Basic (mandatory) no-fault. The monthly work loss, other necessary expenses and death benefit printed under it are its limits (sublimit or other, with the printed description).'
+- code: AU_ADDITIONAL_PIP
+  name: Additional (added) personal injury protection
+  aliases:
+  - Additional Personal Injury Protection
+  - Additional PIP
+  - Addl PIP
+  - Added Personal Injury Protection
+  - Added Personal Injury Protection (or equivalent added No-Fault coverage)
+  - Additional PIP (or equivalent added No Fault Coverage)
+  default_limit_types:
+  - per_person
+  - sublimit
+  - other
+  carriers: 5
+  note: 'Kept apart from X_PIP: New York commercial auto prints basic PIP, APIP and OBEL as separate coverages with their own premiums (as personal_auto PA_ADDITIONAL_PIP).'
+- code: AU_OPTIONAL_BASIC_ECONOMIC_LOSS
+  name: Optional basic economic loss (New York)
+  aliases:
+  - Optional Basic Economic Loss
+  - Optional Basic Economic Loss Coverage
+  - OBEL
+  - Optional Basic Economic Loss (New York only)
+  default_limit_types:
+  - per_person
+  carriers: 5
+- code: AU_AGGREGATE_NO_FAULT_BENEFITS
+  name: Aggregate no-fault benefits available
+  aliases:
+  - Aggregate No-Fault Benefits Available
+  - Aggregate No-Fault Benefits
+  - Aggregate No Fault Benefits Available
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: X_MED_PAY
+  name: Auto medical payments
+  aliases:
+  - Auto Medical Payments
+  - Medical Payments
+  - Medical Pymts
+  - Med Pay
+  default_limit_types:
+  - per_person
+  shared: true
+  carriers: 5
+- code: X_UM
+  name: Uninsured motorists
+  aliases:
+  - Uninsured Motorists
+  - Uninsured Motorists (UM)
+  - Uninsured Mot
+  default_limit_types:
+  - combined_single
+  - per_person
+  - per_accident
+  shared: true
+  carriers: 4
+- code: X_UIM
+  name: Underinsured / supplementary uninsured-underinsured motorists (SUM)
+  aliases:
+  - Underinsured Motorists
+  - Supplementary Uninsured/Underinsured
+  - Supplementary Uninsured/Underinsured Motorist
+  - Supplementary Uninsured/Underinsured Motorists
+  - Supplementary Uninsured/Underinsured Motorists (SUM)
+  - Supplementary Uninsured/Underinsured Motorists Coverage
+  - Supp UM/UIM
+  default_limit_types:
+  - combined_single
+  - per_person
+  - per_accident
+  shared: true
+  carriers: 5
+- code: X_COMPREHENSIVE
+  name: Comprehensive (physical damage)
+  aliases:
+  - Comprehensive
+  - Comprehensive Coverage
+  - Physical Damage - Comprehensive
+  - Comp
+  default_limit_types: []
+  shared: true
+  carriers: 5
+  note: 'The deductible is in deductibles[]; a vehicle''s stated or agreed value is a limit (other).'
+- code: AU_SPECIFIED_CAUSES_OF_LOSS
+  name: Specified causes of loss (physical damage)
+  aliases:
+  - Specified Causes of Loss
+  - Specified Causes of Loss Coverage
+  - Physical Damage - Specified Causes of Loss
+  - Spec COL
+  default_limit_types: []
+  carriers: 4
+- code: X_COLLISION
+  name: Collision (physical damage)
+  aliases:
+  - Collision
+  - Collision Coverage
+  - Physical Damage - Collision
+  default_limit_types: []
+  shared: true
+  carriers: 5
+- code: X_TOWING
+  name: Towing and labor / roadside assistance
+  aliases:
+  - Towing and Labor
+  - 'Towing & Labor'
+  - Physical Damage - Towing and Labor
+  - Physical Damage Towing and Labor
+  - Roadside Assistance
+  - Roadside
+  default_limit_types:
+  - per_disablement
+  shared: true
+  carriers: 3
+- code: X_RENTAL
+  name: Rental reimbursement
+  aliases:
+  - Rental Reimbursement
+  - Rental Reimb
+  - Rental Reimbursement Coverage
+  default_limit_types:
+  - per_day
+  shared: true
+  carriers: 2
+- code: AU_DOWNTIME_RENTAL_TOWING
+  name: 'Downtime loss, rental reimbursement and towing (carrier enhancement)'
+  aliases:
+  - 'Downtime Loss and Rental Reimbursement & Towing Coverage'
+  default_limit_types:
+  - per_day
+  - per_disablement
+  - aggregate
+  carriers: 1
+- code: AU_HIRED_AUTO_LIABILITY
+  name: Hired or borrowed auto liability (Item Four)
+  aliases:
+  - Hired Auto Liability
+  - Hired or Borrowed Auto Liability
+  - Covered Autos Liability Coverage
+  default_limit_types: []
+  carriers: 5
+  note: 'Item Four: liability for hired or borrowed autos, rated on cost of hire (the cost of hire, rate and premium are a rating_exposures[] row). Kept apart from the shared X_HIRED_NONOWNED_AUTO, which a CGL prints as one coverage: commercial auto prints hired (Item Four) and non-owned (Item Five) liability as two coverages with two premiums (CR-AU-02).'
+- code: AU_NON_OWNERSHIP_LIABILITY
+  name: Non-ownership liability (Item Five)
+  aliases:
+  - Non-Ownership Liability
+  - Schedule for Non-Ownership Liability
+  default_limit_types: []
+  carriers: 5
+  note: 'Item Five; the number of employees and the premium are a rating_exposures[] row (CR-AU-02).'
+- code: AU_HIRED_AUTO_PHYSICAL_DAMAGE
+  name: Hired auto physical damage (Item Four)
+  aliases:
+  - Hired Auto Physical Damage
+  - Hired Auto Physical Damage Coverage
+  default_limit_types: []
+  carriers: 2
+- code: AU_FULL_GLASS
+  name: Full window glass (no deductible for glass breakage)
+  aliases:
+  - Full Window Glass Coverage
+  - Full Coverage Window Glass
+  - Full Coverage Window Glass (NY)
+  - Full Safety Glass Coverage
+  default_limit_types: []
+  carriers: 1
+- code: AU_COVERAGE_EXTENSION
+  name: Carrier coverage-extension endorsement priced per auto
+  aliases:
+  - Drive Assured
+  - Drive Assured Extension Endorsement
+  default_limit_types: []
+  carriers: 1
+  note: 'A carrier''s package of auto coverage extensions sold as one endorsement with its own premium (Preferred Mutual PMCA9505 Drive Assured).'
+- code: AU_OTHER_AUTO_COVERAGES
+  name: Other auto coverages (carrier total line)
+  aliases:
+  - Other Auto Coverages
+  default_limit_types: []
+  carriers: 1
+- code: X_ADDITIONAL_INSURED
+  name: Additional insured
+  aliases:
+  - Blanket Additional Insured
+  default_limit_types: []
+  shared: true
+  carriers: 1
+- code: X_WAIVER_OF_SUBROGATION
+  name: Waiver of subrogation
+  aliases:
+  - Blanket Waiver of Subrogation
+  default_limit_types: []
+  shared: true
+  carriers: 1

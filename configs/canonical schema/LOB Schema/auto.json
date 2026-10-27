@@ -1,2371 +1,379 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Commercial Auto policy",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fideon canonical schema - auto (policy_check)",
+  "description": "SPEC_21 section 4 canonical schema for auto, commercial (business) auto (code AU), composing common_model.json 1.1.0 by $ref: the envelope plus locations (garaging), vehicles, drivers, rating_exposures (hired auto cost of hire, non-ownership employees), rating_modifiers and countersignature. Built from the labels the line's 11 single-LOB seed documents of 5 carriers print (read in place: the business auto declarations, schedules of covered autos, Items Two to Five and the forms schedules), every field of the pre-SPEC_21 auto.json 1.5.0 (auto.crosswalk.yaml) and the line's L1 registry YAMLs. No LOB block.",
   "fideon:doc_type": "policy_check",
   "fideon:lob": "auto",
-  "fideon:note": "Generated from the supplied commercial_auto.schema.json v1.4.0 by scripts/build_canonical_policy.py. Do not hand-edit; edit the source and regenerate. Hand-extended to v1.5.0: see fideon:source.change_log.",
-  "fideon:source": {
-    "schema_id": "fideon.canonical.commercial_auto",
-    "version": "1.5.0",
-    "line_of_business_as_supplied": "Commercial Auto",
-    "line_specific_block": "auto",
-    "field_count": 494,
-    "corpus_document_count": 8,
-    "corpus_carrier_count": 4,
-    "aliased_fields": 62,
-    "field_count_as_supplied": 453,
-    "repo_additions": 1,
-    "change_log": [
-      "1.5.0 (2026-09-29): added named_insured.all_named_insureds[].name. Every name the declarations' insured block prints, in order (one, two or more) -- the primary first. Built only from that block, never from an insured-summary table; see _header_named_insureds in fideon/l1/registry_extractor.py."
+  "fideon:lob_code": "AU",
+  "fideon:layout_family": "casualty_fleet",
+  "fideon:schema_version": "2.0.0",
+  "fideon:common_model_version": "1.1.0",
+  "fideon:status": "SPEC_21 schema (10 October 2026) replacing the generated pre-SPEC_21 auto.json 1.5.0; draft for the project owner's approval. The 11 seed golds are drafted against it (DRAFT, pending reviewer sign-off).",
+  "fideon:built_from": {
+    "seed_golds": 11,
+    "documents_read": 11,
+    "carriers": [
+      "Hartford Insurance Company of Illinois (The Hartford)",
+      "Merchants Mutual Insurance Company",
+      "National Union Fire Insurance Company of Pittsburgh, Pa. (VFIS / Glatfelter)",
+      "Preferred Mutual Insurance Company",
+      "Progressive Preferred Insurance Co / Progressive Specialty Insurance Co"
+    ],
+    "legacy_schema": "auto.json 1.5.0 (pre-SPEC_21, fideon.canonical.commercial_auto)",
+    "registry_yamls": [
+      "auto",
+      "autob"
+    ],
+    "corpora": [
+      "synth_core/fideon/synth_core/data/source data/<Carrier>/autob/ (11 documents, seeds)"
     ]
   },
-  "fideon:mandatory_fields": [
-    "carrier",
-    "named_insured",
-    "policy"
+  "fideon:blocks_used": [
+    "locations",
+    "vehicles",
+    "drivers",
+    "rating_exposures",
+    "rating_modifiers",
+    "countersignature"
   ],
-  "fideon:audit_rules": {
-    "date_ordering": [
-      "policy.effective_date <= policy.expiration_date"
+  "fideon:lob_block": "None. Every concept the commercial auto documents print has a home in the envelope or a common-model building block (SPEC_21 4.2.4): Item Two rows are coverages[] (covered_auto_symbols, limits, premium), each scheduled auto's coverage lines are coverages[] with applies_to the vehicle, hired auto cost of hire and non-ownership employee counts are rating_exposures[]. A scheduled auto's class code, radius, size and territory factors have no Vehicle field and travel as additional_fields (section_hint the vehicle; CR-AU-03).",
+  "fideon:coverage_codes_file": "auto.coverage_codes.yaml",
+  "fideon:coverage_codes": [
+    "X_VEHICLE_LIABILITY",
+    "AU_SUPPLEMENTAL_SPOUSAL_LIABILITY",
+    "X_PIP",
+    "AU_ADDITIONAL_PIP",
+    "AU_OPTIONAL_BASIC_ECONOMIC_LOSS",
+    "AU_AGGREGATE_NO_FAULT_BENEFITS",
+    "X_MED_PAY",
+    "X_UM",
+    "X_UIM",
+    "X_COMPREHENSIVE",
+    "AU_SPECIFIED_CAUSES_OF_LOSS",
+    "X_COLLISION",
+    "X_TOWING",
+    "X_RENTAL",
+    "AU_DOWNTIME_RENTAL_TOWING",
+    "AU_HIRED_AUTO_LIABILITY",
+    "AU_NON_OWNERSHIP_LIABILITY",
+    "AU_HIRED_AUTO_PHYSICAL_DAMAGE",
+    "AU_FULL_GLASS",
+    "AU_COVERAGE_EXTENSION",
+    "AU_OTHER_AUTO_COVERAGES",
+    "X_ADDITIONAL_INSURED",
+    "X_WAIVER_OF_SUBROGATION"
+  ],
+  "fideon:mandatory_fields": [
+    "carrier.name",
+    "named_insured.primary_name",
+    "policy.policy_number",
+    "policy.effective_date",
+    "policy.expiration_date",
+    "coverages[].limits[].amount"
+  ],
+  "fideon:audit_rules": [
+    "policy.effective_date < policy.expiration_date",
+    "months_between(policy.effective_date, policy.expiration_date) == policy.term_months",
+    "policy.effective_date <= document.transaction_effective_date <= policy.expiration_date",
+    "len(coverages[].limits[]) >= 1"
+  ],
+  "fideon:audit_rules_note": "Rules 1-4 are common_model.json fideon:default_audit_rules without the claims-made rule: commercial auto is occurrence-based. The term rule applies where the term is printed (Progressive's '12 month').",
+  "fideon:aliases": {
+    "billing.bill_type": [
+      "Direct Bill",
+      "LIST BILL"
     ],
-    "math": [
-      "sum(coverages[*].premium) ≈ premium.total_policy_premium ± 0.01"
+    "billing.installments[].due_date": [
+      "DUE"
+    ],
+    "carrier.name": [
+      "Underwritten by",
+      "Name of Insurance Company",
+      "Company",
+      "Coverage Part and Insurance Company Summary"
+    ],
+    "countersignature.date": [
+      "Countersigned by",
+      "COUNTERSIGNED",
+      "Authorized representative (countersignature, where required)"
+    ],
+    "coverages[].covered_auto_symbols[]": [
+      "Covered Autos",
+      "Covered Auto Symbols",
+      "SYMBOLS"
+    ],
+    "coverages[].deductibles[].amount": [
+      "Deductible",
+      "DEDUCT"
+    ],
+    "coverages[].limits[].amount": [
+      "Limit",
+      "Limits",
+      "Limit of Insurance",
+      "Limit Or Deductible",
+      "LIMITS"
+    ],
+    "coverages[].premium": [
+      "Premium",
+      "Advance Premium",
+      "PREMIUM"
+    ],
+    "document.issue_date": [
+      "DATE PREPARED",
+      "Date Prepared"
+    ],
+    "document.print_date": [
+      "Date Printed"
+    ],
+    "document.transaction_type": [
+      "Transaction Type"
+    ],
+    "drivers[].date_of_birth": [
+      "DOB"
+    ],
+    "drivers[].license_number": [
+      "License Number"
+    ],
+    "drivers[].license_state": [
+      "License State"
+    ],
+    "drivers[].name": [
+      "Rated drivers",
+      "DRIVERS LIST",
+      "Name"
+    ],
+    "forms_and_endorsements[].form_number": [
+      "Form Numbers of Coverage Forms, Endorsements and Schedules that are part of this Coverage Part",
+      "FORMS AND ENDORSEMENTS ATTACHED AT INCEPTION",
+      "ENDORSEMENTS ATTACHED TO THIS POLICY",
+      "SCHEDULE OF FORMS AND ENDORSEMENTS"
+    ],
+    "interested_parties[].name": [
+      "LOSS PAYEE(s)",
+      "LOSS PAYEES",
+      "Loss Payee",
+      "Loss Payee information"
+    ],
+    "locations[].address.city": [
+      "GARAGED",
+      "Garaging Address",
+      "TOWN & STATE WHERE PRINCIPALLY GARAGED"
+    ],
+    "locations[].address.postal_code": [
+      "Garaging Zip Code",
+      "ZIP CODE"
+    ],
+    "locations[].territory": [
+      "TERR",
+      "Territory",
+      "TERRITORY"
+    ],
+    "named_insured.additional_named_insureds[].name": [
+      "SCHEDULE OF NAMED INSURED(S)"
+    ],
+    "named_insured.business_description": [
+      "Business Description",
+      "BUSINESS DESCRIPTION"
+    ],
+    "named_insured.entity_type": [
+      "Type of Entity",
+      "Form of Business",
+      "FORM OF BUSINESS",
+      "The named insured organization type is"
+    ],
+    "named_insured.primary_name": [
+      "Named Insured",
+      "Named insured",
+      "NAMED INSURED",
+      "Named Insured and Mailing Address",
+      "Applicant/Named Insured",
+      "Policy was prepared for",
+      "Especially Designed For"
+    ],
+    "policy.effective_date": [
+      "Policy Period",
+      "POLICY PERIOD",
+      "Effective Date",
+      "From"
+    ],
+    "policy.expiration_date": [
+      "Policy Period",
+      "POLICY PERIOD",
+      "Expiration Date of Policy",
+      "To"
+    ],
+    "policy.policy_number": [
+      "Policy Number",
+      "POLICY NUMBER",
+      "Policy number",
+      "Policy No.",
+      "POLICY NO."
+    ],
+    "policy.prior_policy_number": [
+      "Previous Policy Number",
+      "PREVIOUS POLICY NUMBER"
+    ],
+    "policy.subject_to_audit": [
+      "SUBJECT TO AUDIT"
+    ],
+    "premium.taxes_fees[].amount": [
+      "NY Motor Vehicle Law Enforcement Fee",
+      "Motor Vehicle Law Enforcement Fee",
+      "NEW YORK MOTOR VEHICLE LAW ENFORCEMENT FEE",
+      "PREMIUM FOR AUTOMOBILE NYMVLEF"
+    ],
+    "premium.total": [
+      "Total Advance Premium",
+      "TOTAL ADVANCE PREMIUM",
+      "Total Premium",
+      "TOTAL POLICY PREMIUM",
+      "ESTIMATED TOTAL PREMIUM",
+      "Estimated Total Premium",
+      "Total 12 month policy premium and fees"
+    ],
+    "producer.agency_name": [
+      "Agent/Broker Name",
+      "Producer",
+      "Your Agent",
+      "Agency Name",
+      "Preferred Mutual representative"
+    ],
+    "producer.producer_code": [
+      "Producer",
+      "Your Agent"
+    ],
+    "rating_exposures[].class_code": [
+      "CLASS",
+      "Class Code",
+      "CLASS CODE",
+      "Size Class"
+    ],
+    "rating_exposures[].exposure_amount": [
+      "Estimated Cost of Hire",
+      "ESTIMATED ANNUAL COST OF HIRE",
+      "Number"
+    ],
+    "rating_exposures[].exposure_basis": [
+      "Rating Basis",
+      "RATING BASIS"
+    ],
+    "rating_exposures[].rate": [
+      "Rate Per Each $100 Cost of Hire"
+    ],
+    "vehicles[].body_type": [
+      "Body type",
+      "Body Type"
+    ],
+    "vehicles[].cost_new": [
+      "ORIG. COST NEW",
+      "Cost New",
+      "ORIGINAL COST"
+    ],
+    "vehicles[].make": [
+      "Make"
+    ],
+    "vehicles[].model": [
+      "Model"
+    ],
+    "vehicles[].stated_amount": [
+      "Stated Amount",
+      "Value"
+    ],
+    "vehicles[].use": [
+      "Personal use",
+      "Bus. Use",
+      "Use"
+    ],
+    "vehicles[].vehicle_number": [
+      "NO.",
+      "COVERED AUTO NO.",
+      "Covered Auto No.",
+      "Vehicle #",
+      "Vehicle Number"
+    ],
+    "vehicles[].vin": [
+      "VIN",
+      "ID NO.",
+      "V.I.N.",
+      "VEHICLE IDENTIFICATION NUMBER (VIN)"
+    ],
+    "vehicles[].year": [
+      "Year"
     ]
   },
   "type": "object",
+  "additionalProperties": false,
   "required": [
+    "document",
     "carrier",
     "named_insured",
-    "policy"
+    "policy",
+    "lob_parts",
+    "coverages"
   ],
   "properties": {
     "document": {
-      "type": "object",
-      "properties": {
-        "document_type": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "document_title_as_stated": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "line_of_business_as_stated": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "coverage_parts_present": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/FieldValue"
-          }
-        },
-        "applicable_coverages": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "fideon:aliases": [
-            "Applicable Coverage(s)",
-            "Other Coverage(s) As Specified"
-          ]
-        },
-        "transaction_type": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "TRANS TYPE",
-            "Transaction Type"
-          ]
-        },
-        "transaction_reason": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Amended Date",
-            "Modifies Coverage(s) at Renewal",
-            "Reason(s) for Modification"
-          ]
-        },
-        "transaction_effective_date": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "transaction_date"
-          ]
-        },
-        "issue_date": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "print_date": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Date Summary Printed",
-            "Last Updated",
-            "PROCESSING DATE",
-            "Process Date"
-          ]
-        },
-        "page_count": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "source_file_name": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "source_carrier_folder": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "language": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "source_system": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "endorsement_number": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 11 of the 22 lines. Which endorsement THIS document is. `forms_and_endorsements[]` lists the forms attached to the policy; this names the change the page represents."
-        },
-        "esignature_certificate": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 5 of the 22 lines. The e-signature certificate id -- the evidence the document was signed."
-        },
-        "delivery_preference": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 4 of the 22 lines. Paper or electronic. A notice sent the way the policyholder did not choose is a compliance failure."
-        }
-      }
+      "$ref": "../common/common_model.json#/$defs/document"
     },
     "carrier": {
-      "type": "object",
-      "properties": {
-        "company_name": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "writing_company_name": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "underwriting_company",
-            "writing_company",
-            "issuing_company"
-          ]
-        },
-        "group_name": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "naic_number": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "naic_code"
-          ]
-        },
-        "fein": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "address": {
-          "type": "object",
-          "properties": {
-            "line_1": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "line_2": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "city": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "state": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "postal_code": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "county": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "country": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "full": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:repo_addition": "The address as the document PRINTS it, unparsed. The supplied schema carries only the split parts, and L1 reads the block whole rather than guessing where the street ends and the city begins."
-            }
-          }
-        },
-        "contact": {
-          "type": "object",
-          "properties": {
-            "phone": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "Home",
-                "Mobile",
-                "Work"
-              ]
-            },
-            "fax": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "email": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "website": {
-              "$ref": "#/$defs/FieldValue"
-            }
-          }
-        },
-        "is_surplus_lines": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "surplus_lines_broker_name": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "surplus_lines_license_number": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "state_of_issue": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "admitted_status": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 5 of the 22 lines. Admitted or surplus lines. `is_surplus_lines` is a boolean; carriers print a status word."
-        }
-      },
-      "fideon:aliases": [
-        "Insurer",
-        "Carrier",
-        "Insurance Company",
-        "Underwriting Company"
-      ]
+      "$ref": "../common/common_model.json#/$defs/carrier"
     },
     "producer": {
-      "type": "object",
-      "properties": {
-        "agency_name": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "producer_code": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "producer_contact_name": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "address": {
-          "type": "object",
-          "properties": {
-            "line_1": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "line_2": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "city": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "state": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "postal_code": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "county": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "country": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "full": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:repo_addition": "The address as the document PRINTS it, unparsed. The supplied schema carries only the split parts, and L1 reads the block whole rather than guessing where the street ends and the city begins."
-            }
-          }
-        },
-        "contact": {
-          "type": "object",
-          "properties": {
-            "phone": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "Home",
-                "Mobile",
-                "Work",
-                "agency_phone"
-              ]
-            },
-            "fax": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "email": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "website": {
-              "$ref": "#/$defs/FieldValue"
-            }
-          }
-        },
-        "license_number": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "commission_percentage": {
-          "$ref": "#/$defs/FieldValue"
-        }
-      },
-      "fideon:aliases": [
-        "Agency",
-        "Agent",
-        "Producer",
-        "Broker"
-      ]
-    },
-    "policy": {
-      "type": "object",
-      "properties": {
-        "policy_number": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "prior_policy_number": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "account_id": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Account ID"
-          ]
-        },
-        "certificate_number": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "CERTIFICATE NUMBER"
-          ]
-        },
-        "alternate_policy_identifiers": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "identifier_type": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "identifier_value": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "program_name": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "package_bundle"
-          ]
-        },
-        "policy_form_name": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "form_name"
-          ]
-        },
-        "policy_form_number": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "form_number"
-          ]
-        },
-        "policy_form_edition": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "policy_type": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "effective_date": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Both dates",
-            "Start Date"
-          ]
-        },
-        "expiration_date": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "effective_time": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "time_zone": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "policy_term_months": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "anniversary_date": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "is_renewal": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "renewal_of_policy_number": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "cancellation_date": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "cancellation_reason": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "nonrenewal_notice_date": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "audit_frequency": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "SUBJECT TO AUDIT",
-            "Subject to Audit"
-          ]
-        },
-        "minimum_earned_premium_percentage": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "original_inception_date": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 13 of the 22 lines. The date the policy FIRST incepted, which a renewal states beside its own term -- North Country prints `Inception Date`. Distinct from `effective_date` and from `anniversary_date`."
-        },
-        "renewal_offer": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 12 of the 22 lines. Whether the carrier is offering renewal, and on what terms. A compliance fact on any non-renewal."
-        },
-        "rating_state": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 9 of the 22 lines. The state whose rates apply -- not always where the policy was issued (`carrier.state_of_issue`), nor where the risk sits."
-        },
-        "policy_tier": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 8 of the 22 lines. NYCM prints `Tier: 9`. A rating tier moves the premium and had no slot, so it travelled in `additional_fields` flagged as unverified."
-        },
-        "cancellation_method": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 8 of the 22 lines. HOW a policy was cancelled -- flat, pro-rata, short rate. `cancellation_date` and `cancellation_reason` exist; the method is what decides the refund."
-        },
-        "non_assessable_cooperative": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 7 of the 22 lines. Whether a co-operative may assess its members. Printed on the face of every Leatherstocking declaration, and a statement about the policyholder's liability rather than the carrier's."
-        },
-        "quote_number": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 4 of the 22 lines. The quote this policy was issued from. NYCM prints `QUOTE #: Q31829763` on every page."
-        },
-        "policy_term_as_printed": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "The policy term EXACTLY as the page states it, whichever form that takes. Carriers print two: a duration (`Policy Term: 12 Months`) and a date range (`Policy Term: 02/29/2024 to 02/28/2025`). `policy_term_months` counts months, so a carrier printing the range had its date pair written into a numeric field -- Plymouth Rock shipped `policy_term_months: \"02/29/2024 to 02/28/2025\"`, which is wrong for anyone who trusts the field name, and aliasing the two together would make that the intended behaviour. The alternative was to leave the range in `additional_fields`, flagged. Rejected: every carrier prints the term in one of these two forms, so that is a recurring flagged unknown for a fact the page states plainly. Keeping both fields means `policy_term_months` stays a number and the printed form survives as the audit trail; the date range itself is also in `effective_date`/`expiration_date`, and this says what the page said."
-        }
-      }
+      "$ref": "../common/common_model.json#/$defs/producer"
     },
     "named_insured": {
-      "type": "object",
-      "properties": {
-        "primary_name": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Insured Name",
-            "Named Insured"
-          ]
-        },
-        "doing_business_as": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "entity_type": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "fein": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "mailing_address": {
-          "type": "object",
-          "properties": {
-            "line_1": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "line_2": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "city": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "state": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "postal_code": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "county": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "country": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "full": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:repo_addition": "The address as the document PRINTS it, unparsed. The supplied schema carries only the split parts, and L1 reads the block whole rather than guessing where the street ends and the city begins."
-            }
-          },
-          "fideon:aliases": [
-            "Mail To"
-          ]
-        },
-        "physical_address": {
-          "type": "object",
-          "properties": {
-            "line_1": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "line_2": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "city": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "state": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "postal_code": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "county": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "country": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "full": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:repo_addition": "The address as the document PRINTS it, unparsed. The supplied schema carries only the split parts, and L1 reads the block whole rather than guessing where the street ends and the city begins."
-            }
-          }
-        },
-        "contact": {
-          "type": "object",
-          "properties": {
-            "phone": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "Home",
-                "Mobile",
-                "Work"
-              ]
-            },
-            "fax": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "email": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "website": {
-              "$ref": "#/$defs/FieldValue"
-            }
-          }
-        },
-        "business_description": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Type of Business",
-            "Nature of Business",
-            "Description of Operations"
-          ]
-        },
-        "sic_code": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "naics_code": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "years_in_business": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "additional_named_insureds": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "name": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "entity_type": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "relationship": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "effective_date": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:aliases": [
-                  "Both dates",
-                  "Start Date"
-                ]
-              },
-              "address": {
-                "type": "object",
-                "properties": {
-                  "line_1": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "line_2": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "city": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "state": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "postal_code": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "county": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "country": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "full": {
-                    "$ref": "#/$defs/FieldValue",
-                    "fideon:repo_addition": "The address as the document PRINTS it, unparsed. The supplied schema carries only the split parts, and L1 reads the block whole rather than guessing where the street ends and the city begins."
-                  }
-                }
-              }
-            }
-          }
-        },
-        "contact_name": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 12 of the 22 lines. `named_insured.contact` models phone, fax, email and website and carries no name, so the PERSON to contact had nowhere to go."
-        },
-        "marital_status": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 5 of the 22 lines. A personal-lines rating factor."
-        },
-        "occupation": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 4 of the 22 lines. A personal-lines rating factor."
-        },
-        "all_named_insureds": {
-          "type": "array",
-          "fideon:repo_addition": "Every name the declarations' insured block prints, in order (one, two or more) -- the primary first. Built only from that block, never from an insured-summary table; see _header_named_insureds in fideon/l1/registry_extractor.py.",
-          "items": {
-            "type": "object",
-            "properties": {
-              "name": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:aliases": [
-                  "Named Insured(s)",
-                  "Named Insureds"
-                ]
-              }
-            }
-          }
-        }
-      },
-      "fideon:aliases": [
-        "Named Insured",
-        "Insured",
-        "Policyholder",
-        "Applicant Name"
-      ]
+      "$ref": "../common/common_model.json#/$defs/named_insured"
     },
-    "locations": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "location_number": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "building_number": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "address": {
-            "type": "object",
-            "properties": {
-              "line_1": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "line_2": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "city": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "state": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "postal_code": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "county": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "country": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "full": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:repo_addition": "The address as the document PRINTS it, unparsed. The supplied schema carries only the split parts, and L1 reads the block whole rather than guessing where the street ends and the city begins."
-              }
-            }
-          },
-          "occupancy_description": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "business_description": {
-            "$ref": "#/$defs/FieldValue",
-            "fideon:aliases": [
-              "Type of Business",
-              "Nature of Business",
-              "Description of Operations"
-            ]
-          },
-          "construction_type": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "year_built": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "number_of_stories": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "square_footage": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "protection_class": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "territory_code": {
-            "$ref": "#/$defs/FieldValue",
-            "fideon:aliases": [
-              "GL Territory",
-              "Rating Territory",
-              "Territory"
-            ]
-          },
-          "sprinklered": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "alarm_type": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "interest": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "coverages": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "coverage_code": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "coverage_name": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "coverage_description": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "form_reference": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "applies_to": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "limit_amount": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "limit_basis": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "aggregate_limit_amount": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "sublimit_amount": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "sublimit_basis": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "deductible_amount": {
-                  "$ref": "#/$defs/FieldValue",
-                  "fideon:aliases": [
-                    "ITEM IV. DEDUCTIBLE"
-                  ]
-                },
-                "deductible_type": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "deductible_basis": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "retention_amount": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "waiting_period": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "coinsurance_percentage": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "valuation_basis": {
-                  "$ref": "#/$defs/FieldValue",
-                  "fideon:aliases": [
-                    "Business Personal Property - Replacement Cost"
-                  ]
-                },
-                "premium": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "is_included": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "is_excluded": {
-                  "$ref": "#/$defs/FieldValue"
-                },
-                "notes": {
-                  "$ref": "#/$defs/FieldValue"
-                }
-              }
-            }
-          }
-        }
-      },
-      "fideon:aliases": [
-        "Insured Property Location",
-        "Location of Business",
-        "Locationof Business"
-      ]
+    "policy": {
+      "$ref": "../common/common_model.json#/$defs/policy"
     },
-    "interested_parties": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "party_type": {
-            "$ref": "#/$defs/FieldValue",
-            "fideon:aliases": [
-              "interest_type"
-            ]
-          },
-          "rank": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "name": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "address": {
-            "type": "object",
-            "properties": {
-              "line_1": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "line_2": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "city": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "state": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "postal_code": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "county": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "country": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "full": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:repo_addition": "The address as the document PRINTS it, unparsed. The supplied schema carries only the split parts, and L1 reads the block whole rather than guessing where the street ends and the city begins."
-              }
-            }
-          },
-          "loan_number": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "clause_type": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "applies_to": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "description_of_interest": {
-            "$ref": "#/$defs/FieldValue"
-          }
-        }
-      }
-    },
-    "premium": {
-      "type": "object",
-      "properties": {
-        "total_policy_premium": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "annual_policy_premium",
-            "annual_premium"
-          ]
-        },
-        "basic_premium": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "estimated_annual_premium": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "deposit_premium": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "minimum_premium": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "return_premium": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "additional_premium": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "premium_by_coverage_part": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "coverage_part": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "premium": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "taxes_and_fees": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "description": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "is_fully_earned": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "surcharges": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "description": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "amount": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "discounts_and_credits": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "description": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "percentage": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "applies_to": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            },
-            "fideon:aliases": [
-              "discounts"
-            ]
-          }
-        },
-        "surplus_lines_tax": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "fire_fee": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Includes New York Fire Fee Of",
-            "NY Fire Fee",
-            "New York Fire Fee"
-          ]
-        },
-        "motor_vehicle_law_enforcement_fee": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "DMV FEE",
-            "Enforcement Fee",
-            "MVLE Fee",
-            "Motor Vehicle Law Enforcement Fee",
-            "NEW YORK MOTOR VEHICLE LAW ENFORCEMENT FEE"
-          ]
-        },
-        "guaranty_association_surcharge": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "NJ Property-Liability Guaranty Association Surcharge"
-          ]
-        },
-        "additional_insured_processing_fee": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "AI Processing Fee"
-          ]
-        },
-        "service_fee": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Service Fee"
-          ]
-        },
-        "administrative_fee": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Maximum Administrative Fee"
-          ]
-        },
-        "stamping_fee": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "policy_fee": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "inspection_fee": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "rating_basis": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "rate_per_unit": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "exposure_amount": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "premium_change": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 9 of the 22 lines. The NET change an endorsement makes. `return_premium` and `additional_premium` model the two directions separately; a carrier prints one signed figure."
-        },
-        "pay_in_full_amount": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Printed across the POLICIES-FINAL corpus (277 documents, ~40 carriers) and absent from the supplied schemas. Printed on 7 of the 22 lines. What the policy costs paid at once, printed beside the instalment figure. Neither is the other."
-        }
-      },
-      "fideon:aliases": [
-        "Total Premium",
-        "Policy Premium",
-        "Premium Summary"
-      ]
-    },
-    "terrorism": {
-      "type": "object",
-      "properties": {
-        "terrorism_disposition": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "TERR-DISC"
-          ]
-        },
-        "tria_coverage_elected": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "terrorism_rejection_indicator": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "terrorism_exclusion_form_number": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "terrorism_rejection_date": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "certified_acts_limit": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "terrorism_premium": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "TERR-COV",
-            "Terrorism Coverage"
-          ]
-        },
-        "terrorism_rate": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "catastrophe_terrorism_premium": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "disclosure_form_number": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "federal_share_percentage": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "program_cap_disclosure": {
-          "$ref": "#/$defs/FieldValue"
-        }
-      }
-    },
-    "billing": {
-      "type": "object",
-      "properties": {
-        "billing_plan": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "payment_plan": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "payment_method": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "ELECTRONIC FUND",
-            "Electronic Fund Transfer",
-            "Pay by Check",
-            "Repetitive EFT",
-            "billing_method"
-          ]
-        },
-        "payment_frequency": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Monthly (Pre-authorized checking)",
-            "Quarterly",
-            "Semi-annual"
-          ]
-        },
-        "bill_to_party": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "amount_due": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "due_date": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "installments": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "installment_number": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "due_date": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "installment_fee": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          },
-          "fideon:aliases": [
-            "Pay initial installment"
-          ]
-        }
-      }
-    },
-    "forms_and_endorsements": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "form_number": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "edition_date": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "form_title": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "form_type": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "applies_to": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "limit_amount": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "deductible_amount": {
-            "$ref": "#/$defs/FieldValue",
-            "fideon:aliases": [
-              "ITEM IV. DEDUCTIBLE"
-            ]
-          },
-          "premium": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "is_included": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "is_mandatory": {
-            "$ref": "#/$defs/FieldValue"
-          }
-        }
-      },
-      "fideon:aliases": [
-        "Privacy Disclosure Notice",
-        "SCHEDULE OF ADDITIONAL ENDORSEMENTS",
-        "Service of Suit Endorsement",
-        "Vehicle Under Construction Endorsement",
-        "attached at time of issue"
-      ]
-    },
-    "deductibles": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "applies_to": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "deductible_type": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "amount": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "percentage": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "percentage_basis": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "minimum_amount": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "maximum_amount": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "waiting_period": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "notes": {
-            "$ref": "#/$defs/FieldValue"
-          }
-        }
-      }
-    },
-    "loss_history": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "loss_date": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "claim_number": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "description": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "paid_amount": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "reserved_amount": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "status": {
-            "$ref": "#/$defs/FieldValue"
-          }
-        }
-      }
-    },
-    "state_notices": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "state": {
-            "$ref": "#/$defs/FieldValue"
-          },
-          "notice_title": {
-            "$ref": "#/$defs/FieldValue",
-            "fideon:aliases": [
-              "LVANIA NOTICE",
-              "NEW YORK NOTICE",
-              "NOTICE TO SENIOR CITIZENS",
-              "PENNSYLVANIA NOTICE",
-              "Privacy Disclosure Notice",
-              "State Notice"
-            ]
-          },
-          "form_reference": {
-            "$ref": "#/$defs/FieldValue"
-          }
-        }
-      }
-    },
-    "claim_reporting": {
-      "type": "object",
-      "properties": {
-        "claim_reporting_instructions": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Call (First Notice of Loss)",
-            "Report a Claim",
-            "Send Claims related notices to"
-          ]
-        },
-        "claims_notice_recipient": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "claims_phone": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "CUSTOMER CARE",
-            "Customer Service",
-            "Report a Claim"
-          ]
-        },
-        "claims_email": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "claims_address": {
-          "type": "object",
-          "properties": {
-            "line_1": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "line_2": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "city": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "state": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "postal_code": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "county": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "country": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "full": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:repo_addition": "The address as the document PRINTS it, unparsed. The supplied schema carries only the split parts, and L1 reads the block whole rather than guessing where the street ends and the city begins."
-            }
-          }
-        }
-      }
-    },
-    "signature": {
-      "type": "object",
-      "properties": {
-        "authorized_representative_name": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "authorized_representative",
-            "authorized_rep",
-            "countersigned_by"
-          ]
-        },
-        "title": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "signature_date": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "countersignature_state": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:aliases": [
-            "Authorized Countersignature",
-            "COUNTERSIGNED",
-            "Countersigned On"
-          ]
-        },
-        "countersignature_date": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "has_signature": {
-          "$ref": "#/$defs/FieldValue",
-          "fideon:repo_addition": "Whether the declarations page carries a signature at all. The supplied `signature` block models the signature's CONTENTS -- representative name, title, dates -- and has no key for its presence, so a reader that checks for one had nowhere to report it and the answer travelled in `additional_fields` on every document. An unsigned declarations page is a compliance question, so `false` is a finding rather than an absence."
-        }
-      }
-    },
-    "auto": {
-      "type": "object",
-      "properties": {
-        "vehicles": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "vehicle_number": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "year": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "make": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "model": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "body_type": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "vin": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:aliases": [
-                  "Identification Number",
-                  "VEHICLENUMBER",
-                  "Vehicle ID Number"
-                ]
-              },
-              "vehicle_use": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "garaging_address": {
-                "type": "object",
-                "properties": {
-                  "line_1": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "line_2": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "city": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "state": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "postal_code": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "county": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "country": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "full": {
-                    "$ref": "#/$defs/FieldValue",
-                    "fideon:repo_addition": "The address as the document PRINTS it, unparsed. The supplied schema carries only the split parts, and L1 reads the block whole rather than guessing where the street ends and the city begins."
-                  }
-                },
-                "fideon:aliases": [
-                  "Garaging Zip Code"
-                ]
-              },
-              "garaging_territory": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "cost_new": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "stated_amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "actual_cash_value": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "annual_mileage": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "odometer_reading": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "symbol_or_class_code": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "coverages": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "coverage_code": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "coverage_name": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "coverage_description": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "form_reference": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "applies_to": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "limit_amount": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "limit_basis": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "aggregate_limit_amount": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "sublimit_amount": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "sublimit_basis": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "deductible_amount": {
-                      "$ref": "#/$defs/FieldValue",
-                      "fideon:aliases": [
-                        "ITEM IV. DEDUCTIBLE"
-                      ]
-                    },
-                    "deductible_type": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "deductible_basis": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "retention_amount": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "waiting_period": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "coinsurance_percentage": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "valuation_basis": {
-                      "$ref": "#/$defs/FieldValue",
-                      "fideon:aliases": [
-                        "Business Personal Property - Replacement Cost"
-                      ]
-                    },
-                    "premium": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "is_included": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "is_excluded": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "notes": {
-                      "$ref": "#/$defs/FieldValue"
-                    }
-                  }
-                }
-              },
-              "lienholder": {
-                "type": "object",
-                "properties": {
-                  "party_type": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "rank": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "name": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "address": {
-                    "type": "object",
-                    "properties": {
-                      "line_1": {
-                        "$ref": "#/$defs/FieldValue"
-                      },
-                      "line_2": {
-                        "$ref": "#/$defs/FieldValue"
-                      },
-                      "city": {
-                        "$ref": "#/$defs/FieldValue"
-                      },
-                      "state": {
-                        "$ref": "#/$defs/FieldValue"
-                      },
-                      "postal_code": {
-                        "$ref": "#/$defs/FieldValue"
-                      },
-                      "county": {
-                        "$ref": "#/$defs/FieldValue"
-                      },
-                      "country": {
-                        "$ref": "#/$defs/FieldValue"
-                      },
-                      "full": {
-                        "$ref": "#/$defs/FieldValue",
-                        "fideon:repo_addition": "The address as the document PRINTS it, unparsed. The supplied schema carries only the split parts, and L1 reads the block whole rather than guessing where the street ends and the city begins."
-                      }
-                    }
-                  },
-                  "loan_number": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "clause_type": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "applies_to": {
-                    "$ref": "#/$defs/FieldValue"
-                  },
-                  "description_of_interest": {
-                    "$ref": "#/$defs/FieldValue"
-                  }
-                }
-              },
-              "premium": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "covered_auto_symbols": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/FieldValue"
-                }
-              },
-              "gross_vehicle_weight": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:aliases": [
-                  "GVW/Seats"
-                ]
-              },
-              "size_class": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:aliases": [
-                  "Size Class"
-                ]
-              },
-              "business_use_class": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:aliases": [
-                  "Bus. Use"
-                ]
-              },
-              "radius_of_operation": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "seating_capacity": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "fleet_indicator": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "state_of_registration": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "drivers": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "driver_number": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "name": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "date_of_birth": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "age": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "gender": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "marital_status": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "license_number": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "license_state": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "date_licensed": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "relationship_to_insured": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "driver_status": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "assigned_vehicle_number": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "excluded_driver": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "violations_and_accidents": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "date": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "description": {
-                      "$ref": "#/$defs/FieldValue"
-                    },
-                    "points": {
-                      "$ref": "#/$defs/FieldValue"
-                    }
-                  }
-                }
-              },
-              "driver_discounts": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/FieldValue"
-                }
-              }
-            }
-          }
-        },
-        "liability_coverages": {
-          "type": "object",
-          "properties": {
-            "bodily_injury_per_person_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "bodily_injury_per_accident_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "property_damage_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "combined_single_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "medical_payments_limit": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "Medical Payments",
-                "Medical Payments Limit",
-                "Medical Payments Limit (any one person)"
-              ]
-            },
-            "uninsured_motorist_bodily_injury_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "underinsured_motorist_bodily_injury_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "uninsured_motorist_property_damage_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "uninsured_motorist_deductible": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "personal_injury_protection_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "personal_injury_protection_options": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            },
-            "supplementary_uninsured_underinsured_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "no_fault_benefits_description": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "bodily_injury_split_limits": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "BODILY INJURY SPLIT LIMITS"
-              ]
-            }
-          }
-        },
-        "no_fault_benefits": {
-          "type": "object",
-          "properties": {
-            "is_applicable": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "no_fault_state": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "mandatory_pip_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "mandatory_pedestrian_pip_limit": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "Mandatory Pedestrian Personal Injury Protection"
-              ]
-            },
-            "additional_pip_limit": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "Additional PIP",
-                "Increased PIP"
-              ]
-            },
-            "basic_economic_loss_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "optional_basic_economic_loss_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "aggregate_no_fault_benefits_available": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "maximum_monthly_work_loss": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "additional_monthly_work_loss": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "aggregate_work_loss": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "death_benefit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "additional_death_benefits": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "aggregate_death_benefits": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "other_necessary_expenses_per_day": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "additional_other_necessary_expenses": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "aggregate_other_necessary_expenses": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "funeral_benefit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "no_fault_deductible": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "applies_to_named_insured_only": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "covered_persons": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "physical_damage_coverages": {
-          "type": "object",
-          "properties": {
-            "comprehensive_deductible": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "OTHER THAN COLL",
-                "Other Than Collision",
-                "Other Than Collision Loss"
-              ]
-            },
-            "collision_deductible": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "full_glass_coverage": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "towing_and_labor_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "rental_reimbursement_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "rental_reimbursement_daily_maximum": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "rental_reimbursement_maximum_days": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "gap_coverage": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "custom_equipment_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "substitute_transportation_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "transportation_expenses_limit": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "TRANSPORTATION EXP",
-                "TRAVEL - TRANSPORTATION EXPENSES (FAMILY PLUS)"
-              ]
-            },
-            "trip_interruption_limit": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "TRAVEL - TRIP INTERRUPTION (FAMILY PLUS)",
-                "TRIP INTERRUPTION"
-              ]
-            },
-            "roadside_assistance_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "other_than_collision_deductible": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "guaranteed_value_indicator": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "Guaranteed Value"
-              ]
-            },
-            "full_glass_deductible": {
-              "$ref": "#/$defs/FieldValue"
-            }
-          }
-        },
-        "attached_trailer_or_coupler": {
-          "type": "object",
-          "properties": {
-            "coupler_combination_indicator": {
-              "$ref": "#/$defs/FieldValue",
-              "fideon:aliases": [
-                "COUPLER (COMBO)"
-              ]
-            },
-            "bodily_injury_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "property_damage_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "collision_deductible": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "other_than_collision_deductible": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "full_glass_coverage": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "trailer_description": {
-              "$ref": "#/$defs/FieldValue"
-            }
-          }
-        },
-        "additional_coverages": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "coverage_code": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "coverage_name": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "coverage_description": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "form_reference": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "applies_to": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "limit_amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "limit_basis": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "aggregate_limit_amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "sublimit_amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "sublimit_basis": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "deductible_amount": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:aliases": [
-                  "ITEM IV. DEDUCTIBLE"
-                ]
-              },
-              "deductible_type": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "deductible_basis": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "retention_amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "waiting_period": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "coinsurance_percentage": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "valuation_basis": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:aliases": [
-                  "Business Personal Property - Replacement Cost"
-                ]
-              },
-              "premium": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "is_included": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "is_excluded": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "notes": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "discounts": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "discount_name": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:aliases": [
-                  "ABS Discount",
-                  "ANTI-LOCK BRAKES",
-                  "ANTI-THEFT DEVICE",
-                  "Accident Prevention Course Discount",
-                  "Anti-Lock Braking System (ABS) Discount",
-                  "CUSTOMIZING",
-                  "DAYTIME RUNNING LAMPS",
-                  "HOME OWNERSHIP",
-                  "Multi-Car Discount",
-                  "Multi-Vehicle Discount",
-                  "NEW CAR DISCOUNT",
-                  "PASSIVE RESTRAINT"
-                ]
-              },
-              "applies_to": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "percentage": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "covered_auto_symbol_schedule": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "coverage_name": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "symbols_applied": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/FieldValue"
-                }
-              },
-              "limit_amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "deductible_amount": {
-                "$ref": "#/$defs/FieldValue",
-                "fideon:aliases": [
-                  "ITEM IV. DEDUCTIBLE"
-                ]
-              },
-              "premium": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "hired_auto": {
-          "type": "object",
-          "properties": {
-            "liability_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "physical_damage_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "estimated_annual_cost_of_hire": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "rating_basis": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "premium": {
-              "$ref": "#/$defs/FieldValue"
-            }
-          }
-        },
-        "non_owned_auto": {
-          "type": "object",
-          "properties": {
-            "liability_limit": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "number_of_employees": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "rating_basis": {
-              "$ref": "#/$defs/FieldValue"
-            },
-            "premium": {
-              "$ref": "#/$defs/FieldValue"
-            }
-          }
-        },
-        "drive_other_car": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "named_individual": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "limit_amount": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "premium": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "state_rating_schedule": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "state": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "number_of_autos": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "premium": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        },
-        "motor_carrier_filings": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "filing_type": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "filing_state": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "docket_number": {
-                "$ref": "#/$defs/FieldValue"
-              },
-              "form_number": {
-                "$ref": "#/$defs/FieldValue"
-              }
-            }
-          }
-        }
-      }
+    "lob_parts": {
+      "$ref": "../common/common_model.json#/$defs/lob_parts"
     },
     "coverages": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/CoverageSection"
-      },
-      "fideon:aliases": [
-        "Coverage",
-        "Coverages",
-        "Coverage Part",
-        "Schedule of Coverages",
-        "Limits of Insurance"
-      ]
+      "$ref": "../common/common_model.json#/$defs/coverages"
     },
-    "text_sections": {
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/TextSection"
-      },
-      "fideon:fsm_exclude": true,
-      "description": "Raw text blocks for SLM/LLM-based policy comparison — populated by the text extraction path, not the VLM FSM. These are what the Comparison API reads."
+    "deductibles": {
+      "$ref": "../common/common_model.json#/$defs/deductibles"
+    },
+    "interested_parties": {
+      "$ref": "../common/common_model.json#/$defs/interested_parties"
+    },
+    "premium": {
+      "$ref": "../common/common_model.json#/$defs/premium"
+    },
+    "billing": {
+      "$ref": "../common/common_model.json#/$defs/billing"
+    },
+    "forms_and_endorsements": {
+      "$ref": "../common/common_model.json#/$defs/forms_and_endorsements"
+    },
+    "locations": {
+      "$ref": "../common/common_model.json#/$defs/locations"
+    },
+    "vehicles": {
+      "$ref": "../common/common_model.json#/$defs/vehicles"
+    },
+    "drivers": {
+      "$ref": "../common/common_model.json#/$defs/drivers"
+    },
+    "rating_exposures": {
+      "$ref": "../common/common_model.json#/$defs/rating_exposures"
+    },
+    "rating_modifiers": {
+      "$ref": "../common/common_model.json#/$defs/rating_modifiers"
+    },
+    "countersignature": {
+      "$ref": "../common/common_model.json#/$defs/countersignature"
     },
     "additional_fields": {
-      "type": "array",
-      "description": "Captures the schema has no home for. SPEC_02 §5.1: nothing a reader found is dropped.",
-      "items": {
-        "type": "object",
-        "required": [
-          "name"
-        ],
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "value": {
-            "$ref": "#/$defs/FieldValue"
-          }
-        }
-      }
-    }
-  },
-  "$defs": {
-    "FieldValue": {
-      "type": "object",
-      "required": [
-        "raw",
-        "parsed",
-        "confidence",
-        "page_ref",
-        "flagged"
-      ],
-      "properties": {
-        "raw": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "parsed": {
-          "type": [
-            "string",
-            "number",
-            "null"
-          ]
-        },
-        "confidence": {
-          "type": "object",
-          "properties": {
-            "score": {
-              "type": "number",
-              "minimum": 0.0,
-              "maximum": 1.0
-            },
-            "source": {
-              "type": "string",
-              "enum": [
-                "deterministic",
-                "structural",
-                "vlm",
-                "audit"
-              ]
-            }
-          }
-        },
-        "page_ref": {
-          "type": "array",
-          "items": {
-            "type": "integer"
-          }
-        },
-        "flagged": {
-          "type": "boolean"
-        }
-      }
+      "$ref": "../common/common_model.json#/$defs/additional_fields"
     },
-    "CoverageSection": {
-      "type": "object",
-      "properties": {
-        "coverage_type": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "coverage_name": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "covered_auto_symbols": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "limit": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "aggregate_limit": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "deductible": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "retention": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "sublimit": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "premium": {
-          "$ref": "#/$defs/FieldValue"
-        },
-        "endorsement_refs": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/FieldValue"
-          }
-        }
-      }
+    "text_sections": {
+      "$ref": "../common/common_model.json#/$defs/text_sections"
     },
-    "TextSection": {
-      "type": "object",
-      "required": [
-        "section_id",
-        "raw_text",
-        "page_range"
-      ],
-      "properties": {
-        "section_id": {
-          "type": "string",
-          "description": "Standard keys: conditions, exclusions, endorsements, insuring_agreement, definitions. Endorsements may be keyed by ISO form number (e.g. 'CG 21 47')."
-        },
-        "raw_text": {
-          "type": "string"
-        },
-        "page_range": {
-          "type": "array",
-          "items": {
-            "type": "integer"
-          }
-        },
-        "form_number": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
+    "fideon:provenance": {
+      "$ref": "../common/common_model.json#/$defs/provenance"
     }
-  },
-  "fideon:verification": {
-    "registry_entries": 39,
-    "corpus_samples": 11,
-    "verified_against_documents": true,
-    "note": "11 sample document(s) across 39 registry entries"
   }
 }

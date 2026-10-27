@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fideon canonical schema - health (policy_check)",
+  "description": "SPEC_21 section 4 canonical schema for health (L1 code health; also the schema of the L1 code statutory_disability through lob_schema_map.yaml), composing common_model.json by $ref: the envelope plus the benefit_plans block. Built from the 7 single-LOB documents of the source-data health folder (3 folders, read in place): the 4 with a native text layer are the seeds -- 2 New York statutory disability (DBL) and paid family leave (PFL) policies (Shelterpoint) and 2 volunteer accident and sickness policies (Glatfelter Insurance Group, VFIS program); the other 3 are page images under an OCR text layer. No legacy health.json existed. No LOB block.",
+  "fideon:doc_type": "policy_check",
+  "fideon:lob": "health",
+  "fideon:lob_code": "TBD",
+  "fideon:layout_family": "benefits_misc",
+  "fideon:schema_version": "1.0.0",
+  "fideon:common_model_version": "1.1.0",
+  "fideon:status": "SPEC_21 Phase 2 schema (10 October 2026), built from 4 native seed documents of 2 carriers; the first health schema. Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off.",
+  "fideon:built_from": {
+    "seed_golds": 4,
+    "carriers": [
+      "Shelterpoint",
+      "Glatfelter Insurance Group"
+    ],
+    "legacy_schema": "none (no health.json existed; the statutory_disability registry entries' paths come from the pre-SPEC_21 statutory_disability.json, health.crosswalk.yaml)",
+    "registry_yamls": [
+      "statutory_disability",
+      "health"
+    ],
+    "corpora": [
+      "synth_core/fideon/synth_core/data/source data/<Carrier>/health/ (7 documents; 4 native seeds, 3 page images under an OCR text layer)"
+    ]
+  },
+  "fideon:blocks_used": [
+    "benefit_plans"
+  ],
+  "fideon:lob_block": "None. The benefits a health or statutory disability policy pays are coverages with their printed limits (coverage codes HEALTH_); a plan's printed benefit formula, waiting period and rate are benefit_plans[] (common model). Nothing the seeds print needs a block of its own (SPEC_21 4.2.4).",
+  "fideon:coverage_codes_file": "health.coverage_codes.yaml",
+  "fideon:coverage_codes": [
+    "HEALTH_24_HOUR_ACCIDENT",
+    "HEALTH_ACCIDENTAL_DEATH",
+    "HEALTH_CONTINUATION_HEALTH_INSURANCE",
+    "HEALTH_COORDINATED_28_DAY_DISABILITY",
+    "HEALTH_COSMETIC_BURNS",
+    "HEALTH_COSMETIC_PLASTIC_SURGERY",
+    "HEALTH_CRITICAL_INCIDENT_STRESS",
+    "HEALTH_DBL",
+    "HEALTH_DEPENDENT_CHILD_EDUCATION",
+    "HEALTH_DEPENDENT_ELDER",
+    "HEALTH_DISMEMBERMENT_PARALYSIS",
+    "HEALTH_EXTENDED_TOTAL_DISABILITY",
+    "HEALTH_FAMILY_BEREAVEMENT",
+    "HEALTH_FAMILY_EXPENSE",
+    "HEALTH_FELONIOUS_ASSAULT",
+    "HEALTH_FIRST_WEEK_TOTAL_DISABILITY",
+    "HEALTH_HOME_VEHICLE_MODIFICATION",
+    "HEALTH_ILLNESS_PERMANENT_IMPAIRMENT",
+    "HEALTH_INJURY_PERMANENT_IMPAIRMENT",
+    "HEALTH_LONG_TERM_DISABILITY_COLA",
+    "HEALTH_LONG_TERM_TOTAL_DISABILITY",
+    "HEALTH_MEDICAL_EXPENSE",
+    "HEALTH_MILITARY_DEATH",
+    "HEALTH_OCCUPATIONAL_RETRAINING",
+    "HEALTH_OFF_DUTY_ACCIDENT",
+    "HEALTH_PARTIAL_DISABILITY",
+    "HEALTH_PFL",
+    "HEALTH_PTSD",
+    "HEALTH_REPATRIATION",
+    "HEALTH_SAFETY_VEST",
+    "HEALTH_SEAT_BELT",
+    "HEALTH_SPOUSAL_SUPPORT_EDUCATION",
+    "HEALTH_TOTAL_DISABILITY",
+    "HEALTH_VISION_IMPAIRMENT",
+    "HEALTH_WEEKLY_HOSPITAL",
+    "HEALTH_WEEKLY_INJURY_IMPAIRMENT_COLA",
+    "HEALTH_WEEKLY_INJURY_PERMANENT_IMPAIRMENT"
+  ],
+  "fideon:mandatory_fields": [
+    "carrier.name",
+    "named_insured.primary_name",
+    "policy.policy_number",
+    "policy.effective_date",
+    "policy.expiration_date",
+    "coverages[].limits[].amount"
+  ],
+  "fideon:audit_rules": [
+    "policy.effective_date < policy.expiration_date",
+    "months_between(policy.effective_date, policy.expiration_date) == policy.term_months",
+    "policy.effective_date <= document.transaction_effective_date <= policy.expiration_date",
+    "len(coverages[].limits[]) >= 1"
+  ],
+  "fideon:audit_rules_note": "Rules 1-4 are common_model.json fideon:default_audit_rules (the claims-made rule left out: no health document prints a retroactive date). A New York DBL policy is continuous and prints an anniversary date rather than an expiration date: its next anniversary is policy.expiration_date only where the page prints it as the end of the premium term. A rule whose values a document does not print is not evaluated.",
+  "fideon:aliases": {
+    "benefit_plans[].plan_name": [
+      "Benefit Level"
+    ],
+    "benefit_plans[].rate": [
+      "Rate for Coverage",
+      "DBL Rate",
+      "PFL Rate"
+    ],
+    "benefit_plans[].waiting_period": [
+      "Waiting period"
+    ],
+    "billing.payment_plan": [
+      "Billing Cycle"
+    ],
+    "forms_and_endorsements[].form_number": [
+      "POLICY FORMS ATTACHED AT ISSUANCE"
+    ],
+    "named_insured.mailing_address": [
+      "Address",
+      "(Name and Address)"
+    ],
+    "named_insured.primary_name": [
+      "Policyholder",
+      "Exclusively for Employees of"
+    ],
+    "policy.effective_date": [
+      "Effective Date of Coverage",
+      "Policy Effective Date"
+    ],
+    "policy.expiration_date": [
+      "Policy Termination Date",
+      "To"
+    ],
+    "policy.policy_number": [
+      "Your Policy Number",
+      "Policy Number",
+      "POLICY NO."
+    ],
+    "premium.total": [
+      "Premium"
+    ],
+    "producer.agency_name": [
+      "Your ShelterPoint Life Producer"
+    ]
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "document",
+    "carrier",
+    "named_insured",
+    "policy",
+    "lob_parts",
+    "coverages"
+  ],
+  "properties": {
+    "document": {
+      "$ref": "../common/common_model.json#/$defs/document"
+    },
+    "carrier": {
+      "$ref": "../common/common_model.json#/$defs/carrier"
+    },
+    "producer": {
+      "$ref": "../common/common_model.json#/$defs/producer"
+    },
+    "named_insured": {
+      "$ref": "../common/common_model.json#/$defs/named_insured"
+    },
+    "policy": {
+      "$ref": "../common/common_model.json#/$defs/policy"
+    },
+    "lob_parts": {
+      "$ref": "../common/common_model.json#/$defs/lob_parts"
+    },
+    "coverages": {
+      "$ref": "../common/common_model.json#/$defs/coverages"
+    },
+    "deductibles": {
+      "$ref": "../common/common_model.json#/$defs/deductibles"
+    },
+    "interested_parties": {
+      "$ref": "../common/common_model.json#/$defs/interested_parties"
+    },
+    "premium": {
+      "$ref": "../common/common_model.json#/$defs/premium"
+    },
+    "billing": {
+      "$ref": "../common/common_model.json#/$defs/billing"
+    },
+    "forms_and_endorsements": {
+      "$ref": "../common/common_model.json#/$defs/forms_and_endorsements"
+    },
+    "benefit_plans": {
+      "$ref": "../common/common_model.json#/$defs/benefit_plans"
+    },
+    "additional_fields": {
+      "$ref": "../common/common_model.json#/$defs/additional_fields"
+    },
+    "text_sections": {
+      "$ref": "../common/common_model.json#/$defs/text_sections"
+    },
+    "fideon:provenance": {
+      "$ref": "../common/common_model.json#/$defs/provenance"
+    }
+  }
+}

@@ -233,7 +233,7 @@ def test_a_window_that_sees_one_of_the_vehicles_adds_no_second_discount():
 def test_a_party_and_a_modifier_are_keyed_without_their_units_on_a_common_model_line_only():
     assert array_key("rating_modifiers", "personal_auto") == ("modifier_type", "description")
     assert array_key("interested_parties", "personal_auto") == ("role", "name")
-    assert array_key("interested_parties", "property") == ("name", "party_type")   # a self-contained line
+    assert array_key("interested_parties", "equipment_breakdown") == ("name", "party_type")   # self-contained
 
 
 # --------------------------------------------------------------------------

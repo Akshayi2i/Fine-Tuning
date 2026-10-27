@@ -557,7 +557,7 @@ def test_told_the_line_its_schema_decides_how_a_value_is_taken_out():
     from common.schemas import is_common_model
     from serving.printed_values import _nullable
 
-    assert not is_common_model("policy", None, "property") and is_common_model("policy", None, "homeowners")
-    assert _nullable({}, "property") is False
+    assert not is_common_model("policy", None, "equipment_breakdown") and is_common_model("policy", None, "homeowners")
+    assert _nullable({}, "equipment_breakdown") is False
     assert _nullable({}, "homeowners") is True
     assert _nullable({}, None) is True                   # no line: the fallback, on the common model

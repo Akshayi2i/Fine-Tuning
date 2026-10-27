@@ -3,8 +3,8 @@
   "$id": "common_model.json",
   "title": "Fideon canonical common model",
   "description": "SPEC_21 §4.2. The shared envelope and building blocks every policy_check LOB schema composes by $ref ('../common/common_model.json#/$defs/<name>'). This file is a $defs library, not a schema a document is validated against directly. Field names here are fixed: a LOB schema never renames or adds to them; a missing concept is a change request to the common-model owner. Every limit lives in coverages[].limits[].",
-  "fideon:common_model_version": "1.1.0",
-  "fideon:status": "field list approved by the project owner, 3 October 2026; 1.1.0 (8 October 2026) adds change requests CR-GL-02, CR-GL-03, CR-GL-12 and CR-GL-17",
+  "fideon:common_model_version": "1.4.0",
+  "fideon:status": "field list approved by the project owner, 3 October 2026; 1.1.0 (8 October 2026) adds change requests CR-GL-02, CR-GL-03, CR-GL-12 and CR-GL-17; 1.2.0 (15 October 2026) adds $defs/ValueState and $defs/AbsenceReason, referenced by no LOB property (SPEC amendment of 15 October 2026, items 1 and 5); 1.3.0 (23 October 2026) adds the shared business-liability coverage codes X_BI_PD_LIABILITY, X_PRODUCTS_COMPLETED_OPS, X_DAMAGE_TO_PREMISES_RENTED, X_PERSONAL_ADVERTISING_INJURY and X_LIQUOR_LIABILITY (CR-GL-03 follow-up, CR-BOPGL-01, CR-BOPPR-01; DECISIONS rows 114 and 115); no field, block or definition changes; 1.4.0 (23 October 2026, DECISIONS row 116) adds the optional fields policy.effective_time, policy.expiration_time, carrier.company_type, document.copy_designation, named_insured.naics_code and named_insured.sic_code (printed by two or more of the gl, wc, bopgl, boppr and health lines)",
   "fideon:envelope_blocks": [
     "document",
     "carrier",
@@ -312,6 +312,61 @@
         "Blanket Waiver of Subrogation"
       ],
       "default_limit_types": []
+    },
+    "X_BI_PD_LIABILITY": {
+      "name": "Business liability - bodily injury and property damage (premises and operations)",
+      "aliases": [
+        "Business Liability",
+        "Cov. L - Bodily Injury and Property Damage",
+        "Coverage L - Bodily Injury and Property Damage"
+      ],
+      "default_limit_types": [
+        "per_occurrence",
+        "aggregate"
+      ]
+    },
+    "X_PRODUCTS_COMPLETED_OPS": {
+      "name": "Products-completed operations (business liability)",
+      "aliases": [
+        "Products-Completed Operations",
+        "Cov. N - Products/Completed Operations",
+        "Coverage N - Products/Completed Operations"
+      ],
+      "default_limit_types": [
+        "products_completed_ops_aggregate"
+      ]
+    },
+    "X_DAMAGE_TO_PREMISES_RENTED": {
+      "name": "Damage to premises rented to you / fire legal liability",
+      "aliases": [
+        "Damage to Premises Rented to You",
+        "Fire Legal Liability"
+      ],
+      "default_limit_types": [
+        "per_occurrence",
+        "per_location"
+      ]
+    },
+    "X_PERSONAL_ADVERTISING_INJURY": {
+      "name": "Personal and advertising injury liability",
+      "aliases": [
+        "Personal and Advertising Injury",
+        "Cov. P - Personal and Advertising Injury"
+      ],
+      "default_limit_types": [
+        "per_occurrence",
+        "aggregate"
+      ]
+    },
+    "X_LIQUOR_LIABILITY": {
+      "name": "Liquor liability",
+      "aliases": [
+        "Liquor Liability"
+      ],
+      "default_limit_types": [
+        "per_occurrence",
+        "aggregate"
+      ]
     }
   },
   "$defs": {
@@ -1980,6 +2035,35 @@
       ],
       "description": "Rating column of a classification: premises_operations is the premises-operations column ('All Other'); products_completed_operations is the products-completed operations column ('Pr/Co', 'Prod./Comp. Ops')."
     },
+    "ValueState": {
+      "type": "string",
+      "enum": [
+        "amount",
+        "zero",
+        "included",
+        "excluded",
+        "not_covered",
+        "see_form",
+        "see_schedule",
+        "statutory",
+        "unlimited",
+        "not_applicable",
+        "not_stated"
+      ],
+      "description": "What a printed money, percent or included value says (SPEC amendment of 15 October 2026, item 5): amount (a number), zero (0, None or Nil as a deductible), included, excluded, not_covered (Not Covered / Not Purchased / Declined), see_form (See Form X / Per Endorsement X; the form is the reference), see_schedule (See Schedule / See Attached / As Scheduled), statutory, unlimited, not_applicable (N/A), not_stated (a placeholder: ***, --, -). Carried in the envelope's value_states, keyed by canonical path, never in a FieldValue; fideon/schemas/value_states.py is the only interpreter."
+    },
+    "AbsenceReason": {
+      "type": "string",
+      "enum": [
+        "not_printed",
+        "page_not_read",
+        "page_unreadable",
+        "refers_to_other_document",
+        "not_applicable",
+        "schedule_not_read"
+      ],
+      "description": "Why a value is missing (SPEC amendment of 15 October 2026, item 1): not_printed (every page was read as text and none prints it), page_not_read (a page that could carry it was not read), page_unreadable (a page has no usable text layer), refers_to_other_document (printed as a reference: See Schedule, Per Form X), not_applicable (printed N/A), schedule_not_read (the reader of its block failed). Carried in the envelope's field_gaps, keyed by canonical path, never in a FieldValue."
+    },
     "Limit": {
       "type": "object",
       "description": "A limit. Always inside the coverage it limits. Split limits (auto 100/300/50) are three entries (per_person, per_accident, property_damage); sublimits are 'sublimit' entries with a description.",
@@ -2346,6 +2430,13 @@
         "source_file_name": {
           "type": "string",
           "description": "File name of the source PDF."
+        },
+        "copy_designation": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Which copy of the document this is, where the print says so: 'Agent Copy', 'Insured Copy', 'Mortgagee Copy'.",
+          "fideon:aliases": [
+            "Copy"
+          ]
         }
       }
     },
@@ -2456,6 +2547,14 @@
             "A.M Best Rated"
           ],
           "description": "Financial-strength rating of the writing company as printed, e.g. the A.M. Best rating and size class 'A+ XV'."
+        },
+        "company_type": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "How the writing company describes itself where the declarations print it beside the company name: 'A Stock Company', 'A Mutual Company', 'A Reciprocal Exchange'.",
+          "fideon:aliases": [
+            "Company Type",
+            "Type of Company"
+          ]
         }
       }
     },
@@ -2719,6 +2818,22 @@
             "Occupation"
           ],
           "description": "Occupation as printed."
+        },
+        "naics_code": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "NAICS industry code of the named insured as printed.",
+          "fideon:aliases": [
+            "NAICS",
+            "NAICS Code"
+          ]
+        },
+        "sic_code": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "SIC industry code of the named insured as printed.",
+          "fideon:aliases": [
+            "SIC",
+            "SIC Code"
+          ]
         }
       }
     },
@@ -2845,6 +2960,21 @@
         "is_package": {
           "type": "boolean",
           "description": "True when lob_parts has more than one part."
+        },
+        "effective_time": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Time of day coverage starts, as printed (e.g. '12:01 a.m. Standard Time at the address of the named insured').",
+          "fideon:aliases": [
+            "Policy Period Time",
+            "Effective Time"
+          ]
+        },
+        "expiration_time": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Time of day coverage ends, as printed.",
+          "fideon:aliases": [
+            "Expiration Time"
+          ]
         }
       }
     },

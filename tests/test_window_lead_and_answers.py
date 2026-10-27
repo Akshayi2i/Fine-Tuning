@@ -396,11 +396,12 @@ def test_training_and_serving_plan_the_same_windows():
     assert sorted((group, tuple(pages)) for group, pages in backend.calls) == trained
 
     # Split by their text, with shared pages - a run its page count kept whole
-    # too (forms' [6..9]) - and no window of shared pages alone: the cases this guards.
+    # too (decl's [6..9]) - and no window of shared pages alone: the cases this guards.
     every, declarations = pages_to_read(texts, total)
     by_count = sorted((p.group, p.pages) for p in plan_windows(lob, every, declarations))
     assert trained != by_count
-    assert ("decl", (6, 7, 8, 9)) in by_count and {("decl", (6, 7, 8)), ("decl", (8, 9))} <= set(trained)
+    assert ("decl", (6, 7, 8, 9)) in by_count
+    assert {("decl", (6, 7)), ("decl", (7, 8)), ("decl", (8, 9))} <= set(trained)
     for group in {group for group, _pages in trained}:
         windows = [set(pages) for name, pages in trained if name == group]
         assert set().union(*windows) == set(every)

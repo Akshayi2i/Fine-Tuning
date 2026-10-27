@@ -49,10 +49,10 @@ CALIBRATION = CalibrationParams(
 )
 
 #: The line GOLDEN is read as. GOLDEN is in the self-contained shape
-#: (carrier.company_name); the fallback and general liability compose the
-#: common model since 1.1.0, so the pipeline's generic behaviour is checked on a
-#: line still self-contained, and in no family part-way through that move.
-LINE = "property"
+#: (carrier.company_name); the fallback, general liability, property and the
+#: other lines on the common model write the carrier's name as `name`, so the
+#: pipeline's generic behaviour is checked on a line still self-contained.
+LINE = "equipment_breakdown"
 
 #: The page GOLDEN is read from. It prints every value the fake model writes:
 #: a served policy holds no value its pages do not print (serving.printed_values).
@@ -354,26 +354,26 @@ def test_a_known_lob_selects_its_canonical_schema(client, monkeypatch):
     # selects the schema; self-contained like LINE, so GOLDEN is valid for it.
     backend = EchoBackend(RESPONSE)
     extract(
-        _request(known_lob="cyber"), load_model("base", client, backend_impl=backend),
+        _request(known_lob="crime_fidelity"), load_model("base", client, backend_impl=backend),
         StaticClassifier("policy"), CALIBRATION,
     )
     from common.schema_sections import groups_for
 
     # A policy is read in windows, each constrained to its slice of the LINE's
-    # schema — so the cyber block reaches the model through `lineblk`.
+    # schema — so the crime_fidelity block reaches the model through `lineblk`.
     schemas = [call["json_schema"] for call in backend.calls]
     assert schemas == [
-        with_page_bounds(resolved_schema("policy", None, "cyber", group),
+        with_page_bounds(resolved_schema("policy", None, "crime_fidelity", group),
                          page_total(call["messages"]))
-        for group, call in zip(groups_for("cyber"), backend.calls, strict=True)
+        for group, call in zip(groups_for("crime_fidelity"), backend.calls, strict=True)
     ]
-    assert any("cyber" in schema["properties"] for schema in schemas)
+    assert any("crime_fidelity" in schema["properties"] for schema in schemas)
 
 
 def test_a_policy_with_no_known_lob_still_returns_canonical_json(client):
     """No line means the client's canonical fallback, never the flat schema. The
-    fallback composes the common model since 1.1.0: the carrier's name is
-    `name`, and the document's page count is a plain value the pipeline sets."""
+    fallback composes the common model: the carrier's name is `name`, and the
+    document's page count is a plain value the pipeline sets."""
     fallback = json.dumps({
         "carrier": {"name": _fv("Granite Mutual Insurance Co")},
         "named_insured": {"primary_name": _fv("Rivera Fabrication LLC")},

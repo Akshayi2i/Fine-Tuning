@@ -247,7 +247,9 @@ def test_no_other_schema_has_what_the_fill_now_leaves_out():
             schema = load_schema(key, None, None)
         assert list(found(schema)) == [], key
         checked += 1
-    assert checked >= 27                     # 23 self-contained lines, ACORD, loss runs
+    # 9 self-contained lines (statutory_disability reads with health since the owner's
+    # map routed it there), ACORD 25/125/140, loss runs
+    assert checked >= 13
 
 
 # --------------------------------------------------------------------------

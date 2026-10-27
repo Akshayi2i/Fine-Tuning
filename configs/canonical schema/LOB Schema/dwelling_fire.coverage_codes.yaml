@@ -53,7 +53,6 @@ codes:
   - Premises Liability
   default_limit_types:
   - per_occurrence
-  - aggregate
   carriers: 3
   note: 'Not X_PERSONAL_LIABILITY: the dwelling fire seeds print premises liability, not personal liability.'
   replaces_draft_codes:
@@ -128,7 +127,6 @@ codes:
   - Coverage D ADDL LIVING EXP AND LOSS OF RENT FIRE INCL
   default_limit_types:
   - per_occurrence
-  - other
   shared: true
   carriers: 4
 - code: X_MED_PAY
@@ -139,7 +137,6 @@ codes:
   - Coverage M - Medical Payments - Per Person
   - Medical Payments
   default_limit_types:
-  - per_occurrence
   - per_person
   - per_accident
   shared: true

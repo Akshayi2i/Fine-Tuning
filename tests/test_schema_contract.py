@@ -38,6 +38,9 @@ CANONICAL_KEYS = [("policy", None)]
 
 ALL_KEYS = FLAT_KEYS + CANONICAL_KEYS
 
+#: The common model's version, which every overlay bundle's version carries.
+COMMON_VERSION = json.loads(schemas.COMMON_MODEL.read_text(encoding="utf-8"))[schemas.COMMON_MODEL_VERSION_KEY]
+
 
 # --------------------------------------------------------------------------
 # Schemas
@@ -688,18 +691,20 @@ def test_a_canonical_schema_version_comes_from_fideon_source():
     """The self-contained files carry no top-level `version`; theirs is under
     `fideon:source`. A common-model overlay's is the pair: its own and the common
     model's, written onto the bundle. General liability and the fallback are
-    overlays since common model 1.1.0.
+    overlays since common model 1.1.0; property and the other commercial lines
+    since common model 1.4.0.
 
     `schema_version` is called for every registered schema when a corpus manifest
     is written, so reading the wrong path fails the whole build.
     """
     from common.schemas import schema_version
 
-    assert schema_version("policy", None, ["property"]) == "1.5.0"
+    assert schema_version("policy", None, ["equipment_breakdown"]) == "1.5.0"
     assert schema_version("policy", None, ["management_liability"]) == "3.1.0"
-    assert schema_version("policy", None, ["homeowners"]) == "1.0.0+common.1.1.0"
-    assert schema_version("policy", None, ["gl"]) == "3.0.0+common.1.1.0"
-    assert schema_version("policy") == "1.1.0+common.1.1.0"
+    assert schema_version("policy", None, ["homeowners"]) == f"1.0.0+common.{COMMON_VERSION}"
+    assert schema_version("policy", None, ["gl"]) == f"3.2.0+common.{COMMON_VERSION}"
+    assert schema_version("policy", None, ["property"]) == f"2.0.0+common.{COMMON_VERSION}"
+    assert schema_version("policy") == f"1.4.0+common.{COMMON_VERSION}"
     # A line with no file of its own reads the fallback's.
     assert schema_version("policy", None, ["a_line_with_no_file"]) == schema_version("policy")
 
@@ -720,8 +725,8 @@ def test_a_canonical_schema_validates_the_fieldvalue_envelope():
         "named_insured": {"primary_name": fv},
         "policy": {"policy_number": fv},
     }
-    assert is_valid(whole, "policy", None, ["property"])
-    assert required_fields("policy", None, ["property"]) == [
+    assert is_valid(whole, "policy", None, ["equipment_breakdown"])
+    assert required_fields("policy", None, ["equipment_breakdown"]) == [
         "carrier", "named_insured", "policy",
     ]
 
@@ -731,7 +736,7 @@ def test_a_canonical_schema_validates_the_fieldvalue_envelope():
     from common.schemas import iter_validation_errors
 
     bare = {**whole, "carrier": {"company_name": {"raw": "X"}}}
-    errors = list(iter_validation_errors(bare, "policy", None, ["property"]))
+    errors = list(iter_validation_errors(bare, "policy", None, ["equipment_breakdown"]))
     assert any("'confidence' is a required property" in e for e in errors), (
         f"validation did not enforce the FieldValue envelope; got: {errors[:3]}"
     )
@@ -818,9 +823,9 @@ def test_the_corpus_drift_check_reads_the_key_the_manifest_writes():
     from inference_core.input_builder import InputBuilderError, build_messages
 
     built = build_messages("policy", ["p1.png"], ["text"], "ocr_plus_image", lob="homeowners")
-    assert built.schema_version == "1.0.0+common.1.1.0"
+    assert built.schema_version == f"1.0.0+common.{COMMON_VERSION}"
 
-    built.assert_matches_corpus({"schema_versions": {"policy:homeowners": "1.0.0+common.1.1.0"}})
+    built.assert_matches_corpus({"schema_versions": {"policy:homeowners": f"1.0.0+common.{COMMON_VERSION}"}})
     with pytest.raises(InputBuilderError, match="drift"):
         built.assert_matches_corpus({"schema_versions": {"policy:homeowners": "0.0.1"}})
     # A pin for a different line says nothing about this row.

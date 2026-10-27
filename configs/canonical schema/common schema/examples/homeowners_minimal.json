@@ -1007,7 +1007,7 @@
       },
       "edition_date": {
         "raw": "05 11",
-        "parsed": "05 11",
+        "parsed": "05/11",
         "confidence": {
           "score": 1.0,
           "source": "deterministic"

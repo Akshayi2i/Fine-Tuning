@@ -15,6 +15,8 @@ codes:
   aliases:
   - ADDITIONAL DEATH BENEFITS
   - DEATH BENEFIT
+  - Automobile Death Indemnity Benefits
+  - Death Benefits
   default_limit_types:
   - per_person
   carriers: 1
@@ -31,6 +33,7 @@ codes:
   - Additional Personal Injury Protection - Full
   - BROADENED ADDITIONAL PIP
   - INCREASED PIP
+  - Apip - Other Expense
   default_limit_types:
   - per_occurrence
   - per_person
@@ -105,6 +108,7 @@ codes:
   - FULL COVERAGE WINDOW GLASS
   - Full Glass Coverage
   - No deductible for glass
+  - FULL GLASS
   default_limit_types: []
   carriers: 3
   replaces_draft_codes:
@@ -119,6 +123,7 @@ codes:
   name: OEM PARTS
   aliases:
   - OEM PARTS
+  - OEM
   default_limit_types: []
   carriers: 1
   replaces_draft_codes:
@@ -129,6 +134,7 @@ codes:
   - Optional Basic Economic Loss
   - OBEL
   - OPTIONAL BASIC ECONOMIC LOSS
+  - Optional Basic Economical Loss
   default_limit_types:
   - per_occurrence
   - per_person
@@ -153,6 +159,7 @@ codes:
   name: PERSONAL ARTICLES COVERAGE
   aliases:
   - PERSONAL ARTICLES COVERAGE
+  - PERSONAL ARTICLES
   default_limit_types:
   - per_accident
   - other
@@ -208,6 +215,7 @@ codes:
   aliases:
   - TRAVEL - TRIP INTERRUPTION (FAMILY PLUS)
   - TRIP INTERRUPTION
+  - Travel Protection - Trip Interruption
   default_limit_types:
   - aggregate
   - per_day
@@ -242,6 +250,8 @@ codes:
   - COLLISION
   - COLLISION LOSS
   - Collision Less Deductible
+  - Collision Coverage
+  - Collision Coverage (Full Glass applies)
   default_limit_types:
   - other
   shared: true
@@ -254,6 +264,7 @@ codes:
   - Comprehensive Less Deductible
   - OTHER THAN COLL
   - OTHER THAN COLLISION LOSS
+  - Comprehensive (Full Glass applies)
   default_limit_types:
   - other
   shared: true
@@ -279,6 +290,9 @@ codes:
   - PERSONAL INJURY PROTECTION (PIP)
   - PIP DEDUCTIBLE
   - Personal Injury Protection Benefits
+  - Personal Injury Protection/Basic Economic Loss
+  - Extended PIP
+  - Work Loss Benefit
   default_limit_types:
   - aggregate
   - per_person
@@ -297,6 +311,7 @@ codes:
   - Rental Vehicle Coverage
   - TRANSPORTATION EXP
   - TRAVEL - TRANSPORTATION EXPENSES (FAMILY PLUS)
+  - Travel Protection - Transportation Expenses
   default_limit_types:
   - aggregate
   - per_accident
@@ -312,6 +327,8 @@ codes:
   - Roadside Assistance Coverage
   - TRAVEL - ROADSIDE ASSISTANCE (FAMILY PLUS)
   - Towing and Labor Limit
+  - 'Towing & Labor'
+  - Travel Protection - Roadside
   default_limit_types:
   - per_occurrence
   - per_disablement
@@ -331,6 +348,7 @@ codes:
   - Supplementary Uninsured/ Underinsured Motorists Coverage
   - Supplementary Uninsured/Underinsured Motorist
   - Uninsured/Underinsured Motorist
+  - Supplementary Uninsured Motorist
   default_limit_types:
   - per_person
   - per_accident

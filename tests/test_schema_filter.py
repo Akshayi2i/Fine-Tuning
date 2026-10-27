@@ -24,11 +24,11 @@ def _env(value, page=1):
 
 # A self-contained line: its line block is what labels get wrong. The common-model
 # lines have no line block, and their own case comes with the target builder.
-LINE = "property"
+LINE = "equipment_breakdown"
 LABEL = {
     "policy": {"policy_number": _env("CP-1"), "print_code": _env("X")},
-    "commercial_property": {
-        "time_element_coverages": {"business_income_limit": _env(1000000)},
+    "equipment_breakdown": {
+        "limits": {"business_income_limit": _env(1000000)},
         # A shape the labels invented: the schema has no `occurrences` list.
         "occurrences": [{"coverages": [{"coverage_name": _env("Premises"), "limit_amount": _env(250000)}]}],
     },
@@ -42,8 +42,8 @@ def test_keys_the_schema_does_not_declare_are_dropped_and_named():
 
     kept, dropped = within_schema(LABEL, resolved_schema("policy", None, LINE))
     assert kept["policy"] == {"policy_number": LABEL["policy"]["policy_number"]}
-    assert kept["commercial_property"] == {"time_element_coverages": {"business_income_limit": _env(1000000)}}
-    assert {"policy.print_code", "commercial_property.occurrences", "text_sections",
+    assert kept["equipment_breakdown"] == {"limits": {"business_income_limit": _env(1000000)}}
+    assert {"policy.print_code", "equipment_breakdown.occurrences", "text_sections",
             "fideon:provenance"} <= set(dropped)
 
 
@@ -57,7 +57,7 @@ def test_an_envelope_is_kept_whole():
 
 def test_the_training_target_holds_only_writable_keys():
     target = training_target(LABEL, "policy", None, LINE)
-    assert "occurrences" not in target.get("commercial_property", {})
+    assert "occurrences" not in target.get("equipment_breakdown", {})
     assert "text_sections" not in target and "fideon:provenance" not in target
 
 
@@ -66,7 +66,7 @@ def test_the_window_target_holds_only_writable_keys():
 
     for plan in plan_windows(LINE, [1]):
         target = window_target(LABEL, LINE, plan)
-        assert "occurrences" not in target.get("commercial_property", {})
+        assert "occurrences" not in target.get("equipment_breakdown", {})
         assert "print_code" not in target.get("policy", {})
 
 
@@ -74,7 +74,7 @@ def test_a_gold_value_outside_the_schema_is_not_a_miss():
     from evaluation.run_eval import build_report
 
     got = {"policy": {"policy_number": _env("CP-1")},
-           "commercial_property": {"time_element_coverages": {"business_income_limit": _env(1000000)}}}
+           "equipment_breakdown": {"limits": {"business_income_limit": _env(1000000)}}}
     meta = {"source_id": "d1", "doc_type": "policy", "lob": LINE,
             "modality_mode": "ocr_plus_image"}
     [full] = build_report("t", [(LABEL, got, meta)]).full_set()

@@ -36,8 +36,9 @@ GOLDEN = json.loads(
 #: The line a bundle here is filed under unless a test says otherwise: one whose
 #: schema is still self-contained, the shape GOLDEN is written in. A bundle of no
 #: line is checked against the fallback, which composes the common model since
-#: common model 1.1.0, and GOLDEN is not that shape.
-LINE = "property"
+#: common model 1.1.0, and GOLDEN is not that shape; nor are property and
+#: workers_comp, which moved onto the common model too.
+LINE = "equipment_breakdown"
 
 #: A review record: every gold needs one to import (decision 2026-10-22).
 REVIEWED = {"reviewer_id": "a.reviewer", "review_date": "2026-10-20"}
@@ -139,7 +140,7 @@ def test_an_imported_document_lands_where_the_pipeline_already_reads(tmp_path, c
     """A second layout would mean a second set of readers, and one of them would
     eventually be missed."""
     doc = read_prepared(prepared(tmp_path, metadata={"field_provenance": {"named_insured.primary_name": 1},
-                                                     "lob": ["workers_comp"], **REVIEWED}))
+                                                     "lob": [LINE], **REVIEWED}))
     source_id = import_document(doc, "policy", client, mineru_version="2.0.0")
 
     assert source_id == "policy_0001"
@@ -154,7 +155,7 @@ def test_an_imported_document_lands_where_the_pipeline_already_reads(tmp_path, c
 
     label_meta = client.read_json(paths.label_metadata("policy", source_id))
     assert label_meta["field_provenance"] == {"named_insured.primary_name": 1}
-    assert label_meta["lob"] == ["workers_comp"]
+    assert label_meta["lob"] == [LINE]
 
 
 def test_a_prepared_document_imported_again_keeps_every_folder_it_came_from(tmp_path, client):
@@ -283,7 +284,7 @@ def test_a_prepared_gold_with_no_review_record_is_refused_and_nothing_written(tm
 
 def test_the_review_record_and_a_twins_seed_reach_the_label_metadata(tmp_path, client):
     twin = {"lob": [LINE], "synthetic": True, **REVIEWED, "draft_backend": "fideon_synth",
-            "review_inherited_from": "property/seed_1"}
+            "review_inherited_from": "equipment_breakdown/seed_1"}
     source_id = import_document(read_prepared(prepared(tmp_path, metadata=twin)), "policy", client,
                                 mineru_version="2.0.0")
     stored = client.read_json(paths.label_metadata("policy", source_id))

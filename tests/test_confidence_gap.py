@@ -159,9 +159,10 @@ def test_build_report_emits_the_rate():
 
     got = {"policy": {"policy_number": _env("HO-123"), "account_id": _env("A-999")}}
     # A self-contained line, whose policy block holds account_id: the common
-    # model (general liability since 1.1.0) has no such field, so it would be
-    # scored on neither side and the wrong value would never be seen.
-    meta = {"source_id": "p1", "doc_type": "policy", "lob": ["property"],
+    # model (general liability since 1.1.0, property since 1.4.0) has no such
+    # field, so it would be scored on neither side and the wrong value would
+    # never be seen.
+    meta = {"source_id": "p1", "doc_type": "policy", "lob": ["equipment_breakdown"],
             "modality_mode": "ocr_plus_image"}
     [full] = build_report("t", [(GOLD, got, meta)]).full_set()
     assert full.metrics["auto_accept_error_rate"] == 0.5

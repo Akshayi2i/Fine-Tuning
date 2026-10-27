@@ -10,56 +10,277 @@ crosswalk entry.
 two or more LOBs print it. Anything printed by one LOB only goes in that LOB's
 own block or `coverage_codes.yaml`.
 
-**Release steps.** A change to `common_model.json` or to any schema in
-`config/canonical_schema/<doc_type>/` is committed together with:
-- `python scripts/build_common_model_fields_md.py`, the field reference;
-- `python tools/build_prompt_schemas.py`, the prompt schemas in
-  `config/canonical_schema/prompt/` (HANDOFF_prompt_schemas.md).
+## 1.4.0 — 23 October 2026 (six optional fields printed by two or more lines)
 
-CI fails while either is stale (`test_fields_reference_is_up_to_date`,
-`test_g_committed_outputs_equal_a_fresh_build`).
+DECISIONS_2026-10-19 rows 115 and 116 (Sagar: release now; the fine-tuning side follows). Additions only: six optional `FieldValue`
+properties of existing blocks; nothing renamed, removed, retyped or made required, so every LOB schema pinned at 1.0.0 to 1.3.0 composes
+this version unchanged (`tools/check_common_compat.py`: compatible). Evidence rule (above): two or more lines print the concept; V3 counts
+are documents / carrier folders of POLICIES-FINAL-V3 for a caption printed in 5 or more different documents of 2 or more carriers (no page
+text or value is stored).
 
-## Unreleased — prompt schemas (HANDOFF_prompt_schemas.md, Part A)
+| Path | Printed wording | Printed by |
+|---|---|---|
+| `policy.effective_time`, `policy.expiration_time` | the time of day of the policy period (`12:01 a.m. Standard Time ...`) | gl (25 documents, up to 6 carriers), boppr (the Leatherstocking declarations print it beside both dates), wc (the pre-SPEC_21 wc 1.6.0 had it) |
+| `carrier.company_type` | `A Stock Company`, `A Mutual Company` beside the company name | gl (34 documents, up to 9 carriers), wc (7 documents, 4 carriers) |
+| `document.copy_designation` | `Agent Copy`, `Insured Copy` | gl (8 documents, 3 to 4 carriers), bopgl (8 documents, 2 carriers) |
+| `named_insured.naics_code`, `named_insured.sic_code` | `NAICS`, `SIC`, `SIC Code` | wc (Hartford and AmTrust seeds, 17+ documents), health seeds; gl and BOP declarations (CR-WC-02) |
 
-**5 October 2026.**
-- **The tool.** `tools/build_prompt_schemas.py` builds one self-contained,
-  minified schema per canonical schema, following the handoff's rules 1–10.
-  - Links into the common model are rewritten.
-  - Only the common definitions the schema reaches are copied in, in
-    common-model order; on the homeowners example that is 53 of 76.
-  - `text_sections`, provenance and every `fideon:` key are removed.
-  - The `lean` variant serves every adapter; `full` is for `_fallback.json`
-    only.
-  - A sidecar records versions, SHA-256, characters and Qwen3-VL tokens.
-- **Deviation from rule 8: prompt schemas are written vertically** (indent
-  2), not minified, at the developer's request, so they can be read and
-  reviewed as they are. On `ocean_marine` this costs 86,129 characters and
-  16,967 Qwen tokens, against 41,120 and 10,808 minified: about 6,200 more
-  tokens in every system message, in training and serving alike.
-- **Deviation from rule 5: `fideon:aliases` is kept** in both variants, at
-  the developer's request, as reference for the model. Aliases are the labels
-  carriers print for a field, and SPEC_21 §4.3 says they "feed L1 mappings
-  and the training prompt". Every other `fideon:` key is still removed. On
-  `ocean_marine` this keeps 91 fields' aliases (222 labels), for about 2,300
-  more Qwen tokens. Whether the constrained decoder ignores the unknown
-  keyword, as JSON Schema validators do, joins the handoff's open "what the
-  decoder enforces" check.
-- **Built so far: `ocean_marine` only.** `prompt/policy_check/ocean_marine.prompt.json`
-  was rebuilt on 5 October from the SPEC_21 boat schema
-  (`policy_check/ocean_marine.json` 1.0.0, on common model 1.0.0), which
-  replaced the SPEC_00 v3.1.0 file the first build used. It is lean, with 53
-  common definitions, 390 aliases, 67,711 characters and 15,357 Qwen tokens. It is built from today's
-  `policy_check/ocean_marine.json` v3.1.0, the SPEC_00 schema still served for
-  boats (sidecar `source_kind: spec00`). The SPEC_21 boat schema (Phase 2)
-  replaces it, and the staleness test forces the rebuild into the same
-  commit.
-- **Measured on the SPEC_21 homeowners example:** `full` 44,815 characters
-  (10,692 tokens), `lean` 24,118 characters (6,225 tokens). The handoff
-  estimated 44,752 / 24,071 characters.
-- `config/canonical_schema/prompt/` is added to `SchemaRegistry.SHARED_DIRS`,
-  so it is not read as a document type.
+**Effect:** the fields are in the `document`, `carrier`, `policy` and `named_insured` blocks that every line uses, so every line's prompt
+schema, section files, the manifest and the FSM hashes change (as in 1.1.0 for `carrier.financial_rating`). The fine-tuning repository does
+not render them yet: `fideon/vlm/tests/conftest.py` renders this repository's side of the three parity modules without exactly these six
+fields (and gl from its frozen 3.0.0), so any other drift still fails; the hand-off is `docs/migration/HANDOFF_common_model_1.4.0_fine_tuning.md`.
+`tools/prompt_schema_families.py` lists the families whose adapters need a recheck.
 
-## Unreleased — lob_schema_map.yaml
+Regenerated: `common_model.fields.md`, `policy_check/_fallback.json`, every prompt schema and the manifest, the section files, the FSM hash
+fixture. `lob_schema_map.yaml` `common_model_version` is 1.4.0. The lines gl 3.1.0, wc 2.1.0, bopgl 2.1.0 and boppr 2.1.0 pin 1.4.0.
+
+## 1.3.0 — 23 October 2026 (G1 review of POLICIES-FINAL-V3: shared business-liability coverage codes)
+
+DECISIONS_2026-10-19 rows 114 and 115 (Sagar). Additions only: five entries of `fideon:shared_coverage_codes`; no field, block, definition
+or enum value changes, nothing renamed, removed, retyped or made required, so every LOB schema pinned at 1.0.0, 1.1.0 or 1.2.0 composes this
+version unchanged (`tools/check_common_compat.py`: compatible) and no line's prompt schema, section file or FSM hash moves
+(`tools/build_prompt_schemas.py --check`: current; only the manifest's and the fallback's common-model version string changed).
+
+| Code | Printed by | Default limit types |
+|---|---|---|
+| `X_BI_PD_LIABILITY` | gl, bopgl, boppr (and commercial_fire, property) as `GL_BI_PD`, `BOPGL_LIABILITY`, `BOPPR_LIABILITY` (Coverage L) | per_occurrence, aggregate |
+| `X_PRODUCTS_COMPLETED_OPS` | gl, bopgl, boppr (Coverage N) | products_completed_ops_aggregate |
+| `X_DAMAGE_TO_PREMISES_RENTED` | gl, bopgl, boppr (Coverage O, fire legal liability) | per_occurrence, per_location |
+| `X_PERSONAL_ADVERTISING_INJURY` | gl, bopgl, boppr (Coverage P) | per_occurrence, aggregate |
+| `X_LIQUOR_LIABILITY` | gl (`GL_LIQUOR_LIABILITY`), bopgl (`BOPGL_LIQUOR_LIABILITY`) | per_occurrence, aggregate |
+
+Requests applied: CR-GL-03 follow-up, CR-BOPGL-01, CR-BOPPR-01. The three liability lines keep their own codes in this release: renaming a
+code is a major version of the line (SPEC_21 4.1) and the registry entries' declared paths, golds and varmaps name the old codes. L1 matches a
+printed name to a line's own code first (`fideon/l1/spec21.py` `_codes`), so no row of those lines changes. Aliases are exact-name only (a name
+already claimed by another shared code, or by a line's own file, is not repeated). The moves to the shared codes (gl 4.0.0, bopgl 3.0.0,
+boppr 3.0.0, each with crosswalk entries) are for the project owner to schedule together.
+
+**Proposals NOT taken** (from the gl and wc review, `gl_wc_common_proposals.md`): the officer inclusion / exclusion schedule (the captions
+printed by gl and bopgl are policy wording and an ACORD certificate field, so only wc prints the schedule), `Deductible.basis` (the captions
+found are deductible amounts, not a basis), the embedded certificate insurers, the terrorism disclosure block (statutory boilerplate; its
+premium already has `X_TERRORISM`), and the shared codes for accounts receivable, valuable papers, employee dishonesty, debris removal and
+spoilage (renames for bopgl and boppr, and a name match that would change what L1 codes in other lines; they stay counterpart codes between
+bopgl and boppr). Single-line candidates (employee count on a rating exposure, rating-modifier premium, commission percentage) stay
+`additional_fields`.
+
+Regenerated: `common_model.fields.md`, `policy_check/_fallback.json` (version strings only), `prompt/manifest.json`. `lob_schema_map.yaml`
+`common_model_version` raised to 1.3.0. The `fideon/schemas/tests/test_common_model.py` version assertion follows. The FSM hash fixture moves
+only for bopgl and boppr (their own 2.1.0 releases).
+
+## 1.2.0 — 15 October 2026 (value states and absence reasons)
+
+From the SPEC amendment of 15 October 2026 ("Explainable gaps, reader failures,
+L1 grounding, visible text, value states, registry validation"), items 1 and 5.
+Additions only: two string-enum `$defs` that no LOB schema property references,
+so every LOB schema pinned at 1.0.0 or 1.1.0 composes this version unchanged
+(`tools/check_common_compat.py`: compatible) and the prompt schemas, the
+manifest and the FSM hashes are byte-identical
+(`tools/build_prompt_schemas.py --check`: 25 of 25 current). LOB schemas keep
+their pin.
+
+| Definition | Values | Where it is used |
+|---|---|---|
+| `ValueState` | `amount`, `zero`, `included`, `excluded`, `not_covered`, `see_form`, `see_schedule`, `statutory`, `unlimited`, `not_applicable`, `not_stated` | the envelope's `value_states` (canonical path -> state, and the form a `see_form` names); interpreted only by `fideon/schemas/value_states.py` |
+| `AbsenceReason` | `not_printed`, `page_not_read`, `page_unreadable`, `refers_to_other_document`, `not_applicable`, `schedule_not_read` | the envelope's `field_gaps` (canonical path -> why the value is missing) |
+
+The FieldValue leaf is unchanged: `parsed` of a MoneyValue stays a number or
+null. A FieldValue-level state is open item O8 of the amendment (a 2.0 change,
+once the fine-tuning repository's model view can carry it).
+
+Regenerated: `common_model.fields.md`, `policy_check/_fallback.json` (its
+version strings only; its prompt schema does not change). `lob_schema_map.yaml`
+`common_model_version` raised to 1.2.0.
+
+## 1.1.0 — 8 October 2026 (change requests from gl; accepted by the owner)
+
+The first batch of change requests under SPEC_21 v0.9 §4.2.7, from
+`policy_check/CHANGE_REQUESTS_gl.md`, as the common-model owner accepted it:
+one minor release, so each adapter is rechecked once. Additions only: no field
+is renamed, removed, retyped or made required, so every LOB schema pinned at
+1.0.0 still composes this version unchanged
+(`tools/check_common_compat.py`: compatible).
+
+Release order the owner set:
+1. the CR-GL-19 checks;
+2. a short wait for auto, wc and property findings that would affect CR-GL-16 or
+   add requests;
+3. this release;
+4. gl 3.0.0 on it;
+5. the CGL seed golds against gl 3.0.0.
+
+| Request | Decision | Change |
+|---|---|---|
+| CR-GL-02 | accepted | `RatingExposure.rating_component`, optional, enum `RatingComponent`: `premises_operations` / `products_completed_operations`. A classification whose schedule prints an `All Other` and a `Pr/Co` rate and premium is two `rating_exposures[]` rows with the same `class_code`, `class_description` and `location_ref`, one per column. A row without it keeps its 1.0.0 meaning (one rate). 8 or more carrier folders print the split. |
+| CR-GL-12 | accepted | `carrier.financial_rating` (FieldValue; aliases `A.M. Best Rating`, `AM Best Rating`, `A.M Best Rated`) and `premium.minimum_earned_percent` (PercentValue; alias `Minimum Earned Premium Percentage`). `premium.minimum_earned` now says it holds an amount and points a percentage to the new field. Evidence: CGL 12 documents in 4 folders (rating) and 17 in 3 (percentage). The Sterling flood registry also maps a printed `Minimum Earned Premium Percentage` (to `additional_fields` today), a second line for the percentage. |
+| CR-GL-17 | accepted, parsed by code | `Form.edition_date` carries `fideon:code_parsed: MM/YY`. The pipeline derives `parsed` from `raw` (`04 13`, `0413`, `04-13`, `4/2013` all give `04/13`; null when the print has no month and year) in `schema_registry.conform_document`, which L1, L3 and the delivered envelope all pass through. The model's description is unchanged, so this request changes no prompt (the 8 October decision on code-parsed values, `HANDOFF_parsed_agreement_lanes.md`). |
+| CR-GL-03 | accepted; homeowners left alone | Shared codes `X_ADDITIONAL_INSURED`, `X_PRIMARY_NONCONTRIBUTORY`, `X_WAIVER_OF_SUBROGATION` (no default limit type: an endorsement-coverage usually prints no limit). gl renames to them in 3.0.0. Homeowners keeps `HO_ADDITIONAL_INSURED` until its own next major version, so the personal-lines golds do not change. |
+| CR-GL-18 | accepted | `lob_schema_map.yaml`: gl `routing_key: gl` (was `cgl`). SPEC_06 §9a has keyed the line by its L1 code since 5 October and has no `cgl` key. |
+| CR-GL-15 | decided: `gl` | A package part's `lob` is its L1 code (`gl`), which is also the schema id and routing key. The SPEC_21 §4.2.3 and §4.2.6 examples that wrote `cgl` are corrected. No model change. |
+| CR-GL-06 | confirmed | The gl `blocks_used` edit below, released with this version. |
+| CR-GL-16 | held | `Deductible.basis` waits until the batch is cut: one binder of one carrier prints it, too little training signal. The auto and wc drafters look for it; it joins if a second line prints it. |
+| CR-GL-19 | accepted, built first | `tools/check_lob_defs.py`, `tools/check_common_compat.py`, `tools/prompt_schema_families.py` with `config/canonical_schema/prompt/manifest.json` (written by `tools/build_prompt_schemas.py`), `CONTRIBUTING_common.md`; run in CI (`ci-pipeline-api.yml`, "Common-model change control"). No schema change. |
+
+**Map:** `lob_schema_map.yaml` `version` and `common_model_version` are 1.1.0.
+
+**Regenerated:**
+- `common_model.fields.md`, which now shows a code-parsed field's layout in its type column;
+- `policy_check/_fallback.json`;
+- every prompt schema and the manifest;
+- `common/examples/homeowners_minimal.json` (the form's edition `parsed` is `05/11`).
+
+CR-GL-12 reaches every line's prompt schema and CR-GL-02 gl's only. Under §4.2.7 item 5 every adapter whose
+prompt schema changed is rechecked. That includes the personal_lines adapter if it has already been trained;
+its training status is for the developer to confirm. `tools/prompt_schema_families.py` lists the families.
+
+**Code changes that go with the release:**
+- `fideon/vlm/model_view.py`: the bundle step, ported from the fine-tuning
+  repository, refused a LOB schema pinned at any version other than the loaded
+  common model's. It now accepts the same major version with a pin no newer than
+  the model, as `SchemaRegistry` does. Without this every prompt build and L3
+  read failed on the lines pinned at 1.0.0. The fine-tuning repository
+  needs the same change when it takes 1.1.0.
+- `fideon/l1/spec21.py`: L1 dropped a coverage name two codes claimed, so the new
+  `X_` codes would have unmatched homeowners' `Additional insured` rows. A name
+  the line's own `coverage_codes.yaml` claims now wins over a shared code. This
+  also settles four names that clashed before 1.1.0 and were unmatched:
+  `Additional PIP` and `OBEL` (personal_auto), `Optional Basic Economic Loss`
+  (personal_auto, motorcycle, recreational_vehicle) and `Liability` (homeowners,
+  now `X_PERSONAL_LIABILITY`).
+- `fideon/schemas/schema_registry.py`: the MM/YY edition parser (CR-GL-17).
+
+**FSM cache:** `vlm_server/fsm/tests/fixtures/schema_hashes.json` regenerated: every
+`policy_check` hash moved, so the deployed FSM cache is invalidated on the next
+deploy.
+
+**Fine-tuning parity:** the recorded fixtures in `fideon/vlm/tests/fixtures/`
+(`finetuning_model_view.json`, `finetuning_policy_input.json`,
+`finetuning_section_windows.json`, `finetuning_gl_derived.json`) hold the
+fine-tuning repository's rendering of common model 1.0.0 (and gl 2.0.0). They
+were not re-derived here: that would compare this repository with itself and
+hide the real gap. Until that repository takes 1.1.0, its training prompts
+differ from the prompts served here, and the parity tests fail. They pass again
+once the fixtures are re-recorded there (`record_finetuning_gl.py`,
+`record_finetuning_windows.py`).
+
+**Not in this release** (still open in `CHANGE_REQUESTS_gl.md`):
+- CR-GL-16 (held, above).
+- The aliases offered in CR-GL-04 and CR-GL-09. `Premium Basis` is already an alias of
+  `rating_exposures[].exposure_basis`, and CR-GL-09 offers it for `exposure_amount`.
+- The decisions asked in CR-GL-07, -08, -10, -11, -13 and -14.
+
+## lob_schema_map.yaml — released in 1.1.0
+
+**14 October 2026 (builders_risk):** the builders_risk entry's `schema_lob` is `builders_risk`, its `blocks_used`
+`[locations, buildings, countersignature]`, the blocks the new `builders_risk.json` 3.0.0 (SPEC_21 draft) composes, and
+`source_pdfs` is `{folder: bldrk, carriers: 3, files: 5}`. `lob_code`, `coverage_code_prefix` (the codes use `BR_`,
+`CHANGE_REQUESTS_builders_risk.md` CR-BR-01), `routing_key` and `seeds` are unchanged. `common_model.json` is
+unchanged.
+
+**14 October 2026 (flood):** the flood entry's `blocks_used` is `[locations, buildings, countersignature]`, the
+blocks the new `flood.json` 2.0.0 (SPEC_21 draft) composes; `source_pdfs` (`{folder: flood, carriers: 3, files: 34}`),
+`lob_code`, `coverage_code_prefix` and `seeds` are unchanged (the codes use `FL_`, `CHANGE_REQUESTS_flood.md`
+CR-FL-01). A comment records what the schema was built from. `common_model.json` is unchanged.
+
+**14 October 2026 (directors_officers):** the directors_officers entry is unchanged in its values; its comment records
+that `directors_officers.json` 2.1.0 adds three coverage-part codes and a 9th seed (filed in the epli folder,
+`CHANGE_REQUESTS_directors_officers.md` CR-DO-09). `common_model.json` is unchanged.
+
+**10 October 2026 (commercial_fire):** a new entry for the new L1 code `commercial_fire` (Commercial Fire), added to
+`config/lob_registry.yaml` by the project owner's ruling of 10 October 2026 (CR-BOPPR-06: Leatherstocking's 'Commercial Fire
+and Liability' product is a line of its own). It reads the new `commercial_fire.json` 1.0.0 (SPEC_21 draft; property_pkg;
+`blocks_used: [locations, buildings]`), `source_pdfs: {folder: TBD, carriers: 1, files: 7}` (the seven documents are filed
+in three folders of one carrier), `lob_code` and `coverage_code_prefix` TBD (codes use `CF_`,
+`CHANGE_REQUESTS_commercial_fire.md` CR-CFIRE-02). The map now has 49 entries; the hold-out open item names the
+line (one carrier). `common_model.fields.md` regenerated. `common_model.json` is unchanged.
+
+**10 October 2026 (auto):** the auto entry's `blocks_used` adds `countersignature`, the blocks the new
+`auto.json` 2.0.0 (SPEC_21 draft, commercial auto) composes: `[locations, vehicles, drivers, rating_exposures,
+rating_modifiers, countersignature]`. `source_pdfs` (`{folder: autob, carriers: 5, files: 11}`), `lob_code` (AU),
+`coverage_code_prefix` (AU_) and `seeds` are unchanged. `common_model.json` is unchanged; auto's requests to the
+owner are in `policy_check/CHANGE_REQUESTS_auto.md` (CR-AU-01 to CR-AU-04).
+
+**10 October 2026 (property):** the property entry is unchanged in its values (`blocks_used: [locations, buildings,
+rating_modifiers]`, `source_pdfs: {folder: prop, carriers: 3, files: 11}`, `lob_code` PR, prefix `PR_`); a comment
+records what `property.json` 2.0.0 (SPEC_21 draft) was built from. `common_model.json` is unchanged.
+
+**10 October 2026 (health):** the health entry's `blocks_used` is `[benefit_plans]`, the block the new
+`health.json` 1.0.0 (SPEC_21 draft; the line had no schema) composes, and `source_pdfs` is `{folder: health,
+carriers: 3, files: 7}`. The L1 code `statutory_disability` now reads `health.json` (`schema_lob: health`, as
+`watercraft` reads `ocean_marine`): the corpus files the New York statutory disability (DBL) and paid family leave
+(PFL) policies under health, and L1 keeps routing them as `statutory_disability` (CHANGE_REQUESTS_health.md
+CR-HEALTH-01). `common_model.json` is unchanged.
+
+**10 October 2026 (bopgl):** the bopgl entry's `blocks_used` is `[locations, buildings]`, the blocks the new
+`bopgl.json` 2.0.0 (SPEC_21 draft) composes, and `source_pdfs` is `{folder: bopgl, carriers: 5, files: 13}` (the
+single-LOB folder; package folders not counted). `lob_code`, `coverage_code_prefix`, `routing_key` and `seeds`
+are unchanged (owner to assign, `CHANGE_REQUESTS_bopgl.md` CR-BOPGL-03). `common_model.json` is unchanged.
+
+**10 October 2026 (inland_marine):** the inland_marine entry's `blocks_used` adds `countersignature`, the blocks
+the new `inland_marine.json` 2.0.0 (SPEC_21 draft) composes: `[locations, scheduled_items, countersignature]`.
+`source_pdfs` (`{folder: inmrc, carriers: 4, files: 10}`), `lob_code`, `coverage_code_prefix`, `routing_key` and
+`seeds` are unchanged (owner to assign; the codes use `IM_`, `CHANGE_REQUESTS_inland_marine.md` CR-INMRC-01).
+`common_model.json` is unchanged.
+
+**11 October 2026 (professional_eo):** the professional_eo entry is unchanged in its values (`blocks_used:
+[claims_made_terms]`, `source_pdfs: {folder: eo, ...}`, `lob_code` and `coverage_code_prefix` TBD); a comment
+records that `professional_eo.json` 2.0.0 (SPEC_21 draft) was built from the pl folder's 16 single-LOB declarations
+and that its codes use `PL_` (`CHANGE_REQUESTS_professional_eo.md` CR-PL-01). `common_model.json` is unchanged.
+
+**12 October 2026 (professional_eo):** the professional_eo entry's values are unchanged; its comment records that
+`professional_eo.json` 2.0.0 now also has 13 seeds of the eo folder (CR-PL-05 for the two that are not).
+`common_model.json` is unchanged.
+
+**12 October 2026 (directors_officers):** the directors_officers entry is unchanged in its values (`blocks_used:
+[claims_made_terms, insuring_agreements]`, `source_pdfs: {folder: do, carriers: 7, files: 9}`, `lob_code` and
+`coverage_code_prefix` TBD); a comment records that `directors_officers.json` 2.0.0 (SPEC_21 draft) was built from 8
+of the folder's 9 documents and that its codes use `DO_` (`CHANGE_REQUESTS_directors_officers.md` CR-DO-01).
+`common_model.json` is unchanged; `common_model.fields.md` regenerated.
+
+**12 October 2026 (surety):** the surety entry's `blocks_used` is `[bond]`, the block the new `surety.json` 4.0.0
+(SPEC_21 draft) composes, and `source_pdfs` is `{folder: sure, carriers: 1, files: 4}`. `lob_code`,
+`coverage_code_prefix` (the codes use `SU_`, `CHANGE_REQUESTS_surety.md` CR-SU-01), `routing_key` and `seeds` are
+unchanged. `common_model.json` is unchanged; `common_model.fields.md` regenerated.
+
+**11 October 2026 (cyber):** the cyber entry is unchanged in its values (`blocks_used: [claims_made_terms,
+insuring_agreements]`, `source_pdfs: {folder: cyber, ...}`, `lob_code` and `coverage_code_prefix` TBD); a comment
+records that `cyber.json` 2.0.0 (SPEC_21 draft) was built from 9 of the folder's 11 documents and that its codes use
+`CY_` (`CHANGE_REQUESTS_cyber.md` CR-CY-01). `common_model.json` is unchanged; `common_model.fields.md` regenerated.
+
+**11 October 2026 (umbrella):** the umbrella entry's `blocks_used` adds `countersignature`, the blocks the new
+`umbrella.json` 2.0.0 (SPEC_21 draft) composes: `[underlying_insurance, attachment, countersignature]`. `source_pdfs`,
+`lob_code` (UM), `coverage_code_prefix` (UM_) and `seeds` are unchanged. `common_model.json` is unchanged.
+
+**10 October 2026 (boppr):** the boppr entry's `blocks_used` is `[locations, buildings]`, the blocks the new
+`boppr.json` 2.0.0 (SPEC_21 draft) composes, and `source_pdfs` is `{folder: boppr, carriers: 3, files: 5}` (the
+single-LOB folder; package folders not counted). `lob_code`, `coverage_code_prefix`, `routing_key` and `seeds`
+are unchanged (owner to assign, `CHANGE_REQUESTS_boppr.md` CR-BOPPR-03). `common_model.fields.md` regenerated.
+`common_model.json` is unchanged.
+
+**10 October 2026 (wc):** the wc entry's `blocks_used` adds `countersignature`, the blocks the new `wc.json`
+2.0.0 (SPEC_21 draft, workers compensation) composes: `[locations, rating_exposures, rating_modifiers,
+countersignature]`; `wc.json` also defines one LOB-local block (`wc`, `$defs/WorkersCompensationTerms`; passes
+`tools/check_lob_defs.py`). `source_pdfs`, `lob_code` (WC), `coverage_code_prefix` (WC_) and `seeds` are unchanged.
+`common_model.json` is unchanged; wc's requests to the owner are in `policy_check/CHANGE_REQUESTS_wc.md`.
+
+**8 October 2026 (layout families from SPEC_06 §9a / SPEC_09 §2.1a; to be confirmed by the common-model
+owner):** the 13 L1 codes the spec table assigns but the map still had at `TBD` now carry their family and
+adapter: `personal_property` personal_lines; `product_liability`, `construction` casualty_fleet;
+`builders_risk`, `commercial_package`, `equipment_breakdown`, `agriculture_farm` property_pkg (AGLIA);
+`medical_malpractice`, `management_liability` exec_specialty; `annuities`, `long_term_care`, `disability`,
+`statutory_disability` benefits_misc. Only aviation, energy, environmental, reinsurance and title stay
+without an adapter (base model + `_fallback`). `schema_lob`, `lob_code` and prefixes stay `TBD`: none of
+these lines has a SPEC_21 schema, so they are still read against `_fallback` until one exists. Open: the
+SPEC_06 amendment of 6 October 2026, item 4 keeps the L1 code `ocean_marine` (commercial hull and cargo) on
+property_pkg, while the 3 October decision above made that code the personal boat line (personal_lines);
+left as it is pending the owner's decision. `common_model.json` is unchanged.
+
+**8 October 2026 (project-owner approval, CR-GL-06):** the gl entry's `blocks_used` is now
+`[locations, rating_exposures, claims_made_terms, countersignature]`, the blocks `gl.json` composes:
+no CGL document of either corpus prints a rating modifier, and CGL documents print claims-made terms
+(a retroactive date) and a countersignature. A comment records that gl 1.1.0 also reads the
+`policy_CGL` corpus. `common_model.fields.md` regenerated (`scripts/build_common_model_fields_md.py`):
+`rating_modifiers` is no longer listed as used by gl; `claims_made_terms` and `countersignature` are.
+`common_model.json` is unchanged.
 
 **4 October 2026 (project decision):** classic auto shares one canonical schema with personal_auto.
 The L1 code `classic_auto` keeps routing "Classic Automobile" documents (`config/lob_registry.yaml`), and
@@ -126,26 +347,6 @@ project owner approves the field list and the open items in
     - A `canonical_path` column was added.
     - Labels that carry a printed date were dropped: a committed file
       derived from the seeds holds labels only, never policy data.
-  - **Value types corrected (3 October 2026):**
-    - **The problem.** The first build read a label's value only from the
-      same text line, so 47% of PDF rows had `value_type` "empty". That
-      included nearly every "Named Insured", "Insured Name", "Agency" and
-      "Effective Date".
-    - **Why.** On declarations pages the value is usually a separate text
-      block, either to the right of the label or under it as a heading.
-    - **The fix.** Values are now found by position: to the right on the
-      same visual line (the first value word may sit up to 150 pt away, in
-      a column), else in the cell directly below the label.
-    - **Result.** Empty values fell to 8% (374 of 4,919 PDF rows), mostly
-      genuinely blank form fields and headings.
-    - **Effect on the gap list.** Re-running it added 4 candidates, all
-      policy-wording fragments; the approved model changes are unaffected.
-  - **Person names removed (3 October 2026).** A driver list printed as
-    "<name>: Married, Male Driver, age 64, …" made four people's names into
-    labels. A row whose value describes a person (sex, marital status,
-    driver, age, years driving) is now dropped; 5 rows went. The names were
-    in the versions pushed earlier (`d866011`, `c618e6f`), and Git history
-    still holds them.
   - **Gap rule:** 2 or more LOBs and 2 or more carriers. Duplicate carrier
     spellings were merged ("All State" and `allstate`), and
     `ocean_marine`/`watercraft` counted as one boat line. 241 candidate gaps

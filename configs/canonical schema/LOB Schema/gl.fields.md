@@ -12,13 +12,13 @@ unreadable XS Broker `policy_02` are not counted. Carriers marked `(policy_CGL)`
 
 | Item | Value |
 |---|---|
-| Schema | `gl.json` 3.0.0, composing `common_model.json` 1.1.0 by `$ref` |
+| Schema | `gl.json` 3.1.0, composing `common_model.json` 1.1.0 by `$ref` |
 | Core leaves | 172 (budget 80-300; `python -m fideon.synth_core.tools leaves`) |
 | Leaves whose label the documents print | 97 of the 172 |
 | Documents | 105 CGL documents: 49 seed documents of 10 carriers and 56 `policy_CGL` documents of 13 folders (FORTEGRA, Great American, Hiscox, Indium, Johnson & Johnson, Liberty Mutual, McNeil & Company, Philadelphia Insurance Companies, Russell Bond, XS Broker; from 1.2.0 The Main Street America Group, Scottsdale Insurance Company, USLI, and a Utica First renewal). Seed carriers: Diamond State Insurance Company, Gemini Insurance Company, Great American Insurance Company, Security Mutual Insurance Company, Sutton National, Third Coast Insurance Company, Travelers, USLI, Utica First Insurance Company, Western World Insurance Group |
 | Blocks besides the envelope | `locations`, `rating_exposures`, `claims_made_terms`, `countersignature` |
 | LOB block | none (the 1.1.0-1.2.0 `gl` block was removed in 2.0.0; its concepts are common-model fields from 3.0.0, see below) |
-| Coverage codes | 18 (`gl.coverage_codes.yaml`), of them 6 shared `X_` codes |
+| Coverage codes | 20 (`gl.coverage_codes.yaml`), of them 6 shared `X_` codes; 3.1.0 adds `GL_SUPPLEMENTARY_PAYMENTS`, `GL_OWNERS_CONTRACTORS_PROTECTIVE` |
 | Mandatory fields | `carrier.name`, `named_insured.primary_name`, `policy.policy_number`, `policy.effective_date`, `policy.expiration_date`, `coverages[].limits[].amount` |
 
 Field names, meanings and shapes are fixed by the common model; this line chooses the blocks, the coverage

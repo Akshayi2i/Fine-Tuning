@@ -46,10 +46,11 @@ PAGE_TEXT = {
 TEXTS = [PAGE_TEXT.get(page, "Standard conditions and definitions.") for page in range(1, TOTAL + 1)]
 
 #: The line these windows are read for: a self-contained one, the shape LABEL
-#: is written in. Not the fallback (no line) and not general liability: both
-#: compose common model 1.1.0, whose windows tests/test_schema2_*.py pin. Not
-#: auto, wc or umbrella either, which are moving to the common model too.
-LOB = "property"
+#: is written in (equipment breakdown keeps the layout property had before it
+#: moved). Not the fallback (no line), and not property, general liability, auto,
+#: wc or umbrella: those compose the common model, whose windows
+#: tests/test_schema2_*.py pin.
+LOB = "equipment_breakdown"
 
 
 def _fv(value, page):
@@ -279,10 +280,10 @@ def test_serving_asks_the_windows_training_built(client, monkeypatch):
     # Sent in planned order, so each call pairs with its training row; the
     # order windows are sent in has tests of its own (test_window_send_order).
     monkeypatch.setattr(pipeline, "_send_order", lambda pending, doc_type: list(range(len(pending))))
-    rows, _ = expand_document(_document(lob="wc"), "train", modes=("ocr_plus_image",))
+    rows, _ = expand_document(_document(), "train", modes=("ocr_plus_image",))
     trained = [(r["sections"], r["window_pages"]) for r in rows]
 
-    _result, backend = _serve(client, _decl_response(), known_lob="wc")
+    _result, backend = _serve(client, _decl_response(), known_lob=LOB)
     served_schemas = [call["json_schema"] for call in backend.calls]
 
     assert len(backend.calls) == len(trained)
@@ -292,7 +293,7 @@ def test_serving_asks_the_windows_training_built(client, monkeypatch):
     # Each constrained to its slice, with page_ref bounded to the pages its
     # training row showed.
     assert served_schemas == [
-        with_page_bounds(resolved_schema("policy", None, "wc", group),
+        with_page_bounds(resolved_schema("policy", None, LOB, group),
                          page_total(call["messages"]), pages=list(pages))
         for (group, pages), call in zip(trained, backend.calls, strict=True)
     ]
@@ -314,7 +315,7 @@ def _fallback_response():
 
 @pytest.mark.parametrize("lob,response,carrier_name", [
     (LOB, _decl_response(), "company_name"),
-    # No line: the fallback, which composes common model 1.1.0. Every policy
+    # No line: the fallback, which composes the common model. Every policy
     # served without a line is read against it.
     (None, _fallback_response(), "name"),
 ], ids=["line", "fallback"])

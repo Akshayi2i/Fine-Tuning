@@ -1,0 +1,367 @@
+# SPEC_21 4.7 crosswalk for pl: every leaf of professional_eo.json 2.0.0 -> pl.json 1.0.0. pl was built
+# from professional_eo (DECISIONS_2026-10-19 row 48), so every path keeps its place (new: same path);
+# a registry entry or a seed gold drafted against professional_eo moves to pl unchanged.
+# Applied by tools/registry_migrate.py --lob pl.
+
+lob: pl
+from_schema: professional_eo 2.0.0
+to_schema: 1.0.0
+paths:
+  billing.account_number:
+    new: billing.account_number
+  billing.amount_due:
+    new: billing.amount_due
+  billing.bill_type:
+    new: billing.bill_type
+  billing.due_date:
+    new: billing.due_date
+  billing.installments[].amount:
+    new: billing.installments[].amount
+  billing.installments[].due_date:
+    new: billing.installments[].due_date
+  billing.installments[].installment_number:
+    new: billing.installments[].installment_number
+  billing.payment_method:
+    new: billing.payment_method
+  billing.payment_plan:
+    new: billing.payment_plan
+  carrier.address.city:
+    new: carrier.address.city
+  carrier.address.county:
+    new: carrier.address.county
+  carrier.address.postal_code:
+    new: carrier.address.postal_code
+  carrier.address.state:
+    new: carrier.address.state
+  carrier.address.street:
+    new: carrier.address.street
+  carrier.address.street_2:
+    new: carrier.address.street_2
+  carrier.admitted_status:
+    new: carrier.admitted_status
+  carrier.claims_address.city:
+    new: carrier.claims_address.city
+  carrier.claims_address.county:
+    new: carrier.claims_address.county
+  carrier.claims_address.postal_code:
+    new: carrier.claims_address.postal_code
+  carrier.claims_address.state:
+    new: carrier.claims_address.state
+  carrier.claims_address.street:
+    new: carrier.claims_address.street
+  carrier.claims_address.street_2:
+    new: carrier.claims_address.street_2
+  carrier.claims_email:
+    new: carrier.claims_email
+  carrier.claims_phone:
+    new: carrier.claims_phone
+  carrier.fax:
+    new: carrier.fax
+  carrier.financial_rating:
+    new: carrier.financial_rating
+  carrier.group_name:
+    new: carrier.group_name
+  carrier.naic_code:
+    new: carrier.naic_code
+  carrier.name:
+    new: carrier.name
+  carrier.phone:
+    new: carrier.phone
+  carrier.web_address:
+    new: carrier.web_address
+  claims_made_terms.continuity_date:
+    new: claims_made_terms.continuity_date
+  claims_made_terms.defense_within_limits:
+    new: claims_made_terms.defense_within_limits
+  claims_made_terms.extended_reporting_period:
+    new: claims_made_terms.extended_reporting_period
+  claims_made_terms.extended_reporting_premium_percent:
+    new: claims_made_terms.extended_reporting_premium_percent
+  claims_made_terms.pending_prior_litigation_date:
+    new: claims_made_terms.pending_prior_litigation_date
+  claims_made_terms.retroactive_date:
+    new: claims_made_terms.retroactive_date
+  coverages[].applies_to[]:
+    new: coverages[].applies_to[]
+  coverages[].coinsurance_percent:
+    new: coverages[].coinsurance_percent
+  coverages[].coverage_code:
+    new: coverages[].coverage_code
+  coverages[].coverage_id:
+    new: coverages[].coverage_id
+  coverages[].coverage_name:
+    new: coverages[].coverage_name
+  coverages[].covered_auto_symbols[]:
+    new: coverages[].covered_auto_symbols[]
+  coverages[].deductibles[].amount:
+    new: coverages[].deductibles[].amount
+  coverages[].deductibles[].applies_to[]:
+    new: coverages[].deductibles[].applies_to[]
+  coverages[].deductibles[].applies_to_coverages[]:
+    new: coverages[].deductibles[].applies_to_coverages[]
+  coverages[].deductibles[].deductible_type:
+    new: coverages[].deductibles[].deductible_type
+  coverages[].deductibles[].percentage:
+    new: coverages[].deductibles[].percentage
+  coverages[].deductibles[].percentage_basis:
+    new: coverages[].deductibles[].percentage_basis
+  coverages[].deductibles[].peril:
+    new: coverages[].deductibles[].peril
+  coverages[].form_refs[]:
+    new: coverages[].form_refs[]
+  coverages[].included:
+    new: coverages[].included
+  coverages[].limits[].amount:
+    new: coverages[].limits[].amount
+  coverages[].limits[].basis_coverage_code:
+    new: coverages[].limits[].basis_coverage_code
+  coverages[].limits[].description:
+    new: coverages[].limits[].description
+  coverages[].limits[].limit_type:
+    new: coverages[].limits[].limit_type
+  coverages[].limits[].percentage:
+    new: coverages[].limits[].percentage
+  coverages[].part:
+    new: coverages[].part
+  coverages[].premium:
+    new: coverages[].premium
+  coverages[].valuation:
+    new: coverages[].valuation
+  deductibles[].amount:
+    new: deductibles[].amount
+  deductibles[].applies_to[]:
+    new: deductibles[].applies_to[]
+  deductibles[].applies_to_coverages[]:
+    new: deductibles[].applies_to_coverages[]
+  deductibles[].deductible_type:
+    new: deductibles[].deductible_type
+  deductibles[].percentage:
+    new: deductibles[].percentage
+  deductibles[].percentage_basis:
+    new: deductibles[].percentage_basis
+  deductibles[].peril:
+    new: deductibles[].peril
+  document.doc_type:
+    new: document.doc_type
+  document.endorsement_number:
+    new: document.endorsement_number
+  document.issue_date:
+    new: document.issue_date
+  document.mailing_date:
+    new: document.mailing_date
+  document.modality:
+    new: document.modality
+  document.page_count:
+    new: document.page_count
+  document.print_date:
+    new: document.print_date
+  document.source_file_name:
+    new: document.source_file_name
+  document.title:
+    new: document.title
+  document.transaction_date:
+    new: document.transaction_date
+  document.transaction_effective_date:
+    new: document.transaction_effective_date
+  document.transaction_reason:
+    new: document.transaction_reason
+  document.transaction_type:
+    new: document.transaction_type
+  forms_and_endorsements[].applies_to[]:
+    new: forms_and_endorsements[].applies_to[]
+  forms_and_endorsements[].edition_date:
+    new: forms_and_endorsements[].edition_date
+  forms_and_endorsements[].form_number:
+    new: forms_and_endorsements[].form_number
+  forms_and_endorsements[].form_type:
+    new: forms_and_endorsements[].form_type
+  forms_and_endorsements[].page_range[]:
+    new: forms_and_endorsements[].page_range[]
+  forms_and_endorsements[].part:
+    new: forms_and_endorsements[].part
+  forms_and_endorsements[].premium:
+    new: forms_and_endorsements[].premium
+  forms_and_endorsements[].title:
+    new: forms_and_endorsements[].title
+  interested_parties[].address.city:
+    new: interested_parties[].address.city
+  interested_parties[].address.county:
+    new: interested_parties[].address.county
+  interested_parties[].address.postal_code:
+    new: interested_parties[].address.postal_code
+  interested_parties[].address.state:
+    new: interested_parties[].address.state
+  interested_parties[].address.street:
+    new: interested_parties[].address.street
+  interested_parties[].address.street_2:
+    new: interested_parties[].address.street_2
+  interested_parties[].applies_to[]:
+    new: interested_parties[].applies_to[]
+  interested_parties[].is_payor:
+    new: interested_parties[].is_payor
+  interested_parties[].loan_number:
+    new: interested_parties[].loan_number
+  interested_parties[].name:
+    new: interested_parties[].name
+  interested_parties[].rank:
+    new: interested_parties[].rank
+  interested_parties[].role:
+    new: interested_parties[].role
+  lob_parts[].coverage_part_form:
+    new: lob_parts[].coverage_part_form
+  lob_parts[].lob:
+    new: lob_parts[].lob
+  lob_parts[].part_id:
+    new: lob_parts[].part_id
+  lob_parts[].premium:
+    new: lob_parts[].premium
+  lob_parts[].title:
+    new: lob_parts[].title
+  named_insured.additional_named_insureds[].date_of_birth:
+    new: named_insured.additional_named_insureds[].date_of_birth
+  named_insured.additional_named_insureds[].gender:
+    new: named_insured.additional_named_insureds[].gender
+  named_insured.additional_named_insureds[].marital_status:
+    new: named_insured.additional_named_insureds[].marital_status
+  named_insured.additional_named_insureds[].name:
+    new: named_insured.additional_named_insureds[].name
+  named_insured.additional_named_insureds[].occupation:
+    new: named_insured.additional_named_insureds[].occupation
+  named_insured.additional_named_insureds[].relationship:
+    new: named_insured.additional_named_insureds[].relationship
+  named_insured.business_description:
+    new: named_insured.business_description
+  named_insured.date_of_birth:
+    new: named_insured.date_of_birth
+  named_insured.doing_business_as:
+    new: named_insured.doing_business_as
+  named_insured.email:
+    new: named_insured.email
+  named_insured.entity_type:
+    new: named_insured.entity_type
+  named_insured.fein:
+    new: named_insured.fein
+  named_insured.gender:
+    new: named_insured.gender
+  named_insured.mailing_address.city:
+    new: named_insured.mailing_address.city
+  named_insured.mailing_address.county:
+    new: named_insured.mailing_address.county
+  named_insured.mailing_address.postal_code:
+    new: named_insured.mailing_address.postal_code
+  named_insured.mailing_address.state:
+    new: named_insured.mailing_address.state
+  named_insured.mailing_address.street:
+    new: named_insured.mailing_address.street
+  named_insured.mailing_address.street_2:
+    new: named_insured.mailing_address.street_2
+  named_insured.marital_status:
+    new: named_insured.marital_status
+  named_insured.occupation:
+    new: named_insured.occupation
+  named_insured.phone:
+    new: named_insured.phone
+  named_insured.primary_name:
+    new: named_insured.primary_name
+  policy.audit_period:
+    new: policy.audit_period
+  policy.certificate_number:
+    new: policy.certificate_number
+  policy.coverage_trigger:
+    new: policy.coverage_trigger
+  policy.effective_date:
+    new: policy.effective_date
+  policy.expiration_date:
+    new: policy.expiration_date
+  policy.is_package:
+    new: policy.is_package
+  policy.original_inception_date:
+    new: policy.original_inception_date
+  policy.policy_number:
+    new: policy.policy_number
+  policy.policy_type:
+    new: policy.policy_type
+  policy.prior_policy_number:
+    new: policy.prior_policy_number
+  policy.rating_state:
+    new: policy.rating_state
+  policy.subject_to_audit:
+    new: policy.subject_to_audit
+  policy.term_months:
+    new: policy.term_months
+  premium.change:
+    new: premium.change
+  premium.deposit:
+    new: premium.deposit
+  premium.discounts[].amount:
+    new: premium.discounts[].amount
+  premium.discounts[].description:
+    new: premium.discounts[].description
+  premium.discounts[].fully_earned:
+    new: premium.discounts[].fully_earned
+  premium.discounts[].percentage:
+    new: premium.discounts[].percentage
+  premium.items[].amount:
+    new: premium.items[].amount
+  premium.items[].applies_to[]:
+    new: premium.items[].applies_to[]
+  premium.items[].coverage_code:
+    new: premium.items[].coverage_code
+  premium.items[].description:
+    new: premium.items[].description
+  premium.items[].part:
+    new: premium.items[].part
+  premium.items[].unit_type:
+    new: premium.items[].unit_type
+  premium.minimum:
+    new: premium.minimum
+  premium.minimum_earned:
+    new: premium.minimum_earned
+  premium.minimum_earned_percent:
+    new: premium.minimum_earned_percent
+  premium.surcharges[].amount:
+    new: premium.surcharges[].amount
+  premium.surcharges[].description:
+    new: premium.surcharges[].description
+  premium.surcharges[].fully_earned:
+    new: premium.surcharges[].fully_earned
+  premium.surcharges[].percentage:
+    new: premium.surcharges[].percentage
+  premium.taxes_fees[].amount:
+    new: premium.taxes_fees[].amount
+  premium.taxes_fees[].description:
+    new: premium.taxes_fees[].description
+  premium.taxes_fees[].fully_earned:
+    new: premium.taxes_fees[].fully_earned
+  premium.taxes_fees[].percentage:
+    new: premium.taxes_fees[].percentage
+  premium.total:
+    new: premium.total
+  producer.address.city:
+    new: producer.address.city
+  producer.address.county:
+    new: producer.address.county
+  producer.address.postal_code:
+    new: producer.address.postal_code
+  producer.address.state:
+    new: producer.address.state
+  producer.address.street:
+    new: producer.address.street
+  producer.address.street_2:
+    new: producer.address.street_2
+  producer.agency_name:
+    new: producer.agency_name
+  producer.contact_name:
+    new: producer.contact_name
+  producer.contract_number:
+    new: producer.contract_number
+  producer.email:
+    new: producer.email
+  producer.fax:
+    new: producer.fax
+  producer.phone:
+    new: producer.phone
+  producer.producer_code:
+    new: producer.producer_code
+  producer.web_address:
+    new: producer.web_address

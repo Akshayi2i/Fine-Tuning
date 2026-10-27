@@ -30,19 +30,20 @@ def test_an_overlay_is_registered_as_a_common_model_line(lob):
 
 
 def test_the_self_contained_lines_are_not_common_model_lines():
-    # General liability's family-mates still use self-contained files, as do
-    # the lines of the families not yet moved.
-    for lob in ("auto", "wc", "umbrella", "property", "cyber"):
+    # The lines not yet moved to the common model keep their self-contained files.
+    for lob in ("business_owners", "commercial_package", "crime_fidelity", "epli", "management_liability"):
         assert not S.is_common_model("policy", lob=lob), lob
 
 
 def test_general_liability_and_the_fallback_compose_the_common_model():
     """gl.json is a SPEC_21 overlay since its 3.0.0, and _fallback.json - the
-    schema of a policy of no known line - composes common model 1.1.0 too."""
+    schema of a policy of no known line - composes the common model too, both
+    pinned at 1.4.0 since 23 October 2026."""
     assert S.is_common_model("policy", lob="gl")
     assert S.is_common_model("policy")  # the fallback
-    assert S.schema_version("policy", lob="gl") == "3.0.0+common.1.1.0"
-    assert S.schema_version("policy") == "1.1.0+common.1.1.0"
+    common = S._common_model()[S.COMMON_MODEL_VERSION_KEY]
+    assert S.schema_version("policy", lob="gl") == f"{_overlay('gl')['fideon:schema_version']}+common.{common}"
+    assert S.schema_version("policy") == f"{_overlay('_fallback')['fideon:schema_version']}+common.{common}"
 
 
 @pytest.mark.parametrize("lob", OVERLAY_LINES)
@@ -56,7 +57,10 @@ def test_a_bundle_has_no_reference_outside_its_own_definitions(lob):
 
 @pytest.mark.parametrize("lob", OVERLAY_LINES)
 def test_a_bundle_version_names_the_overlay_and_the_common_model(lob):
-    assert S.schema_version("policy", lob=lob) == "1.0.0+common.1.1.0"
+    """The overlay's own version and the common model it was COMPOSED with -
+    the one loaded, though the overlay may pin an earlier minor."""
+    common = S._common_model()[S.COMMON_MODEL_VERSION_KEY]
+    assert S.schema_version("policy", lob=lob) == f"{_overlay(lob)['fideon:schema_version']}+common.{common}"
 
 
 def test_the_spec21_example_gold_validates_against_its_bundle():
@@ -101,6 +105,18 @@ def test_an_overlay_written_against_another_common_model_version_is_refused():
         S._bundle(overlay, S.CANONICAL_DIR / "homeowners.json")
 
 
+def test_an_earlier_minor_composes_and_a_later_or_other_major_does_not():
+    """A minor release of the common model is additions only (its change
+    control), so a line pinned at 1.1.0 composes 1.4.0, as the schema owner's
+    registry composes it; a later version or another major is refused."""
+    assert S.composes_common("1.4.0", "1.4.0") and S.composes_common("1.1.0", "1.4.0")
+    for wanted in ("1.5.0", "2.0.0", "0.9.0", None, "one"):
+        assert not S.composes_common(wanted, "1.4.0"), wanted
+    overlay = _overlay("homeowners")
+    overlay[S.COMMON_MODEL_VERSION_KEY] = "1.0.0"
+    assert S._bundle(overlay, S.CANONICAL_DIR / "homeowners.json")
+
+
 def test_a_code_file_listing_other_codes_is_refused(tmp_path):
     overlay = _overlay("personal_umbrella")
     (tmp_path / overlay["fideon:coverage_codes_file"]).write_text(
@@ -119,14 +135,15 @@ def test_a_code_without_a_meaning_is_refused(tmp_path):
 
 
 def test_lines_on_the_common_model_and_lines_on_self_contained_files_load_together():
-    """Lines move to the common model one by one: general liability is on it
-    while auto, workers' comp and umbrella are not yet. Every schema still
-    loads; one corpus holding both kinds is refused where the adapter is
-    trained (common.adapter.assert_one_output_shape), not here."""
+    """Lines move to the common model one by one: general liability, workers'
+    comp and the businessowners lines are on it while EPLI and management
+    liability are not yet. Every schema still loads; one corpus holding both
+    kinds is refused where the adapter is trained
+    (common.adapter.assert_one_output_shape), not here."""
     S._sources.cache_clear()
     sources = S._sources()
-    assert sources["policy:gl"].common_model
-    assert not any(sources[f"policy:{lob}"].common_model for lob in ("auto", "wc", "umbrella"))
+    assert all(sources[f"policy:{lob}"].common_model for lob in ("gl", "wc", "bopgl", "boppr"))
+    assert not any(sources[f"policy:{lob}"].common_model for lob in ("epli", "management_liability"))
 
 
 def test_commercial_auto_reads_the_clients_auto_file():

@@ -36,8 +36,9 @@ GOLDEN = json.loads(
 #: The line a bundle here is filed under unless a test says otherwise: one whose
 #: schema is still self-contained, the shape GOLDEN is written in. A bundle of no
 #: line is checked against the fallback, which composes the common model since
-#: common model 1.1.0, and GOLDEN is not that shape.
-LINE = "property"
+#: common model 1.1.0, and GOLDEN is not that shape; nor are property, auto, wc
+#: or umbrella, which moved onto the common model too.
+LINE = "equipment_breakdown"
 
 #: A review record: every gold needs one to import (decision 2026-10-22).
 REVIEWED = {"reviewer_id": "a.reviewer", "review_date": "2026-10-20"}
@@ -172,7 +173,7 @@ def test_a_complete_bundle_reports_nothing(tmp_path):
     complete = bundle(tmp_path, metadata={
         "field_provenance": {"named_insured.primary_name": 1},
         "policy_number": "WC-8842317-01",
-        "lob": ["workers_comp"],
+        "lob": [LINE],
         "reviewer_id": "a.reviewer", "review_date": "2026-10-20",
     })
     check = check_bundle(read_bundle(complete), "policy")
@@ -201,7 +202,7 @@ def test_a_twin_imports_only_with_its_seeds_review(tmp_path):
     twin = {"lob": [LINE], "synthetic": True, "sample": 1, **REVIEWED}
     check = check_bundle(read_bundle(bundle(tmp_path, "own", metadata=twin)), "policy")
     assert any("a twin is reviewed only when its seed was" in e for e in check.errors)
-    inherited = bundle(tmp_path, "inherited", metadata={**twin, "review_inherited_from": "property/seed_1"})
+    inherited = bundle(tmp_path, "inherited", metadata={**twin, "review_inherited_from": "equipment_breakdown/seed_1"})
     assert check_bundle(read_bundle(inherited), "policy").ok
 
 
@@ -211,7 +212,7 @@ def test_the_review_record_reaches_the_label_metadata(tmp_path, client, raw_clie
     bundle(root, "doc", metadata={"lob": [LINE], "reviewer_id": "a.reviewer",
                                   "review_date": "2026-10-20", "draft_backend": "base_qwen3vl"})
     bundle(root, "twin", pdf=b"%PDF-1.7 twin", metadata={
-        "lob": [LINE], "synthetic": True, **REVIEWED, "review_inherited_from": "property/seed_1"})
+        "lob": [LINE], "synthetic": True, **REVIEWED, "review_inherited_from": "equipment_breakdown/seed_1"})
     report = import_batch(root, "policy", client, raw_client)
     assert report.ok, report.describe()
     stored = client.read_json(paths.label_metadata("policy", report.imported["doc"]))
@@ -219,7 +220,7 @@ def test_the_review_record_reaches_the_label_metadata(tmp_path, client, raw_clie
         "a.reviewer", "2026-10-20", "base_qwen3vl")
     # A twin keeps the seed it inherited its record from: every later reader checks it.
     twin = client.read_json(paths.label_metadata("policy", report.imported["twin"]))
-    assert twin["review_inherited_from"] == "property/seed_1"
+    assert twin["review_inherited_from"] == "equipment_breakdown/seed_1"
 
 
 # --------------------------------------------------------------------------
@@ -372,7 +373,7 @@ def test_an_edition_left_inside_a_form_number_blocks_and_a_doubtful_one_warns(tm
     assert any("may end in their edition" in w for w in check.warnings)
 
 
-@pytest.mark.parametrize("line", ["property", "auto", "wc", "umbrella"])
+@pytest.mark.parametrize("line", [LINE, "agriculture_farm", "epli", "crime_fidelity"])
 def test_a_self_contained_line_keeps_its_editions_in_the_form_number(tmp_path, line):
     """Nothing applies the label rules on a self-contained line - not
     prepare_bundles, not serving - so "re-run prepare_bundles" could never fix

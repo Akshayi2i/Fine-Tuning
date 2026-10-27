@@ -1,4 +1,4 @@
-# SPEC_21 4.2.4 coverage codes of gl (schema 3.0.0, common model 1.1.0).
+# SPEC_21 4.2.4 coverage codes of gl (schema 3.2.0, common model 1.4.0).
 # Built from the CGL documents of 10 seed carriers (Diamond State Insurance Company, Gemini Insurance Company, Great American Insurance Company, Security Mutual Insurance Company, Sutton National, Third Coast Insurance Company, Travelers, USLI, Utica First Insurance Company, Western World Insurance Group)
 # and, from 1.1.0, the CGL documents of 10 policy_CGL carrier folders (FORTEGRA, Great American, Hiscox, Indium, Johnson & Johnson, Liberty Mutual, McNeil & Company, Philadelphia Insurance Companies, Russell Bond, XS Broker),
 # and, from 1.2.0, six more CGL documents in 4 folders (The Main Street America Group, Scottsdale Insurance Company, USLI,
@@ -19,12 +19,19 @@
 # replaces_codes: the gl 2.0.0 code of the same coverage, renamed to the common model 1.1.0 shared code in
 # 3.0.0 (CR-GL-03; gl.crosswalk.yaml). The aliases here are gl's carrier and ISO form titles; the shared
 # code's generic names are in common_model.json.
+# 3.1.0 (23 October 2026): GL_SUPPLEMENTARY_PAYMENTS and GL_OWNERS_CONTRACTORS_PROTECTIVE, from the recurring wording of
+# the POLICIES-FINAL-V3 cgl originals (captions printed in at least 5 documents of at least 2 carriers; their
+# 'carriers' count is the number of V3 carrier folders, not of the 23 above). Both are additive.
 # GL_DAMAGE_TO_PREMISES_RENTED: the default limit type stays per_location (L1 uses a default only when it is the
 # single one). A limit printed per fire ('Fire Damage (Any One Fire)') is per_occurrence in a gold; L1 does not yet
 # read 'any one fire' as a printed qualifier (CR-GL-20).
+# 3.2.0 (26 October 2026, additive): the coverage rows the G1 scanned and hybrid seeds printed that the line had no name or code for. Printed names
+# of an existing concept became aliases; a concept no code covered got a code (LOB prefix; counterpart keys between bopgl and boppr). Nothing is
+# removed or renamed.
+
 lob: gl
-schema_version: 3.0.0
-common_model_version: 1.1.0
+schema_version: 3.2.0
+common_model_version: 1.4.0
 code_prefix: GL_
 codes:
 - code: GL_BI_PD
@@ -47,6 +54,11 @@ codes:
   - Designated Construction Project(s) General Aggregate Limit
   - Independent Contractors/Subcontractors Sublimit
   - Per Occurrence Limit
+  - Cov L - Bodily Injury & Property Damage
+  # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
+  - Liability and Medical Expenses Limit
+  - General Aggregate (other than Products/Completed Operations)
+  - GENERAL AGGREGATE LIMIT PER LOCATION
   default_limit_types:
   - per_occurrence
   - aggregate
@@ -63,6 +75,12 @@ codes:
   - Products - Completed Operations Aggregate Limit
   - Products/Completed Operations Liability Coverage Part
   - PRODUCTS - COMP/OP AGG
+  - Products-Completed Ops Aggregate Limit
+  - Coverage N - Products/Completed Operations
+  - Cov N - Products/Completed Operations
+  # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
+  - Products Completed Operations Aggregate
+  - Products/Completed Operations Aggregate
   default_limit_types:
   - products_completed_ops_aggregate
   carriers: 18
@@ -72,11 +90,15 @@ codes:
   - Personal and Advertising Injury Limit
   - Personal & Advertising Injury Limit
   - Personal/Advertising Injury Limit
+  - Personal/Advertising Limit
   - Coverage B Personal and Advertising Injury Liability
   - Coverage P - Personal and Advertising Injury Liability
   - Personal and Advertising Injury Liability
   - Personal & Advertising Injury Limit (Any One Person/Organization)
   - PERSONAL & ADV INJURY
+  - Coverage P - Personal Injury & Advertising Liability
+  # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
+  - Personal And Advertising Injury
   default_limit_types:
   - per_person
   carriers: 19
@@ -94,6 +116,9 @@ codes:
   - Medical Payments
   - Medical Payments (limit per person)
   - MED EXP (Any one person)
+  - Medical Expense Limit (Any one person)
+  - Cov M - Medical Payments
+  - Coverage M – Premises Medical Payments
   default_limit_types:
   - per_person
   shared: true
@@ -114,6 +139,8 @@ codes:
   - Damages To Premises Rented To You (Any One Premises)
   - DAMAGE TO RENTED PREMISES (Ea occurrence)
   - Broadened Coverage for Damage to Premises Rented to You
+  # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
+  - Fire Legal Liability (Toolbox)
   default_limit_types:
   - per_location
   carriers: 18
@@ -155,6 +182,8 @@ codes:
   - Nonowned Hired Auto Liability
   - Non Owned Hired Auto Liability Coverage New York
   - Hired and Non-Owned Auto
+  # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
+  - HIRED AUTO AND NON-OWNED AUTO LIABILITY - NEW YORK
   default_limit_types:
   - per_occurrence
   - combined_single
@@ -175,6 +204,13 @@ codes:
   - Additional Insured - Mortgagee, Assignee or Receiver
   - Additional Insured - Owners, Lessees or Contractors - Completed Operations
   - Additional Insured - Owners, Lessees or Contractors - Scheduled Person or Organization
+  - Additional Insured Designated Person or Organization
+  - Designated Person or Organization
+  - Vendors
+  - Lessor of Premises
+  - Owner of Leased Land
+  - Owners, Lessees or Contractors Completed Work - Automatic Status
+  - State or Political Subdivision - Premises Permits
   default_limit_types: []
   shared: true
   carriers: 14
@@ -195,6 +231,7 @@ codes:
   aliases:
   - Blanket Waiver of Subrogation
   - Waiver of Transfer of Rights of Recovery Against Others to Us
+  - Waiver Of Subrogation
   default_limit_types: []
   shared: true
   carriers: 6
@@ -230,6 +267,8 @@ codes:
   - Fitness and Wellness Liability Insurance Extension
   - Technology Services Extension Endorsement
   - Contractors Extension Endorsement
+  - Business General Liability - Extra Coverage
+  - General Liability Coverage (Business General Liability Extra Coverage)
   default_limit_types: []
   carriers: 8
 - code: GL_SNOW_PLOW_OPERATIONS
@@ -251,3 +290,589 @@ codes:
   - other
   shared: true
   carriers: 20
+- code: GL_SUPPLEMENTARY_PAYMENTS
+  name: Supplementary payments - Coverages A and B (bail bonds, loss of earnings)
+  aliases:
+  - Supplementary Payments - Coverages A and B
+  - Supplementary Payments
+  - Supplementary Payments Aggregate Limit
+  # The caps the ISO form prints inside Supplementary Payments (cost of bail bonds, loss of earnings per day) are
+  # sublimits of this coverage: limit_type sublimit and per_day, each limit's description its printed wording.
+  default_limit_types:
+  - sublimit
+  - per_day
+  carriers: 10
+- code: GL_OWNERS_CONTRACTORS_PROTECTIVE
+  name: Owners and contractors protective (OCP) liability coverage part
+  aliases:
+  - Owners and Contractors Protective Liability Coverage Part
+  - Owners and Contractors Protective Liability
+  - Owners and Contractors Protective Liability Coverage Form
+  default_limit_types:
+  - per_occurrence
+  - aggregate
+  carriers: 6
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_ACCOUNTS_RECEIVABLE
+  name: Accounts receivable
+  aliases:
+  - Accounts receivable
+  - Accounts Receivable Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_APPURTENANT_STRUCTURES
+  name: Garages, storage buildings and other appurtenant structures
+  aliases:
+  - Garages, storage buildings and other appurtenant structures
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_ARSON_REWARD
+  name: Arson and theft reward
+  aliases:
+  - Arson and theft reward
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_AUTOMOBILE_LIABILITY
+  name: Automobile liability (combined single limit)
+  aliases:
+  - Automobile liability (combined single limit)
+  - AUTOMOBILE LIABILITY COMBINED SINGLE LIMIT (Ea accident)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_BI_DEPENDENT_PROPERTIES
+  name: Business income from dependent properties
+  aliases:
+  - Business income from dependent properties
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_BI_OFF_PREMISES_OPERATIONS
+  name: Business income from off-premises operations
+  aliases:
+  - Business income from off-premises operations
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_BI_UTILITY_SERVICES
+  name: Business income for off-premises utility services
+  aliases:
+  - Business income for off-premises utility services
+  - OFF-PREMISES UTILITY SERVICES
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_BI_WEBSITES
+  name: Business income from websites
+  aliases:
+  - Business income from websites
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_BRANDS_LABELS
+  name: Brands and labels
+  aliases:
+  - Brands and labels
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_BUILDING_PROPERTY_OF_OTHERS
+  name: Building property of others
+  aliases:
+  - Building property of others
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_BUSINESS_INCOME_EXTRA_EXPENSE
+  name: Business income and extra expense
+  aliases:
+  - Business income and extra expense
+  - Business income and extra expense sub-limit (waiting period 24 hours)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_CIVIL_AUTHORITY
+  name: Business income for civil authority orders
+  aliases:
+  - Business income for civil authority orders
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_CLAIM_EXPENSE
+  name: Claim expense
+  aliases:
+  - Claim expense
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_COLLAPSE
+  name: Collapse
+  aliases:
+  - Collapse
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_COMPUTERS_WORLDWIDE
+  name: Computers worldwide
+  aliases:
+  - Computers worldwide
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_COMPUTER_COVERAGE
+  name: Computer coverage
+  aliases:
+  - Computer coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_COMPUTER_INTERRUPTION
+  name: Interruption of computer operations
+  aliases:
+  - Interruption of computer operations
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_CONDO_COVERED_PROPERTY
+  name: Condo covered property
+  aliases:
+  - Condo covered property
+  - Condo Covered Property limit
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_CONTRACTORS_EQUIPMENT
+  name: Scheduled contractor's equipment
+  aliases:
+  - Scheduled contractor's equipment
+  - Tools & Equipment
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_CONTRACTORS_POLLUTION_LIABILITY
+  name: Contractor's pollution liability
+  aliases:
+  - Contractor's pollution liability
+  - CONTRACTOR'S POLLUTION LIABILITY COVERAGE
+  - CONTRACTOR'S POLLUTION LIABILITY COVERAGE Each Pollution Incident Limit
+  - CONTRACTOR'S POLLUTION LIABILITY COVERAGE Pollution Incident Aggregate Limit
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_CONTRACTOR_BROADENING
+  name: Contractor broadening endorsement
+  aliases:
+  - Contractor broadening endorsement
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_CONTRACT_PENALTIES
+  name: Contract penalties
+  aliases:
+  - Contract penalties
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_CYBER_VIRUS_MALWARE
+  name: Cyber virus and malware
+  aliases:
+  - Cyber virus and malware
+  - CYBER VIRUS AND MALWARE COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_DATA_BREACH_DEFENSE
+  name: Data breach defense and liability
+  aliases:
+  - Data breach defense and liability
+  - Data Breach Defense and Liability annual aggregate
+  - Data Breach Defense and Liability each claim limit
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_DATA_BREACH_RESPONSE
+  name: Data breach response expenses
+  aliases:
+  - Data breach response expenses
+  - Data Breach Response Expenses limit of insurance
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_DEBRIS_REMOVAL
+  name: Debris removal
+  aliases:
+  - Debris removal
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_DETACHED_TRAILERS
+  name: Non-owned detached trailers
+  aliases:
+  - Non-owned detached trailers
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_ELECTRONIC_DATA
+  name: Electronic data
+  aliases:
+  - Electronic data
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_EMPLOYEE_DISHONESTY
+  name: Employee dishonesty
+  aliases:
+  - Employee dishonesty
+  - EMPLOYEE DISHONESTY COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_EPL
+  name: Employment practices liability
+  aliases:
+  - Employment practices liability
+  - Employment Practices Liability Insurance EACH CLAIM LIMIT
+  - Employment Practices Liability Insurance ANNUAL AGGREGATE LIMIT
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_EQUIPMENT_BREAKDOWN
+  name: Equipment breakdown
+  aliases:
+  - Equipment breakdown
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_EXTORTION_THREATS
+  name: Extortion threats
+  aliases:
+  - Extortion threats
+  - Extortion threats sub-limit
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_FINE_ARTS
+  name: Fine arts
+  aliases:
+  - Fine arts
+  - FINE ARTS COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_FIRE_DEPARTMENT_SERVICE_CHARGE
+  name: Fire department service charge
+  aliases:
+  - Fire department service charge
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_FIRE_EXTINGUISHER_RECHARGE
+  name: Fire extinguisher recharge
+  aliases:
+  - Fire extinguisher recharge
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_FORGERY
+  name: Forgery (including credit cards, currency and money orders)
+  aliases:
+  - Forgery (including credit cards, currency and money orders)
+  - FORGERY COVERAGE (INCLUDING CREDIT CARDS, CURRENCY AND MONEY ORDERS)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_FRAUDULENT_TRANSFER
+  name: Fraudulent transfer
+  aliases:
+  - Fraudulent transfer
+  - FRAUDULENT TRANSFER COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_GLASS_EXPENSE
+  name: Glass expense
+  aliases:
+  - Glass expense
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_IDENTITY_RECOVERY
+  name: Identity recovery
+  aliases:
+  - Identity recovery
+  - IDENTITY RECOVERY FOR BUSNESSOWNERS AND EMPLOYEES
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_INSTALLATION_FLOATER
+  name: Installation floater
+  aliases:
+  - Installation floater
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_LEASEHOLD_IMPROVEMENTS
+  name: Leasehold improvements
+  aliases:
+  - Leasehold improvements
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_LEASE_ASSESSMENT
+  name: Lease assessment
+  aliases:
+  - Lease assessment
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_LOCK_KEY
+  name: Lock and key replacement
+  aliases:
+  - Lock and key replacement
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_LOST_KEYS
+  name: Lost keys
+  aliases:
+  - Lost keys
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_MONEY_SECURITIES
+  name: Money and securities
+  aliases:
+  - Money and securities
+  - MONEY AND SECURITIES COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_NEWLY_ACQUIRED_PROPERTY
+  name: Newly acquired or constructed property
+  aliases:
+  - Newly acquired or constructed property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_ORDINANCE_OR_LAW
+  name: Ordinance or law
+  aliases:
+  - Ordinance or law
+  - ORDINANCE OR LAW COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_OUTDOOR_PROPERTY
+  name: Outdoor property
+  aliases:
+  - Outdoor property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_OUTDOOR_SIGNS
+  name: Outdoor signs on premises
+  aliases:
+  - Outdoor signs on premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_PAIRS_OR_SETS
+  name: Pairs or sets
+  aliases:
+  - Pairs or sets
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_PAVED_SURFACES
+  name: Paved surfaces
+  aliases:
+  - Paved surfaces
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_PERSONAL_EFFECTS
+  name: Personal effects
+  aliases:
+  - Personal effects
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_POLLUTANT_CLEANUP
+  name: Pollutants and contaminants clean up and removal
+  aliases:
+  - Pollutants and contaminants clean up and removal
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_PRESERVATION_OF_PROPERTY
+  name: Preservation of property
+  aliases:
+  - Preservation of property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_PROPERTY_OFF_PREMISES
+  name: Property off-premises
+  aliases:
+  - Property off-premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_SALESPERSONS_SAMPLES
+  name: Salespersons samples
+  aliases:
+  - Salespersons samples
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_SPOILAGE
+  name: Spoilage (perishable goods and refrigeration contamination)
+  aliases:
+  - Spoilage (perishable goods and refrigeration contamination)
+  - SPOILAGE
+  - Perishable Goods Spoilage limit
+  - Refrigeration Contamination limit
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_SUMP_BACKUP
+  name: Sump overflow, sewer and drain back-up
+  aliases:
+  - Sump overflow, sewer and drain back-up
+  - SUMP OVERFLOW OR SUMP PUMP FAILURE
+  - Discharge from Sewer, Drain, or Sump
+  - BACK-UP OF SEWERS AND DRAINS COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_TENANTS_LEGAL_LIABILITY
+  name: Tenant's legal liability
+  aliases:
+  - Tenant's legal liability
+  - TENANT'S LEGAL LIABILITY COVERAGE
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_THEFT_DAMAGE_TO_BUILDING
+  name: Theft damage to building
+  aliases:
+  - Theft damage to building
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_TRANSIT
+  name: Transit coverage
+  aliases:
+  - Transit coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_TRANSIT_BUSINESS_INCOME
+  name: Transit business income
+  aliases:
+  - Transit business income
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_UMBRELLA_LIABILITY
+  name: Umbrella liability
+  aliases:
+  - Umbrella liability
+  - Umbrella aggregate limit
+  - Umbrella each occurrence limit
+  - Umbrella bodily injury by disease aggregate limit
+  - Umbrella products-completed operations aggregate limit
+  - Umbrella general aggregate limit (other than Products-Completed Operations, Bodily Injury By Disease and Automobile)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_UNAUTHORIZED_CARD_USE
+  name: Unauthorized business card use
+  aliases:
+  - Unauthorized business card use
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_VALUABLE_PAPERS
+  name: Valuable papers and records
+  aliases:
+  - Valuable papers and records
+  - Valuable Papers & Records Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+# 26 October 2026: row printed by the G1 scanned/hybrid seeds; no code covered it before
+- code: GL_WATER_DAMAGE_OTHER_LIQUID
+  name: Water damage, other liquid, powder or molten material damage
+  aliases:
+  - Water damage, other liquid, powder or molten material damage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1

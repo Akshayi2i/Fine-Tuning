@@ -1,0 +1,277 @@
+# SPEC_21 4.2.4 coverage codes of health (schema 1.0.0).
+# Built from the 4 single-LOB health seed documents with a native text layer (Shelterpoint 2: New York DBL and PFL;
+# Glatfelter Insurance Group 2: VFIS volunteer accident and sickness), read in place.
+# aliases: benefit names as the seeds print them, without the schedule's outline numbering ('(1)', 'A.', 'IV.')
+# and dot leaders (whitespace collapsed). L1 codes a printed row by its name (fideon/l1/spec21.py
+# coverage_code_for), so every name a seed prints in a benefit schedule is an alias of exactly one code. Codes are
+# LOB-prefixed (HEALTH_). A benefit printed 'NONE' is not provided: included not_purchased, no limit.
+# carriers: how many of the 2 native seed carriers print one of the code's names.
+lob: health
+schema_version: 1.0.0
+common_model_version: 1.1.0
+code_prefix: HEALTH_
+codes:
+- code: HEALTH_DBL
+  name: New York statutory disability benefits (DBL)
+  aliases:
+  - DBL Benefit Level
+  - New York State Disability Benefits
+  - Disability Benefits
+  default_limit_types:
+  - other
+  carriers: 1
+- code: HEALTH_PFL
+  name: New York paid family leave benefits (PFL)
+  aliases:
+  - Paid Family Leave Rider
+  - Paid Family Leave
+  default_limit_types:
+  - other
+  carriers: 1
+- code: HEALTH_ACCIDENTAL_DEATH
+  name: Accidental death benefit
+  aliases:
+  - Accidental Death Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_SEAT_BELT
+  name: Seat belt benefit
+  aliases:
+  - Seat Belt Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_SAFETY_VEST
+  name: Safety vest benefit
+  aliases:
+  - Safety Vest Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_MILITARY_DEATH
+  name: Military death benefit
+  aliases:
+  - Military Death Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_DEPENDENT_CHILD_EDUCATION
+  name: Dependent child and education benefit
+  aliases:
+  - Dependent Child and Education Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_SPOUSAL_SUPPORT_EDUCATION
+  name: Spousal support and education benefit
+  aliases:
+  - Spousal Support and Education Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_DEPENDENT_ELDER
+  name: Dependent elder benefit
+  aliases:
+  - Dependent Elder Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_REPATRIATION
+  name: Repatriation benefit
+  aliases:
+  - Repatriation Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_DISMEMBERMENT_PARALYSIS
+  name: Accidental dismemberment and paralysis benefit (principal sum)
+  aliases:
+  - Accidental Dismemberment and Paralysis Benefit Principal Sum
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_VISION_IMPAIRMENT
+  name: Vision impairment benefit (principal sum)
+  aliases:
+  - Vision Impairment Benefit Principal Sum
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_INJURY_PERMANENT_IMPAIRMENT
+  name: Injury permanent impairment benefit (principal sum)
+  aliases:
+  - Injury Permanent Impairment Benefit Principal Sum
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_COSMETIC_BURNS
+  name: Cosmetic disfigurement resulting from burns benefit (principal sum)
+  aliases:
+  - Cosmetic Disfigurement Resulting From Burns Benefit Principal Sum
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_TOTAL_DISABILITY
+  name: Total disability weekly benefit
+  aliases:
+  - Total Disability Benefits
+  - Total Disability Weekly Amount (first 28 days)
+  - Total Disability Maximum Weekly Amount (after 28 days)
+  - Total Disability Minimum Weekly Amount
+  default_limit_types:
+  - other
+  carriers: 1
+- code: HEALTH_PARTIAL_DISABILITY
+  name: Partial disability weekly benefit
+  aliases:
+  - Partial Disability Benefits
+  - Partial Disability Weekly Amount (first 28 days)
+  - Partial Disability Maximum Weekly Amount (after 28 days)
+  - Partial Disability Minimum Weekly Amount
+  default_limit_types:
+  - other
+  carriers: 1
+- code: HEALTH_ILLNESS_PERMANENT_IMPAIRMENT
+  name: Illness permanent impairment benefit (principal sum)
+  aliases:
+  - Illness Permanent Impairment Benefit Principal Sum
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_OCCUPATIONAL_RETRAINING
+  name: Occupational retraining benefit
+  aliases:
+  - Occupational Retraining Benefit Maximum Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_WEEKLY_INJURY_PERMANENT_IMPAIRMENT
+  name: Weekly injury permanent impairment benefit
+  aliases:
+  - Weekly Injury Permanent Impairment Benefit
+  default_limit_types: []
+  carriers: 1
+- code: HEALTH_MEDICAL_EXPENSE
+  name: Medical expense benefit (injury only)
+  aliases:
+  - Medical Expense Benefit Maximum Amount
+  - Medical Expense Benefits (Injury Only)
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_COSMETIC_PLASTIC_SURGERY
+  name: Cosmetic plastic surgery benefit
+  aliases:
+  - Cosmetic Plastic Surgery Maximum Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_PTSD
+  name: Post-traumatic stress disorder benefit
+  aliases:
+  - Post-Traumatic Stress Disorder Maximum Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_CRITICAL_INCIDENT_STRESS
+  name: Critical incident stress management benefit
+  aliases:
+  - Critical Incident Stress Management Maximum Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_FAMILY_EXPENSE
+  name: Family expense benefit (per day)
+  aliases:
+  - Family Expense Benefit Amount (per day)
+  default_limit_types:
+  - per_day
+  carriers: 1
+- code: HEALTH_FAMILY_BEREAVEMENT
+  name: Family bereavement and trauma counseling benefit (per person)
+  aliases:
+  - Family Bereavement and Trauma Counseling Benefit Amount (per person)
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_CONTINUATION_HEALTH_INSURANCE
+  name: Continuation of health insurance benefit
+  aliases:
+  - Continuation of Health Insurance Benefit Maximum Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_FELONIOUS_ASSAULT
+  name: Felonious assault benefit
+  aliases:
+  - Felonious Assault Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_HOME_VEHICLE_MODIFICATION
+  name: Home alteration and vehicle modification benefit
+  aliases:
+  - Home Alteration and Vehicle Modification Benefit Maximum Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_WEEKLY_HOSPITAL
+  name: Weekly hospital benefit (optional)
+  aliases:
+  - Weekly Hospital Benefit Amount
+  default_limit_types:
+  - other
+  carriers: 1
+- code: HEALTH_FIRST_WEEK_TOTAL_DISABILITY
+  name: First week total disability benefit (optional)
+  aliases:
+  - First Week Total Disability Benefit Amount
+  default_limit_types:
+  - other
+  carriers: 1
+- code: HEALTH_COORDINATED_28_DAY_DISABILITY
+  name: Coordinated 28 day total disability benefit (optional)
+  aliases:
+  - Coordinated 28 Day Total Disability Benefit Amount
+  default_limit_types:
+  - other
+  carriers: 1
+- code: HEALTH_EXTENDED_TOTAL_DISABILITY
+  name: Extended total disability benefit (optional)
+  aliases:
+  - Extended Total Disability Benefit
+  default_limit_types: []
+  carriers: 1
+- code: HEALTH_LONG_TERM_TOTAL_DISABILITY
+  name: Long-term total disability benefit (optional)
+  aliases:
+  - Long-Term Total Disability Benefit
+  default_limit_types: []
+  carriers: 1
+- code: HEALTH_WEEKLY_INJURY_IMPAIRMENT_COLA
+  name: Weekly injury permanent impairment cost of living adjustment
+  aliases:
+  - Weekly Injury Permanent Impairment COLA
+  default_limit_types: []
+  carriers: 1
+- code: HEALTH_LONG_TERM_DISABILITY_COLA
+  name: Long-term total disability cost of living adjustment
+  aliases:
+  - Long-Term Total Disability COLA
+  default_limit_types: []
+  carriers: 1
+- code: HEALTH_24_HOUR_ACCIDENT
+  name: 24-hour accident benefit (optional)
+  aliases:
+  - 24-Hour Accident Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1
+- code: HEALTH_OFF_DUTY_ACCIDENT
+  name: Off-duty accident benefit (optional)
+  aliases:
+  - Off-Duty Accident Benefit Amount
+  default_limit_types:
+  - per_person
+  carriers: 1

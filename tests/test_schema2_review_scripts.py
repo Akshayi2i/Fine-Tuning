@@ -98,7 +98,7 @@ def test_a_definition_that_contains_itself_is_recorded_once_not_followed_forever
     assert paths == ["party", "party.name", "party.parent"]
 
 
-@pytest.mark.parametrize("stem", ["auto", "classic_auto"])
+@pytest.mark.parametrize("stem", ["equipment_breakdown", "classic_auto"])
 def test_old_style_files_are_read_as_they_lie_on_disk(monkeypatch, tmp_path, stem):
     """``classic_auto`` is personal auto to the loader, but its own file is
     self-contained: bundling it as personal auto's overlay would version it and
@@ -163,7 +163,7 @@ def test_an_old_style_lines_fields_are_unchanged():
         path.stem for path in aliases.CANONICAL.glob("*.json")
         if not S.is_common_model("policy", None, path.stem)
     ))
-    assert "auto" in old_style and "homeowners" not in old_style
+    assert "equipment_breakdown" in old_style and "homeowners" not in old_style
     expected: set[str] = set()
     for lob in old_style:
         schema = S.resolved_schema("policy", None, lob, None)

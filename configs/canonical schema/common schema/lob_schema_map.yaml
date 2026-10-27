@@ -10,6 +10,9 @@
 #               TBD where no layout family is known, so no schema is planned yet. SchemaRegistry routes
 #               a code whose schema_lob differs from it to that schema.
 # layout_family, adapter   SPEC_09 adapter table; SPEC_06 LOB_TO_LAYOUT_FAMILY where it names the line.
+#               adapter is the one pooled policy_check_v1 for every line that has a layout family (SPEC_09
+#               amendment of 15 October 2026; DECISIONS_2026-10-19 row 34); TBD where no family is known.
+#               layout_family stays as a label only.
 # lob_code      batch code, SYNTHETIC_DATA_PROCESS.md section 2.
 # routing_key   the SPEC_06 LOB_TO_LAYOUT_FAMILY key, or null.
 # blocks_used   common-model building blocks the schema composes. Envelope blocks (SPEC_21 4.2.1) are
@@ -21,8 +24,8 @@
 #
 # TBD marks a value no source gives. Every TBD is listed under open_items at the end.
 
-version: "1.0.0"
-common_model_version: "1.0.0"
+version: "1.1.0"
+common_model_version: "1.4.0"
 
 lobs:
   - code: reinsurance
@@ -41,8 +44,8 @@ lobs:
   - code: annuities
     display: "Annuities"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: benefits_misc
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -54,8 +57,8 @@ lobs:
   - code: long_term_care
     display: "Long-Term Care"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: benefits_misc
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -64,24 +67,24 @@ lobs:
     source_pdfs: {folder: TBD, carriers: TBD, files: TBD}
     holdout_carrier: TBD
 
-  - code: statutory_disability
+  - code: statutory_disability          # one canonical schema with health (10 October 2026, CR-HEALTH-01)
     display: "Statutory Disability"
-    schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    schema_lob: health                  # the corpus files New York DBL/PFL policies under health; L1 keeps the code
+    layout_family: benefits_misc
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
-    blocks_used: TBD
+    blocks_used: [benefit_plans]
     seeds: pending
-    source_pdfs: {folder: TBD, carriers: TBD, files: TBD}
+    source_pdfs: {folder: health, carriers: 1, files: 2}   # Shelterpoint, among the health seeds
     holdout_carrier: TBD
 
   - code: disability
     display: "Disability"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: benefits_misc
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -94,7 +97,7 @@ lobs:
     display: "Group Accident & Sickness"
     schema_lob: group_accident_sickness
     layout_family: benefits_misc
-    adapter: policy_check_benefits_misc_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -107,20 +110,24 @@ lobs:
     display: "Health Insurance"
     schema_lob: health
     layout_family: benefits_misc
-    adapter: policy_check_benefits_misc_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
-    blocks_used: TBD
+    blocks_used: [benefit_plans]
     seeds: pending
-    source_pdfs: {folder: TBD, carriers: TBD, files: TBD}
+    source_pdfs: {folder: health, carriers: 3, files: 7}
     holdout_carrier: TBD
+    # health.json 1.0.0 (10 October 2026, draft; no schema existed before) composes the envelope plus benefit_plans.
+    # Its coverage codes use the prefix HEALTH_ until the owner sets coverage_code_prefix and lob_code
+    # (CHANGE_REQUESTS_health.md CR-HEALTH-02). source_pdfs counts the single-LOB health folder: 4 native seeds of 2
+    # carriers (New York DBL/PFL, volunteer accident and sickness); 3 are page images under an OCR text layer.
 
   - code: life
     display: "Life Insurance"
     schema_lob: life
     layout_family: benefits_misc
-    adapter: policy_check_benefits_misc_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: life
     coverage_code_prefix: TBD
@@ -146,20 +153,23 @@ lobs:
     display: "Surety"
     schema_lob: surety
     layout_family: exec_specialty
-    adapter: policy_check_exec_specialty_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
-    blocks_used: TBD
+    blocks_used: [bond]
     seeds: pending
-    source_pdfs: {folder: TBD, carriers: TBD, files: TBD}
+    source_pdfs: {folder: sure, carriers: 1, files: 4}
     holdout_carrier: TBD
+    # surety.json 4.0.0 (12 October 2026, draft) composes the envelope plus the bond block; its codes use `SU_`
+    # (CHANGE_REQUESTS_surety.md CR-SU-01). The 4 sure documents are scans under an OCR layer: no seed gold, they
+    # escalate to L3 (CR-SU-02).
 
   - code: watercraft
     display: "Watercraft"
     schema_lob: ocean_marine
     layout_family: personal_lines
-    adapter: policy_check_personal_lines_v1
+    adapter: policy_check_v1
     lob_code: OM
     routing_key: null
     coverage_code_prefix: OM_
@@ -172,7 +182,7 @@ lobs:
     display: "Ocean Marine"
     schema_lob: ocean_marine
     layout_family: personal_lines
-    adapter: policy_check_personal_lines_v1
+    adapter: policy_check_v1
     lob_code: OM
     routing_key: null
     coverage_code_prefix: OM_
@@ -210,8 +220,8 @@ lobs:
   - code: medical_malpractice
     display: "Medical Malpractice"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: exec_specialty
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -224,7 +234,7 @@ lobs:
     display: "Employment Practices Liability"
     schema_lob: epli
     layout_family: exec_specialty
-    adapter: policy_check_exec_specialty_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: epli
     coverage_code_prefix: TBD
@@ -236,8 +246,8 @@ lobs:
   - code: management_liability
     display: "Management Liability"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: exec_specialty
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -250,33 +260,43 @@ lobs:
     display: "Directors & Officers"
     schema_lob: directors_officers
     layout_family: exec_specialty
-    adapter: policy_check_exec_specialty_v1
-    lob_code: TBD
+    adapter: policy_check_v1
+    lob_code: DO            # DECISIONS_2026-10-19 row 34
     routing_key: do
     coverage_code_prefix: TBD
     blocks_used: [claims_made_terms, insuring_agreements]
     seeds: pending
     source_pdfs: {folder: do, carriers: 7, files: 9}
     holdout_carrier: TBD
+    # directors_officers.json 2.0.0 (12 October 2026, draft) composes the envelope plus these blocks. Its seeds are 8
+    # of the 9 do documents (AmTrust, ARC Excess & Surplus, Chubb, CNA Companies, Philadelphia 1 each, RT Specialty
+    # 3); the codes use `DO_` (CHANGE_REQUESTS_directors_officers.md CR-DO-01). RPS's document is a broker's
+    # proposal of insurance, not declarations (CR-DO-02). 2.1.0 (14 October 2026) adds a 9th seed, filed in the epli
+    # folder: ARC Excess & Surplus' investment management liability declarations (Columbia Casualty), read as D&O
+    # with three new coverage-part codes (CR-DO-09); source_pdfs still counts the do folder only.
 
   - code: cyber
     display: "Cyber Insurance"
     schema_lob: cyber
     layout_family: exec_specialty
-    adapter: policy_check_exec_specialty_v1
-    lob_code: TBD
+    adapter: policy_check_v1
+    lob_code: CY            # DECISIONS_2026-10-19 row 34
     routing_key: cyber
     coverage_code_prefix: TBD
     blocks_used: [claims_made_terms, insuring_agreements]
     seeds: pending
     source_pdfs: {folder: cyber, carriers: 5, files: 11}
     holdout_carrier: TBD
+    # cyber.json 2.0.0 (11 October 2026, draft) composes the envelope plus these blocks. Its seeds are 9 of the 11
+    # cyber documents (At-Bay 3, Coalition 5, Corvus on Travelers paper 1); the codes use `CY_`
+    # (CHANGE_REQUESTS_cyber.md CR-CY-01). CRC's document is an agency-system print and Travelers' other one is a
+    # lawyers professional liability policy (CR-CY-02, CR-CY-03).
 
   - code: crime_fidelity
     display: "Crime & Fidelity"
     schema_lob: crime_fidelity
     layout_family: exec_specialty
-    adapter: policy_check_exec_specialty_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: crime
     coverage_code_prefix: TBD
@@ -302,20 +322,24 @@ lobs:
     display: "Flood"
     schema_lob: flood
     layout_family: property_pkg
-    adapter: policy_check_property_pkg_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: flood
     coverage_code_prefix: TBD
-    blocks_used: [locations, buildings]
+    blocks_used: [locations, buildings, countersignature]
     seeds: pending
     source_pdfs: {folder: flood, carriers: 3, files: 34}
     holdout_carrier: TBD
+    # flood.json 2.0.0 (14 October 2026, draft) composes the envelope plus these blocks. Its seeds are 32 of the 34
+    # flood documents (Sterling Flood 28, Foremost 4); the codes use `FL_` and the shared X_LOSS_OF_USE
+    # (CHANGE_REQUESTS_flood.md CR-FL-01). Sterling's renewal quote is not declarations and IAT's document is a scan
+    # (CR-FL-02).
 
   - code: earthquake
     display: "Earthquake"
     schema_lob: earthquake
     layout_family: property_pkg
-    adapter: policy_check_property_pkg_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: eq
     coverage_code_prefix: TBD
@@ -328,7 +352,7 @@ lobs:
     display: "Homeowners"
     schema_lob: homeowners
     layout_family: personal_lines
-    adapter: policy_check_personal_lines_v1
+    adapter: policy_check_v1
     lob_code: HO
     routing_key: home
     coverage_code_prefix: HO_
@@ -340,8 +364,8 @@ lobs:
   - code: agriculture_farm
     display: "Agriculture / Farm"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: property_pkg
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -352,22 +376,26 @@ lobs:
 
   - code: builders_risk
     display: "Builders Risk"
-    schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    schema_lob: builders_risk
+    layout_family: property_pkg
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
-    blocks_used: TBD
+    blocks_used: [locations, buildings, countersignature]
     seeds: pending
-    source_pdfs: {folder: TBD, carriers: TBD, files: TBD}
+    source_pdfs: {folder: bldrk, carriers: 3, files: 5}
     holdout_carrier: TBD
+    # builders_risk.json 3.0.0 (14 October 2026, draft) composes the envelope plus these blocks; its codes use `BR_`
+    # (CHANGE_REQUESTS_builders_risk.md CR-BR-01). No bldrk document is digital declarations: US Assure's three are a
+    # renewal application with its e-signature certificate (read at L1, seeds), Vacant Express's is a premium invoice
+    # and Zurich's a scan (both L3).
 
   - code: construction
     display: "Construction"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: casualty_fleet
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -380,20 +408,24 @@ lobs:
     display: "Inland Marine"
     schema_lob: inland_marine
     layout_family: property_pkg
-    adapter: policy_check_property_pkg_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: im
     coverage_code_prefix: TBD
-    blocks_used: [locations, scheduled_items]
+    blocks_used: [locations, scheduled_items, countersignature]
     seeds: pending
     source_pdfs: {folder: inmrc, carriers: 4, files: 10}
     holdout_carrier: TBD
+    # inland_marine.json 2.0.0 (10 October 2026, draft) composes the envelope plus these blocks (countersignature: the
+    # declarations' countersigned date and place). Its coverage codes use the prefix IM_ until the owner sets
+    # coverage_code_prefix and lob_code (CHANGE_REQUESTS_inland_marine.md CR-INMRC-01). source_pdfs counts the
+    # single-LOB inmrc folder: 10 native seeds of 4 folders.
 
   - code: product_liability
     display: "Product Liability"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: casualty_fleet
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -406,7 +438,7 @@ lobs:
     display: "Professional Liability / E&O"
     schema_lob: professional_eo
     layout_family: exec_specialty
-    adapter: policy_check_exec_specialty_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: eo
     coverage_code_prefix: TBD
@@ -414,12 +446,34 @@ lobs:
     seeds: pending
     source_pdfs: {folder: eo, carriers: 5, files: 15}
     holdout_carrier: TBD
+    # professional_eo.json 2.0.0 (10-11 October 2026, draft) composes the envelope plus claims_made_terms. Its seeds
+    # are the 16 single-LOB professional liability declarations of the pl folder (6 carriers) and, since 12 October
+    # 2026, 13 of the 15 eo documents (Mount Vernon 11, Swiss Re 1, Navigators 1; an agency proposal and a scanned
+    # application are not seeds, CR-PL-05). Its coverage codes use the prefix PL_ until the owner sets
+    # coverage_code_prefix and lob_code (CHANGE_REQUESTS_professional_eo.md CR-PL-01).
+
+  - code: pl
+    display: "Professional Liability"
+    schema_lob: pl
+    layout_family: exec_specialty
+    adapter: policy_check_v1
+    lob_code: TBD
+    routing_key: pl
+    coverage_code_prefix: PL_
+    blocks_used: [claims_made_terms]
+    seeds: pending
+    source_pdfs: {folder: pl, carriers: 7, files: 31}
+    holdout_carrier: TBD
+    # pl.json 1.0.0 (21 October 2026, draft; DECISIONS_2026-10-19 row 48): Professional Liability apart from
+    # Errors & Omissions (professional_eo). Built from professional_eo.json 2.0.0 (same composition, codes
+    # copied with their PL_ prefix, CHANGE_REQUESTS_pl.md CR-PLL-01); the pl folder's golds are still under
+    # seeds/professional_eo (CR-PLL-03).
 
   - code: specialty
     display: "Specialty"
     schema_lob: specialty
     layout_family: benefits_misc
-    adapter: policy_check_benefits_misc_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -432,7 +486,7 @@ lobs:
     display: "Classic Auto"
     schema_lob: personal_auto           # L1 keeps routing "Classic Automobile" here; it reads personal_auto.json
     layout_family: personal_lines
-    adapter: policy_check_personal_lines_v1
+    adapter: policy_check_v1
     lob_code: PA
     routing_key: null
     coverage_code_prefix: PA_
@@ -445,7 +499,7 @@ lobs:
     display: "Motorcycle"
     schema_lob: motorcycle
     layout_family: personal_lines
-    adapter: policy_check_personal_lines_v1
+    adapter: policy_check_v1
     lob_code: MC
     routing_key: null
     coverage_code_prefix: MC_
@@ -458,7 +512,7 @@ lobs:
     display: "Recreational Vehicle"
     schema_lob: recreational_vehicle
     layout_family: personal_lines
-    adapter: policy_check_personal_lines_v1
+    adapter: policy_check_v1
     lob_code: RV
     routing_key: null
     coverage_code_prefix: RV_
@@ -471,7 +525,7 @@ lobs:
     display: "Personal Auto"
     schema_lob: personal_auto
     layout_family: personal_lines
-    adapter: policy_check_personal_lines_v1
+    adapter: policy_check_v1
     lob_code: PA
     routing_key: personal_auto
     coverage_code_prefix: PA_
@@ -484,7 +538,7 @@ lobs:
     display: "Dwelling Fire"
     schema_lob: dwelling_fire
     layout_family: personal_lines
-    adapter: policy_check_personal_lines_v1
+    adapter: policy_check_v1
     lob_code: DF
     routing_key: null
     coverage_code_prefix: DF_
@@ -496,8 +550,8 @@ lobs:
   - code: personal_property
     display: "Personal Property"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: personal_lines
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -510,33 +564,68 @@ lobs:
     display: "Businessowners Liability"
     schema_lob: bopgl
     layout_family: property_pkg
-    adapter: policy_check_property_pkg_v1
-    lob_code: TBD
+    adapter: policy_check_v1
+    lob_code: BG            # DECISIONS_2026-10-19 row 34
     routing_key: null
     coverage_code_prefix: TBD
-    blocks_used: TBD
+    blocks_used: [locations, buildings]
     seeds: pending
-    source_pdfs: {folder: TBD, carriers: TBD, files: TBD}
+    source_pdfs: {folder: bopgl, carriers: 5, files: 13}
     holdout_carrier: TBD
+    # bopgl.json 2.2.0 (25 October 2026, additive, G1/bop review; common model 1.4.0): 25 coverage codes (10 new on both lines, 15
+    # counterparts of boppr codes) and the shared entry X_CYBER, 19 aliases on existing codes, nine more field captions; the counterpart table has 72 pairs.
+    # bopgl.json 2.1.0 (23 October 2026, additive, rows 114/115, 116; common model 1.4.0) composes the envelope plus locations and
+    # buildings; 2.1.0 added 9 Section I codes, the counterpart-code table shared with boppr and four field captions.
+    # 2.0.0 (10 October 2026, draft) composes the envelope plus locations and buildings: the bopgl
+    # documents print the whole businessowners declarations (Section I property beside Section II liability). Its
+    # coverage codes use the prefix BOPGL_ until the owner sets coverage_code_prefix and lob_code
+    # (CHANGE_REQUESTS_bopgl.md CR-BOPGL-03). source_pdfs counts the single-LOB bopgl folder (8 native documents of
+    # 2 carriers are seeds; 5 are page images under an OCR text layer); package folders not counted.
 
   - code: boppr
     display: "Businessowners Property"
     schema_lob: boppr
     layout_family: property_pkg
-    adapter: policy_check_property_pkg_v1
+    adapter: policy_check_v1
+    lob_code: BP            # DECISIONS_2026-10-19 row 34
+    routing_key: null
+    coverage_code_prefix: TBD
+    blocks_used: [locations, buildings]
+    seeds: pending
+    source_pdfs: {folder: boppr, carriers: 3, files: 5}
+    holdout_carrier: TBD
+    # boppr.json 2.2.0 (25 October 2026, additive, G1/bop review; common model 1.4.0): 10 coverage codes new on both lines and 3 shared
+    # entries, 23 aliases on existing codes, seven more field captions; the counterpart table has 72 pairs.
+    # boppr.json 2.1.0 (23 October 2026, additive, rows 114/115, 116; common model 1.4.0): 8 seeds (the four Leatherstocking
+    # Preferred-form documents moved from property, rows 87/89), the counterpart-code table shared with bopgl, one new code.
+    # 2.0.0 (10 October 2026, draft) composes the envelope plus locations and buildings; its coverage
+    # codes use the prefix BOPPR_ until the owner sets coverage_code_prefix and lob_code (CHANGE_REQUESTS_boppr.md
+    # CR-BOPPR-03). source_pdfs counts the single-LOB boppr folder only (package folders not counted).
+
+  - code: commercial_fire
+    display: "Commercial Fire"
+    schema_lob: commercial_fire
+    layout_family: property_pkg
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
-    blocks_used: TBD
+    blocks_used: [locations, buildings]
     seeds: pending
-    source_pdfs: {folder: TBD, carriers: TBD, files: TBD}
+    source_pdfs: {folder: TBD, carriers: 1, files: 7}
     holdout_carrier: TBD
+    # A line of its own by the project owner's ruling of 10 October 2026 (CR-BOPPR-06): the Leatherstocking
+    # 'Commercial Fire and Liability' declarations. commercial_fire.json 1.0.0 (draft) composes the envelope plus
+    # locations and buildings; coverage codes use the prefix CF_ until the owner sets coverage_code_prefix and
+    # lob_code (CHANGE_REQUESTS_commercial_fire.md CR-CFIRE-02). The 7 documents are filed in three folders of the
+    # one carrier (boppr 1, prop 1, cgl_prop 5), so no single source folder is named; seeds/commercial_fire/
+    # seed_inventory.csv lists them. One carrier: no hold-out carrier is possible yet.
 
   - code: commercial_package
     display: "Commercial Package"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: property_pkg
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -549,7 +638,7 @@ lobs:
     display: "Businessowners"
     schema_lob: business_owners
     layout_family: property_pkg
-    adapter: policy_check_property_pkg_v1
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -562,7 +651,7 @@ lobs:
     display: "Personal Umbrella"
     schema_lob: personal_umbrella
     layout_family: personal_lines
-    adapter: policy_check_personal_lines_v1
+    adapter: policy_check_v1
     lob_code: PU
     routing_key: null
     coverage_code_prefix: PU_
@@ -574,8 +663,8 @@ lobs:
   - code: equipment_breakdown
     display: "Equipment Breakdown"
     schema_lob: TBD
-    layout_family: TBD
-    adapter: TBD
+    layout_family: property_pkg
+    adapter: policy_check_v1
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
@@ -588,46 +677,56 @@ lobs:
     display: "Workers' Compensation"
     schema_lob: wc
     layout_family: casualty_fleet
-    adapter: policy_check_casualty_fleet_v1
+    adapter: policy_check_v1
     lob_code: WC
     routing_key: wc
     coverage_code_prefix: WC_
-    blocks_used: [locations, rating_exposures, rating_modifiers]
+    blocks_used: [locations, rating_exposures, rating_modifiers, countersignature]
     seeds: pending
     source_pdfs: {folder: wc, carriers: 4, files: 40}
     holdout_carrier: TBD
+    # wc.json 2.0.0 (10 October 2026, SPEC_21 draft) composes the envelope plus these blocks and one LOB-local
+    # block (wc: Item 3.A states, Item 3.C wording, NCCI and bureau numbers); 31 DRAFT seed golds (seeds/wc/),
+    # pending reviewer sign-off. countersignature added: the NCCI Information Page prints the countersignature date.
 
   - code: gl
     display: "General Liability"
     schema_lob: gl
     layout_family: casualty_fleet
-    adapter: policy_check_casualty_fleet_v1
+    adapter: policy_check_v1
     lob_code: GL
-    routing_key: cgl
+    routing_key: gl
     coverage_code_prefix: GL_
-    blocks_used: [locations, rating_exposures, rating_modifiers]
+    blocks_used: [locations, rating_exposures, claims_made_terms, countersignature]
     seeds: pending
     source_pdfs: {folder: cgl, carriers: 11, files: 51}
+    # gl.json 1.1.0 (8 October 2026) also reads the policy_CGL corpus (policy_CGL/<Carrier>/CGL/,
+    # 50 CGL documents of 10 carrier folders, outside this repository); see gl.fields.md.
+    # routing_key gl, not cgl (CR-GL-18, common model 1.1.0): SPEC_06 9a LOB_TO_LAYOUT_FAMILY is keyed
+    # by the L1 codes since 5 October 2026 and has no cgl key.
     holdout_carrier: TBD
 
   - code: auto
     display: "Commercial Auto"
     schema_lob: auto
     layout_family: casualty_fleet
-    adapter: policy_check_casualty_fleet_v1
+    adapter: policy_check_v1
     lob_code: AU
     routing_key: auto
     coverage_code_prefix: AU_
-    blocks_used: [locations, vehicles, drivers, rating_exposures, rating_modifiers]
+    blocks_used: [locations, vehicles, drivers, rating_exposures, rating_modifiers, countersignature]
     seeds: pending
     source_pdfs: {folder: autob, carriers: 5, files: 11}
     holdout_carrier: TBD
+    # auto.json 2.0.0 (10 October 2026, SPEC_21 draft) composes the envelope plus these blocks; 11 DRAFT seed
+    # golds (seeds/auto/), pending reviewer sign-off. countersignature added: the business auto declarations
+    # print the countersignature date.
 
   - code: property
     display: "Commercial Property"
     schema_lob: property
     layout_family: property_pkg
-    adapter: policy_check_property_pkg_v1
+    adapter: policy_check_v1
     lob_code: PR
     routing_key: property
     coverage_code_prefix: PR_
@@ -635,19 +734,25 @@ lobs:
     seeds: pending
     source_pdfs: {folder: prop, carriers: 3, files: 11}
     holdout_carrier: TBD
+    # property.json 2.0.0 (10 October 2026, draft) composes the envelope plus these blocks. Its seeds are the 6 prop
+    # documents that print a commercial property or businessowners declarations; 4 more are the Leatherstocking
+    # Landlords Package product the homeowners entry reads, 1 is a package (CHANGE_REQUESTS_property.md CR-PROP-01).
 
   - code: umbrella
     display: "Umbrella & Excess Liability"
     schema_lob: umbrella
     layout_family: casualty_fleet
-    adapter: policy_check_casualty_fleet_v1
+    adapter: policy_check_v1
     lob_code: UM
     routing_key: umbrella
     coverage_code_prefix: UM_
-    blocks_used: [underlying_insurance, attachment]
+    blocks_used: [underlying_insurance, attachment, countersignature]
     seeds: pending
     source_pdfs: {folder: cumbr, carriers: 3, files: 4}
     holdout_carrier: TBD
+    # umbrella.json 2.0.0 (11 October 2026, draft) composes the envelope plus these blocks (countersignature: the
+    # declarations' countersignature date). Its seeds are 3 of the 4 cumbr documents (Utica First 2, CNA 1); Sutton
+    # National's declarations page is a scan (CHANGE_REQUESTS_umbrella.md CR-UM-02).
 
 open_items:
   - item: Layout family for 19 L1 codes
@@ -661,7 +766,9 @@ open_items:
   - item: LOB codes
     detail: >-
       SYNTHETIC_DATA_PROCESS.md section 2 gives batch codes for the seven personal lines and for gl, auto,
-      wc, property and umbrella only. lob_code and coverage_code_prefix are TBD for every other code.
+      wc, property and umbrella only. DECISIONS_2026-10-19 row 34 adds CY (cyber), DO (directors_officers),
+      BG (bopgl), BP (boppr) and PL (the PL line). lob_code and coverage_code_prefix are TBD for every
+      other code; coverage_code_prefix stays TBD for those four too (their codes use CY_, DO_, BOPGL_, BOPPR_).
   - item: SPEC_06 routing keys for personal lines
     detail: >-
       LOB_TO_LAYOUT_FAMILY has keys only for homeowners (home) and personal_auto. dwelling_fire,
@@ -686,11 +793,18 @@ open_items:
       holdout_carrier is TBD for every code and is named by the project owner before schema work
       (SPEC_21 section 10.3; Lakshman review #22). Not possible today for epli (1 carrier), earthquake
       and crime_fidelity (no source PDFs). personal_umbrella and life have 2 carriers, so holding one out
-      leaves a single training carrier. source_pdfs is TBD for codes outside the 22 described lines.
+      leaves a single training carrier. commercial_fire has 1 carrier (Leatherstocking), so none can be
+      held out. source_pdfs is TBD for codes outside the 22 described lines.
   - item: The other LOBs of the 38
     detail: >-
       SPEC_21 counts 38 LOBs; config/lob_registry.yaml has 48 codes. Which codes become schema LOBs is
       settled as their layout families are assigned.
+  - item: PL line
+    detail: >-
+      DECISIONS_2026-10-19 rows 2 and 34: PL (Professional Liability) is its own line, separate from E&O
+      (professional_eo), in plan group 3, generator code PL. It has no entry here yet: this map is keyed by
+      the codes of config/lob_registry.yaml, which has no pl code, and there is no pl schema (schema TBD).
+      Add the entry when the L1 registry adds the code.
   - item: Seed availability outside personal lines
     detail: >-
       The seed folder also holds PDFs for several non-personal lines (gl, wc, directors_officers,

@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fideon canonical schema - pl (policy_check)",
+  "description": "SPEC_21 section 4 canonical schema for pl, Professional Liability (L1 code pl; DECISIONS_2026-10-19 row 48, separate from Errors & Omissions, professional_eo), composing common_model.json 1.1.0 by $ref: the envelope plus the claims_made_terms block. A professional liability declarations prints its insuring agreement's per-claim and aggregate limits (coverages[].limits[]), its retention or deductible (coverages[].deductibles[]), whether defense costs are inside or outside the limits (claims_made_terms.defense_within_limits) and its prior-acts terms (claims_made_terms.retroactive_date, pending_prior_litigation_date, continuity_date) -- all common-model concepts, so there is no LOB block. Built from the professional_eo schema 2.0.0, whose seeds were the source-data pl folder's single-LOB professional liability declarations (Benchmark, Coterie, CNA, Hartford, Nationwide, Travelers), read in place. Draft for the project owner's approval.",
+  "fideon:doc_type": "policy_check",
+  "fideon:lob": "pl",
+  "fideon:lob_code": "TBD",
+  "fideon:layout_family": "exec_specialty",
+  "fideon:schema_version": "1.0.0",
+  "fideon:common_model_version": "1.1.0",
+  "fideon:status": "SPEC_21 schema built 21 October 2026 (DECISIONS_2026-10-19 row 48) from professional_eo.json 2.0.0, for the Professional Liability line on its own. Draft for the project owner's approval; no seed gold is drafted against it yet (the pl folder's golds are under seeds/professional_eo). Change requests: CHANGE_REQUESTS_pl.md.",
+  "fideon:built_from": {
+    "seed_golds": 0,
+    "carriers": [
+      "Benchmark Insurance Company",
+      "coterie",
+      "CNA Companies",
+      "Hartford",
+      "Nationwide",
+      "Travelers",
+      "ARC Excess & Surplus, LLC"
+    ],
+    "legacy_schema": "professional_eo.json 2.0.0 (the pl folder's seeds were drafted against it)",
+    "registry_yamls": [
+      "pl"
+    ],
+    "corpora": [
+      "synth_core/fideon/synth_core/data/source data/<Carrier>/pl/"
+    ]
+  },
+  "fideon:blocks_used": [
+    "claims_made_terms"
+  ],
+  "fideon:lob_block": "None. Each insuring agreement or extension the declarations limit is a coverage with its per-claim and aggregate limits and its retention; defense inside or outside the limits and the prior-acts dates are claims_made_terms (common model).",
+  "fideon:coverage_codes_file": "pl.coverage_codes.yaml",
+  "fideon:coverage_codes": [
+    "PL_PROFESSIONAL",
+    "PL_INVESTMENT_ADVISOR",
+    "PL_FUND_MANAGEMENT",
+    "PL_INSURANCE_COMPANY",
+    "PL_PERSONAL_INJURY",
+    "PL_MEDIA",
+    "PL_POLLUTION",
+    "PL_RECTIFICATION",
+    "PL_DISCIPLINARY_PROCEEDINGS",
+    "PL_SUPPLEMENTARY_PAYMENTS",
+    "PL_SUBPOENA",
+    "PL_REGULATORY_PROCEEDINGS",
+    "PL_PRE_CLAIM",
+    "PL_CRISIS_MANAGEMENT",
+    "PL_REPUTATION",
+    "PL_NONPROFIT_DO",
+    "PL_CLIENT_FEE_ASSISTANCE",
+    "PL_PUBLISHING_NONPROFIT",
+    "PL_PRO_BONO",
+    "PL_RETIRED_REPORTING",
+    "X_CYBER",
+    "X_TERRORISM"
+  ],
+  "fideon:mandatory_fields": [
+    "carrier.name",
+    "named_insured.primary_name",
+    "policy.policy_number",
+    "policy.effective_date",
+    "policy.expiration_date",
+    "coverages[].limits[].amount"
+  ],
+  "fideon:audit_rules": [
+    "policy.effective_date < policy.expiration_date",
+    "months_between(policy.effective_date, policy.expiration_date) == policy.term_months",
+    "policy.effective_date <= document.transaction_effective_date <= policy.expiration_date",
+    "claims_made_terms.retroactive_date <= policy.effective_date",
+    "len(coverages[].limits[]) >= 1"
+  ],
+  "fideon:audit_rules_note": "Rules 1-5 are common_model.json fideon:default_audit_rules, the claims-made rule kept: professional liability is written claims made. A rule whose values a document does not print is not evaluated.",
+  "fideon:aliases": {
+    "claims_made_terms.continuity_date": [
+      "Continuity Date",
+      "Knowledge Date"
+    ],
+    "claims_made_terms.defense_within_limits": [
+      "Defense Costs Within Limits",
+      "Defense Inside Limits",
+      "Defense Outside Limits",
+      "Defense Costs in Addition to the Limit"
+    ],
+    "claims_made_terms.extended_reporting_period": [
+      "EXTENDED REPORTING PERIOD",
+      "Optional Extended Reporting Period"
+    ],
+    "claims_made_terms.pending_prior_litigation_date": [
+      "PRIOR or PENDING DATE",
+      "Pending and Prior Litigation Date"
+    ],
+    "claims_made_terms.retroactive_date": [
+      "RETROACTIVE DATE",
+      "Retroactive Date",
+      "Retro Date"
+    ],
+    "coverages[].deductibles[].amount": [
+      "DEDUCTIBLE",
+      "Deductible",
+      "RETENTION",
+      "Retention"
+    ],
+    "coverages[].limits[].amount": [
+      "LIMIT OF LIABILITY",
+      "Limits of Liability",
+      "Each Claim",
+      "Aggregate"
+    ],
+    "named_insured.business_description": [
+      "BUSINESS DESCRIPTION",
+      "Professional Services",
+      "Description of Business"
+    ],
+    "named_insured.primary_name": [
+      "NAMED INSURED",
+      "Named Insured",
+      "NAMED ENTITY",
+      "Named Entity"
+    ],
+    "policy.effective_date": [
+      "POLICY PERIOD",
+      "Policy Period",
+      "Inception Date",
+      "Effective Date"
+    ],
+    "policy.expiration_date": [
+      "POLICY PERIOD",
+      "Policy Period",
+      "Expiration Date"
+    ],
+    "policy.policy_number": [
+      "POLICY NUMBER",
+      "Policy Number",
+      "Policy No.",
+      "POLICY NO."
+    ],
+    "policy.prior_policy_number": [
+      "Prior Policy Number",
+      "Renewal of"
+    ],
+    "premium.total": [
+      "PREMIUM",
+      "Premium",
+      "POLICY PREMIUM",
+      "Total Premium"
+    ],
+    "producer.agency_name": [
+      "PRODUCER",
+      "Producer",
+      "Broker",
+      "Agent"
+    ]
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "document",
+    "carrier",
+    "named_insured",
+    "policy",
+    "lob_parts",
+    "coverages"
+  ],
+  "properties": {
+    "document": {
+      "$ref": "../common/common_model.json#/$defs/document"
+    },
+    "carrier": {
+      "$ref": "../common/common_model.json#/$defs/carrier"
+    },
+    "producer": {
+      "$ref": "../common/common_model.json#/$defs/producer"
+    },
+    "named_insured": {
+      "$ref": "../common/common_model.json#/$defs/named_insured"
+    },
+    "policy": {
+      "$ref": "../common/common_model.json#/$defs/policy"
+    },
+    "lob_parts": {
+      "$ref": "../common/common_model.json#/$defs/lob_parts"
+    },
+    "coverages": {
+      "$ref": "../common/common_model.json#/$defs/coverages"
+    },
+    "deductibles": {
+      "$ref": "../common/common_model.json#/$defs/deductibles"
+    },
+    "interested_parties": {
+      "$ref": "../common/common_model.json#/$defs/interested_parties"
+    },
+    "premium": {
+      "$ref": "../common/common_model.json#/$defs/premium"
+    },
+    "billing": {
+      "$ref": "../common/common_model.json#/$defs/billing"
+    },
+    "forms_and_endorsements": {
+      "$ref": "../common/common_model.json#/$defs/forms_and_endorsements"
+    },
+    "claims_made_terms": {
+      "$ref": "../common/common_model.json#/$defs/claims_made_terms"
+    },
+    "additional_fields": {
+      "$ref": "../common/common_model.json#/$defs/additional_fields"
+    },
+    "text_sections": {
+      "$ref": "../common/common_model.json#/$defs/text_sections"
+    },
+    "fideon:provenance": {
+      "$ref": "../common/common_model.json#/$defs/provenance"
+    }
+  }
+}

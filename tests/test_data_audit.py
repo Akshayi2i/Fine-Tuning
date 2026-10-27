@@ -14,7 +14,10 @@ pymupdf = pytest.importorskip("pymupdf")
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "golden"
 GOLDEN = json.loads((FIXTURES / "policy_0001.golden.json").read_text(encoding="utf-8"))
-META = {"lob": "workers_comp", "field_provenance": {"policy.policy_number": "Policy No."},
+#: The fixture gold is a workers' comp declarations page written in a
+#: self-contained line's shape; workers_comp composes the common model now, so
+#: the folder is filed under a line whose schema is still self-contained.
+META = {"lob": "equipment_breakdown", "field_provenance": {"policy.policy_number": "Policy No."},
         # Every gold needs a review record to import (decision 2026-10-22).
         "reviewer_id": "a.reviewer", "review_date": "2026-10-20"}
 
@@ -145,19 +148,19 @@ def test_a_gold_with_no_review_record_is_a_blocker_as_at_import(tmp_path):
 def test_every_line_is_audited_by_default(tmp_path):
     """No --lines: a document of any line with a canonical schema is importable
     (the default was personal lines while scopes existed)."""
-    _document(tmp_path, "wc")                                      # workers_comp is commercial
-    # A personal line too. The workers' comp gold does not fit its schema, so
-    # only the line filter is asserted for it.
+    _document(tmp_path, "eb")                                      # equipment_breakdown is commercial
+    # A personal line too. The fixture gold does not fit its schema, so only
+    # the line filter is asserted for it.
     _document(tmp_path, "home", meta={**META, "lob": "homeowners"}, pages=[PAGE_1 + ["home"]])
     report = audit_folder(tmp_path)
     assert report.lines is None
     assert not [f for f in report.blockers if "outside the lines" in f.detail]
-    assert not [f for f in report.blockers if f.folder == "wc"], [f.detail for f in report.blockers]
-    assert summary(report)["documents_per_line"] == {"wc": 1}
+    assert not [f for f in report.blockers if f.folder == "eb"], [f.detail for f in report.blockers]
+    assert summary(report)["documents_per_line"] == {"equipment_breakdown": 1}
 
 
 def test_a_line_outside_lines_is_a_blocker(tmp_path):
-    _document(tmp_path, "doc")                       # workers_comp is commercial
+    _document(tmp_path, "doc")                       # equipment_breakdown is commercial
     report = audit_folder(tmp_path, lines=frozenset({"homeowners", "personal_auto"}))
     outside = [f.detail for f in report.blockers if "is outside the lines audited" in f.detail]
     assert outside and "homeowners" in outside[0] and "personal_auto" in outside[0]
@@ -165,10 +168,10 @@ def test_a_line_outside_lines_is_a_blocker(tmp_path):
 
 
 def test_a_line_inside_lines_passes_and_a_package_must_be_wholly_inside(tmp_path):
-    _document(tmp_path, "wc")
-    _document(tmp_path, "package", meta={**META, "lob": ["workers_comp", "gl"]},
+    _document(tmp_path, "eb")
+    _document(tmp_path, "package", meta={**META, "lob": ["equipment_breakdown", "gl"]},
               pages=[PAGE_1 + ["package"]])
-    report = audit_folder(tmp_path, lines=frozenset({"wc"}))
+    report = audit_folder(tmp_path, lines=frozenset({"equipment_breakdown"}))
     blocked = {f.folder for f in report.blockers if "is outside the lines audited" in f.detail}
     assert blocked == {"package"}                    # one of its lines is not asked for
 
@@ -240,8 +243,8 @@ def test_totals_and_spot_check(tmp_path):
     report = audit_folder(tmp_path)
     facts = summary(report)
     assert facts["importable"] == 3
-    assert facts["documents_per_line"] == {"wc": 3}
-    assert facts["lines_too_small_to_measure"] == ["wc"]
+    assert facts["documents_per_line"] == {"equipment_breakdown": 3}
+    assert facts["lines_too_small_to_measure"] == ["equipment_breakdown"]
     assert not facts["test_meets_freeze_minimum"]
     assert facts["spot_check_documents"] == 1
 
@@ -261,9 +264,9 @@ def test_the_report_is_written_and_blockers_fail_the_command(tmp_path):
 
 def test_the_command_audits_the_lines_it_is_given(tmp_path):
     data, out = tmp_path / "data", tmp_path / "out"
-    _document(data, "good", pages=[PAGE_1 + ["one"]])                     # workers' comp
-    assert main(["--input", str(data), "--out", str(out), "--lines", "workers_comp"]) == 0
-    assert "Lines: wc · folders: 1" in (out / "report.md").read_text(encoding="utf-8")
+    _document(data, "good", pages=[PAGE_1 + ["one"]])                     # equipment breakdown
+    assert main(["--input", str(data), "--out", str(out), "--lines", "equipment_breakdown"]) == 0
+    assert "Lines: equipment_breakdown · folders: 1" in (out / "report.md").read_text(encoding="utf-8")
     assert main(["--input", str(data), "--out", str(out), "--lines", "homeowners,personal_auto"]) == 1
     report = (out / "report.md").read_text(encoding="utf-8")
     assert "Lines: homeowners, personal_auto" in report

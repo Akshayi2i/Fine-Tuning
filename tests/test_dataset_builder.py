@@ -950,9 +950,9 @@ def test_how_many_pages_a_call_holds_depends_on_the_line():
     from data_pipeline.dataset_builder.expand_tasks import pages_per_extraction_call
 
     larger = pages_per_extraction_call("policy", None, "management_liability")
-    smaller = pages_per_extraction_call("policy", None, "gl")
+    smaller = pages_per_extraction_call("policy", None, "equipment_breakdown")
     assert 1 <= larger < smaller, (
-        f"management_liability {larger} should fit fewer than gl {smaller}"
+        f"management_liability {larger} should fit fewer than equipment_breakdown {smaller}"
     )
 
 

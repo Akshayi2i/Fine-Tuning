@@ -1,5 +1,17 @@
 # Changelog - recreational_vehicle canonical schema
 
+## Coverage code aliases - 15 October 2026 (no version change)
+
+Printed names added as aliases in `recreational_vehicle.coverage_codes.yaml`, as agency-management-system printouts (`VEHICLE COVERAGES` grid) print them, under the code the line's golds use: `Collision Coverage` (`X_COLLISION`), `GL` (`RV_GUEST_LIABILITY`, the guest liability row of an all-terrain vehicle's grid) and `Personal Injury Protection/Basic Economic Loss` (`X_PIP`). No code, field or default limit type changes; the schema and its prompt schema are unchanged. Each alias names one code only.
+
+## Coverage code alias - 14 October 2026 (no version change)
+
+`Supplementary Uninsured / Underinsured` added as an alias of `X_UIM`, as American Modern's motorsports declarations (form MS-CW-D-0001, Policy Coverages) print the coverage name with its last word (`Motorist`) wrapped onto the next line. No code, field or default limit type changes; the schema and its prompt schema are unchanged. The alias names one code only.
+
+## Common model 1.1.0 - 09 October 2026 (no version change)
+
+Re-pinned to `common_model.json` 1.1.0: `fideon:common_model_version` "1.0.0" -> "1.1.0". No field change: `fideon:schema_version` stays 1.0.0, and the prompt schema (`config/canonical_schema/prompt/policy_check/recreational_vehicle.prompt.json`) is unchanged by the pin. Common model 1.x is additive (SPEC_21 4.2.7), so the schema composes 1.1.0 as it composed 1.0.0. The fine-tuning repository's copy of this schema carries the same pin since its commit c8df4bb (9 October 2026); with it the two files are byte-identical again, and both repositories' loaders compose it.
+
 ## 1.0.0 - 05 October 2026 (SPEC_21 Phase 2; awaiting project-owner approval)
 
 First SPEC_21 schema of the line. It replaces the pre-SPEC_21 `recreational_vehicle.json` (1.5.0, pre-SPEC_21), which was generated from carrier-shaped blocks and did not compose the common model; that file is not carried over (SPEC_21 4.1).

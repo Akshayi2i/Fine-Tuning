@@ -144,8 +144,8 @@ def test_a_self_contained_lines_gold_keeps_its_edition_in_the_form_number(client
     serving's answer - so the harness scores the number as stored."""
     from testing.run_extraction import document_request
 
-    _imported_document(client, metadata={"lob": "auto", **REVIEWED})
-    envelope = {"raw": "CA 00 01 03 10", "parsed": "CA 00 01 03 10", "page_ref": [2]}
+    _imported_document(client, metadata={"lob": "equipment_breakdown", **REVIEWED})
+    envelope = {"raw": "EB 00 20 03 10", "parsed": "EB 00 20 03 10", "page_ref": [2]}
     client.write_json(paths.golden_label("policy", "policy_0001", "t1"),
                       {"forms_and_endorsements": [{"form_number": envelope}]})
     _, golden = document_request(client, "policy_0001", doc_type="policy", tenant_id="t1",

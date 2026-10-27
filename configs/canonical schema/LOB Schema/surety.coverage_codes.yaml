@@ -1,0 +1,40 @@
+# SPEC_21 4.2.4 coverage codes of surety (schema 4.0.0, common model 1.1.0).
+# Built from the sure folder (Western Surety Company's New York liquor license or permit bonds, scans under an
+# OCR layer, read in place) and the pre-SPEC_21 surety.json. A bond is one coverage: its penal sum is the
+# coverage's policy_limit. Codes are LOB-prefixed (SU_, provisional). SU_CONTRACT_BOND and SU_COMMERCIAL_BOND
+# cover the legacy schema's other bond categories; no source document prints them yet.
+# carriers: how many of the source carrier folders print one of the code's names.
+lob: surety
+schema_version: 4.0.0
+common_model_version: 1.1.0
+code_prefix: SU_
+codes:
+- code: SU_LICENSE_PERMIT_BOND
+  name: License or permit bond (penal sum)
+  aliases:
+  - Bond in Support of Application for License or Permit
+  - Penal Sum of Bond
+  - License Bond
+  - Permit Bond
+  default_limit_types:
+  - policy_limit
+  carriers: 1
+- code: SU_CONTRACT_BOND
+  name: Contract (performance or payment) bond (penal sum)
+  aliases:
+  - Performance Bond
+  - Payment Bond
+  - Bid Bond
+  default_limit_types:
+  - policy_limit
+  carriers: 0
+- code: SU_COMMERCIAL_BOND
+  name: Other commercial surety bond (penal sum)
+  aliases:
+  - Court Bond
+  - Fiduciary Bond
+  - Public Official Bond
+  - Notary Bond
+  default_limit_types:
+  - policy_limit
+  carriers: 0

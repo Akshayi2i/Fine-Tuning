@@ -49,7 +49,7 @@ def test_nothing_accepted_is_not_measured_and_coverage_says_so():
     tally = score_auto_accept(gold, got)
     assert tally.rate is None                               # was 0.0: a perfect score for accepting nothing
     assert tally.coverage == 0.0 and tally.selective_accuracy is None
-    meta = {"source_id": "p1", "doc_type": "policy", "lob": ["property"], "modality_mode": "ocr_plus_image"}
+    meta = {"source_id": "p1", "doc_type": "policy", "lob": ["equipment_breakdown"], "modality_mode": "ocr_plus_image"}
     [full] = build_report("t", [(gold, got, meta)]).full_set()
     assert "auto_accept_error_rate" not in full.metrics
     assert full.metrics["auto_accept_coverage"] == 0.0
@@ -144,7 +144,7 @@ def test_a_filled_figure_the_page_prints_is_expected_and_one_printed_nowhere_is_
     assert gold["premium"] == {"total": env("$250,000.00", 250000.0)}
     assert label["premium"]["fee"] == env("$75.00", 75.0)                       # the frozen gold untouched
     answer = {"premium": {"total": env("$250,000", 250000.0)}}
-    meta = {"source_id": "p1", "doc_type": "policy", "lob": ["property"], "modality_mode": "ocr_plus_image"}
+    meta = {"source_id": "p1", "doc_type": "policy", "lob": ["equipment_breakdown"], "modality_mode": "ocr_plus_image"}
     [full] = build_report("t", [(gold, answer, meta)]).full_set()
     assert full.error_records == []
 

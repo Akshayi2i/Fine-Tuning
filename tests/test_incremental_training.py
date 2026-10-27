@@ -845,23 +845,23 @@ def _continued_v2_gate(client, controller, *, parent: dict, candidate: dict):
 def test_a_continued_cycle_that_held_every_line_is_released(released, controller):
     report, decision = _continued_v2_gate(
         released, controller,
-        parent=_report({"auto": [0.95] * 6}, policy=200),
-        candidate=_report({"auto": [0.96] * 6}, policy=200))
+        parent=_report({"equipment_breakdown": [0.95] * 6}, policy=200),
+        candidate=_report({"equipment_breakdown": [0.96] * 6}, policy=200))
     assert report.ok, report.render()
     assert decision["passed"] and decision["failed_gates"] == []
     comparison = decision["line_comparison"]
     assert comparison["continued"] == "policy-v1" and comparison["runs_compared"] == ["policy-v1"]
-    assert [(v["line"], v["held_to"]) for v in comparison["lines"]] == [("auto", "policy-v1")]
+    assert [(v["line"], v["held_to"]) for v in comparison["lines"]] == [("equipment_breakdown", "policy-v1")]
 
 
 def test_a_continued_cycle_that_lost_a_line_is_blocked_at_the_gate(released, controller):
     report, decision = _continued_v2_gate(
         released, controller,
-        parent=_report({"auto": [0.95] * 30}, policy=200),
-        candidate=_report({"auto": [0.90] * 30}, policy=200))
+        parent=_report({"equipment_breakdown": [0.95] * 30}, policy=200),
+        candidate=_report({"equipment_breakdown": [0.90] * 30}, policy=200))
     assert report.blocked_at == "evaluation_gate"
-    assert "line:auto" in decision["failed_gates"]
-    assert any("auto is not non-inferior to policy-v1" in r for r in decision["blocking_reasons"])
+    assert "line:equipment_breakdown" in decision["failed_gates"]
+    assert any("equipment_breakdown is not non-inferior to policy-v1" in r for r in decision["blocking_reasons"])
     assert "package" not in {r.name for r in report.results}
 
 

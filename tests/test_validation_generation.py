@@ -29,9 +29,10 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 GOLDEN = json.loads((FIXTURES / "golden" / "policy_0001.golden.json").read_text(encoding="utf-8"))
 OCR = (FIXTURES / "ocr" / "policy_0001_page_1.md").read_text(encoding="utf-8")
 #: The line GOLDEN is valid for: a self-contained one. With no line it would be
-#: read against the fallback, which composes common model 1.1.0: GOLDEN is
-#: the old shape there, and a bare value is bookkeeping, never a field to calibrate.
-LOB = "property"
+#: read against the fallback, which composes the common model (since 1.1.0):
+#: GOLDEN is the old shape there, and a bare value is bookkeeping, never a field
+#: to calibrate. property was this file's until it moved too (common model 1.4.0).
+LOB = "equipment_breakdown"
 
 
 @pytest.fixture

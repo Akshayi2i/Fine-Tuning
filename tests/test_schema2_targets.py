@@ -196,8 +196,9 @@ def test_an_old_shape_gold_on_a_common_model_line_is_named_as_such():
     old = {"carrier": {"company_name": {"raw": "X", "parsed": "X"}}, "homeowners": {}, "terrorism": {}}
     hint = old_shape_hint(old, "policy", None, "homeowners")
     assert hint and "SPEC_21" in hint and "homeowners" in hint
-    assert old_shape_hint(old, "policy", None, "property") is None          # a self-contained line
-    assert old_shape_hint(old, "policy", None, "gl")                        # gl.json 3.0.0 composes the common model
+    assert old_shape_hint(old, "policy", None, "equipment_breakdown") is None   # a self-contained line
+    assert old_shape_hint(old, "policy", None, "gl")                        # gl.json composes the common model
+    assert old_shape_hint(old, "policy", None, "property")                  # and property.json since 2.0.0
     assert old_shape_hint(HOME, "policy", None, "homeowners") is None
 
 

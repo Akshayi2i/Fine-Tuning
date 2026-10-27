@@ -144,7 +144,7 @@ def test_the_gate_reads_the_derived_set(uncached):
     ["homeowners", "personal_auto", "gl"],          # lines on the common model
     # No line, and a package: both read against _fallback.json, the common model.
     ["homeowners", None, ["wc", "auto"]],
-    ["wc", "auto", "flood"],                        # self-contained schema files
+    ["equipment_breakdown", "epli", "business_owners"],   # self-contained schema files
     [],
 ])
 def test_training_documents_on_one_output_shape_are_accepted(lobs):
@@ -154,29 +154,32 @@ def test_training_documents_on_one_output_shape_are_accepted(lobs):
 def test_documents_read_against_the_common_model_and_self_contained_schemas_are_refused():
     """One entry per trained document, judged by the schema it is read against."""
     with pytest.raises(AdapterError, match="two output shapes") as refused:
-        assert_one_output_shape(["homeowners", "homeowners", "wc", None, ["homeowners", "gl"]])
+        assert_one_output_shape(["homeowners", "homeowners", "equipment_breakdown", None, ["homeowners", "gl"]])
     message = str(refused.value)
     assert "common model (gl+homeowners, homeowners, no line)" in message
-    assert "self-contained schema files (wc)" in message
+    assert "self-contained schema files (equipment_breakdown)" in message
 
 
 def test_a_package_of_self_contained_lines_is_read_in_the_common_models_shape():
     """A package is read against _fallback.json, so it does not share a shape
     with a policy of one of its lines on its own schema file."""
     with pytest.raises(AdapterError, match="two output shapes"):
-        assert_one_output_shape(["wc", ["wc", "auto"]])
+        assert_one_output_shape(["equipment_breakdown", ["equipment_breakdown", "epli"]])
 
 
 # --------------------------------------------------------------------------
 # Lines of business (common.lob)
 # --------------------------------------------------------------------------
 
-#: The delivered SPEC_21 map: the 48 L1 codes, each with its schema.
+#: The delivered SPEC_21 map: the 48 L1 codes, and since map 1.1.0 the pl and
+#: commercial_fire lines, each with its schema.
 LOB_SCHEMA_MAP_PARTS = ("canonical schema", "common schema", "lob_schema_map.yaml")
+LOB_SCHEMA_MAP_ROWS = 50
 
 #: L1 codes the map names a schema for that was never delivered: this
-#: repository cannot read them yet. A new one here is a gap to close.
-NO_SCHEMA_DELIVERED = {"health", "life", "earthquake", "specialty"}
+#: repository cannot read them yet. A new one here is a gap to close. (health
+#: was delivered as health.json 1.0.0.)
+NO_SCHEMA_DELIVERED = {"life", "earthquake", "specialty"}
 
 
 def test_enum_and_schema_spellings_are_one_line():
@@ -204,7 +207,7 @@ def test_every_l1_code_the_map_names_a_schema_for_is_a_line_here_or_a_known_gap(
     from common.schemas import LOB_SCHEMA_ALIASES
 
     rows = yaml.safe_load(CONFIG_DIR.joinpath(*LOB_SCHEMA_MAP_PARTS).read_text(encoding="utf-8"))["lobs"]
-    assert len(rows) == 48
+    assert len(rows) == LOB_SCHEMA_MAP_ROWS
     named = {row["code"]: row["schema_lob"] for row in rows if row.get("schema_lob") not in (None, "TBD")}
     ours = {code: LOB_SCHEMA_ALIASES.get(merge_line(code), merge_line(code)) for code in named}
     assert {code for code, line in ours.items() if line not in known_lines()} == NO_SCHEMA_DELIVERED
@@ -240,7 +243,7 @@ def test_a_lines_filter_passes_a_document_only_when_all_its_lines_are_in_it(lob,
 
 
 def test_a_package_of_self_contained_lines_passes_a_filter_naming_them():
-    assert within_lines(["wc", "auto"], frozenset({"wc", "auto"}))
+    assert within_lines(["equipment_breakdown", "epli"], frozenset({"equipment_breakdown", "epli"}))
 
 
 def test_no_filter_passes_everything():

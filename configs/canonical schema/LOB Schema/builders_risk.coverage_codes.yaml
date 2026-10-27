@@ -1,0 +1,330 @@
+# SPEC_21 4.2.4 coverage codes of builders_risk (schema 3.0.0, common model 1.1.0).
+# Built from the bldrk folder's documents, read in place (Zurich's builders risk supplemental declarations, forms
+# U-GU / HBIS, for the captions; US Assure's renewal application and Vacant Express's invoice print no coverage)
+# and the pre-SPEC_21 builders_risk.json limits, deductibles and time-element blocks.
+# aliases: coverage names as the documents print them. Codes are LOB-prefixed (BR_, provisional,
+# CHANGE_REQUESTS_builders_risk.md CR-BR-01); X_ORDINANCE_LAW, X_WATER_BACKUP and X_TERRORISM are the common
+# model's shared codes (shared: true). The ordinance or law parts the supplemental declarations print on their own
+# rows (undamaged portion, demolition cost, increased cost of construction) have BR_OL_ codes.
+# carriers: how many of the bldrk carrier folders print one of the code's names (0 = a legacy-schema field only).
+lob: builders_risk
+schema_version: 3.0.0
+common_model_version: 1.1.0
+code_prefix: BR_
+codes:
+- code: BR_BUILDING_UNDER_CONSTRUCTION
+  name: Building or structure under construction (builders risk)
+  aliases:
+  - Building Under Construction
+  - Buildings Under Construction
+  - Builders Risk
+  - Builders Risk Coverage
+  - New Construction
+  default_limit_types:
+  - per_occurrence
+  - per_location
+  - policy_limit
+  carriers: 1
+- code: BR_RENOVATIONS
+  name: Renovations and improvements
+  aliases:
+  - Renovations and improvements
+  - Renovations
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_EXISTING_BUILDINGS
+  name: Existing buildings or structures
+  aliases:
+  - Existing buildings or structures
+  - Existing Building
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_SOFT_COSTS
+  name: Soft costs
+  aliases:
+  - Soft Costs
+  - Soft Costs Coverage
+  - Soft Costs Coverage (HBIS-88)
+  default_limit_types:
+  - per_occurrence
+  - sublimit
+  carriers: 1
+- code: BR_EXPENSE_TO_MITIGATE
+  name: Expense to mitigate loss (soft costs)
+  aliases:
+  - Expense To Mitigate Loss
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_DELAY_IN_COMPLETION
+  name: Delay in completion
+  aliases:
+  - Delay in Completion
+  - Delay in Completion Coverage
+  - Delay in Opening
+  default_limit_types:
+  - per_occurrence
+  carriers: 0
+- code: BR_RENTAL_INCOME
+  name: Rental income (delay in completion)
+  aliases:
+  - Rental Income
+  - Loss of Rents
+  default_limit_types:
+  - per_occurrence
+  carriers: 0
+- code: BR_LOAN_INTEREST
+  name: Loan interest (delay in completion)
+  aliases:
+  - Loan Interest
+  - Interest on Loans
+  default_limit_types:
+  - per_occurrence
+  carriers: 0
+- code: BR_BUSINESS_INCOME
+  name: Business income (builders risk)
+  aliases:
+  - Business Income
+  - Business Income (HBIS-95)
+  default_limit_types:
+  - per_occurrence
+  - other
+  carriers: 1
+- code: BR_BUSINESS_INCOME_EXTRA_EXPENSE
+  name: Business income and extra expense (builders risk)
+  aliases:
+  - Business Income And Extra Expense
+  - Business Income And Extra Expense (HBIS-82)
+  default_limit_types:
+  - per_occurrence
+  - other
+  carriers: 1
+- code: BR_EXTRA_EXPENSE
+  name: Extra expense (builders risk)
+  aliases:
+  - Extra Expense
+  - Extra Expense (HBIS-92)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_CIVIL_AUTHORITY
+  name: Civil authority (time element)
+  aliases:
+  - Civil Authority
+  default_limit_types:
+  - per_occurrence
+  - other
+  carriers: 1
+- code: BR_EXPEDITING_EXPENSE
+  name: Expediting expense
+  aliases:
+  - Expediting Expense
+  - Expediting Expense (HBIS-93)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_TEMPORARY_STORAGE
+  name: Property at a temporary storage location
+  aliases:
+  - Temporary Storage
+  - Property At A Temporary Storage Location
+  - Property at Temporary Storage Location
+  - Offsite Storage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_TRANSIT
+  name: Property in transit
+  aliases:
+  - Transit
+  - Property In Transit
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_PROPERTY_IN_THE_OPEN
+  name: Property in the open
+  aliases:
+  - Property in the Open
+  default_limit_types:
+  - per_occurrence
+  carriers: 0
+- code: BR_DEBRIS_REMOVAL
+  name: Debris removal
+  aliases:
+  - Debris Removal
+  default_limit_types:
+  - per_occurrence
+  - sublimit
+  carriers: 1
+- code: BR_POLLUTANT_CLEANUP
+  name: Pollutant clean-up and removal
+  aliases:
+  - Pollutant Clean-Up
+  - Pollutant Clean-Up And Removal
+  - Pollutant Cleanup
+  default_limit_types:
+  - per_occurrence
+  - aggregate
+  carriers: 1
+- code: BR_SCAFFOLDING
+  name: 'Scaffolding, construction forms and temporary structures'
+  aliases:
+  - Scaffolding and Forms
+  - 'Scaffolding, Construction Forms And Temporary Structures'
+  - Scaffolding
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_REERECTION_SCAFFOLDING
+  name: Re-erection of scaffolding
+  aliases:
+  - Re-erection Of Scaffolding
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_TREES_SHRUBS
+  name: 'Trees, shrubs and plants'
+  aliases:
+  - 'Trees, Shrubs and Plants'
+  - 'Trees, Shrubs, Plants and Lawns'
+  default_limit_types:
+  - per_occurrence
+  carriers: 0
+- code: BR_THEFT_OF_MATERIALS
+  name: Theft of building materials
+  aliases:
+  - Theft of Building Materials
+  - Theft of Materials
+  default_limit_types:
+  - per_occurrence
+  carriers: 0
+- code: BR_MODEL_HOME_CONTENTS
+  name: Model home contents
+  aliases:
+  - Model Home Contents
+  - Marine Model Home Contents Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_COLLAPSE
+  name: Collapse (additional coverage)
+  aliases:
+  - Collapse
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_FIRE_DEPT_SERVICE_CHARGE
+  name: Fire department service charge
+  aliases:
+  - Fire Department Service Charge
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_VALUABLE_PAPERS
+  name: Valuable papers and records
+  aliases:
+  - Valuable Papers And Records
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_PRESERVATION_OF_PROPERTY
+  name: Preservation of property
+  aliases:
+  - Preservation Of Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_REWARDS
+  name: Rewards
+  aliases:
+  - Rewards
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_CLAIM_PREPARATION
+  name: Claim preparation expense
+  aliases:
+  - Claim Preparation Expense
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_CONTRACT_PENALTIES
+  name: Contract penalties
+  aliases:
+  - Contract Penalties
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_FENCES_WALLS_SIGNS
+  name: 'Development or subdivision fences, walls and signs'
+  aliases:
+  - 'Development Or Subdivision Fences, Walls And Signs'
+  - 'Development Or Subdivision Fences, Walls And Signs (HBIS-58)'
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_GREEN_BUILDING
+  name: Builders risk green building coverage extension
+  aliases:
+  - Builders Risk Green Building Coverage Extension
+  - Builders Risk Green Building Coverage Extension (HBIS-96)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_OL_UNDAMAGED_PORTION
+  name: 'Ordinance or law: loss to the undamaged portion of the building'
+  aliases:
+  - Loss To The Undamaged Portion Of The Building
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_OL_DEMOLITION_COST
+  name: 'Ordinance or law: demolition cost'
+  aliases:
+  - Demolition Cost
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: BR_OL_INCREASED_COST
+  name: 'Ordinance or law: increased cost of construction'
+  aliases:
+  - Increased Cost Of Construction
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: X_ORDINANCE_LAW
+  name: Ordinance or law
+  aliases:
+  - Ordinance or Law
+  - 'Ordinance & Law'
+  - Ordinance Or Law — Direct Damage
+  - Ordinance Or Law - Direct Damage
+  default_limit_types:
+  - per_occurrence
+  - sublimit
+  carriers: 1
+  shared: true
+- code: X_WATER_BACKUP
+  name: Water or sewer backup
+  aliases:
+  - Water Back-Up
+  - Sewer Backup
+  - 'Back-Up Or Overflow Of Sewers, Drains Or Sumps'
+  default_limit_types:
+  - per_occurrence
+  - sublimit
+  carriers: 1
+  shared: true
+- code: X_TERRORISM
+  name: Terrorism (TRIA)
+  aliases:
+  - Terrorism
+  - Certified Acts of Terrorism
+  - TRIA
+  - Terrorism Risk Insurance Act
+  default_limit_types:
+  - other
+  carriers: 0
+  shared: true

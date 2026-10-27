@@ -1,0 +1,140 @@
+# SPEC_21 4.2.4 coverage codes of directors_officers (schema 2.1.0, common model 1.1.0).
+# Built from the single-LOB D&O declarations of the do folder (Wesco under AmTrust, Zurich under ARC Excess &
+# Surplus, Federal under Chubb, Hudson Excess under CNA Companies, Philadelphia Indemnity, United States Liability
+# under RT Specialty), read in place, and the pre-SPEC_21 directors_officers.json. aliases: coverage part and
+# insuring clause names as the seeds print them. Codes are LOB-prefixed (DO_, provisional). A coverage part's
+# limit is an aggregate (or per-claim) limit; a clause's sub-limit an aggregate limit of that clause; a retention a
+# retention deductible.
+# 2.1.0: the three coverage parts of CNA's Investment Management Liability Solutions declarations (Columbia
+# Casualty, filed under ARC Excess & Surplus) and two aliases (policy aggregate, derivative demand).
+# carriers: how many of the seed carrier folders print one of the code's names.
+lob: directors_officers
+schema_version: 2.1.0
+common_model_version: 1.1.0
+code_prefix: DO_
+codes:
+- code: DO_POLICY_AGGREGATE
+  name: Policy aggregate limit of liability (all coverage parts combined)
+  aliases:
+  - POLICY AGGREGATE LIMIT OF LIABILITY
+  - Combined Total Limit of Liability
+  - 'Aggregate, All Parts'
+  - Combined Aggregate Limit of Liability for all Liability Coverage Parts
+  - Policy Aggregate Limit of Liability
+  default_limit_types:
+  - aggregate
+  carriers: 3
+- code: DO_DIRECTORS_OFFICERS
+  name: Directors and officers liability coverage part (element)
+  aliases:
+  - Private Company Liability Coverage Element
+  - COVERAGE ELEMENT LIMIT OF LIABILITY
+  - Management and Company Liability
+  - 'Director, Officers and Company Liability Coverage Part'
+  - 'Part 1, D&O Liability'
+  - Directors And Officers Liability Coverage Part
+  - Limits of Liability
+  - 'Community Association Directors & Officers Liability - D&O/EPL'
+  default_limit_types:
+  - aggregate
+  - per_claim
+  carriers: 6
+- code: DO_SIDE_A
+  name: Insured person (side A) liability
+  aliases:
+  - Insured Person Liability
+  - Individual Insurance Coverage
+  - Executive and Employee Liability
+  - Coverage A
+  - Insuring Agreement I (A)
+  default_limit_types:
+  - aggregate
+  carriers: 3
+- code: DO_SIDE_B
+  name: Company reimbursement (side B)
+  aliases:
+  - Company Reimbursement
+  - Company Reimbursement Coverage
+  - Company Indemnification Liability
+  - Insuring Agreement I (B)
+  default_limit_types:
+  - aggregate
+  carriers: 3
+- code: DO_SIDE_C
+  name: 'Company (entity, side C) liability'
+  aliases:
+  - Company Liability
+  - Company Coverage
+  - Insuring Agreement I (C)
+  default_limit_types:
+  - aggregate
+  carriers: 3
+- code: DO_DERIVATIVE_DEMAND
+  name: Securityholder derivative demand investigation costs
+  aliases:
+  - Securityholder Derivative Demand Investigative Costs
+  - Derivative Demand Investigation Sub-Limit of Liability
+  - Securities Holder Derivative Demand Investigation Liability
+  - Insuring Agreement I (D)
+  - Shareholder Derivative Demand Investigation Costs
+  - Shareholder Derivative Demand Investigation Costs Sublimit of Liability
+  default_limit_types:
+  - aggregate
+  carriers: 3
+- code: DO_ADVERSE_MEDIA
+  name: Adverse media event loss
+  aliases:
+  - Adverse Media Event Loss Sub-Limit of Liability
+  - Adverse Media Event Coverage
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_ADDITIONAL_SIDE_A
+  name: Additional side A (executive) limit of liability
+  aliases:
+  - Additional Executive Limit of Liability
+  - Additional Limit of Liability for Insuring Clause A
+  - additional aggregate for Claims covered pursuant to Section IV.
+  default_limit_types:
+  - aggregate
+  carriers: 3
+- code: DO_DEFENSE_COSTS_ADDITIONAL
+  name: Additional limit of liability for defense costs
+  aliases:
+  - Additional Limit of Liability for Defense Costs
+  - additional aggregate for all Defense Costs
+  default_limit_types:
+  - aggregate
+  carriers: 2
+- code: DO_RETIRED_DIRECTORS
+  name: Retired independent directors liability
+  aliases:
+  - Retired Independent Directors Liability
+  default_limit_types:
+  - per_person
+  - aggregate
+  carriers: 1
+- code: DO_INVESTMENT_ADVISER_PROFESSIONAL
+  name: Investment adviser professional liability coverage part
+  aliases:
+  - Investment Adviser Professional Liability Coverage Part
+  - Investment Adviser Professional Liability
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_INVESTMENT_ADVISER_MANAGEMENT
+  name: Investment adviser management liability coverage part
+  aliases:
+  - Investment Adviser Management Liability Coverage Part
+  - Investment Adviser Management Liability
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_FUND_MANAGEMENT
+  name: Fund management and professional liability coverage part
+  aliases:
+  - Fund Management and Professional Liability Coverage Part
+  - Fund Management and Professional Liability
+  default_limit_types:
+  - aggregate
+  carriers: 1

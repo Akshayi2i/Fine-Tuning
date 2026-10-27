@@ -136,37 +136,37 @@ def test_what_counts_as_a_replaced_identity(path, identifying):
 def test_the_delivery_is_completed_in_place_only_with_apply(tmp_path):
     # A line still on a self-contained schema: a common-model line's twins are
     # complete and never filled (tests/test_schema2_targets.py), and gl is one
-    # since common model 1.1.0.
+    # since common model 1.1.0, property since the lines moved onto it.
     delivery, reviewed = tmp_path / "delivery", tmp_path / "reviewed"
     (delivery / "Train/gold json").mkdir(parents=True)
-    (reviewed / "Acme/property").mkdir(parents=True)
-    (reviewed / "Acme/property/ho_1.json").write_text(json.dumps(_source()), encoding="utf-8")
-    gold = delivery / "Train/gold json/property__ho_1__synth_001.json"
+    (reviewed / "Acme/equipment_breakdown").mkdir(parents=True)
+    (reviewed / "Acme/equipment_breakdown/ho_1.json").write_text(json.dumps(_source()), encoding="utf-8")
+    gold = delivery / "Train/gold json/equipment_breakdown__ho_1__synth_001.json"
     gold.write_text(json.dumps(_twin()), encoding="utf-8")
     _manifest(delivery)
-    dry = fill_delivery(delivery, reviewed, lines=frozenset({"property"}))
+    dry = fill_delivery(delivery, reviewed, lines=frozenset({"equipment_breakdown"}))
     assert dry.filled == 1 and dry.fields_after > dry.fields_before
     assert json.loads(gold.read_text(encoding="utf-8")) == _twin()             # a dry run writes nothing
-    fill_delivery(delivery, reviewed, lines=frozenset({"property"}), apply=True)
+    fill_delivery(delivery, reviewed, lines=frozenset({"equipment_breakdown"}), apply=True)
     filled = json.loads(gold.read_text(encoding="utf-8"))
     assert "general_aggregate_limit" in filled["general_liability"]["limits_of_insurance"]
     # The seed the values came from, who reviewed it, and its own notes stay on the twin.
-    assert filled["fideon:filled"]["source"] == "Acme/property/ho_1"
+    assert filled["fideon:filled"]["source"] == "Acme/equipment_breakdown/ho_1"
     assert filled["fideon:filled"]["source_review"] == {"reviewer_id": "a.reviewer", "review_date": "2026-10-20"}
     assert filled["fideon:filled"]["source_notes"] == _source().get("fideon:provenance")
 
 
 def _manifest(delivery, seed_review=None):
-    """One twin of ``Acme/property/ho_1`` and its seed's own row, with the seed's review."""
+    """One twin of ``Acme/equipment_breakdown/ho_1`` and its seed's own row, with the seed's review."""
     review = {"reviewer_id": "a.reviewer", "review_date": "2026-10-20"} if seed_review is None else seed_review
     with (delivery / "manifest.csv").open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=["split", "lob", "source", "kind", "gold", "pages",
                                            "reviewer_id", "review_date"])
         w.writeheader()
-        w.writerow({"split": "Train", "lob": "property", "source": "Acme/property/ho_1.pdf", "kind": "original",
-                    "gold": "Train/gold json/property__ho_1__original.json", "pages": 3, **review})
-        w.writerow({"split": "Train", "lob": "property", "source": "Acme/property/ho_1.pdf",
-                    "kind": "synthetic", "gold": "Train/gold json/property__ho_1__synth_001.json",
+        w.writerow({"split": "Train", "lob": "equipment_breakdown", "source": "Acme/equipment_breakdown/ho_1.pdf", "kind": "original",
+                    "gold": "Train/gold json/equipment_breakdown__ho_1__original.json", "pages": 3, **review})
+        w.writerow({"split": "Train", "lob": "equipment_breakdown", "source": "Acme/equipment_breakdown/ho_1.pdf",
+                    "kind": "synthetic", "gold": "Train/gold json/equipment_breakdown__ho_1__synth_001.json",
                     "pages": 3, "reviewer_id": "a.reviewer", "review_date": "2026-10-20"})
 
 
@@ -176,15 +176,15 @@ def test_a_twin_is_never_filled_from_a_seed_nobody_reviewed(tmp_path, seed_revie
     only through its seed (decision 2026-10-22)."""
     delivery, reviewed = tmp_path / "delivery", tmp_path / "reviewed"
     (delivery / "Train/gold json").mkdir(parents=True)
-    (reviewed / "Acme/property").mkdir(parents=True)
-    (reviewed / "Acme/property/ho_1.json").write_text(json.dumps(_source()), encoding="utf-8")
-    gold = delivery / "Train/gold json/property__ho_1__synth_001.json"
+    (reviewed / "Acme/equipment_breakdown").mkdir(parents=True)
+    (reviewed / "Acme/equipment_breakdown/ho_1.json").write_text(json.dumps(_source()), encoding="utf-8")
+    gold = delivery / "Train/gold json/equipment_breakdown__ho_1__synth_001.json"
     gold.write_text(json.dumps(_twin()), encoding="utf-8")
     _manifest(delivery, {} if seed_review == "no seed row" else seed_review)
     if seed_review == "no seed row":
         lines = (delivery / "manifest.csv").read_text(encoding="utf-8").splitlines()
         (delivery / "manifest.csv").write_text("\n".join([lines[0], lines[2]]) + "\n", encoding="utf-8")
-    report = fill_delivery(delivery, reviewed, lines=frozenset({"property"}), apply=True)
+    report = fill_delivery(delivery, reviewed, lines=frozenset({"equipment_breakdown"}), apply=True)
     assert report.filled == 0 and sum(report.refused.values()) == 1
     assert "the seed has no review record" in next(iter(report.refused))
     assert json.loads(gold.read_text(encoding="utf-8")) == _twin()

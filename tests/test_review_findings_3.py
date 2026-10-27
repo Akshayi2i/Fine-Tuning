@@ -127,10 +127,12 @@ def test_originals_whose_values_are_not_on_the_page_fail_the_check():
 
 
 # 4 - a fragment that carries identified rows of its own is taught and joined
-VEHICLE = {"policy": {"policy_number": _env("PA-1", 1)}, "auto": {"vehicles": [{
-    "vin": _env("1HGCM82633A004352", 6), "make": _env("Honda", 6),
-    "coverages": [{"coverage_name": _env("Collision", 7), "premium": _env(281.0, 7)},
-                  {"coverage_name": _env("Comprehensive", 7), "premium": _env(120.0, 7)}],
+#: A self-contained line's block (auto moved to the common model): a location
+#: row, identified by its number, whose coverage table runs onto the next page.
+LOCATION = {"policy": {"policy_number": _env("CPP-1", 1)}, "commercial_package": {"per_location_schedule": [{
+    "location_number": _env("1", 6), "occupancy_description": _env("Machine shop", 6),
+    "coverages": [{"coverage_name": _env("Building", 7), "premium": _env(281.0, 7)},
+                  {"coverage_name": _env("Business Personal Property", 7), "premium": _env(120.0, 7)}],
 }]}}
 
 
@@ -138,44 +140,45 @@ def _plan(pages, index):
     return PolicyWindowPlan("lineblk", index, tuple(pages), single=False)
 
 
-def test_a_coverage_table_on_the_page_after_its_vin_is_taught():
+def test_a_coverage_table_on_the_page_after_its_location_number_is_taught():
     report = TargetReport()
-    second = window_target(VEHICLE, "commercial_auto", _plan([7, 8, 9], 1), report)
-    (vehicle,) = second["auto"]["vehicles"]
-    assert [c["coverage_name"]["raw"] for c in vehicle["coverages"]] == ["Collision", "Comprehensive"]
-    assert "vin" not in vehicle and not report.orphaned
+    second = window_target(LOCATION, "commercial_package", _plan([7, 8, 9], 1), report)
+    (location,) = second["commercial_package"]["per_location_schedule"]
+    assert [c["coverage_name"]["raw"] for c in location["coverages"]] == ["Building", "Business Personal Property"]
+    assert "location_number" not in location and not report.orphaned
 
 
 def test_a_fragment_with_nothing_identified_is_still_left_out():
-    label = {"auto": {"vehicles": [{"vin": _env("1HGCM82633A004352", 6),
-                                    "coverages": [{"coverage_name": _env("Collision", 6),
-                                                   "premium": _env(1.0, 6, 7, 8)}]}]}}
+    label = {"commercial_package": {"per_location_schedule": [{
+        "location_number": _env("1", 6),
+        "coverages": [{"coverage_name": _env("Building", 6), "premium": _env(1.0, 6, 7, 8)}]}]}}
     report = TargetReport()
-    assert not window_target(label, "commercial_auto", _plan([7, 8, 9], 1), report).get("auto", {}).get("vehicles")
+    target = window_target(label, "commercial_package", _plan([7, 8, 9], 1), report)
+    assert not target.get("commercial_package", {}).get("per_location_schedule")
     assert report.orphaned
 
 
-def test_the_merge_joins_the_fragment_to_the_only_vehicle_and_says_so():
-    first = window_target(VEHICLE, "commercial_auto", _plan([4, 5, 6], 0))
-    second = window_target(VEHICLE, "commercial_auto", _plan([7, 8, 9], 1))
+def test_the_merge_joins_the_fragment_to_the_only_location_and_says_so():
+    first = window_target(LOCATION, "commercial_package", _plan([4, 5, 6], 0))
+    second = window_target(LOCATION, "commercial_package", _plan([7, 8, 9], 1))
     merged = merge_policy_windows([PolicyWindow("lineblk", [4, 5, 6], first),
-                                   PolicyWindow("lineblk", [7, 8, 9], second)], lob="commercial_auto")
-    (vehicle,) = merged.extraction["auto"]["vehicles"]
-    assert vehicle["vin"]["raw"] == "1HGCM82633A004352" and len(vehicle["coverages"]) == 2
-    assert "auto.vehicles:joined_without_identifier" in merged.review_flags
+                                   PolicyWindow("lineblk", [7, 8, 9], second)], lob="commercial_package")
+    (location,) = merged.extraction["commercial_package"]["per_location_schedule"]
+    assert location["location_number"]["raw"] == "1" and len(location["coverages"]) == 2
+    assert "commercial_package.per_location_schedule:joined_without_identifier" in merged.review_flags
 
 
-def test_a_fragment_is_not_joined_when_two_vehicles_could_own_it():
-    def vehicle(vin):
-        return {"vin": _env(vin, 1)}
+def test_a_fragment_is_not_joined_when_two_locations_could_own_it():
+    def location(number):
+        return {"location_number": _env(number, 1)}
 
-    fragment = {"coverages": [{"coverage_name": _env("Collision", 2)}]}
+    fragment = {"coverages": [{"coverage_name": _env("Building", 2)}]}
     # The line named: no line is the common-model fallback, merged by its own rules.
     merged = merge_policy_windows([
-        PolicyWindow("lineblk", [1], {"auto": {"vehicles": [vehicle("VIN-A"), vehicle("VIN-B")]}}),
-        PolicyWindow("lineblk", [2], {"auto": {"vehicles": [fragment]}}),
-    ], lob="commercial_auto")
-    assert len(merged.extraction["auto"]["vehicles"]) == 3
+        PolicyWindow("lineblk", [1], {"commercial_package": {"per_location_schedule": [location("1"), location("2")]}}),
+        PolicyWindow("lineblk", [2], {"commercial_package": {"per_location_schedule": [fragment]}}),
+    ], lob="commercial_package")
+    assert len(merged.extraction["commercial_package"]["per_location_schedule"]) == 3
     assert not merged.joined_unidentified
 
 
@@ -186,22 +189,23 @@ def test_a_single_window_group_keeps_a_value_that_records_no_page():
     label = {"named_insured": {"primary_name": {"raw": "Jane Rivera", "parsed": "Jane Rivera", "page_ref": []}},
              "policy": {}, "carrier": {}}
     # A self-contained line: a common-model line's view requires every value to
-    # cite a page (general liability composes the common model since 1.1.0).
+    # cite a page (general liability, property and the other lines on the
+    # common model).
     decl = PolicyWindowPlan("decl", 0, (1, 2, 3), single=True)
-    sections = multi_window_sections("property", [decl])
+    sections = multi_window_sections("equipment_breakdown", [decl])
     assert "named_insured" not in sections
     placed = with_inferred_pages(label, pages, sections=sections)
     assert placed is label
-    assert window_target(placed, "property", decl)["named_insured"]["primary_name"]["raw"] == "Jane Rivera"
+    assert window_target(placed, "equipment_breakdown", decl)["named_insured"]["primary_name"]["raw"] == "Jane Rivera"
 
 
 def test_a_multi_window_group_still_gets_its_pages_inferred():
     plans = [PolicyWindowPlan("lineblk", 0, (1, 2), single=False), PolicyWindowPlan("lineblk", 1, (3, 4), single=False)]
-    label = {"auto": {"vehicles": [{"vin": {"raw": "1HGCM82633A004352", "parsed": "1HGCM82633A004352",
-                                            "page_ref": []}}]}}
-    pages = ["cover", "schedule", "vehicle 1HGCM82633A004352 listed", "end"]
-    placed = with_inferred_pages(label, pages, sections=multi_window_sections("commercial_auto", plans))
-    assert placed["auto"]["vehicles"][0]["vin"]["page_ref"] == [3]
+    label = {"equipment_breakdown": {"object_schedule": [{"serial_number": {
+        "raw": "SN-4471-B2209", "parsed": "SN-4471-B2209", "page_ref": []}}]}}
+    pages = ["cover", "schedule", "boiler SN-4471-B2209 listed", "end"]
+    placed = with_inferred_pages(label, pages, sections=multi_window_sections("equipment_breakdown", plans))
+    assert placed["equipment_breakdown"]["object_schedule"][0]["serial_number"]["page_ref"] == [3]
 
 
 # 9 - the fingerprint moves when a setting that shapes the data moves
@@ -243,11 +247,12 @@ def test_the_flat_folder_message_names_the_folder_layout_not_a_flag(tmp_path, cl
 def test_the_window_notes_report_orphaned_fragments():
     from data_pipeline.dataset_builder.build_jsonl import SourceDocument, _policy_window_rows
 
-    label = {"policy": {"policy_number": _env("PA-1", 1)}, "carrier": {}, "named_insured": {},
-             "auto": {"vehicles": [{"vin": _env("1HGCM82633A004352", 1), "make": _env("Honda", 1, 9)}]}}
+    label = {"policy": {"policy_number": _env("CPP-1", 1)}, "carrier": {}, "named_insured": {},
+             "commercial_package": {"per_location_schedule": [{
+                 "location_number": _env("1", 1), "occupancy_description": _env("Machine shop", 1, 9)}]}}
     document = SourceDocument(source_id="s1", doc_type="policy", golden_label=label,
                               ocr_pages=[f"page {i}" for i in range(1, 13)],
-                              image_paths=[f"p{i}.png" for i in range(1, 13)], lob="commercial_auto")
+                              image_paths=[f"p{i}.png" for i in range(1, 13)], lob="commercial_package")
     details: list[str] = []
     _policy_window_rows(document, "train", "image_only", None, details)
     assert any("orphaned" in d for d in details), json.dumps(details)[:300]

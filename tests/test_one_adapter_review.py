@@ -178,8 +178,8 @@ def test_the_audit_blocks_a_folder_teaching_two_output_shapes():
 
     one = [DocumentAudit(folder="a", line="homeowners"), DocumentAudit(folder="b", line="gl")]
     assert output_shape_findings(one) == []
-    two = [*one, DocumentAudit(folder="c", line="wc"),
-           DocumentAudit(folder="d", line="auto+wc")]          # a package does not train
+    two = [*one, DocumentAudit(folder="c", line="equipment_breakdown"),
+           DocumentAudit(folder="d", line="epli+equipment_breakdown")]   # a package does not train
     [finding] = output_shape_findings(two)
     assert finding.severity == "blocker" and "prepare_bundles --lines" in finding.detail
 
@@ -189,10 +189,10 @@ def test_the_preflight_fails_imported_policies_teaching_two_output_shapes():
 
     results: list = []
     check_output_shape(results, [("policy", "p1", {"lob": "homeowners"}),
-                                 ("policy", "p2", {"lob": ["auto", "wc"]})])
+                                 ("policy", "p2", {"lob": ["equipment_breakdown", "epli"]})])
     assert results[-1].status == "PASS"
     check_output_shape(results, [("policy", "p1", {"lob": "homeowners"}),
-                                 ("policy", "p3", {"lob": "workers_comp"})])
+                                 ("policy", "p3", {"lob": "equipment_breakdown"})])
     assert results[-1].status == "FAIL"
 
 

@@ -37,7 +37,9 @@ def test_the_personal_lines_alone_train_one_shape():
 
 
 def test_self_contained_lines_alone_train_one_shape():
-    assert_one_output_shape(["auto", "wc", "umbrella"])
+    lines = ["equipment_breakdown", "epli", "business_owners"]
+    assert not any(is_common_model("policy", None, line) for line in lines)
+    assert_one_output_shape(lines)
 
 
 def test_a_corpus_with_nothing_in_it_has_no_shape_to_mix():
@@ -45,32 +47,34 @@ def test_a_corpus_with_nothing_in_it_has_no_shape_to_mix():
 
 
 def test_a_common_model_line_and_a_self_contained_line_are_refused():
-    """Homeowners answers in the common model's shape, workers' comp in its own
-    file's: one adapter trained on both learns neither well."""
-    assert not is_common_model("policy", None, "wc")
+    """Homeowners answers in the common model's shape, equipment breakdown in
+    its own file's: one adapter trained on both learns neither well."""
+    assert not is_common_model("policy", None, "equipment_breakdown")
     with pytest.raises(AdapterError, match="two output shapes") as caught:
-        assert_one_output_shape(["homeowners", "wc"])
+        assert_one_output_shape(["homeowners", "equipment_breakdown"])
     message = str(caught.value)
     assert "read against the common model (homeowners)" in message
-    assert "self-contained schema files (wc)" in message
+    assert "self-contained schema files (equipment_breakdown)" in message
 
 
 def test_a_package_or_a_policy_with_no_line_is_judged_by_the_fallback_it_is_read_against():
     """A package of lines, and a policy with no line, are read against
-    _fallback.json, which is on the common model: with workers' comp alone they
-    are two shapes, with homeowners one."""
-    assert_one_output_shape(["homeowners", ["auto", "wc"], None])
+    _fallback.json, which is on the common model: with equipment breakdown
+    alone they are two shapes, with homeowners one."""
+    assert_one_output_shape(["homeowners", ["epli", "equipment_breakdown"], None])
     with pytest.raises(AdapterError, match="two output shapes") as caught:
-        assert_one_output_shape(["wc", ["auto", "wc"]])
-    assert "auto+wc" in str(caught.value)
+        assert_one_output_shape(["equipment_breakdown", ["epli", "equipment_breakdown"]])
+    assert "epli+equipment_breakdown" in str(caught.value)
     with pytest.raises(AdapterError, match="no line"):
-        assert_one_output_shape(["wc", None])
+        assert_one_output_shape(["equipment_breakdown", None])
 
 
-def test_general_liability_with_auto_is_refused_too():
-    """General liability composes the common model; auto does not yet."""
+def test_general_liability_with_a_self_contained_line_is_refused_too():
+    """General liability composes the common model, and auto does since
+    auto.json 2.0.0; a commercial package does not yet."""
+    assert_one_output_shape({"gl": 40, "auto": 3})
     with pytest.raises(AdapterError, match="two output shapes"):
-        assert_one_output_shape({"gl": 40, "auto": 3})      # a line-count mapping reads as its lines
+        assert_one_output_shape({"gl": 40, "commercial_package": 3})   # a line-count mapping reads as its lines
 
 
 # --------------------------------------------------------------------------
@@ -127,4 +131,4 @@ def test_a_package_of_common_model_lines_is_outside_any_filter():
     lines = frozenset({"homeowners", "personal_auto"})
     assert not within_lines(["homeowners", "personal_auto"], lines)
     # Self-contained lines carry no such shape: a package of them passes.
-    assert within_lines(["auto", "wc"], frozenset({"auto", "wc"}))
+    assert within_lines(["equipment_breakdown", "epli"], frozenset({"equipment_breakdown", "epli"}))

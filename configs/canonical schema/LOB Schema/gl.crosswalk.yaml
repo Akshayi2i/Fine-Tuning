@@ -10,7 +10,7 @@
 
 lob: gl
 from_schema: "1.5.0"
-to_schema: "3.0.0"
+to_schema: "3.2.0"
 paths:
   # gl 1.1.0-1.2.0 LOB block, removed in 2.0.0 (SPEC_21 v0.9 4.2.4); in 2.0.0 additional_fields, from 3.0.0
   # the common model 1.1.0 fields (CR-GL-02, CR-GL-12). A classification's products-completed operations

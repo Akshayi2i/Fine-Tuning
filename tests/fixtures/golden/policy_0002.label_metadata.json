@@ -14,6 +14,6 @@
     "producer.agency_name": "Agency",
     "premium.total_policy_premium": "Total Policy Premium"
   },
-  "lob": "commercial_auto",
+  "lob": "commercial_package",
   "$comment": "ALIAS VARIETY fixture, paired with policy_0001. The SAME canonical field named_insured.primary_name appears here under 'Named Insured' and there under 'Applicant'. Without two surface labels for one field there is nothing for alias_accuracy to slice, so this pair is what makes per-alias diagnosis testable at all. Also carries a different LoB value from policy_0001, so LoB coverage has more than one class."
 }

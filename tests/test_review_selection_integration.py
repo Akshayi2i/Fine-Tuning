@@ -206,6 +206,6 @@ def test_a_self_contained_line_still_infers_the_page(monkeypatch):
 
     monkeypatch.setattr(policy_windows, "with_placed_pages",
                         lambda *a, **k: pytest.fail("a self-contained line is not placed by search"))
-    label = {"policy": {"policy_number": {"raw": "CY-1", "parsed": "CY-1", "page_ref": [1]}}}
-    result = windowing_ceiling.oracle("d", label, "cyber", 1, ["Policy CY-1"])
+    label = {"policy": {"policy_number": {"raw": "EB-1", "parsed": "EB-1", "page_ref": [1]}}}
+    result = windowing_ceiling.oracle("d", label, "equipment_breakdown", 1, ["Policy EB-1"])
     assert result.gold_values == 1

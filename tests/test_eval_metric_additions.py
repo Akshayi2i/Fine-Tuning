@@ -19,7 +19,7 @@ LABEL = {"policy": {"policy_number": _env("HO-1"), "effective_date": _env("01/01
 
 #: A self-contained line, scored on the label above as it is: a common-model
 #: line's report narrows it to the common model's shape first.
-LINE = "cyber"
+LINE = "equipment_breakdown"
 
 
 def _meta(source="p1", lob=LINE, ocr="HO-1 01/01/2026 01/01/2027 1200", mode="ocr_plus_image"):
@@ -54,8 +54,8 @@ def test_accuracy_is_broken_down_by_line_and_by_field():
     no_premium = {"policy": {k: v for k, v in LABEL["policy"].items() if k != "account_id"}}
     m = _metrics([(LABEL, perfect, _meta("p1", LINE)),
                   (LABEL, no_premium, _meta("p2", LINE)),
-                  (LABEL, {}, _meta("p3", "property"))])
-    assert m["field_accuracy_by_lob"] == {LINE: 0.875, "property": 0.0}
+                  (LABEL, {}, _meta("p3", "agriculture_farm"))])
+    assert m["field_accuracy_by_lob"] == {LINE: 0.875, "agriculture_farm": 0.0}
     weakest = m["weakest_fields"]
     assert weakest[0]["field"] == "policy.account_id"          # right once in 3
     assert weakest[0]["accuracy"] == pytest.approx(1 / 3, abs=1e-4) and weakest[0]["scored"] == 3

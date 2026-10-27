@@ -22,9 +22,9 @@ GOLD = json.loads((FIXTURES / "personal_auto_6page.json").read_text(encoding="ut
 META = {"source_id": "pa", "doc_type": "policy", "lob": "personal_auto",
         "modality_mode": "ocr_plus_image"}
 
-#: A line whose schema is still self-contained, in a layout family none of whose
-#: lines has moved yet. gl was this file's until it moved (common model 1.1.0).
-SELF_CONTAINED = "property"
+#: A line whose schema is still self-contained. gl was this file's until it moved
+#: (common model 1.1.0), then property until it moved too (common model 1.4.0).
+SELF_CONTAINED = "equipment_breakdown"
 
 
 def _full(got, *, gold=GOLD, **meta):
@@ -124,7 +124,7 @@ def _env(value):
 
 
 def _additional_coverages(applies):
-    return {"auto": {"additional_coverages": [
+    return {"equipment_breakdown": {"additional_coverages": [
         {"coverage_code": _env("HIRED"), "applies_to": _env(applies[0]), "limit": _env("1000000")},
         {"coverage_code": _env("NONOWN"), "applies_to": _env(applies[1]), "limit": _env("1000000")},
     ]}}
@@ -135,7 +135,7 @@ def test_a_differently_worded_applies_to_does_not_unpair_old_style_rows():
     inside the row, not every row of the table missed."""
     gold = _additional_coverages(["Symbol 8", "Symbol 9"])
     got = _additional_coverages(["Sym. 8 - Hired", "Sym. 9 - Non-Owned"])
-    metrics = _full(got, gold=gold, lob="auto", source_id="x").metrics
+    metrics = _full(got, gold=gold, lob=SELF_CONTAINED, source_id="x").metrics
     assert metrics["list_field_recall"] == 1.0
     assert metrics["field_f1_list_fields"] == 1.0 and metrics["list_field_precision"] == 1.0
 

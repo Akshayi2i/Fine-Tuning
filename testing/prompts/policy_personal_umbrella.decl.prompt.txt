@@ -106,6 +106,7 @@ document - About the document itself.
   issue_date: date - Date the document was issued.
   print_date: date - Date the document was printed.
   mailing_date: date - Date the document was mailed; it starts notice periods on cancellation and nonrenewal notices.
+  copy_designation: text - Which copy of the document this is, where the print says so: 'Agent Copy', 'Insured Copy', 'Mortgagee Copy'.
 carrier - The insurer.
   name: text - The writing company.
   naic_code: naic - NAIC company code of the writing company.
@@ -119,6 +120,7 @@ carrier - The insurer.
   claims_address: Address - Where claims and notices are sent, when it differs from the carrier address.
   admitted_status: admittedstatus - Whether the writing company is admitted or non-admitted in the state.
   financial_rating: text - Financial-strength rating of the writing company as printed, e.g. the A.M. Best rating and size class 'A+ XV'.
+  company_type: text - How the writing company describes itself where the declarations print it beside the company name: 'A Stock Company', 'A Mutual Company', 'A Reciprocal Exchange'.
 producer - The agency or broker of record.
   agency_name: text - Name of the agency or broker of record.
   producer_code: text - Code the carrier assigns to the agency.
@@ -143,6 +145,8 @@ named_insured - The insured. date_of_birth, gender, marital_status and occupatio
   gender: text - Gender as printed.
   marital_status: text - Marital status as printed.
   occupation: text - Occupation as printed.
+  naics_code: text - NAICS industry code of the named insured as printed.
+  sic_code: text - SIC industry code of the named insured as printed.
 policy
   policy_number: text - Policy number.
   prior_policy_number: text - Number of the policy this one renews or replaces.
@@ -156,6 +160,8 @@ policy
   rating_state: state - State the policy is rated in.
   audit_period: text - As printed: Annual, Semi-Annual, Quarterly, Monthly, Non-Auditable.
   subject_to_audit: yesno - Whether the premium is subject to audit.
+  effective_time: text - Time of day coverage starts, as printed (e.g. '12:01 a.m. Standard Time at the address of the named insured').
+  expiration_time: text - Time of day coverage ends, as printed.
 lob_parts: [LobPart] - At least one part: a single-LOB policy has one.
 premium
   total: money - Total premium for the policy.

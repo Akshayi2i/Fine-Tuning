@@ -1,0 +1,205 @@
+# SPEC_21 4.2.4 coverage codes of professional_eo (schema 2.0.0, common model 1.1.0).
+# Built from the single-LOB professional liability declarations of the pl folder (Benchmark, Coterie, CNA,
+# Hartford, Nationwide, Travelers) and the errors and omissions declarations of the eo folder, read in place, and
+# the pre-SPEC_21 professional_eo.json. aliases: coverage, coverage part and extension names as the seeds print
+# them. Codes are LOB-prefixed (PL_, provisional: CHANGE_REQUESTS_professional_eo.md); X_CYBER and X_TERRORISM
+# are the common model's shared codes. A coverage part's limit is per_claim / aggregate as printed; an extension
+# printed with one amount inside the policy limit is a sublimit.
+# carriers: how many of the seed carrier folders print one of the code's names.
+lob: professional_eo
+schema_version: 2.0.0
+common_model_version: 1.1.0
+code_prefix: PL_
+codes:
+- code: PL_PROFESSIONAL
+  name: Professional liability (errors and omissions)
+  aliases:
+  - Professional Liability
+  - (A) Professional Liability
+  - Errors and Omissions
+  - 'Errors & Omissions'
+  - Miscellaneous Professional Services Coverage Section
+  - Specified Professions Professional Liability (Errors And Omissions Coverage Part)
+  - Lawyers Professional Liability Coverage
+  - Professional Services and Network and Information Security Offenses Coverage Limits
+  - LIMIT OF LIABILITY
+  - Limits of Liability
+  - Specified Professions Professional Liability
+  - Limit of Liability
+  - INSURANCE INDUSTRY PROFESSIONAL LIABILITY COVERAGE FOR INSURANCE AGENCIES
+  - ACCOUNTANTS PROFESSIONAL LIABILITY POLICY
+  default_limit_types:
+  - per_claim
+  - aggregate
+  carriers: 9
+- code: PL_INVESTMENT_ADVISOR
+  name: Investment advisor professional liability
+  aliases:
+  - Investment Advisor Professional Liability Coverage Section
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: PL_FUND_MANAGEMENT
+  name: Fund management and professional liability
+  aliases:
+  - Fund Management and Professional Liability Coverage Section
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: PL_INSURANCE_COMPANY
+  name: Insurance company professional liability
+  aliases:
+  - Insurance Company Professional Liability Coverage Section
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: PL_PERSONAL_INJURY
+  name: Personal injury liability
+  aliases:
+  - (B) Personal Injury Liability
+  - Personal Injury Liability
+  default_limit_types:
+  - per_claim
+  carriers: 1
+- code: PL_MEDIA
+  name: Media liability
+  aliases:
+  - Media Liability - Occurrence
+  - Epack Extra Media Liability Occurrence Coverage Part NY
+  - Media Liability
+  default_limit_types:
+  - per_occurrence
+  - aggregate
+  carriers: 1
+- code: PL_POLLUTION
+  name: Pollution incident
+  aliases:
+  - Pollution Incident
+  default_limit_types:
+  - per_claim
+  carriers: 1
+- code: PL_RECTIFICATION
+  name: Rectification expense
+  aliases:
+  - Rectification Expense
+  - Cost of Corrections
+  default_limit_types:
+  - sublimit
+  carriers: 2
+- code: PL_DISCIPLINARY_PROCEEDINGS
+  name: Disciplinary or regulatory proceedings
+  aliases:
+  - Disciplinary Proceeding Extension
+  - Disciplinary Proceeding Coverage
+  - Disciplinary or Regulatory Proceeding Expenses Limits
+  default_limit_types:
+  - sublimit
+  carriers: 2
+- code: PL_SUPPLEMENTARY_PAYMENTS
+  name: 'Supplementary payments (expenses, loss of earnings)'
+  aliases:
+  - Supplementary payments Extension
+  - Supplementary Payments
+  - Expense and Loss of Earnings Reimbursement
+  - Additional Covered Expenses Limit of Liability
+  default_limit_types:
+  - sublimit
+  carriers: 2
+- code: PL_SUBPOENA
+  name: Subpoena assistance
+  aliases:
+  - Subpoena Assistance extension
+  - Subpoena Assistance Coverage
+  default_limit_types:
+  - sublimit
+  carriers: 1
+- code: PL_REGULATORY_PROCEEDINGS
+  name: 'FHA, OSHA and ADA proceedings reimbursement'
+  aliases:
+  - 'FHA, OSHA and ADA Proceedings Reimbursement'
+  default_limit_types:
+  - sublimit
+  carriers: 1
+- code: PL_PRE_CLAIM
+  name: Pre-claim assistance
+  aliases:
+  - Pre Claim Assistance and Prevention Expense
+  - Pre-Claim Expenses
+  default_limit_types:
+  - sublimit
+  carriers: 2
+- code: PL_CRISIS_MANAGEMENT
+  name: Crisis event management
+  aliases:
+  - Crisis Event Management Reimbursement
+  - Crisis Event Expenses Limits
+  default_limit_types:
+  - sublimit
+  carriers: 2
+- code: PL_REPUTATION
+  name: Professional reputation restoration
+  aliases:
+  - Professional Reputation Restoration Expense Coverage
+  default_limit_types:
+  - sublimit
+  carriers: 2
+- code: PL_NONPROFIT_DO
+  name: Non-profit directors and officers
+  aliases:
+  - Non Profit Directors and Officers Coverage
+  default_limit_types:
+  - sublimit
+  carriers: 1
+- code: PL_CLIENT_FEE_ASSISTANCE
+  name: Client entity fee assistance
+  aliases:
+  - Client Entity(ies) Fee Assistance Coverage
+  default_limit_types:
+  - sublimit
+  carriers: 1
+- code: PL_PUBLISHING_NONPROFIT
+  name: Publishing and non-profit services
+  aliases:
+  - Publishing and Non-profit Services Coverage Limits
+  default_limit_types:
+  - per_claim
+  - aggregate
+  carriers: 1
+- code: PL_PRO_BONO
+  name: Pro bono services
+  aliases:
+  - Pro Bono Services Coverage
+  default_limit_types:
+  - sublimit
+  carriers: 2
+- code: PL_RETIRED_REPORTING
+  name: Retired professional reporting
+  aliases:
+  - Retired Professional Reporting Coverage
+  default_limit_types:
+  - sublimit
+  carriers: 2
+- code: X_CYBER
+  name: 'Cyber, privacy and network security liability'
+  aliases:
+  - (C) Personally Identifiable Information Liability
+  - Personally Identifiable Information Liability
+  - Network Intrusion Liability
+  - Sublimit of Liability for BREACH OF PERSONAL DATA
+  - Transmission of Malicious Code Liability Coverage
+  - Unauthorized Access Liability Coverage
+  default_limit_types:
+  - sublimit
+  carriers: 4
+  shared: true
+- code: X_TERRORISM
+  name: Terrorism (TRIA)
+  aliases:
+  - TRIA
+  - Terrorism
+  - TRIA Premium
+  - Terrorism Premium
+  default_limit_types:
+  - other
+  carriers: 3
+  shared: true

@@ -1,0 +1,71 @@
+# SPEC_21 4.2.4 coverage codes of wc (schema 2.2.0, common model 1.1.0; 2.1.0 adds no code: the V3 originals
+# print no coverage the three codes below do not hold).
+# Built from the workers compensation documents of the source-data wc folder, read in place
+# (AmTrust: AmTrust Insurance Company and Technology Insurance Company, Inc.; Hartford: Hartford Accident
+# and Indemnity Company, Property and Casualty Insurance Company of Hartford, Twin City Fire Insurance
+# Company; NYSIF: The State Insurance Fund), and the pre-SPEC_21 wc.json 1.6.0
+# (workers_compensation.item_3_coverage). Seed golds are DRAFT, not signed off.
+# The NCCI Information Page (WC 00 00 01 A) and its carrier equivalents (AmTrust WC 99 00 01 B, the NYSIF
+# Information Page) state the coverage in Item 3: A. Workers Compensation Insurance (Part One, the
+# statutory benefits of the states listed), B. Employers Liability Insurance (Part Two, three limits),
+# C. Other States Insurance (Part Three). Each is one coverage. Part One and Part Three print no limit
+# (Part One is statutory); Part Two prints its three limits as captions over amounts
+# ('Bodily injury by Accident $1,000,000 each accident'), so the captions are aliases of the coverage they
+# limit: L1 codes a printed row by its name (fideon/l1/spec21.py coverage_code_for) and types each limit
+# by the printed qualifier ('each accident' per_accident, 'policy limit' policy_limit, 'each employee'
+# each_employee; fideon/l1/spec21.py printed_limit_types).
+# Not coverages: the terrorism (TRIPRA) and catastrophe charges, the expense constant and the state
+# assessment are premium lines (premium.items[], premium.taxes_fees[]); the experience, schedule and merit
+# rating factors are rating_modifiers[].
+# No document of the folder prints voluntary compensation, United States Longshore and Harbor Workers'
+# coverage, a waiver of subrogation or an alternate employer endorsement; codes for them are added when a
+# seed prints them (a waiver of subrogation would use the shared X_WAIVER_OF_SUBROGATION).
+# carriers: how many of the 3 carrier folders with digital documents (AmTrust, Hartford, NYSIF) print one of
+# the code's names or captions on the Information Page. NYSIF's Information Page states no Item 3 coverage
+# section (no Part Two limits, no Part Three wording), so its seeds carry no coverage.
+# 2.2.0 (26 October 2026, additive): the coverage rows the G1 scanned and hybrid seeds printed that the line had no name or code for. Printed names
+# of an existing concept became aliases; a concept no code covered got a code (LOB prefix; counterpart keys between bopgl and boppr). Nothing is
+# removed or renamed.
+
+lob: wc
+schema_version: 2.2.0
+common_model_version: 1.4.0
+code_prefix: WC_
+codes:
+- code: WC_PART_ONE
+  name: Part One - Workers compensation insurance (the statutory benefits of the states listed in Item 3.A)
+  aliases:
+  - Workers Compensation Insurance
+  - Workers Compensation
+  - Part One
+  - Part One - Workers Compensation Insurance
+  - Coverage A - Workers Compensation
+  default_limit_types: []
+  carriers: 2
+- code: WC_EMPLOYERS_LIABILITY
+  name: 'Part Two - Employers liability insurance (its limits: Bodily injury by Accident each accident, Bodily
+    injury by Disease policy limit, Bodily injury by Disease each employee)'
+  aliases:
+  - Employers Liability Insurance
+  - Employers Liability
+  - Part Two
+  - Part Two - Employers Liability Insurance
+  - Coverage B - Employers Liability
+  - Bodily Injury by Accident
+  - Bodily Injury by Disease
+  # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
+  - Limits Emp Liability
+  default_limit_types:
+  - per_accident
+  - policy_limit
+  - each_employee
+  carriers: 2
+- code: WC_OTHER_STATES
+  name: Part Three - Other states insurance (the states listed in Item 3.C)
+  aliases:
+  - Other States Insurance
+  - Other States
+  - Part Three
+  - Part Three - Other States Insurance
+  default_limit_types: []
+  carriers: 2

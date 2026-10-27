@@ -37,17 +37,27 @@ def test_table_rows_are_matched_by_identifier_not_position():
     assert flat["auto.vehicles[vin=5tfdw5f11kx778685].year"]["parsed"] == 2021
 
 
+#: GOLD on a self-contained line: its vehicles as the farm's scheduled equipment,
+#: each matched on its serial number (commercial auto moved to the common model).
+FARM_GOLD = {
+    "policy": GOLD["policy"],
+    "farm": {"scheduled_farm_equipment": [{"serial_number": vehicle["vin"], "year": vehicle["year"]}
+                                          for vehicle in GOLD["auto"]["vehicles"]]},
+}
+
+
 def test_each_model_value_gets_a_result_against_gold():
     base = {"policy": {"policy_number": _env("PA-1"), "program_name": _env("Preferred")}}   # 1 right, 1 invented
     adapter = {"policy": {"policy_number": _env("PA-1"), "effective_date": _env("01/02/2026")},
-               "auto": {"vehicles": [{"vin": _env("1HGCM82633A004352"), "year": _env(2019)}]}}
-    result = compare(GOLD, base, adapter, lob="commercial_auto")   # self-contained: its auto block
+               "farm": {"scheduled_farm_equipment": [{"serial_number": _env("1HGCM82633A004352"),
+                                                      "year": _env(2019)}]}}
+    result = compare(FARM_GOLD, base, adapter, lob="agriculture_farm")   # self-contained: its farm block
     rows = {row.path: row for row in result.rows}
     assert rows["policy.policy_number"].base_result == "correct"
     assert rows["policy.effective_date"].base_result == "missed"
     assert rows["policy.effective_date"].adapter_result == "wrong"
     assert rows["policy.program_name"].base_result == "invented"
-    assert rows["auto.vehicles[vin=1hgcm82633a004352].year"].change == "fixed"
+    assert rows["farm.scheduled_farm_equipment[serial_number=1hgcm82633a004352].year"].change == "fixed"
     assert (result.base.correct, result.base.missed, result.base.invented) == (1, 5, 1)
     assert (result.adapter.correct, result.adapter.wrong, result.adapter.missed) == (3, 1, 2)
     assert result.adapter.recall == pytest.approx(3 / 6)

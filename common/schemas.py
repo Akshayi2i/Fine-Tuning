@@ -86,6 +86,9 @@ LOB_SCHEMA_ALIASES: dict[str, str] = {
     # The L1 code of commercial general liability, and its SPEC_21 routing key.
     "cgl": "gl",
     "commercial_auto": "auto",
+    # One canonical schema with health since 10 October 2026 (CR-HEALTH-01): the
+    # owner's lob_schema_map.yaml files New York DBL/PFL policies under health.
+    "statutory_disability": "health",
 }
 
 #: Shared definition files, loaded into the registry so ``$ref`` can reach them.
@@ -255,6 +258,29 @@ def _common_model() -> dict[str, Any]:
     return _load_json(COMMON_MODEL)
 
 
+def composes_common(wanted: Any, loaded: Any) -> bool:
+    """Whether an overlay pinned at common model ``wanted`` composes ``loaded``.
+
+    The same version, or an earlier minor of the same major: the common model's
+    change control (``CONTRIBUTING_common.md``, ``tools/check_common_compat.py``)
+    makes a minor release additions only - nothing renamed, removed, retyped or
+    made required - so a line pinned at 1.1.0 composes 1.4.0 unchanged, as the
+    schema owner's own registry composes it. A later version than the one
+    loaded, another major, or an unreadable version is refused. The bundle
+    records the version it was composed with (``BUNDLE_VERSION_KEY``).
+    """
+    def parts(version: Any) -> tuple[int, ...] | None:
+        try:
+            return tuple(int(part) for part in str(version).split("."))
+        except ValueError:
+            return None
+
+    if wanted == loaded:
+        return True
+    want, have = parts(wanted), parts(loaded)
+    return want is not None and have is not None and want[0] == have[0] and want <= have
+
+
 def _bundle(overlay: dict[str, Any], path: Path) -> dict[str, Any]:
     """A SPEC_21 overlay as one self-contained schema.
 
@@ -265,9 +291,10 @@ def _bundle(overlay: dict[str, Any], path: Path) -> dict[str, Any]:
     a reader left out would see a block as a bare pointer and silently skip it.
 
     Refused, never guessed: a reference into any other file, a pointer outside
-    ``$defs``, an overlay written against a different common-model version, or a
-    coverage-code list the line's code file does not name. Each would ship a
-    schema that differs from the one the overlay's author reviewed.
+    ``$defs``, an overlay written against a common-model version this one does
+    not compose (:func:`composes_common`), or a coverage-code list the line's code
+    file does not name. Each would ship a schema that differs from the one the
+    overlay's author reviewed.
 
     Also attached, for the model view to read before ``fideon:`` keys are
     stripped: the version of the pair, and each coverage code's meaning.
@@ -276,7 +303,7 @@ def _bundle(overlay: dict[str, Any], path: Path) -> dict[str, Any]:
 
     common = _common_model()
     wanted, loaded = overlay.get(COMMON_MODEL_VERSION_KEY), common.get(COMMON_MODEL_VERSION_KEY)
-    if wanted != loaded:
+    if not composes_common(wanted, loaded):
         raise SchemaError(
             f"{path.name} composes common model {wanted}, but {COMMON_MODEL} is {loaded}"
         )

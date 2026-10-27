@@ -1,0 +1,397 @@
+# SPEC_21 4.2.4 coverage codes of property (schema 2.0.0, common model 1.1.0).
+# Built from the 6 native single-LOB property seed documents of 2 carriers (Leatherstocking Cooperative Insurance
+# Company 5: Businessowner's Policy SF-10P x4, Commercial Fire and Liability x1; Merchants Mutual Insurance Group 1:
+# businessowners declarations), read in place, and the pre-SPEC_21 property.json.
+# aliases: coverage names as the seeds print them (whitespace collapsed; a wrapped name joined with one space).
+# L1 codes a printed row by its name (fideon/l1/spec21.py coverage_code_for). Codes are LOB-prefixed (PR_, the
+# lob_schema_map.yaml prefix); a coverage the common model shares across lines uses its X_ code; shared: true marks
+# those. Liability rows printed beside the property ones are coded here under PR_ codes until shared codes exist
+# (CR-PROP-02). Rows that print an exclusion or a credit against a form are not coverages: their premium is
+# forms_and_endorsements[].premium.
+# carriers: how many of the 2 native seed carriers print one of the code's names.
+lob: property
+schema_version: 2.0.0
+common_model_version: 1.1.0
+code_prefix: PR_
+codes:
+- code: PR_BUILDING
+  name: Building
+  aliases:
+  - Cov. A - Building
+  - Coverage A - Building - Fire
+  - Building
+  - Coverage A - Building
+  - Building Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_BUILDING_EC
+  name: Building - extended coverage perils
+  aliases:
+  - Coverage A - Building - Extended Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_BPP
+  name: Business personal property
+  aliases:
+  - Business Personal Property - Replacement Cost
+  - Business Personal Property
+  - Coverage B - Business Property
+  - Cov B - Business Property
+  - Coverage B Business Property
+  - Contents Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_LOSS_OF_INCOME_LIMIT
+  name: Loss of income included limit (SF-312A)
+  aliases:
+  - SF-312A - Loss of Income Included Limit
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_LOSS_OF_INCOME
+  name: Loss of income / business income and extra expense
+  aliases:
+  - Loss of Income - 12 Months Included
+  - Business Income and Extra Expense
+  - Loss of Income
+  - Loss of Earnings
+  default_limit_types:
+  - other
+  carriers: 2
+- code: PR_LOSS_OF_INCOME_DEPENDENT
+  name: Loss of income / business income from dependent property
+  aliases:
+  - Loss of Income From Dependent Property
+  - Business Income From Dependent Properties
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+- code: PR_COMPUTER_INTERRUPTION
+  name: Business income and extra expense - interruption of computers
+  aliases:
+  - Business Income and Extra Expense Interruption of Computers
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_ACCOUNTS_RECEIVABLE
+  name: Accounts receivable
+  aliases:
+  - Accounts Receivable
+  default_limit_types:
+  - per_occurrence
+  - sublimit
+  carriers: 2
+- code: PR_ADDITIONAL_EXPENSE
+  name: Additional expense
+  aliases:
+  - Additional Expense
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: X_ORDINANCE_LAW
+  name: Ordinance or law
+  aliases:
+  - Building Ordinance or Law Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  shared: true
+- code: PR_DEBRIS_REMOVAL
+  name: Debris removal
+  aliases:
+  - Debris Removal (Refer to SF-311P)
+  - Debris Removal
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_EMPLOYEE_DISHONESTY
+  name: Employee dishonesty
+  aliases:
+  - Employee Dishonesty
+  - Employee Dishonesty - Per Occurrence
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+- code: PR_SIGNS
+  name: Exterior / outdoor signs
+  aliases:
+  - Exterior Signs
+  - Outdoor Signs - $250 Deductible - Per Occurence
+  - Outdoor Signs
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+- code: PR_MONEY_SECURITIES
+  name: Money and securities
+  aliases:
+  - Money and Securities - On Premise
+  - Money and Securities - Off Premise
+  - Money and Securities and Credit Card Slips
+  default_limit_types:
+  - per_occurrence
+  - sublimit
+  carriers: 2
+- code: PR_NEWLY_ACQUIRED_BUILDING
+  name: Newly acquired or constructed property - building
+  aliases:
+  - Building - Newly Acquired or Constructed Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_NEWLY_ACQUIRED_BPP
+  name: Newly acquired or constructed property - business personal property
+  aliases:
+  - Business Personal Property - Newly Acquired or Constructed Property
+  - Constructed Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_PERSONAL_ARTICLES
+  name: Personal articles
+  aliases:
+  - Personal Articles
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_POLLUTANT_CLEANUP
+  name: Pollutant cleanup and removal
+  aliases:
+  - Pollutant Cleanup and Removal
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_SPOILAGE
+  name: Refrigerated property / spoilage
+  aliases:
+  - Refrigerated Property
+  - Spoilage
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+- code: PR_SPRINKLER_LEAKAGE
+  name: Sprinkler leakage
+  aliases:
+  - Sprinkler Leakage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_TRANSPORTATION_BPP
+  name: Transportation - business property
+  aliases:
+  - Transportation - Business Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_TRANSPORTATION_TOOLS
+  name: Transportation - tools and equipment
+  aliases:
+  - Transportation - Tools and Equipment
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_VALUABLE_PAPERS
+  name: Valuable papers and records
+  aliases:
+  - Valuable Papers and Records
+  - Valuable Papers
+  default_limit_types:
+  - per_occurrence
+  - sublimit
+  carriers: 2
+- code: PR_PROPERTY_AWAY
+  name: Property while away from insured premises
+  aliases:
+  - While Away From Insured Premises
+  - Business Property Off Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_FINE_ARTS
+  name: Fine arts
+  aliases:
+  - Fine Arts - $250 Deductible
+  - Fine Arts
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_FORGERY
+  name: Forgery or alteration
+  aliases:
+  - Forgery or Alteration
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_UTILITY_SERVICE
+  name: Utility service - direct damage and time element
+  aliases:
+  - Utility Service
+  - Utility Services Interruption - For Time Element Coverages Including Transmission Lines
+  default_limit_types:
+  - per_occurrence
+  - sublimit
+  carriers: 1
+- code: PR_COMPUTER_FRAUD
+  name: Computer fraud and funds transfer fraud
+  aliases:
+  - Computer Fraud and Funds Transfer Fraud
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_COUNTERFEIT_MONEY
+  name: Money orders and counterfeit money
+  aliases:
+  - Money Orders and Counterfeit Money
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_AUTO_INCREASE
+  name: Automatic increase in the building limit
+  aliases:
+  - 'SM-26 Automatic Increase, RC'
+  default_limit_types:
+  - other
+  carriers: 1
+- code: X_EPL
+  name: Employment practices liability (optional liability coverage)
+  aliases:
+  - Employment Practices Liability
+  default_limit_types:
+  - per_claim
+  - aggregate
+  carriers: 1
+  shared: true
+- code: PR_REPLACEMENT_COST
+  name: Replacement cost provision
+  aliases:
+  - SF-27B Replacement Cost Provision
+  default_limit_types:
+  - other
+  carriers: 1
+- code: X_EQUIPMENT_BREAKDOWN
+  name: Equipment breakdown
+  aliases:
+  - Equipment Breakdown
+  - Equipment Breakdown Enhancement Endorsement
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  shared: true
+- code: PR_LIABILITY
+  name: Business liability - bodily injury and property damage
+  aliases:
+  - Coverage L - Liability
+  - Coverage L - Liability (Each Occurrence)
+  - Cov. L - Bodily Injury and Property Damage
+  - Coverage L - Liability (Aggregate)
+  - Business Liability/Occurrence
+  - General Aggregate Limit (Other than Products-Completed Operations)
+  - Business Liability Limits
+  default_limit_types:
+  - per_occurrence
+  - aggregate
+  carriers: 2
+- code: PR_PRODUCTS_COMPLETED_OPS
+  name: Products-completed operations
+  aliases:
+  - Cov. N - Products/Completed Operations (Aggregate)
+  - Cov. N - Products/Completed Operations
+  - Products-Completed Operations Aggregate
+  default_limit_types:
+  - products_completed_ops_aggregate
+  carriers: 2
+- code: PR_PERSONAL_INJURY
+  name: Personal and advertising injury
+  aliases:
+  - LS-49 Personal Injury Liability
+  - Personal and Advertising Injury
+  - Personal and Advertising Injury Liability (Refer to SF-311P)
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+- code: X_MED_PAY
+  name: Medical payments / medical expense
+  aliases:
+  - Cov. M - Medical Payments (Each Person) - Enhanced
+  - Cov. M - Medical Payments (Each Accident) - Enhanced
+  - Coverage M - Med Pay (Each Person)
+  - Coverage M - Med Pay (Each Accident)
+  - Medical Expense (Any One Person)
+  - Coverage M - Med Pay
+  default_limit_types:
+  - per_person
+  - per_accident
+  carriers: 2
+  shared: true
+- code: PR_FIRE_LEGAL_LIABILITY
+  name: Fire legal liability / damage to premises rented
+  aliases:
+  - Fire Legal Liability - Enhanced
+  - Fire Legal Liability Limit (Damage to Premises Rented to You)
+  - Fire Legal Liability
+  default_limit_types:
+  - per_location
+  carriers: 2
+- code: X_CYBER
+  name: Cyber insurance (optional liability coverage)
+  aliases:
+  - Cyber Insurance
+  default_limit_types:
+  - aggregate
+  carriers: 1
+  shared: true
+- code: X_HIRED_NONOWNED_AUTO
+  name: Hired and non-owned auto liability
+  aliases:
+  - 'Hired Auto & Non-Owned Auto Liability'
+  default_limit_types:
+  - per_occurrence
+  - aggregate
+  carriers: 1
+  shared: true
+- code: PR_LOSS_OF_RENTS
+  name: Loss of rents
+  aliases:
+  - Loss Of Rents
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_CONDOMINIUM_LOSS
+  name: Condominium loss
+  aliases:
+  - Condominium Loss
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_CRAFTS_PAK_BASIC
+  name: Contractors (Crafts Pak) basic coverage
+  aliases:
+  - Craft12 - Basic Coverage
+  default_limit_types:
+  - other
+  carriers: 1
+- code: PR_CREDIT_CARD_FORGERY
+  name: Business credit card, debit card, forgery and counterfeit money
+  aliases:
+  - Business Credit Card, Debit Card, Forgery and Counterfeit Money - Per Occurrence
+  - Business Credit Card, Debit Card, Forgery And Counterfeit Money - Per Policy Period
+  default_limit_types:
+  - per_occurrence
+  - aggregate
+  carriers: 1
+- code: PR_PROPERTY_OF_OTHERS
+  name: Business property of others and customer goods
+  aliases:
+  - Business Property of Others And Customer Goods
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_TOOLS_EQUIPMENT
+  name: Tools and equipment off premises
+  aliases:
+  - Tools & Equipment Off Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1

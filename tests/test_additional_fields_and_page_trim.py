@@ -27,9 +27,10 @@ def _plan(pages, *, single=False, group="decl"):
 
 
 #: A self-contained line: LABEL's shape, and the path that keeps additional_fields
-#: entries as written (a common-model line, such as general liability from
-#: gl.json 3.0.0, envelopes their values; tests/test_schema2_*.py pin that).
-LINE = "property"
+#: entries as written (a common-model line, such as general liability or, since
+#: property.json 2.0.0, property, envelopes their values; tests/test_schema2_*.py
+#: pin that).
+LINE = "equipment_breakdown"
 
 LABEL = {
     "carrier": {"company_name": _fv("Granite Mutual", [1, 2, 9, 30])},

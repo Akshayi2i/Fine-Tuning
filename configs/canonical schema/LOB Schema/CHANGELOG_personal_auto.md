@@ -1,5 +1,21 @@
 # Changelog - personal_auto canonical schema
 
+## Coverage code aliases - 15 October 2026 (no version change)
+
+Printed names added as aliases in `personal_auto.coverage_codes.yaml`, as agency-management-system printouts (`VEHICLE COVERAGES` grid; Allstate and NYCM paper) print them, each under the code the line's draft golds use: `Personal Injury Protection/Basic Economic Loss`, `Extended PIP`, `Work Loss Benefit` (`X_PIP`); `Comprehensive (Full Glass applies)` (`X_COMPREHENSIVE`); `Collision Coverage`, `Collision Coverage (Full Glass applies)` (`X_COLLISION`); `Automobile Death Indemnity Benefits`, `Death Benefits` (`PA_ADDITIONAL_DEATH_BENEFITS`); `Apip - Other Expense` (`PA_ADDITIONAL_PIP`); `Supplementary Uninsured Motorist` (`X_UIM`); `Towing & Labor`, `Travel Protection - Roadside` (`X_TOWING`); `Travel Protection - Transportation Expenses` (`X_RENTAL`); `Travel Protection - Trip Interruption` (`PA_TRIP_INTERRUPTION`). No code, field or default limit type changes; the schema and its prompt schema are unchanged. Each alias names one code only.
+
+## Coverage code alias - 14 October 2026 (no version change)
+
+`Optional Basic Economical Loss` added as an alias of `PA_OPTIONAL_BASIC_ECONOMIC_LOSS`, as Travelers' automobile policy continuation declarations (form PL-7782, Item 4, coverage W) print it. No code, field or default limit type changes; the schema and its prompt schema are unchanged. The alias names one code only.
+
+## Coverage code aliases - 13 October 2026 (no version change)
+
+Three printed names added as aliases in `personal_auto.coverage_codes.yaml`, as NYCM's automobile endorsement summary (form NYC 79A) prints them in its `VEHICLE COVERAGES` grid: `FULL GLASS` (`PA_FULL_GLASS`), `OEM` (`PA_OEM_PARTS`) and `PERSONAL ARTICLES` (`PA_PERSONAL_ARTICLES`). No code, field or default limit type changes; the schema (`fideon:schema_version` 1.0.0) and its prompt schema are unchanged. Each alias names one code only (no clash with another code of the line or a shared `X_` code).
+
+## Common model 1.1.0 - 09 October 2026 (no version change)
+
+Re-pinned to `common_model.json` 1.1.0: `fideon:common_model_version` "1.0.0" -> "1.1.0". No field change: `fideon:schema_version` stays 1.0.0, and the prompt schema (`config/canonical_schema/prompt/policy_check/personal_auto.prompt.json`) is unchanged by the pin. Common model 1.x is additive (SPEC_21 4.2.7), so the schema composes 1.1.0 as it composed 1.0.0. The fine-tuning repository's copy of this schema carries the same pin since its commit c8df4bb (9 October 2026); with it the two files are byte-identical again, and both repositories' loaders compose it.
+
 ## 1.0.0 - 05 October 2026 (SPEC_21 Phase 2; awaiting project-owner approval)
 
 First SPEC_21 schema of the line. It replaces the pre-SPEC_21 `personal_auto.json` (1.5.0, pre-SPEC_21), which was generated from carrier-shaped blocks and did not compose the common model; that file is not carried over (SPEC_21 4.1).

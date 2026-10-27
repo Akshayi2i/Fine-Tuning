@@ -43,10 +43,10 @@ def test_they_are_not_scored_on_either_side():
 
 
 #: A line still on a self-contained schema, which declares these two as
-#: envelopes. A common-model line - general liability and the fallback among
-#: them since common model 1.1.0 - declares them as plain values
+#: envelopes. A common-model line - general liability, property and the
+#: fallback among them - declares them as plain values
 #: (tests/test_schema2_serving.py).
-SELF_CONTAINED = "property"
+SELF_CONTAINED = "equipment_breakdown"
 
 
 def test_serving_fills_them_from_the_request_into_a_valid_canonical_output():

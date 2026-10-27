@@ -21,6 +21,11 @@ from data_pipeline.labeling.export_golden_labels import (
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
+#: A line whose schema is still self-contained, the shape _policy_label is
+#: written in. workers_comp, property, flood and cyber moved onto the common
+#: model, so a label of theirs is in _common_model_label's shape now.
+LINE = "equipment_breakdown"
+
 
 @pytest.fixture
 def client() -> BlobClient:
@@ -109,7 +114,7 @@ def _fixture_documents():
 # --------------------------------------------------------------------------
 
 def test_valid_label_passes():
-    validate_golden_label(_policy_label(), "policy", lob="workers_comp")
+    validate_golden_label(_policy_label(), "policy", lob=LINE)
     validate_golden_label(_flat_label(), "lossrun")
 
 
@@ -157,7 +162,7 @@ def test_a_canonical_policy_label_needs_no_top_level_line_of_business():
     label cannot carry one. Its line travels in the metadata instead."""
     label = _policy_label()
     assert "line_of_business" not in label
-    validate_golden_label(label, "policy", lob="workers_comp")
+    validate_golden_label(label, "policy", lob=LINE)
     # An unknown line: the fallback schema, on the common model since 1.1.0.
     fallback = _common_model_label()
     assert "line_of_business" not in fallback
@@ -170,16 +175,18 @@ def test_a_canonical_policy_label_with_a_line_that_has_no_schema_is_rejected():
 
 
 @pytest.mark.parametrize("lob,label", [
-    ("flood", _policy_label()),
-    ("gl", _common_model_label("gl")),                  # a common-model overlay since 1.1.0
-    ("cyber", _policy_label()),
-    ("workers_comp", _policy_label()),
+    ("flood", _common_model_label("flood")),            # common-model overlays since 1.1.0
+    ("gl", _common_model_label("gl")),
+    ("cyber", _common_model_label("cyber")),
+    ("workers_comp", _common_model_label("wc")),
+    (LINE, _policy_label()),                            # a line still self-contained
     (["homeowners", "personal_auto"], _common_model_label()),  # several lines: the fallback
-], ids=["flood", "gl", "cyber", "workers_comp", "homeowners+personal_auto"])
+], ids=["flood", "gl", "cyber", "workers_comp", LINE, "homeowners+personal_auto"])
 def test_a_policy_line_is_any_line_with_a_canonical_schema(lob, label):
     """A policy's line names its schema. The LOB enum (13 values) rejected flood,
     cyber and the schema spellings (gl, wc), so real labels failed export. Each
-    label is in its schema's shape: gl and the fallback compose the common model."""
+    label is in its schema's shape: flood, gl, cyber, wc and the fallback compose
+    the common model; a self-contained line keeps its own."""
     validate_golden_label(label, "policy", lob=lob)
 
 
@@ -192,7 +199,7 @@ def test_a_flat_label_under_a_canonical_policy_is_rejected():
 
 def test_a_canonical_provenance_names_a_nested_path():
     validate_golden_label(
-        _policy_label(), "policy", lob="workers_comp",
+        _policy_label(), "policy", lob=LINE,
         field_provenance={"named_insured.primary_name": "Applicant"},
     )
 
@@ -202,7 +209,7 @@ def test_a_canonical_provenance_naming_a_confusable_is_rejected():
     checked by its leaf — and the confusable check still bites."""
     with pytest.raises(LabelValidationError, match="registered CONFUSABLE"):
         validate_golden_label(
-            _policy_label(), "policy", lob="workers_comp",
+            _policy_label(), "policy", lob=LINE,
             field_provenance={"named_insured.primary_name": "Certificate Holder"},
         )
 
@@ -264,7 +271,7 @@ def test_a_draft_accepted_without_review_is_refused_after_day_zero_too(client, m
     monkeypatch.setattr(E, "review_requirement", lambda *a, **k: "confidence_routed")
     with pytest.raises(LabelValidationError, match="no review record"):
         export_golden_label(_policy_label(), "policy_0001", "policy", client,
-                            reviewer_id="alice", accepted_without_review=True, lob="property")
+                            reviewer_id="alice", accepted_without_review=True, lob=LINE)
     assert not client.exists(paths.golden_label("policy", "policy_0001"))
 
 
@@ -272,7 +279,7 @@ def test_a_draft_accepted_without_review_is_refused_after_day_zero_too(client, m
 def test_an_export_naming_no_reviewer_writes_nothing(client, reviewer):
     with pytest.raises(LabelValidationError, match="reviewer_id"):
         export_golden_label(_policy_label(), "policy_0001", "policy", client, reviewer_id=reviewer,
-                            lob="property")
+                            lob=LINE)
     assert not client.exists(paths.golden_label("policy", "policy_0001"))
 
 
@@ -281,7 +288,7 @@ def test_export_writes_label_and_provenance(client):
         _policy_label(), "policy_0001", "policy", client,
         reviewer_id="alice", draft_backend="base_qwen3vl",
         field_provenance={"named_insured.primary_name": "Applicant"},
-        lob="workers_comp",
+        lob=LINE,
     )
     assert client.exists(paths.golden_label("policy", "policy_0001"))
 
@@ -291,7 +298,7 @@ def test_export_writes_label_and_provenance(client):
     assert meta["field_provenance"]["named_insured.primary_name"] == "Applicant"
     assert meta["review_requirement"] == "full"
     # Where the dataset build reads the line from to select the schema.
-    assert meta["lob"] == "workers_comp"
+    assert meta["lob"] == LINE
 
 
 def test_a_relabel_keeps_what_the_delivery_recorded(client):
@@ -312,7 +319,7 @@ def test_a_relabel_keeps_what_the_delivery_recorded(client):
                             "unprinted_values": ["policy.policy_term_months"]})
 
     export_golden_label(_policy_label(), "policy_0001", "policy", client, reviewer_id="alice",
-                        lob="property")
+                        lob=LINE)
     meta = client.read_json(key)
     assert {k: meta[k] for k in DELIVERY_KEYS} == delivered
     assert meta["reviewer_id"] == "alice" and meta["review_date"] != "2026-10-01"
@@ -322,7 +329,7 @@ def test_a_relabel_keeps_what_the_delivery_recorded(client):
 def test_labeled_source_ids_are_listed(client):
     for source_id in ("policy_0001", "policy_0002"):
         export_golden_label(_policy_label(), source_id, "policy", client, reviewer_id="alice",
-                            lob="property")
+                            lob=LINE)
     assert list_labeled_source_ids(client, "policy") == ["policy_0001", "policy_0002"]
 
 

@@ -1,0 +1,68 @@
+# SPEC_21 4.2.4 coverage codes of umbrella (schema 2.0.0, common model 1.1.0).
+# Built from the single-LOB commercial umbrella / excess documents of the cumbr folder (Utica First 2, CNA 1; Sutton
+# is a scan), read in place, and the pre-SPEC_21 umbrella.json. aliases: layer names as the seeds print them. Codes
+# are LOB-prefixed (UM_); X_TERRORISM is the common model's shared code. The layer's limits are per_occurrence /
+# aggregate / products_completed_ops_aggregate / policy_limit as printed; scheduled underlying policies are
+# underlying_insurance[] elements, not coverages; their coverage_code is one of the UM_UNDERLYING_ codes.
+# carriers: how many of the seed carrier folders print one of the code's names.
+lob: umbrella
+schema_version: 2.0.0
+common_model_version: 1.1.0
+code_prefix: UM_
+codes:
+- code: UM_UMBRELLA_LIABILITY
+  name: Commercial umbrella / excess liability layer
+  aliases:
+  - Commercial Umbrella/Excess Liability
+  - Commercial Umbrella
+  - Commercial Excess Liability
+  - POLICY LIMIT
+  - LIMITS OF INSURANCE
+  - Umbrella Liability
+  default_limit_types:
+  - per_occurrence
+  - aggregate
+  carriers: 2
+- code: UM_EXCESS_LIABILITY
+  name: Follow-form excess layer (over a followed policy)
+  aliases:
+  - Excess Insurance Policy
+  - EXCESS INSURANCE POLICY
+  - Limit of Liability
+  - Excess Liability
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: UM_UNDERLYING_GENERAL_LIABILITY
+  name: 'Underlying general liability (an underlying_insurance[] coverage_code)'
+  aliases:
+  - General Liability
+  default_limit_types:
+  - per_occurrence
+  - aggregate
+  carriers: 1
+- code: UM_UNDERLYING_FOLLOWED
+  name: 'Underlying followed policy (an underlying_insurance[] coverage_code)'
+  aliases:
+  - Followed Policy
+  default_limit_types:
+  - policy_limit
+  carriers: 1
+- code: UM_UNDERLYING_LAYER
+  name: 'Underlying excess layer (an underlying_insurance[] coverage_code)'
+  aliases:
+  - Underlying Excess Policies
+  - UNDERLYING EXCESS POLICY SCHEDULE
+  default_limit_types:
+  - policy_limit
+  carriers: 1
+- code: X_TERRORISM
+  name: Terrorism (TRIA)
+  aliases:
+  - Certified Terrorism Loss
+  - Terrorism
+  - TRIA
+  default_limit_types:
+  - other
+  carriers: 2
+  shared: true

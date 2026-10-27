@@ -28,10 +28,12 @@ def _plan(group, pages, index=0):
     return PolicyWindowPlan(group, index, tuple(pages), single=False)
 
 
-AUTO = {
-    "policy": {"policy_number": _env("PA-1", 1)},
-    "auto": {"vehicles": [{
-        "vin": _env("1HGCM82633A004352", 2),
+#: A self-contained line's block (auto moved to the common model): a location
+#: row, identified by its number, holding its own table of coverages.
+PACKAGE = {
+    "policy": {"policy_number": _env("CPP-1", 1)},
+    "commercial_package": {"per_location_schedule": [{
+        "location_number": _env("1", 2),
         "coverages": [
             # The label lists the premium on every page a "1.0" is printed.
             {"coverage_name": _env("Medical Payments", 2), "premium": _env(1.0, 1, 2, 5, 9)},
@@ -42,14 +44,14 @@ AUTO = {
 
 def test_an_orphan_fragment_is_not_taught():
     report = TargetReport()
-    far = window_target(AUTO, "commercial_auto", _plan("lineblk", [9], index=1), report)
-    assert not far.get("auto", {}).get("vehicles"), far
+    far = window_target(PACKAGE, "commercial_package", _plan("lineblk", [9], index=1), report)
+    assert not far.get("commercial_package", {}).get("per_location_schedule"), far
     assert any("coverages[0]" in path for path in report.orphaned)
 
 
 def test_the_window_showing_the_identifier_carries_the_whole_row():
-    near = window_target(AUTO, "commercial_auto", _plan("lineblk", [2]))
-    (coverage,) = near["auto"]["vehicles"][0]["coverages"]
+    near = window_target(PACKAGE, "commercial_package", _plan("lineblk", [2]))
+    (coverage,) = near["commercial_package"]["per_location_schedule"][0]["coverages"]
     assert coverage["coverage_name"]["raw"] == "Medical Payments" and coverage["premium"]["parsed"] == 1.0
 
 
@@ -119,8 +121,8 @@ def test_a_value_is_matched_on_word_boundaries():
 def test_the_golden_eval_reports_the_windowing_ceiling():
     from evaluation.golden_eval import GoldenDocument, windowing_ceiling
 
-    doc = GoldenDocument(source_id="p1", doc_type="policy", golden=AUTO, image_keys=["a", "b"],
-                         page_texts={1: "", 2: ""}, acord_form=None, lob="commercial_auto",
+    doc = GoldenDocument(source_id="p1", doc_type="policy", golden=PACKAGE, image_keys=["a", "b"],
+                         page_texts={1: "", 2: ""}, acord_form=None, lob="commercial_package",
                          is_scanned=False, synthetic=False)
     section = windowing_ceiling([doc])
     assert section["documents"] == 1 and section["value_recall"] == 1.0

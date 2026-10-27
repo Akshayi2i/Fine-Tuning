@@ -259,10 +259,21 @@ def old_style_fingerprints() -> dict[str, dict[str, str]]:
 
 
 def write_fingerprints(path: Path = FINGERPRINTS_PATH) -> Path:
+    """Re-freeze the fingerprints, rendered in the standard format profile: the one
+    tests/test_old_style_prompts_frozen.py compares them in, whatever profile
+    configs/shared/format.yaml ships (the fast one writes a policy window another way)."""
     import json
 
+    import common.config
+
+    shipped = common.config.shared_format_config
+    common.config.shared_format_config = lambda: {"profile": "standard"}
+    try:
+        fingerprints = old_style_fingerprints()
+    finally:
+        common.config.shared_format_config = shipped
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(old_style_fingerprints(), indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(fingerprints, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
 

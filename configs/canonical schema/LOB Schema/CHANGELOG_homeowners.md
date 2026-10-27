@@ -1,5 +1,17 @@
 # Changelog - homeowners canonical schema
 
+## Aliases - 14 October 2026 (Madison Mutual homeowners declarations; no field change)
+
+`homeowners.coverage_codes.yaml`: one alias, the coverage name as the Madison Mutual Insurance Company homeowners declarations print it (read by `madison_mutual/homeowners.yaml`, GAP-A): `HO_CREDIT_CARD_FORGERY` + `HO 2530 01 06 Incidental Property Coverages - Higher Limits - Credit Card, Electronic Fund Transfer Card Or Access Device, Forgery And Counterfeit Money` (the form's coverage row, its three printed lines joined). No new code; `homeowners.json` and the prompt schema are unchanged (`tools/build_prompt_schemas.py --check`: homeowners current).
+
+## Aliases - 12 October 2026 (Leatherstocking Landlords Package declarations; no field change)
+
+`homeowners.coverage_codes.yaml`: two aliases, the coverage names as the Leatherstocking Cooperative Insurance Company Landlords Package declarations print them (read by `leatherstocking/homeowners.yaml`, CR-PROP-01): `X_LOSS_OF_USE` + `Increased Limit (Coverage D)` (the row that raises Coverage D's limit) and `X_WATER_BACKUP` + `ML-WD Water Damage` (the water-damage endorsement row of the coverage schedule). No new code; `homeowners.json` and the prompt schema are unchanged (`tools/build_prompt_schemas.py --check`: current).
+
+## Common model 1.1.0 - 09 October 2026 (no version change)
+
+Re-pinned to `common_model.json` 1.1.0: `fideon:common_model_version` "1.0.0" -> "1.1.0". No field change: `fideon:schema_version` stays 1.0.0, and the prompt schema (`config/canonical_schema/prompt/policy_check/homeowners.prompt.json`) is unchanged by the pin. Common model 1.x is additive (SPEC_21 4.2.7), so the schema composes 1.1.0 as it composed 1.0.0. The fine-tuning repository's copy of this schema carries the same pin since its commit c8df4bb (9 October 2026); with it the two files are byte-identical again, and both repositories' loaders compose it.
+
 ## 1.0.0 - 05 October 2026 (SPEC_21 Phase 2; awaiting project-owner approval)
 
 First SPEC_21 schema of the line. It replaces the pre-SPEC_21 `homeowners.json` (1.6.0, pre-SPEC_21), which was generated from carrier-shaped blocks and did not compose the common model; that file is not carried over (SPEC_21 4.1).

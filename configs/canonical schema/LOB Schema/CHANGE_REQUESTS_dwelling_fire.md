@@ -7,3 +7,6 @@ Dryden Mutual and Leatherstocking print a total annual premium per location ('To
 
 **CR-DF-02. Building protective devices and alarms.**
 Dryden Mutual ('Protective Devices', 'Type of Device', 'Burglar Alarm', 'Fire Alarm', 'Sprinklers') and Leatherstocking ('LOCAL FIRE ALARM') print alarms per building; `buildings[].protective_devices[]` and `sprinklered` exist, but the seeds also print a device *type* and a credit; no change is asked for the fields, only confirmation that the credit belongs in `premium.discounts[]` and the device in `buildings[].protective_devices[]`.
+
+**CR-DF-03. Training parity for the coverage codes file (fine-tuning repository owner).**
+`dwelling_fire.coverage_codes.yaml` changed `default_limit_types` of `DF_COV_L`, `X_LOSS_OF_USE` and `X_MED_PAY` on 10 October 2026 (CHANGELOG_dwelling_fire.md). The fine-tuning repository's copy (`configs/canonical schema/LOB Schema/dwelling_fire.coverage_codes.yaml`) was byte-identical before and is now three lines behind. Neither `dwelling_fire.json` nor its prompt schema changed, and no parity test covers dwelling_fire. Request: take the same three lines into the fine-tuning copy (or confirm the fine-tuning side does not read `default_limit_types`, in which case the copies may differ in that field only).

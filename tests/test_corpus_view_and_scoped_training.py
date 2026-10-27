@@ -121,15 +121,15 @@ def test_the_view_trains_single_line_policies_only(client):
 
 def test_a_run_refuses_a_view_whose_documents_read_two_output_shapes():
     """Judged on the documents the view trains, each by the schema it is read
-    against: homeowners and a package (_fallback.json) are one shape, workers'
-    comp alone is another."""
+    against: homeowners and a package (_fallback.json) are one shape, equipment
+    breakdown alone (still a self-contained schema file) is another."""
     from common.adapter import AdapterError, assert_one_output_shape
     from training.corpus_view import CorpusView, trained_lobs
 
     view = CorpusView(examples_by_line={"train": {"homeowners": {}, "auto,wc": {}, "unknown": {}}})
     assert trained_lobs(view) == ["homeowners", ["auto", "wc"], None]
     assert_one_output_shape(trained_lobs(view))
-    view.examples_by_line["train"]["wc"] = {}
+    view.examples_by_line["train"]["equipment_breakdown"] = {}
     with pytest.raises(AdapterError, match="two output shapes"):
         assert_one_output_shape(trained_lobs(view))
 

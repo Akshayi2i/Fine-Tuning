@@ -1,0 +1,69 @@
+# SPEC_21 4.2.4 coverage codes of inland_marine (schema 2.0.0, common model 1.1.0).
+# Built from the 10 single-LOB inland marine seed documents of 4 carrier folders (Hartford 3, Leatherstocking
+# Cooperative Insurance Company 4, McNeil & Company 1, RT Specialty 2), read in place, and the pre-SPEC_21
+# inland_marine.json. aliases: coverage names as the seeds print them. Codes are LOB-prefixed (IM_); X_TERRORISM
+# is the common model's shared code. Each scheduled article is a scheduled_items[] element; the coverage carries
+# the schedule's total (limit_type scheduled_total) or its maximum limit.
+# carriers: how many of the 4 seed carrier folders print one of the code's names.
+lob: inland_marine
+schema_version: 2.0.0
+common_model_version: 1.1.0
+code_prefix: IM_
+codes:
+- code: IM_COMMERCIAL_ARTICLES
+  name: 'Commercial articles (cameras, musical instruments)'
+  aliases:
+  - COMMERCIAL ARTICLES - CAMERAS
+  - COMMERCIAL ARTICLES-CAMERA SCHEDULE
+  - COMMERCIAL ARTICLES - CAMERA SCHEDULE
+  - Commercial Articles
+  default_limit_types:
+  - scheduled_total
+  carriers: 1
+- code: IM_CONTRACTORS_EQUIPMENT
+  name: Contractors equipment
+  aliases:
+  - MR-72 Contractors Equipment
+  - Contractors Equipment
+  - Tools Equipment Coverage
+  default_limit_types:
+  - scheduled_total
+  carriers: 1
+- code: IM_EMERGENCY_APPARATUS
+  name: Emergency apparatus
+  aliases:
+  - Emergency Apparatus
+  default_limit_types:
+  - scheduled_total
+  carriers: 1
+- code: IM_PORTABLE_EQUIPMENT
+  name: Portable equipment
+  aliases:
+  - Portable Equipment
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: IM_OTHER_PROPERTY
+  name: Other property
+  aliases:
+  - Other Property
+  default_limit_types:
+  - scheduled_total
+  carriers: 1
+- code: IM_SCHEDULED_EQUIPMENT
+  name: Scheduled equipment (scheduled property)
+  aliases:
+  - Scheduled Property
+  - Equipment
+  - Inland Marine - Commercial
+  default_limit_types:
+  - scheduled_total
+  carriers: 1
+- code: X_TERRORISM
+  name: Terrorism (TRIA)
+  aliases:
+  - TRIA
+  default_limit_types:
+  - other
+  carriers: 1
+  shared: true

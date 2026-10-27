@@ -23,6 +23,9 @@ from common.schema_sections import (
     sections_for,
 )
 
+#: The common model's version, which every overlay bundle's version carries.
+_COMMON_VERSION = json.loads(schemas.COMMON_MODEL.read_text(encoding="utf-8"))[schemas.COMMON_MODEL_VERSION_KEY]
+
 
 def _registered_lobs() -> list[str | None]:
     """Every policy schema, the fallback included (as ``None``)."""
@@ -70,29 +73,29 @@ def test_a_group_with_nothing_to_ask_for_is_not_a_window():
     document_type_detail is carried by a few self-contained lines only, and the
     fallback schema has no line-specific block at all.
     """
-    assert "dtd" in group_names("property")
-    assert "dtd" in groups_for("flood")
-    assert "dtd" not in groups_for("property")
-    # The fallback composes the common model (1.1.0) and has no line block: the
+    assert "dtd" in group_names("equipment_breakdown")
+    assert "dtd" in groups_for("business_owners")
+    assert "dtd" not in groups_for("equipment_breakdown")
+    # The fallback composes the common model and has no line block: the
     # forms list has a job of its own, so nothing is left for the remainder and
     # it is never called, as on a personal line.
     assert sections_for("forms", None) == ("forms_and_endorsements",)
     assert sections_for("lineblk", None) == () and "lineblk" not in groups_for(None)
     # The self-contained lines keep their forms in `arrays` (their prompts are frozen).
-    assert "forms" in group_names("property") and "forms" not in groups_for("property")
+    assert "forms" in group_names("equipment_breakdown") and "forms" not in groups_for("equipment_breakdown")
 
 
 def test_the_remainder_group_claims_a_section_the_map_never_names():
     """`lineblk` is defined as the remainder, not as a list.
 
-    commercial auto's line block is called `auto`, commercial property's
-    `commercial_property`, and the delivered files added sections this file has
-    never heard of. Naming them would mean the first unlisted one was silently
-    dropped — which is the failure the whole map exists to prevent.
+    EPLI's line block is called `employment_practices`, a farm policy's `farm`,
+    and the delivered files added sections this file has never heard of. Naming
+    them would mean the first unlisted one was silently dropped — which is the
+    failure the whole map exists to prevent.
     """
     added = ("coverages", "text_sections", "additional_fields")
-    assert sections_for("lineblk", "commercial_auto") == ("auto", *added)
-    assert sections_for("lineblk", "property") == ("commercial_property", *added)
+    assert sections_for("lineblk", "epli") == ("employment_practices", *added)
+    assert sections_for("lineblk", "agriculture_farm") == ("farm", *added)
     # The common-model profile's remainder as well: general liability's own
     # blocks are named nowhere in it.
     assert {"claims_made_terms", "countersignature"} <= set(sections_for("lineblk", "gl"))
@@ -103,15 +106,15 @@ def test_a_slice_narrows_required_rather_than_keeping_it_whole():
     carrier, named_insured and policy as `{}`. Two windows would then both own
     carrier, and on the training side every schedule target would teach the
     model to emit an empty one."""
-    whole = schemas.load_schema("policy", None, "property")["required"]
+    whole = schemas.load_schema("policy", None, "equipment_breakdown")["required"]
     assert set(whole) == {"carrier", "named_insured", "policy"}
 
-    decl = schemas.load_schema("policy", None, "property", "decl")
+    decl = schemas.load_schema("policy", None, "equipment_breakdown", "decl")
     assert set(decl["required"]) == set(whole), "all three are declarations sections"
 
-    arrays = schemas.load_schema("policy", None, "property", "arrays")
+    arrays = schemas.load_schema("policy", None, "equipment_breakdown", "arrays")
     assert "required" not in arrays, "no required section survives into arrays"
-    assert set(arrays["properties"]) == set(sections_for("arrays", "property"))
+    assert set(arrays["properties"]) == set(sections_for("arrays", "equipment_breakdown"))
 
 
 def test_a_sliced_key_resolves_its_file_on_the_base():
@@ -127,7 +130,7 @@ def test_a_sliced_key_resolves_its_file_on_the_base():
     assert schemas.slice_of("policy:gl") is None
 
     # A self-contained file's version, and a common-model bundle's.
-    for lob, version in (("property", "1.5.0"), ("gl", "3.0.0+common.1.1.0")):
+    for lob, version in (("equipment_breakdown", "1.5.0"), ("gl", f"3.2.0+common.{_COMMON_VERSION}")):
         for group in groups_for(lob):
             assert schemas.schema_version("policy", None, lob, group) == version
             assert schemas.is_canonical("policy", None, lob)
@@ -229,8 +232,8 @@ def test_every_shared_array_has_an_identifying_key():
     """An array is asked over several page windows, so a table spanning a
     boundary comes back twice. De-duplication is load-bearing, not tidying, and
     it needs a key per array."""
-    for section in sections_for("arrays", "property"):
-        assert array_key(section, "property"), f"{section} has no identifying key to de-duplicate on"
+    for section in sections_for("arrays", "equipment_breakdown"):
+        assert array_key(section, "equipment_breakdown"), f"{section} has no identifying key to de-duplicate on"
 
 
 # --------------------------------------------------------------------------
@@ -318,7 +321,7 @@ def test_a_common_model_group_keeps_its_task_and_page_rule():
     assert group_names("homeowners") == ("decl", "arrays", "forms", "lineblk")
     # No line is the fallback, which composes the common model since 1.1.0.
     assert group_names() == group_names("homeowners")
-    assert group_names("property") == ("decl", "arrays", "forms", "lineblk", "dtd")
+    assert group_names("equipment_breakdown") == ("decl", "arrays", "forms", "lineblk", "dtd")
 
 
 def test_general_liability_reads_its_forms_and_its_own_blocks_apart():
@@ -346,7 +349,7 @@ def test_the_common_model_keys_are_their_own():
     # so the units it names are not part of its key (the merge unites them).
     assert array_key("interested_parties", "homeowners") == ("role", "name")
     assert array_key("rating_modifiers", "personal_auto") == ("modifier_type", "description")
-    assert array_key("interested_parties", "property") == ("name", "party_type")
+    assert array_key("interested_parties", "equipment_breakdown") == ("name", "party_type")
 
 
 def test_a_classification_is_read_with_the_locations_it_rates():

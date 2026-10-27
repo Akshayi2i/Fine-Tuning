@@ -30,7 +30,7 @@ def _keys(node, path=""):
 
 
 # A self-contained line: the common-model lines have their own case (Phase 6).
-LINE = "property"
+LINE = "equipment_breakdown"
 SCHEMA = load_schema("policy", None, LINE)
 
 

@@ -1,0 +1,324 @@
+# SPEC_21 4.2.4 coverage codes of cyber (schema 2.0.0, common model 1.1.0).
+# Built from the single-LOB cyber declarations of the cyber folder (At-Bay under AtBay and ARC Excess & Surplus,
+# Coalition, Corvus on Travelers paper), read in place, and the pre-SPEC_21 cyber.json. aliases: insuring
+# agreement names as the seeds print them. Codes are LOB-prefixed (CY_, provisional); X_TERRORISM is the common
+# model's shared code. An insuring agreement's sub-limit is an aggregate limit; its retention a retention
+# deductible; a waiting period a waiting_period deductible.
+# carriers: how many of the seed carrier folders print one of the code's names.
+lob: cyber
+schema_version: 2.0.0
+common_model_version: 1.1.0
+code_prefix: CY_
+codes:
+- code: CY_POLICY_AGGREGATE
+  name: Policy aggregate (and per event) limit of insurance
+  aliases:
+  - Aggregate Limit of Insurance
+  - Aggregate Policy Limit of Liability
+  - Policy Aggregate Limit
+  - Per Event Limit of Liability
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: CY_PRIVACY_LIABILITY
+  name: Information privacy / network and information security liability
+  aliases:
+  - Network Security and Privacy Liability
+  - Information Privacy Liability
+  - NETWORK AND INFORMATION SECURITY LIABILITY
+  - Network Security and Privacy Liability
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: CY_NETWORK_SECURITY_LIABILITY
+  name: Network security liability
+  aliases:
+  - Network Security Liability
+  default_limit_types:
+  - aggregate
+  carriers: 2
+- code: CY_REGULATORY
+  name: 'Regulatory defense, fines and penalties'
+  aliases:
+  - Regulatory Actions
+  - Regulatory Liability
+  - REGULATORY DEFENSE AND PENALTIES
+  - 'Regulatory Investigations, Fines and Penalties'
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: CY_PCI
+  name: PCI-DSS fines and assessments
+  aliases:
+  - PCI Fines and Assessments
+  - PCI-DSS Liability
+  - PCI FINES AND ASSESSMENTS
+  - PCI DSS Assessment Expenses
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: CY_FUNDS_TRANSFER_LIABILITY
+  name: Funds transfer liability
+  aliases:
+  - Funds Transfer Liability
+  - FUNDS TRANSFER LIABILITY
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_MEDIA
+  name: Media / multimedia content liability
+  aliases:
+  - Media Liability
+  - MULTIMEDIA CONTENT LIABILITY
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: CY_MEDIA_EVENT_RESPONSE
+  name: Media event response
+  aliases:
+  - Media Event Response
+  default_limit_types:
+  - aggregate
+  carriers: 2
+- code: CY_EVENT_RESPONSE
+  name: Event (breach) response costs
+  aliases:
+  - BREACH RESPONSE
+  - Breach Response Costs
+  - Event Response and Management
+  - BREACH RESPONSE COSTS
+  - Breach Management Expenses
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: CY_EVENT_RESPONSE_RECOVERY
+  name: Event response and recovery
+  aliases:
+  - Event Response and Recovery
+  - Breach Response and Remediation Expenses
+  default_limit_types:
+  - aggregate
+  carriers: 3
+- code: CY_BREACH_RESPONSE_SERVICES
+  name: Breach response services
+  aliases:
+  - Rapid Response Services
+  - BREACH RESPONSE SERVICES
+  default_limit_types:
+  - other
+  carriers: 1
+- code: CY_CRISIS_MANAGEMENT
+  name: Crisis management and public relations
+  aliases:
+  - CRISIS MANAGEMENT AND PUBLIC RELATIONS
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_EXTORTION
+  name: Cyber extortion and ransomware
+  aliases:
+  - CYBER EXTORTION
+  - Ransomware and Cyber Extortion
+  - Cyber Extortion
+  - RANSOMWARE AND CYBER EXTORTION
+  - Cyber Extortion and Ransomware Coverage
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: CY_BUSINESS_INTERRUPTION
+  name: Direct business interruption
+  aliases:
+  - BUSINESS INTERRUPTION AND EXTRA EXPENSES
+  - Direct Business Interruption
+  - Business Interruption
+  default_limit_types:
+  - aggregate
+  carriers: 3
+- code: CY_CONTINGENT_BI
+  name: Contingent business interruption
+  aliases:
+  - Contingent Business Interruption
+  default_limit_types:
+  - aggregate
+  carriers: 3
+- code: CY_BI_SYSTEM_FAILURE
+  name: Business interruption from security and system failure
+  aliases:
+  - 'DIRECT AND CONTINGENT BUSINESS INTERRUPTION, AND EXTRA EXPENSES FROM SECURITY FAILURE AND SYSTEMS FAILURE'
+  - System Failure Coverage
+  - Direct System Failure
+  - Contingent System Failure
+  - Contingent and Direct System Failure
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: CY_PROOF_OF_LOSS
+  name: Proof of loss preparation expenses
+  aliases:
+  - Proof of Loss Preparation
+  - PROOF OF LOSS PREPARATION EXPENSES
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_DIGITAL_ASSET_RESTORATION
+  name: Digital asset restoration
+  aliases:
+  - Data Recovery and Computer Replacement Costs
+  - DIGITAL ASSET RESTORATION
+  - 'Digital Asset Destruction, Data Retrieval and System Restoration'
+  default_limit_types:
+  - aggregate
+  carriers: 2
+- code: CY_BRICKING
+  name: Computer replacement and bricking
+  aliases:
+  - COMPUTER REPLACEMENT AND BRICKING
+  - Bricking
+  default_limit_types:
+  - aggregate
+  carriers: 2
+- code: CY_REPUTATIONAL_HARM
+  name: Reputational harm
+  aliases:
+  - Reputational Harm Loss
+  - Reputational Harm
+  - REPUTATIONAL HARM LOSS
+  - Reputational Loss Coverage
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: CY_COURT_ATTENDANCE
+  name: Court attendance
+  aliases:
+  - Court Attendance
+  - COURT ATTENDANCE
+  - Court Attendance Costs
+  default_limit_types:
+  - aggregate
+  carriers: 2
+- code: CY_CRIMINAL_REWARD
+  name: Criminal reward
+  aliases:
+  - Criminal Reward
+  - CRIMINAL REWARD
+  - Criminal Reward Expenses
+  default_limit_types:
+  - aggregate
+  carriers: 2
+- code: CY_SOCIAL_ENGINEERING
+  name: Funds transfer fraud and social engineering
+  aliases:
+  - FUNDS TRANSFER FRAUD
+  - Funds Transfer Fraud and Social Engineering
+  - Social Engineering
+  - FUNDS TRANSFER FRAUD AND SOCIAL ENGINEERING
+  - 'Social Engineering & Cyber Crime Coverage'
+  default_limit_types:
+  - aggregate
+  carriers: 4
+- code: CY_COMPUTER_FRAUD
+  name: Computer fraud
+  aliases:
+  - Computer Fraud
+  default_limit_types:
+  - aggregate
+  carriers: 2
+- code: CY_SERVICE_FRAUD
+  name: Service fraud including cryptojacking
+  aliases:
+  - Service Fraud Including Cryptojacking
+  - SERVICE FRAUD INCLUDING CRYPTOJACKING
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_IMPERSONATION_REPAIR
+  name: Impersonation repair costs
+  aliases:
+  - Impersonation Repair
+  - IMPERSONATION REPAIR COSTS
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_INVOICE_MANIPULATION
+  name: Invoice manipulation
+  aliases:
+  - Invoice Manipulation
+  - INVOICE MANIPULATION
+  - Invoice Manipulation Loss
+  default_limit_types:
+  - aggregate
+  carriers: 2
+- code: CY_PRE_CLAIM
+  name: Pre-claim assistance
+  aliases:
+  - Prevention and Mitigation Costs
+  - Pre-Claim Assistance
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_BI_SECURITY_FAILURE
+  name: 'Direct business interruption: security failure'
+  aliases:
+  - Security Failure
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_BI_SYSTEMS_FAILURE
+  name: 'Direct business interruption: systems failure'
+  aliases:
+  - Systems Failure
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_BI_VOLUNTARY_SHUTDOWN
+  name: 'Direct business interruption: voluntary shutdown'
+  aliases:
+  - Voluntary Shutdown
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_CBI_IT_SECURITY_FAILURE
+  name: 'Contingent business interruption: IT provider security failure'
+  aliases:
+  - IT Provider Security Failure
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_CBI_IT_SYSTEMS_FAILURE
+  name: 'Contingent business interruption: IT provider systems failure'
+  aliases:
+  - IT Provider Systems Failure
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_CBI_NONIT_SECURITY_FAILURE
+  name: 'Contingent business interruption: non-IT provider security failure'
+  aliases:
+  - Non-IT Provider Security Failure
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_CBI_NONIT_SYSTEMS_FAILURE
+  name: 'Contingent business interruption: non-IT provider systems failure'
+  aliases:
+  - Non-IT Provider Systems Failure
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_CBI_VOLUNTARY_SHUTDOWN
+  name: 'Contingent business interruption: voluntary shutdown'
+  aliases:
+  - Voluntary Shutdown
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: X_TERRORISM
+  name: Terrorism (TRIA)
+  aliases:
+  - Coverage for Certified Acts of Terrorism
+  - TRIA
+  - TRIA Premium
+  default_limit_types:
+  - other
+  carriers: 1
+  shared: true

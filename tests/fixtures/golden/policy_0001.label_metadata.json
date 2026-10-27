@@ -15,6 +15,6 @@
     "producer.agency_name": "Producer",
     "premium.total_policy_premium": "Total Premium"
   },
-  "lob": "workers_comp",
+  "lob": "equipment_breakdown",
   "$comment": "CONFUSABLE CO-OCCURRENCE fixture. Certificate Holder (Meridian) and Producer (Hanover) sit on the same page as the insured (Rivera). named_insured.primary_name resolves to Rivera and NOT to either - this is the boundary the model must learn, not just the mapping (arch 0c). Note named_insured.primary_name was found under 'Applicant', the hardest of the alias variants: it is a role-based contextual equivalence, not a lexical synonym."
 }

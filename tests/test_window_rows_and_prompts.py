@@ -115,7 +115,8 @@ def test_a_common_model_line_shares_a_page_between_the_windows_of_a_split_run():
 
     assert run_overlap("homeowners") == 1 and run_overlap("personal_auto") == 1
     assert run_overlap("gl") == 1                                  # gl.json 3.0.0 composes the common model
-    assert run_overlap("property") == 0                            # a self-contained line plans as before
+    assert run_overlap("property") == 1                            # property.json moved onto it too
+    assert run_overlap("equipment_breakdown") == 0                 # a self-contained line plans as before
 
 
 def test_the_prompt_says_a_lone_building_is_named_not_its_location():

@@ -17,7 +17,7 @@ def _env(value, page=1):
 
 
 # A self-contained line, whose forms carry form_title.
-LINE = "property"
+LINE = "equipment_breakdown"
 
 SCHEMA = {
     "type": "object",

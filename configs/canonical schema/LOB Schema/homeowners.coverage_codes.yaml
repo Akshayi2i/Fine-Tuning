@@ -100,6 +100,7 @@ codes:
   - Credit Card, EFT Card, Forgery, Etc
   - Credit Card, Fund Transfer, Forgery and Counterfeit Money
   - Limits - Credit Card, Electronic Fund Transfer Card Or Access Device, Forgery And Counterfeit Money
+  - HO 2530 01 06 Incidental Property Coverages - Higher Limits - Credit Card, Electronic Fund Transfer Card Or Access Device, Forgery And Counterfeit Money
   default_limit_types:
   - per_occurrence
   carriers: 3
@@ -371,6 +372,7 @@ codes:
   - D. Loss Of Use
   - 'D: LOSS OF USE'
   - Loss Of Use (Cov. D)
+  - Increased Limit (Coverage D)
   default_limit_types:
   - per_occurrence
   - other
@@ -436,6 +438,7 @@ codes:
   aliases:
   - HO 2708 07 11 Water Back Up And Sump Discharge Or Overflow Coverage
   - Water Backup and Sump Discharge or Overflow
+  - ML-WD Water Damage
   default_limit_types:
   - per_occurrence
   - sublimit

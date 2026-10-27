@@ -24,7 +24,7 @@ GOLD = {"policy": {"policy_number": _env("HO-778812"), "account_id": _env("A-551
 
 
 def _meta(source, mode="ocr_plus_image", **extra):
-    return {"source_id": source, "doc_type": "policy", "lob": ["property"], "modality_mode": mode, **extra}
+    return {"source_id": source, "doc_type": "policy", "lob": ["equipment_breakdown"], "modality_mode": mode, **extra}
 
 
 def _analysis(triples):
@@ -87,7 +87,7 @@ def test_the_golden_document_carries_the_frozen_carrier(monkeypatch):
     client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
     base = f"{paths.golden_eval_set_dir(None)}/policy_0001"
     client.write_json(f"{base}/golden.json", GOLD)
-    client.write_json(f"{base}/metadata.json", {"doc_type": "policy", "lob": "property", "carrier": "acme mutual",
+    client.write_json(f"{base}/metadata.json", {"doc_type": "policy", "lob": "equipment_breakdown", "carrier": "acme mutual",
                                                 "carrier_seen_in_train": False})
     client.write_bytes(f"{base}/page_1.png", b"png")
     client.write_text(f"{base}/page_1.md", "Policy HO-778812 Account A-55120")

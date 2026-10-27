@@ -1,0 +1,415 @@
+# SPEC_21 4.7 crosswalk for umbrella: every field of the pre-SPEC_21 umbrella.json (1.6.0, the _common-shaped
+# envelope plus its umbrella block, $defs expanded) and every canonical_path the line's policy registry YAMLs
+# declared (config/document_registry/policy/*/umbrella.yaml) -> the SPEC_21 schema named by to_schema.
+# new: same concept at its SPEC_21 path; overflow: an additional_fields entry with that label; drop: not a value
+# (needs reviewer approval). The envelope paths take the mapping the gl, wc, auto and homeowners crosswalks give
+# them where that target is in umbrella.json; the umbrella block is mapped by hand: the layer's limits to the
+# umbrella coverage, the schedule of underlying insurance to underlying_insurance[], retentions and the attachment
+# point to attachment, the rest to its caption.
+# Applied by tools/registry_migrate.py --lob umbrella.
+
+lob: umbrella
+from_schema: "1.6.0"
+to_schema: "2.0.0"
+paths:
+  document.document_type: {drop: "the document kind L1 computes (dec page, renewal...), not a printed value; transport metadata (`document_kind`)"}
+  document.document_title_as_stated: {new: "document.title"}
+  document.line_of_business_as_stated: {new: "lob_parts[].title"}
+  document.coverage_parts_present[]: {new: "lob_parts[].title"}
+  document.applicable_coverages[]: {overflow: "Applicable Coverages"}
+  document.transaction_type: {new: "document.transaction_type"}
+  document.transaction_reason: {new: "document.transaction_reason"}
+  document.transaction_effective_date: {new: "document.transaction_effective_date"}
+  document.issue_date: {new: "document.issue_date"}
+  document.print_date: {new: "document.print_date"}
+  document.page_count: {new: "document.page_count"}
+  document.source_file_name: {new: "document.source_file_name"}
+  document.source_carrier_folder: {drop: "the registry's carrier id, a routing fact, not a printed value; transport metadata (`_carrier_id`)"}
+  document.language: {overflow: "Language"}
+  document.source_system: {drop: "the system the corpus file came from, not printed on the document"}
+  document.endorsement_number: {new: "document.endorsement_number"}
+  document.esignature_certificate: {overflow: "E-Signature Certificate"}
+  document.delivery_preference: {overflow: "Delivery Preference"}
+  carrier.company_name: {new: "carrier.name"}
+  carrier.writing_company_name: {new: "carrier.name"}
+  carrier.group_name: {new: "carrier.group_name"}
+  carrier.naic_number: {new: "carrier.naic_code"}
+  carrier.fein: {overflow: "Carrier FEIN"}
+  carrier.address.line_1: {new: "carrier.address.street"}
+  carrier.address.line_2: {new: "carrier.address.street_2"}
+  carrier.address.city: {new: "carrier.address.city"}
+  carrier.address.state: {new: "carrier.address.state"}
+  carrier.address.postal_code: {new: "carrier.address.postal_code"}
+  carrier.address.county: {new: "carrier.address.county"}
+  carrier.address.country: {overflow: "Country"}
+  carrier.address.full: {new: "carrier.address"}
+  carrier.contact.phone: {new: "carrier.phone"}
+  carrier.contact.fax: {new: "carrier.fax"}
+  carrier.contact.email: {overflow: "Carrier Email"}
+  carrier.contact.website: {new: "carrier.web_address"}
+  carrier.is_surplus_lines: {new: "carrier.admitted_status"}
+  carrier.surplus_lines_broker_name: {overflow: "Surplus Lines Broker"}
+  carrier.surplus_lines_license_number: {overflow: "Surplus Lines License Number"}
+  carrier.state_of_issue: {new: "policy.rating_state"}
+  carrier.admitted_status: {new: "carrier.admitted_status"}
+  carrier.company_structure: {overflow: "Company Structure"}
+  carrier.state_of_domicile: {overflow: "State of Domicile"}
+  carrier.home_office_address.line_1: {overflow: "Line 1"}
+  carrier.home_office_address.line_2: {overflow: "Line 2"}
+  carrier.home_office_address.city: {overflow: "City"}
+  carrier.home_office_address.state: {overflow: "State"}
+  carrier.home_office_address.postal_code: {overflow: "Postal Code"}
+  carrier.home_office_address.county: {overflow: "County"}
+  carrier.home_office_address.country: {overflow: "Country"}
+  carrier.home_office_address.full: {overflow: "Full"}
+  carrier.surplus_lines_broker_address.line_1: {overflow: "Line 1"}
+  carrier.surplus_lines_broker_address.line_2: {overflow: "Line 2"}
+  carrier.surplus_lines_broker_address.city: {overflow: "City"}
+  carrier.surplus_lines_broker_address.state: {overflow: "State"}
+  carrier.surplus_lines_broker_address.postal_code: {overflow: "Postal Code"}
+  carrier.surplus_lines_broker_address.county: {overflow: "County"}
+  carrier.surplus_lines_broker_address.country: {overflow: "Country"}
+  carrier.surplus_lines_broker_address.full: {overflow: "Full"}
+  producer.agency_name: {new: "producer.agency_name"}
+  producer.producer_code: {new: "producer.producer_code"}
+  producer.producer_contact_name: {new: "producer.contact_name"}
+  producer.address.line_1: {new: "producer.address.street"}
+  producer.address.line_2: {new: "producer.address.street_2"}
+  producer.address.city: {new: "producer.address.city"}
+  producer.address.state: {new: "producer.address.state"}
+  producer.address.postal_code: {new: "producer.address.postal_code"}
+  producer.address.county: {new: "producer.address.county"}
+  producer.address.country: {overflow: "Country"}
+  producer.address.full: {new: "producer.address"}
+  producer.contact.phone: {new: "producer.phone"}
+  producer.contact.fax: {new: "producer.fax"}
+  producer.contact.email: {new: "producer.email"}
+  producer.contact.website: {new: "producer.web_address"}
+  producer.license_number: {overflow: "Producer License Number"}
+  producer.commission_percentage: {overflow: "Commission Percentage"}
+  policy.policy_number: {new: "policy.policy_number"}
+  policy.prior_policy_number: {new: "policy.prior_policy_number"}
+  policy.account_id: {new: "billing.account_number"}
+  policy.certificate_number: {new: "policy.certificate_number"}
+  policy.alternate_policy_identifiers[].identifier_type: {overflow: "Alternate Policy Identifier Type"}
+  policy.alternate_policy_identifiers[].identifier_value: {overflow: "Alternate Policy Identifier"}
+  policy.program_name: {new: "policy.policy_type"}
+  policy.policy_form_name: {new: "policy.policy_type"}
+  policy.policy_form_number: {new: "lob_parts[].coverage_part_form"}
+  policy.policy_form_edition: {overflow: "Policy Form Edition"}
+  policy.policy_type: {new: "policy.policy_type"}
+  policy.effective_date: {new: "policy.effective_date"}
+  policy.expiration_date: {new: "policy.expiration_date"}
+  policy.effective_time: {overflow: "Effective Time"}
+  policy.time_zone: {overflow: "Time Zone"}
+  policy.policy_term_months: {new: "policy.term_months"}
+  policy.anniversary_date: {overflow: "Anniversary Date"}
+  policy.is_renewal: {new: "document.transaction_type"}
+  policy.renewal_of_policy_number: {new: "policy.prior_policy_number"}
+  policy.cancellation_date: {new: "document.transaction_effective_date"}
+  policy.cancellation_reason: {new: "document.transaction_reason"}
+  policy.nonrenewal_notice_date: {new: "document.mailing_date"}
+  policy.audit_frequency: {new: "policy.audit_period"}
+  policy.minimum_earned_premium_percentage: {new: "premium.minimum_earned_percent"}
+  policy.original_inception_date: {new: "policy.original_inception_date"}
+  policy.renewal_offer: {overflow: "Renewal Offer"}
+  policy.rating_state: {new: "policy.rating_state"}
+  policy.policy_tier: {overflow: "Policy Tier"}
+  policy.cancellation_method: {overflow: "Cancellation Method"}
+  policy.non_assessable_cooperative: {overflow: "Non-Assessable Policy"}
+  policy.quote_number: {overflow: "Quote Number"}
+  policy.policy_term_as_printed: {overflow: "Policy Term"}
+  policy.service_of_suit_designee: {overflow: "Service of Suit Designee"}
+  policy.cancellation_notice_days: {overflow: "Cancellation Notice Days"}
+  named_insured.primary_name: {new: "named_insured.primary_name"}
+  named_insured.doing_business_as: {new: "named_insured.doing_business_as"}
+  named_insured.entity_type: {new: "named_insured.entity_type"}
+  named_insured.fein: {new: "named_insured.fein"}
+  named_insured.mailing_address.line_1: {new: "named_insured.mailing_address.street"}
+  named_insured.mailing_address.line_2: {new: "named_insured.mailing_address.street_2"}
+  named_insured.mailing_address.city: {new: "named_insured.mailing_address.city"}
+  named_insured.mailing_address.state: {new: "named_insured.mailing_address.state"}
+  named_insured.mailing_address.postal_code: {new: "named_insured.mailing_address.postal_code"}
+  named_insured.mailing_address.county: {new: "named_insured.mailing_address.county"}
+  named_insured.mailing_address.country: {overflow: "Country"}
+  named_insured.mailing_address.full: {new: "named_insured.mailing_address"}
+  named_insured.physical_address.line_1: {overflow: "Line 1"}
+  named_insured.physical_address.line_2: {overflow: "Line 2"}
+  named_insured.physical_address.city: {overflow: "City"}
+  named_insured.physical_address.state: {overflow: "State"}
+  named_insured.physical_address.postal_code: {overflow: "Postal Code"}
+  named_insured.physical_address.county: {overflow: "County"}
+  named_insured.physical_address.country: {overflow: "Country"}
+  named_insured.physical_address.full: {overflow: "Full"}
+  named_insured.contact.phone: {new: "named_insured.phone"}
+  named_insured.contact.fax: {overflow: "Insured Fax"}
+  named_insured.contact.email: {new: "named_insured.email"}
+  named_insured.contact.website: {overflow: "Insured Website"}
+  named_insured.business_description: {new: "named_insured.business_description"}
+  named_insured.sic_code: {overflow: "SIC Code"}
+  named_insured.naics_code: {overflow: "NAICS Code"}
+  named_insured.years_in_business: {overflow: "Years in Business"}
+  named_insured.additional_named_insureds[].name: {new: "named_insured.additional_named_insureds[].name"}
+  named_insured.additional_named_insureds[].entity_type: {overflow: "Additional Named Insured Entity Type"}
+  named_insured.additional_named_insureds[].relationship: {new: "named_insured.additional_named_insureds[].relationship"}
+  named_insured.additional_named_insureds[].effective_date: {overflow: "Additional Named Insured Effective Date"}
+  named_insured.additional_named_insureds[].address.line_1: {overflow: "Additional Named Insured Address"}
+  named_insured.additional_named_insureds[].address.line_2: {overflow: "Additional Named Insured Address"}
+  named_insured.additional_named_insureds[].address.city: {overflow: "Additional Named Insured Address"}
+  named_insured.additional_named_insureds[].address.state: {overflow: "Additional Named Insured Address"}
+  named_insured.additional_named_insureds[].address.postal_code: {overflow: "Additional Named Insured Address"}
+  named_insured.additional_named_insureds[].address.county: {overflow: "Additional Named Insured Address"}
+  named_insured.additional_named_insureds[].address.country: {overflow: "Additional Named Insured Address"}
+  named_insured.additional_named_insureds[].address.full: {overflow: "Additional Named Insured Address"}
+  named_insured.contact_name: {overflow: "Insured Contact"}
+  named_insured.marital_status: {new: "named_insured.marital_status"}
+  named_insured.occupation: {new: "named_insured.occupation"}
+  named_insured.all_named_insureds[].name: {new: "named_insured.additional_named_insureds[].name"}
+  named_insured.attention: {overflow: "Attention"}
+  locations[].location_number: {overflow: "Location Number"}
+  locations[].building_number: {overflow: "Building Number"}
+  locations[].address.line_1: {overflow: "Line 1"}
+  locations[].address.line_2: {overflow: "Line 2"}
+  locations[].address.city: {overflow: "City"}
+  locations[].address.state: {overflow: "State"}
+  locations[].address.postal_code: {overflow: "Postal Code"}
+  locations[].address.county: {overflow: "County"}
+  locations[].address.country: {overflow: "Country"}
+  locations[].address.full: {overflow: "Full"}
+  locations[].occupancy_description: {overflow: "Occupancy"}
+  locations[].business_description: {new: "named_insured.business_description"}
+  locations[].construction_type: {overflow: "Construction"}
+  locations[].year_built: {overflow: "Year Constructed"}
+  locations[].number_of_stories: {overflow: "Number of Stories"}
+  locations[].square_footage: {overflow: "Square Footage"}
+  locations[].protection_class: {overflow: "Protection Class"}
+  locations[].territory_code: {overflow: "Territory Code"}
+  locations[].sprinklered: {overflow: "Sprinklered"}
+  locations[].alarm_type: {overflow: "Alarm Type"}
+  locations[].interest: {overflow: "Interest"}
+  locations[].coverages[].coverage_code: {new: "coverages[].coverage_code"}
+  locations[].coverages[].coverage_name: {new: "coverages[].coverage_name"}
+  locations[].coverages[].coverage_description: {new: "coverages[].limits[].description"}
+  locations[].coverages[].form_reference: {new: "coverages[].form_refs[]"}
+  locations[].coverages[].applies_to: {new: "coverages[].applies_to[]"}
+  locations[].coverages[].limit_amount: {new: "coverages[].limits[limit_type=per_occurrence].amount"}
+  locations[].coverages[].limit_basis: {new: "coverages[].limits[].description"}
+  locations[].coverages[].aggregate_limit_amount: {new: "coverages[].limits[limit_type=aggregate].amount"}
+  locations[].coverages[].sublimit_amount: {new: "coverages[].limits[limit_type=sublimit].amount"}
+  locations[].coverages[].sublimit_basis: {new: "coverages[].limits[limit_type=sublimit].description"}
+  locations[].coverages[].deductible_amount: {new: "coverages[].deductibles[deductible_type=flat].amount"}
+  locations[].coverages[].deductible_type: {new: "coverages[].deductibles[].deductible_type"}
+  locations[].coverages[].deductible_basis: {new: "coverages[].deductibles[].percentage_basis"}
+  locations[].coverages[].retention_amount: {new: "coverages[].deductibles[deductible_type=retention].amount"}
+  locations[].coverages[].waiting_period: {new: "coverages[].deductibles[deductible_type=waiting_period].amount"}
+  locations[].coverages[].coinsurance_percentage: {new: "coverages[].coinsurance_percent"}
+  locations[].coverages[].valuation_basis: {new: "coverages[].valuation"}
+  locations[].coverages[].premium: {new: "coverages[].premium"}
+  locations[].coverages[].is_included: {new: "coverages[].included"}
+  locations[].coverages[].is_excluded: {new: "coverages[].included"}
+  locations[].coverages[].notes: {overflow: "Coverage Notes"}
+  interested_parties[].party_type: {new: "interested_parties[].role"}
+  interested_parties[].rank: {new: "interested_parties[].rank"}
+  interested_parties[].name: {new: "interested_parties[].name"}
+  interested_parties[].address.line_1: {new: "interested_parties[].address.street"}
+  interested_parties[].address.line_2: {new: "interested_parties[].address.street_2"}
+  interested_parties[].address.city: {new: "interested_parties[].address.city"}
+  interested_parties[].address.state: {new: "interested_parties[].address.state"}
+  interested_parties[].address.postal_code: {new: "interested_parties[].address.postal_code"}
+  interested_parties[].address.county: {new: "interested_parties[].address.county"}
+  interested_parties[].address.country: {overflow: "Country"}
+  interested_parties[].address.full: {new: "interested_parties[].address"}
+  interested_parties[].loan_number: {new: "interested_parties[].loan_number"}
+  interested_parties[].clause_type: {overflow: "Interest Clause"}
+  interested_parties[].applies_to: {new: "interested_parties[].applies_to[]"}
+  interested_parties[].description_of_interest: {overflow: "Description of Interest"}
+  premium.total_policy_premium: {new: "premium.total"}
+  premium.basic_premium: {new: "premium.items[].amount"}
+  premium.estimated_annual_premium: {new: "premium.total"}
+  premium.deposit_premium: {new: "premium.deposit"}
+  premium.minimum_premium: {new: "premium.minimum"}
+  premium.return_premium: {new: "premium.change"}
+  premium.additional_premium: {new: "premium.change"}
+  premium.premium_by_coverage_part[].coverage_part: {new: "lob_parts[].title"}
+  premium.premium_by_coverage_part[].premium: {new: "lob_parts[].premium"}
+  premium.taxes_and_fees[].description: {new: "premium.taxes_fees[].description"}
+  premium.taxes_and_fees[].amount: {new: "premium.taxes_fees[].amount"}
+  premium.taxes_and_fees[].is_fully_earned: {new: "premium.taxes_fees[].fully_earned"}
+  premium.surcharges[].description: {new: "premium.surcharges[].description"}
+  premium.surcharges[].amount: {new: "premium.surcharges[].amount"}
+  premium.discounts_and_credits[].description: {new: "premium.discounts[].description"}
+  premium.discounts_and_credits[].amount: {new: "premium.discounts[].amount"}
+  premium.discounts_and_credits[].percentage: {new: "premium.discounts[].percentage"}
+  premium.discounts_and_credits[].applies_to: {overflow: "Discount Applies To"}
+  premium.surplus_lines_tax: {new: "premium.taxes_fees[description=Surplus Lines Tax].amount"}
+  premium.fire_fee: {new: "premium.taxes_fees[description=Fire Fee].amount"}
+  premium.motor_vehicle_law_enforcement_fee: {new: "premium.taxes_fees[description=Motor Vehicle Law Enforcement Fee].amount"}
+  premium.guaranty_association_surcharge: {new: "premium.surcharges[description=Guaranty Association Surcharge].amount"}
+  premium.additional_insured_processing_fee: {new: "premium.taxes_fees[description=Additional Insured Processing Fee].amount"}
+  premium.service_fee: {new: "premium.taxes_fees[description=Service Fee].amount"}
+  premium.administrative_fee: {new: "premium.taxes_fees[description=Administrative Fee].amount"}
+  premium.stamping_fee: {new: "premium.taxes_fees[description=Stamping Fee].amount"}
+  premium.policy_fee: {new: "premium.taxes_fees[description=Policy Fee].amount"}
+  premium.inspection_fee: {new: "premium.taxes_fees[description=Inspection Fee].amount"}
+  premium.rating_basis: {overflow: "Rating Basis"}
+  premium.rate_per_unit: {overflow: "Rate"}
+  premium.exposure_amount: {overflow: "Exposure"}
+  premium.premium_change: {new: "premium.change"}
+  premium.pay_in_full_amount: {overflow: "Pay in Full Amount"}
+  premium.association_dues: {overflow: "Association Dues"}
+  premium.total_premium_and_fees: {overflow: "Total Premium and Fees"}
+  terrorism.terrorism_disposition: {new: "coverages[coverage_code=X_TERRORISM].included"}
+  terrorism.tria_coverage_elected: {new: "coverages[coverage_code=X_TERRORISM].included"}
+  terrorism.terrorism_rejection_indicator: {new: "coverages[coverage_code=X_TERRORISM].included"}
+  terrorism.terrorism_exclusion_form_number: {new: "coverages[coverage_code=X_TERRORISM].form_refs[]"}
+  terrorism.terrorism_rejection_date: {overflow: "Terrorism Rejection Date"}
+  terrorism.certified_acts_limit: {new: "coverages[coverage_code=X_TERRORISM].limits[limit_type=other].amount"}
+  terrorism.terrorism_premium: {new: "coverages[coverage_code=X_TERRORISM].premium"}
+  terrorism.terrorism_rate: {overflow: "Terrorism Rate"}
+  terrorism.catastrophe_terrorism_premium: {overflow: "Catastrophe Terrorism Premium"}
+  terrorism.disclosure_form_number: {new: "forms_and_endorsements[].form_number"}
+  terrorism.federal_share_percentage: {overflow: "Federal Share of Terrorism Losses"}
+  terrorism.program_cap_disclosure: {overflow: "Terrorism Program Cap"}
+  billing.billing_plan: {new: "billing.payment_plan"}
+  billing.payment_plan: {new: "billing.payment_plan"}
+  billing.payment_method: {new: "billing.payment_method"}
+  billing.payment_frequency: {new: "billing.payment_plan"}
+  billing.bill_to_party: {new: "billing.bill_type"}
+  billing.amount_due: {new: "billing.amount_due"}
+  billing.due_date: {new: "billing.due_date"}
+  billing.installments[].installment_number: {new: "billing.installments[].installment_number"}
+  billing.installments[].due_date: {new: "billing.installments[].due_date"}
+  billing.installments[].amount: {new: "billing.installments[].amount"}
+  billing.installments[].installment_fee: {new: "premium.taxes_fees[description=Installment Fee].amount"}
+  forms_and_endorsements[].form_number: {new: "forms_and_endorsements[].form_number"}
+  forms_and_endorsements[].edition_date: {new: "forms_and_endorsements[].edition_date"}
+  forms_and_endorsements[].form_title: {new: "forms_and_endorsements[].title"}
+  forms_and_endorsements[].form_type: {new: "forms_and_endorsements[].form_type"}
+  forms_and_endorsements[].applies_to: {new: "forms_and_endorsements[].applies_to[]"}
+  forms_and_endorsements[].limit_amount: {overflow: "Endorsement Limit"}
+  forms_and_endorsements[].deductible_amount: {overflow: "Endorsement Deductible"}
+  forms_and_endorsements[].premium: {new: "forms_and_endorsements[].premium"}
+  forms_and_endorsements[].is_included: {overflow: "Endorsement Included"}
+  forms_and_endorsements[].is_mandatory: {overflow: "Mandatory Form"}
+  forms_and_endorsements[].endorsement_number: {overflow: "Endorsement Number"}
+  forms_and_endorsements[].effective_date: {overflow: "Effective Date"}
+  deductibles[].applies_to: {new: "deductibles[].applies_to_coverages[]"}
+  deductibles[].deductible_type: {new: "deductibles[].deductible_type"}
+  deductibles[].amount: {new: "deductibles[].amount"}
+  deductibles[].percentage: {new: "deductibles[].percentage"}
+  deductibles[].percentage_basis: {new: "deductibles[].percentage_basis"}
+  deductibles[].minimum_amount: {overflow: "Minimum Deductible"}
+  deductibles[].maximum_amount: {overflow: "Maximum Deductible"}
+  deductibles[].waiting_period: {new: "deductibles[deductible_type=waiting_period].amount"}
+  deductibles[].notes: {new: "deductibles[].peril"}
+  loss_history[].loss_date: {overflow: "Loss Date"}
+  loss_history[].claim_number: {overflow: "Claim Number"}
+  loss_history[].description: {overflow: "Loss Description"}
+  loss_history[].paid_amount: {overflow: "Paid Amount"}
+  loss_history[].reserved_amount: {overflow: "Reserved Amount"}
+  loss_history[].status: {overflow: "Claim Status"}
+  state_notices[].state: {overflow: "State Notice State"}
+  state_notices[].notice_title: {new: "forms_and_endorsements[form_type=notice].title"}
+  state_notices[].form_reference: {new: "forms_and_endorsements[form_type=notice].form_number"}
+  claim_reporting.claim_reporting_instructions: {overflow: "Claim Reporting Instructions"}
+  claim_reporting.claims_notice_recipient: {overflow: "Claims Notice Recipient"}
+  claim_reporting.claims_phone: {new: "carrier.claims_phone"}
+  claim_reporting.claims_email: {new: "carrier.claims_email"}
+  claim_reporting.claims_address.line_1: {new: "carrier.claims_address.street"}
+  claim_reporting.claims_address.line_2: {new: "carrier.claims_address.street_2"}
+  claim_reporting.claims_address.city: {new: "carrier.claims_address.city"}
+  claim_reporting.claims_address.state: {new: "carrier.claims_address.state"}
+  claim_reporting.claims_address.postal_code: {new: "carrier.claims_address.postal_code"}
+  claim_reporting.claims_address.county: {new: "carrier.claims_address.county"}
+  claim_reporting.claims_address.country: {overflow: "Country"}
+  claim_reporting.claims_address.full: {new: "carrier.claims_address"}
+  claim_reporting.claims_fax: {overflow: "Claims Fax"}
+  claim_reporting.claims_website: {overflow: "Claims Website"}
+  claim_reporting.other_notices_recipient: {overflow: "Other Notices Recipient"}
+  claim_reporting.other_notices_address.line_1: {overflow: "Line 1"}
+  claim_reporting.other_notices_address.line_2: {overflow: "Line 2"}
+  claim_reporting.other_notices_address.city: {overflow: "City"}
+  claim_reporting.other_notices_address.state: {overflow: "State"}
+  claim_reporting.other_notices_address.postal_code: {overflow: "Postal Code"}
+  claim_reporting.other_notices_address.county: {overflow: "County"}
+  claim_reporting.other_notices_address.country: {overflow: "Country"}
+  claim_reporting.other_notices_address.full: {overflow: "Full"}
+  signature.authorized_representative_name: {new: "countersignature.representative_name"}
+  signature.title: {overflow: "Authorized Representative Title"}
+  signature.signature_date: {new: "countersignature.date"}
+  signature.countersignature_state: {overflow: "Countersignature State"}
+  signature.countersignature_date: {new: "countersignature.date"}
+  signature.has_signature: {drop: "a flag L1 computes from the page, not a printed value; transport metadata (`has_signature`)"}
+  signature.officer_signatories[].name: {overflow: "Name"}
+  signature.officer_signatories[].title: {overflow: "Title"}
+  umbrella.limits_of_insurance.each_occurrence_limit: {new: "coverages[coverage_code=UM_UMBRELLA_LIABILITY].limits[limit_type=per_occurrence].amount"}
+  umbrella.limits_of_insurance.aggregate_limit: {new: "coverages[coverage_code=UM_UMBRELLA_LIABILITY].limits[limit_type=aggregate].amount"}
+  umbrella.limits_of_insurance.products_completed_operations_aggregate_limit: {new: "coverages[coverage_code=UM_UMBRELLA_LIABILITY].limits[limit_type=products_completed_ops_aggregate].amount"}
+  umbrella.limits_of_insurance.personal_and_advertising_injury_limit: {new: "coverages[coverage_code=UM_UMBRELLA_LIABILITY].limits[limit_type=other].amount"}
+  umbrella.limits_of_insurance.crisis_management_limit: {overflow: "Crisis Management Limit"}
+  umbrella.limits_of_insurance.policy_limit: {new: "coverages[coverage_code=UM_UMBRELLA_LIABILITY].limits[limit_type=policy_limit].amount"}
+  umbrella.attachment.self_insured_retention_amount: {new: "attachment.self_insured_retention"}
+  umbrella.attachment.retained_limit_amount: {new: "attachment.retained_amount"}
+  umbrella.attachment.attachment_point_amount: {new: "attachment.attachment_point"}
+  umbrella.attachment.coverage_basis: {new: "policy.coverage_trigger"}
+  umbrella.attachment.follow_form_indicator: {new: "attachment.follow_form"}
+  umbrella.attachment.is_excess_or_umbrella: {new: "policy.policy_type"}
+  umbrella.attachment.drop_down_provision: {overflow: "Drop Down"}
+  umbrella.attachment.schedule_of_underlying_form_number: {overflow: "Schedule of Underlying Form"}
+  umbrella.schedule_of_underlying_insurance[].coverage_part: {new: "underlying_insurance[].coverage_name"}
+  umbrella.schedule_of_underlying_insurance[].carrier_name: {new: "underlying_insurance[].carrier_name"}
+  umbrella.schedule_of_underlying_insurance[].policy_number: {new: "underlying_insurance[].policy_number"}
+  umbrella.schedule_of_underlying_insurance[].policy_effective_date: {new: "underlying_insurance[].effective_date"}
+  umbrella.schedule_of_underlying_insurance[].policy_expiration_date: {new: "underlying_insurance[].expiration_date"}
+  umbrella.schedule_of_underlying_insurance[].underlying_limits[].limit_description: {new: "underlying_insurance[].limits[].description"}
+  umbrella.schedule_of_underlying_insurance[].underlying_limits[].limit_amount: {new: "underlying_insurance[].limits[].amount"}
+  umbrella.schedule_of_underlying_insurance[].required_minimum_limit: {overflow: "Required Minimum Limit"}
+  umbrella.schedule_of_underlying_insurance[].layer_type: {overflow: "Layer"}
+  umbrella.schedule_of_underlying_insurance[].coverage_status: {overflow: "Underlying Coverage Status"}
+  umbrella.schedule_of_underlying_insurance[].policy_period_as_printed: {overflow: "Underlying Policy Period"}
+  umbrella.schedule_of_underlying_insurance[].retroactive_date: {overflow: "Underlying Retroactive Date"}
+  umbrella.schedule_of_underlying_insurance[].parent_company: {overflow: "Underlying Parent Company"}
+  umbrella.schedule_of_underlying_insurance[].limit_amount: {new: "underlying_insurance[].limits[].amount"}
+  umbrella.schedule_of_underlying_insurance[].deductible_or_retention_amount: {overflow: "Ded/Ret Amount"}
+  umbrella.schedule_of_underlying_insurance[].excess_of_amount: {new: "attachment.attachment_point"}
+  umbrella.coverage_trigger: {new: "policy.coverage_trigger"}
+  umbrella.claims_made_provisions.coverage_trigger: {new: "policy.coverage_trigger"}
+  umbrella.claims_made_provisions.retroactive_date: {overflow: "Retroactive Date"}
+  umbrella.claims_made_provisions.continuity_date: {overflow: "Continuity Date"}
+  umbrella.claims_made_provisions.prior_acts_coverage: {overflow: "Prior Acts Coverage"}
+  umbrella.claims_made_provisions.pending_prior_litigation_date: {overflow: "Pending or Prior Litigation Date"}
+  umbrella.claims_made_provisions.first_inception_date: {new: "policy.original_inception_date"}
+  umbrella.claims_made_provisions.extended_reporting_period_available: {overflow: "Extended Reporting Period"}
+  umbrella.claims_made_provisions.extended_reporting_period_months: {overflow: "Extended Reporting Period"}
+  umbrella.claims_made_provisions.extended_reporting_period_premium_percentage: {overflow: "Extended Reporting Premium"}
+  umbrella.claims_made_provisions.claim_reporting_instructions: {overflow: "Claim Reporting Instructions"}
+  umbrella.claims_made_provisions.prior_acts_exclusion_date: {overflow: "Prior Acts Exclusion Date"}
+  umbrella.exclusions[].exclusion_name: {new: "forms_and_endorsements[].title"}
+  umbrella.exclusions[].form_number: {new: "forms_and_endorsements[].form_number"}
+  umbrella.personal_umbrella_exposures.number_of_residences: {overflow: "Number of Residences"}
+  umbrella.personal_umbrella_exposures.number_of_autos: {overflow: "Number of Autos"}
+  umbrella.personal_umbrella_exposures.number_of_watercraft: {overflow: "Number of Watercraft"}
+  umbrella.personal_umbrella_exposures.number_of_recreational_vehicles: {overflow: "Number of Recreational Vehicles"}
+  umbrella.personal_umbrella_exposures.number_of_rental_units: {overflow: "Number of Rental Units"}
+  umbrella.personal_umbrella_exposures.number_of_youthful_operators: {overflow: "Number of Youthful Operators"}
+  umbrella.personal_umbrella_exposures.watercraft_liability_limit: {overflow: "Watercraft Liability Limit"}
+  umbrella.personal_umbrella_exposures.uninsured_underinsured_motorist_limit: {overflow: "Uninsured/Underinsured Motorist Limit"}
+  umbrella.personal_umbrella_exposures.domestic_employee_liability_limit: {overflow: "Domestic Employee Liability Limit"}
+  umbrella.premium_basis.rating_basis: {overflow: "Rating Basis"}
+  umbrella.premium_basis.exposure_amount: {overflow: "Exposure"}
+  umbrella.premium_basis.rate: {overflow: "Rate"}
+  umbrella.premium_basis.minimum_premium: {new: "premium.minimum"}
+  umbrella.underlying_insurance_note: {overflow: "Underlying Insurance"}
+  coverages[].coverage_type: {drop: "the line itself (always general liability here), not a printed value"}
+  coverages[].coverage_name: {new: "coverages[].coverage_name"}
+  coverages[].covered_auto_symbols: {new: "coverages[].covered_auto_symbols[]"}
+  coverages[].limit: {new: "coverages[].limits[].amount"}
+  coverages[].aggregate_limit: {new: "coverages[].limits[limit_type=aggregate].amount"}
+  coverages[].deductible: {new: "coverages[].deductibles[deductible_type=flat].amount"}
+  coverages[].retention: {new: "coverages[].deductibles[deductible_type=retention].amount"}
+  coverages[].sublimit: {new: "coverages[].limits[limit_type=sublimit].amount"}
+  coverages[].premium: {new: "coverages[].premium"}
+  coverages[].endorsement_refs[]: {new: "coverages[].form_refs[]"}
+  text_sections: {new: "text_sections"}
+  additional_fields[].name: {new: "additional_fields[].label"}
+  additional_fields[].value: {new: "additional_fields[].value"}

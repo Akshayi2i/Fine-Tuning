@@ -51,6 +51,7 @@ codes:
   aliases:
   - Guest Liability
   - Motel Liab Guest
+  - GL
   default_limit_types:
   - per_person
   - per_accident
@@ -162,6 +163,7 @@ codes:
   aliases:
   - Collision
   - COLLISION
+  - Collision Coverage
   default_limit_types:
   - per_occurrence
   - other
@@ -194,6 +196,7 @@ codes:
   aliases:
   - MANDATORY PERSONAL INJURY PROTECTION
   - Mandatory Personal Injury Protection
+  - Personal Injury Protection/Basic Economic Loss
   default_limit_types:
   - aggregate
   - per_person
@@ -217,6 +220,7 @@ codes:
   name: Underinsured / supplementary uninsured motorist
   aliases:
   - SUPPLEMENTARY UNINSURED/UNDERINSURED MOTORISTS BODILY INJURY
+  - Supplementary Uninsured / Underinsured
   - Supplementary Uninsured / Underinsured Motorist
   - Supplementary Uninsured/ Underinsured Motorist
   - Supplementary Uninsured/Underinsured Motorist

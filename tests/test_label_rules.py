@@ -536,8 +536,10 @@ import pytest  # noqa: E402 - the parametrised tests below
 @pytest.mark.parametrize(("doc_type", "lob", "applies"), [
     ("policy", "homeowners", True), ("policy", ["personal_auto"], True), ("policy", "classic_auto", True),
     ("policy", "gl", True), ("policy", None, True),                       # no line: the fallback, common model
-    ("policy", "auto", False), ("policy", "wc", False), ("policy", "umbrella", False),
-    ("policy", "property", False),
+    ("policy", "auto", True), ("policy", "wc", True), ("policy", "umbrella", True),
+    ("policy", "property", True),                                          # moved onto the common model
+    ("policy", "equipment_breakdown", False), ("policy", "agriculture_farm", False),
+    ("policy", "epli", False), ("policy", "business_owners", False),      # still self-contained
     ("policy", "pet_insurance", True),                    # no schema of its own: the fallback, as serving reads it
     ("acord", None, False), ("lossrun", None, False),
 ])
@@ -560,7 +562,8 @@ def _stored_gold(client, source_id, lob, number="CG 00 01 04 13"):
     client.write_bytes(paths.processed_page("policy", source_id, 1, "png"), b"\x89PNG")
 
 
-@pytest.mark.parametrize(("lob", "moved"), [("homeowners", True), ("auto", False), ("wc", False)])
+@pytest.mark.parametrize(("lob", "moved"), [("homeowners", True), ("auto", True),
+                                             ("equipment_breakdown", False), ("epli", False)])
 def test_the_corpus_build_reads_a_stored_gold_exactly_as_the_gate_scores_it(lob, moved):
     """Before, the corpus build trained a stored gold's edition inside its form
     number while the gate scored it split - and the gate split every line's."""
@@ -589,5 +592,5 @@ def test_the_corpus_builds_verification_applies_the_rule_when_told_the_line():
     assert verified_label(gold, ["text"]) is gold                         # as build_jsonl calls it today
     moved = verified_label(gold, ["text"], doc_type="policy", lob="homeowners")
     assert moved["forms_and_endorsements"][0]["edition_date"]["parsed"] == "04/13"
-    assert verified_label(gold, ["text"], doc_type="policy", lob="auto") is gold
+    assert verified_label(gold, ["text"], doc_type="policy", lob="equipment_breakdown") is gold
     assert gold == _forms("CG 00 01 04 13")

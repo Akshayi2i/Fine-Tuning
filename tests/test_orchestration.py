@@ -2128,11 +2128,13 @@ def test_the_lines_of_the_run_s_own_train_view_are_canonical(client, controller)
     seed_corpus(client)
     ctx = make_context(client, controller)
     assert run_stages(ctx, stages_for("all"), command="all").ok
-    # The view keys lines by their schema names (labels say commercial_auto,
-    # workers_comp), as the release and the data mix name them.
+    # The view keys lines by their schema names, as the release and the data mix
+    # name them (the fixture policies are read as equipment_breakdown and
+    # commercial_package, lines still on self-contained files; an alias spelling
+    # such as workers_comp -> wc is tests/test_adapter.py's).
     train = ctx.manifests["policy"].data_stats.examples_by_line["train"]
-    assert set(train) == {"auto", "wc"}
-    assert client.read_json(paths.release_bundle("v1"))["lines"] == ["auto", "wc"]
+    assert set(train) == {"commercial_package", "equipment_breakdown"}
+    assert client.read_json(paths.release_bundle("v1"))["lines"] == ["commercial_package", "equipment_breakdown"]
 
 
 def test_an_uncalibrated_release_is_gated_not_promoted(client, controller):

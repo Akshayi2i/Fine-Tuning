@@ -35,7 +35,7 @@ from serving.doc_type_classifier import StaticClassifier
 from serving.pipeline import ExtractionRequest, extract
 
 #: A self-contained line, as tests/test_policy_windows.py reads.
-LOB = "property"
+LOB = "equipment_breakdown"
 TOTAL = 30
 
 _WORDS = ["the", "insured", "we", "our", "you", "your", "coverage", "property", "damage",

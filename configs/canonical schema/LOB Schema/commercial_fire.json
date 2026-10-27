@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fideon canonical schema - commercial_fire (policy_check)",
+  "description": "SPEC_21 section 4 canonical schema for commercial_fire, commercial fire (L1 code commercial_fire), composing common_model.json 1.1.0 by $ref: the envelope plus the locations and buildings blocks the property lines use. Built from the seven single-LOB 'Commercial Fire and Liability' declarations of the source data (one carrier, read in place). A commercial fire policy insures the building and business property against named perils (Section I) and grants premises liability and medical payments beside them (Section II); both are coverages of this line. No LOB block.",
+  "fideon:doc_type": "policy_check",
+  "fideon:lob": "commercial_fire",
+  "fideon:lob_code": "TBD",
+  "fideon:layout_family": "property_pkg",
+  "fideon:schema_version": "1.0.0",
+  "fideon:common_model_version": "1.1.0",
+  "fideon:status": "SPEC_21 schema of a new line (10 October 2026): the project owner ruled that the 'Commercial Fire and Liability' product is a line of business of its own (CR-BOPPR-06) and approved new canonical schemas. Built from 7 seed documents of 1 carrier; the seed golds drafted against it are DRAFT, pending reviewer sign-off.",
+  "fideon:built_from": {
+    "seed_golds": 7,
+    "carriers": [
+      "Leatherstocking Cooperative Insurance Company"
+    ],
+    "legacy_schema": null,
+    "registry_yamls": [
+      "commercial_fire"
+    ],
+    "corpora": [
+      "synth_core/fideon/synth_core/data/source data/<Carrier>/{boppr,prop,cgl_prop}/ (7 documents printing 'DECLARATION, Commercial Fire and Liability', seeds)"
+    ]
+  },
+  "fideon:blocks_used": [
+    "locations",
+    "buildings"
+  ],
+  "fideon:lob_block": "None. Every concept the seeds print has a home in the envelope or a common-model building block (SPEC_21 4.2.4). The liability rows of Section II (Coverage L, M, the LS-49 personal injury option) are coverages of this line: Coverage M uses the shared X_MED_PAY; Coverage L and LS-49 use CF_ codes until the shared liability codes of CR-BOPPR-01 exist (CHANGE_REQUESTS_commercial_fire.md CR-CFIRE-01). The OLT classification premiums are premium.items of those coverages.",
+  "fideon:coverage_codes_file": "commercial_fire.coverage_codes.yaml",
+  "fideon:coverage_codes": [
+    "CF_AUTO_INCREASE",
+    "CF_BPP",
+    "CF_BPP_EC",
+    "CF_BPP_SPECIAL_FORM",
+    "CF_BPP_VMM",
+    "CF_BUILDING",
+    "CF_BUILDING_EC",
+    "CF_LIABILITY",
+    "CF_PERSONAL_INJURY",
+    "CF_REPLACEMENT_COST",
+    "X_MED_PAY"
+  ],
+  "fideon:mandatory_fields": [
+    "carrier.name",
+    "named_insured.primary_name",
+    "policy.policy_number",
+    "policy.effective_date",
+    "policy.expiration_date",
+    "coverages[].limits[].amount"
+  ],
+  "fideon:audit_rules": [
+    "policy.effective_date < policy.expiration_date",
+    "months_between(policy.effective_date, policy.expiration_date) == policy.term_months",
+    "policy.effective_date <= document.transaction_effective_date <= policy.expiration_date",
+    "len(coverages[].limits[]) >= 1",
+    "`coverages[coverage_code=CF_LIABILITY].limits[limit_type=per_occurrence].amount` <= `coverages[coverage_code=CF_LIABILITY].limits[limit_type=aggregate].amount`",
+    "`coverages[coverage_code=X_MED_PAY].limits[limit_type=per_person].amount` <= `coverages[coverage_code=X_MED_PAY].limits[limit_type=per_accident].amount`",
+    "premium.total == sum(coverages[].premium) + sum(forms_and_endorsements[].premium) + sum(premium.items[].amount) + sum(premium.surcharges[].amount) + sum(premium.discounts[].amount) + sum(premium.taxes_fees[].amount) ± 0.01"
+  ],
+  "fideon:audit_rules_note": "Rules 1-4 are common_model.json fideon:default_audit_rules (the claims-made rule left out: a commercial fire declarations prints no retroactive date). Rule 5: an each-occurrence liability limit never exceeds its aggregate. Rule 6: the medical payments each-person limit never exceeds the each-accident limit. Rule 7 holds on all 7 seeds: exclusion credits are negative form premiums, a premium printed 'Incl.' parses to null and adds nothing, and the carrier's printed subtotals ('Property Total', 'Coverage Premium') are additional_fields, not premium items. A rule whose values a document does not print is not evaluated.",
+  "fideon:aliases": {
+    "buildings[].construction": [
+      "Construction Type"
+    ],
+    "buildings[].occupancy": [
+      "Description of Building Occupancies"
+    ],
+    "carrier.fax": [
+      "Fax"
+    ],
+    "carrier.phone": [
+      "Phone"
+    ],
+    "coverages[].coinsurance_percent": [
+      "Coinsurance"
+    ],
+    "coverages[].deductibles[].amount": [
+      "Deductible"
+    ],
+    "coverages[].valuation": [
+      "Loss Settlement",
+      "Business Property Loss Settlement"
+    ],
+    "document.transaction_effective_date": [
+      "Amended Date"
+    ],
+    "document.transaction_reason": [
+      "POLICY CHANGE"
+    ],
+    "interested_parties[].name": [
+      "1st Mortgagee",
+      "Lienholder"
+    ],
+    "locations[].location_number": [
+      "Property"
+    ],
+    "locations[].protection_class": [
+      "Protection Class"
+    ],
+    "locations[].territory": [
+      "Territory (OLT Classification 1)"
+    ],
+    "named_insured.primary_name": [
+      "Named Insured(s)"
+    ],
+    "policy.effective_date": [
+      "Policy Term Effective Date"
+    ],
+    "policy.expiration_date": [
+      "Policy Term Expiration Date"
+    ],
+    "policy.policy_number": [
+      "Policy ID",
+      "Policy Number"
+    ],
+    "premium.taxes_fees[].amount": [
+      "Fees"
+    ],
+    "premium.total": [
+      "Total"
+    ],
+    "producer.agency_name": [
+      "Agency",
+      "Mail To"
+    ],
+    "producer.fax": [
+      "Fax"
+    ],
+    "producer.phone": [
+      "Work"
+    ]
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "document",
+    "carrier",
+    "named_insured",
+    "policy",
+    "lob_parts",
+    "coverages"
+  ],
+  "properties": {
+    "document": {
+      "$ref": "../common/common_model.json#/$defs/document"
+    },
+    "carrier": {
+      "$ref": "../common/common_model.json#/$defs/carrier"
+    },
+    "producer": {
+      "$ref": "../common/common_model.json#/$defs/producer"
+    },
+    "named_insured": {
+      "$ref": "../common/common_model.json#/$defs/named_insured"
+    },
+    "policy": {
+      "$ref": "../common/common_model.json#/$defs/policy"
+    },
+    "lob_parts": {
+      "$ref": "../common/common_model.json#/$defs/lob_parts"
+    },
+    "coverages": {
+      "$ref": "../common/common_model.json#/$defs/coverages"
+    },
+    "deductibles": {
+      "$ref": "../common/common_model.json#/$defs/deductibles"
+    },
+    "interested_parties": {
+      "$ref": "../common/common_model.json#/$defs/interested_parties"
+    },
+    "premium": {
+      "$ref": "../common/common_model.json#/$defs/premium"
+    },
+    "billing": {
+      "$ref": "../common/common_model.json#/$defs/billing"
+    },
+    "forms_and_endorsements": {
+      "$ref": "../common/common_model.json#/$defs/forms_and_endorsements"
+    },
+    "locations": {
+      "$ref": "../common/common_model.json#/$defs/locations"
+    },
+    "buildings": {
+      "$ref": "../common/common_model.json#/$defs/buildings"
+    },
+    "additional_fields": {
+      "$ref": "../common/common_model.json#/$defs/additional_fields"
+    },
+    "text_sections": {
+      "$ref": "../common/common_model.json#/$defs/text_sections"
+    },
+    "fideon:provenance": {
+      "$ref": "../common/common_model.json#/$defs/provenance"
+    }
+  }
+}

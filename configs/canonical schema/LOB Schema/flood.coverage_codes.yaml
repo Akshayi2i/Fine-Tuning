@@ -1,0 +1,72 @@
+# SPEC_21 4.2.4 coverage codes of flood (schema 2.0.0, common model 1.1.0).
+# Built from the single-LOB flood declarations of the flood folder (Sterling Surplus Underwriters' private flood on
+# Lloyd's paper, Foremost Insurance Company's NFIP declarations), read in place, and the pre-SPEC_21 flood.json.
+# aliases: coverage names as the seeds print them. Codes are LOB-prefixed (FL_, provisional); X_LOSS_OF_USE is the
+# common model's shared code (shared: true). A coverage's limit is a per-occurrence limit; a printed '$0' limit is
+# the coverage with amount 0, a printed 'No' / 'Yes' its `included`; a loss-of-use waiting period
+# ('14-day deductible') is a waiting_period deductible.
+# carriers: how many of the seed carrier folders print one of the code's names.
+lob: flood
+schema_version: 2.0.0
+common_model_version: 1.1.0
+code_prefix: FL_
+codes:
+- code: FL_BUILDING
+  name: Building or dwelling property (flood)
+  aliases:
+  - Building
+  - Dwelling
+  - Building Coverage
+  - Building Coverage - Each and Every Loss
+  - Building Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+- code: FL_CONTENTS
+  name: Contents or personal property (flood)
+  aliases:
+  - Contents
+  - Contents Coverage
+  - Contents Coverage - Each and Every Loss
+  - Personal Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 2
+- code: FL_OTHER_STRUCTURES
+  name: Other structures (flood)
+  aliases:
+  - Other Structures
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: X_LOSS_OF_USE
+  name: Loss of use / additional living expense / fair rental value
+  aliases:
+  - Loss of Use
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  shared: true
+- code: FL_BASEMENT
+  name: Basement coverage (flood)
+  aliases:
+  - Basement Coverage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: FL_BASEMENT_PERSONAL_PROPERTY
+  name: Basement personal property (flood)
+  aliases:
+  - Basement Personal Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: FL_ICC
+  name: Increased cost of compliance (NFIP)
+  aliases:
+  - Increased Cost of Compliance
+  - Increased Cost of Compliance (ICC)
+  - ICC
+  default_limit_types:
+  - per_occurrence
+  carriers: 1

@@ -68,10 +68,15 @@ def test_golden_label_carries_line_of_business(golden):
     in its own field, a canonical policy in its metadata."""
     label, meta, doc_type, form = _load(golden)
     if schemas.is_canonical(doc_type, form, meta.get("lob")):
+        # As the importer checks it (export_golden_labels.validate_label): a line
+        # that names a canonical schema, not a value of the flat labels' LOB enum.
+        from common.lob import known_lines, lob_lines
+
         assert "lob" in meta, f"{golden.stem}: a canonical policy records its line in metadata"
+        assert lob_lines(meta["lob"]) <= known_lines(), f"{golden.stem}: {meta['lob']!r} names no schema"
     else:
         assert "line_of_business" in label
-    validate_lob(_lines_of(golden))
+        validate_lob(_lines_of(golden))
 
 
 @pytest.mark.parametrize("golden", ALL_GOLDEN, ids=lambda p: p.stem)
@@ -179,7 +184,10 @@ def test_fixtures_include_a_variable_length_list_field():
 
 
 def test_fixtures_cover_more_than_one_lob_value():
-    values = [_lines_of(g) for g in ALL_GOLDEN]
+    # The LOB enum is the flat labels' own field (ACORD, Loss Run); a canonical
+    # policy outputs no line_of_business - its line is the schema it is read with.
+    values = [_lines_of(g) for g in ALL_GOLDEN
+              if not schemas.is_canonical(*_load(g)[2:], _meta_for(g).get("lob"))]
     coverage = compute_coverage(values)
     assert len([v for v, c in coverage.counts.items() if c]) >= 2, (
         "a single LoB value across all fixtures makes per-value LoB accuracy untestable"

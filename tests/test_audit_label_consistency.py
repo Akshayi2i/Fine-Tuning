@@ -96,7 +96,7 @@ def test_a_date_kept_as_written_splits_where_one_the_build_rewrites_does_not():
 def test_dates_the_build_can_read_train_in_one_format_on_a_self_contained_line():
     found = _found({"a": {"policy": {"effective_date": _value("04/01/2026", "2026-04-01")}},
                     "b": {"policy": {"effective_date": _value("04/01/2026", "04/01/2026")}}},
-                   lob="workers_comp")
+                   lob="equipment_breakdown")
     assert found == []
 
 
@@ -114,7 +114,7 @@ def test_whole_numbers_written_two_ways_split_and_a_decimal_beside_them_does_not
 def test_a_number_beside_text_splits_on_a_line_whose_schema_holds_either():
     found = _found({"a": {"premium": {"total_policy_premium": _value("$47,250.00", 47250.0)}},
                     "b": {"premium": {"total_policy_premium": _value("$47,250.00", "47,250.00")}}},
-                   lob="workers_comp")
+                   lob="equipment_breakdown")
     assert _by_kind(found) == {"format": {"premium.total_policy_premium"}}
     assert 'text "99,999.99"' in found[0].detail
 
@@ -147,7 +147,7 @@ def test_a_value_another_check_reports_is_left_to_that_report():
                             "premium": {"total_policy_premium": _value("$47,250.00", 47250.0)}},
                       "b": {"policy": {"effective_date": _value("sometime", "sometime in April")},
                             "premium": {"total_policy_premium": _value("$47,250.00", "$47,250.00")}}},
-                     lob="workers_comp")
+                     lob="equipment_breakdown")
     assert formats == []
 
 
@@ -172,10 +172,10 @@ def test_a_placeholder_beside_a_null_where_its_row_is_there():
 
 def test_an_explicit_null_is_a_null_and_a_placeholder_alone_is_no_split():
     found = _found({"a": {"producer": {"producer_code": _value("TBD", "TBD")}},
-                    "b": {"producer": {"producer_code": _value(None, None)}}}, lob="workers_comp")
+                    "b": {"producer": {"producer_code": _value(None, None)}}}, lob="equipment_breakdown")
     assert _by_kind(found) == {"placeholder": {"producer.producer_code"}}
     alone = _found({"a": {"producer": {"producer_code": _value("TBD", "TBD")}},
-                    "b": {"producer": {"producer_code": _value("TBD", "TBD")}}}, lob="workers_comp")
+                    "b": {"producer": {"producer_code": _value("TBD", "TBD")}}}, lob="equipment_breakdown")
     assert alone == []
 
 
@@ -260,8 +260,11 @@ def test_a_consistent_folder_has_no_label_consistency_warning(tmp_path):
 def test_each_kind_of_split_is_a_warning_in_the_report(tmp_path):
     pytest.importorskip("pymupdf")
     from data_pipeline.audit import audit_folder, write_report
-    from tests.test_data_audit import GOLDEN, PAGE_1, _document
+    from tests.test_data_audit import GOLDEN, META, PAGE_1, _document
 
+    # The fixture gold is in a self-contained line's shape; workers_comp is on
+    # the common model now, so the folder is filed under a line still its own.
+    meta = {**META, "lob": "equipment_breakdown"}
     a = copy.deepcopy(GOLDEN)
     a["policy"]["policy_type"] = _value("Standard", "Standard")
     b = copy.deepcopy(GOLDEN)
@@ -271,7 +274,7 @@ def test_each_kind_of_split_is_a_warning_in_the_report(tmp_path):
     c = copy.deepcopy(GOLDEN)
     c["policy"]["effective_date"]["parsed"] = "2026-01-04"                   # raw says 04/01/2026
     for name, golden in (("a", a), ("b", b), ("c", c)):
-        _document(tmp_path / "data", name, golden=golden, pages=[PAGE_1 + [name]])
+        _document(tmp_path / "data", name, golden=golden, meta=meta, pages=[PAGE_1 + [name]])
     report = audit_folder(tmp_path / "data")
     found = [f for f in report.findings if f.check == LABEL_CONSISTENCY]
     assert _by_kind(found) == {
