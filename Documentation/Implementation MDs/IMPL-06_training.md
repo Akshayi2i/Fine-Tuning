@@ -304,9 +304,12 @@ first epoch's documents and the same for every epoch, in this order:
    scanned with one gold trains in one render per epoch and the other the next; half of a seed's twins start
    in each render. Real documents and single-render twins train every epoch; a line that rotation would take
    under the line-balance target keeps both renders.
-3. **Line balance** (`line_balance: {min_documents: 100, max_repeat: 3}`, `line_repeats`): a line with fewer
-   documents per epoch than the target (`min_documents`, capped at the largest line) has its rows repeated
-   ⌈target ÷ documents⌉ times, at most 3, in every epoch file.
+3. **Line balance** (`line_balance: {min_documents: 0, max_repeat: 3}`, `line_repeats`): when on, a line with
+   fewer documents per epoch than the target (`min_documents`, capped at the largest line) has its rows repeated
+   ⌈target ÷ documents⌉ times, at most 3, in every epoch file. **Off since 2026-10-27** (`min_documents: 0`,
+   user decision for the first commercial cycle): every line trains at its natural share; on, it repeated
+   boppr, wc and bopgl three times an epoch and nearly doubled the run (~30 h against ~16 h on an H200).
+   `min_documents: 100` turns it back on.
 
 Validation and test are never sampled, rotated or repeated. The CGL documents still train in their own tenant
 (`--tenant`), now as the policy adapter: one line, real documents only, so the three change nothing there. The

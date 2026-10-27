@@ -134,7 +134,9 @@ def test_the_adapter_s_view_applies_the_configured_line_balance():
     rows = ([{"source_id": f"h{i}", "lob": "homeowners"} for i in range(120)]
             + [{"source_id": "m0", "lob": "motorcycle"}])
     repeats = line_repeats(rows, **_balance_settings())
-    assert repeats["homeowners"] == 1 and repeats["motorcycle"] == int(configured["max_repeat"])
+    # Off (min_documents 0, decision 2026-10-27): every line at its natural share.
+    expected = int(configured["max_repeat"]) if int(configured["min_documents"]) > 0 else 1
+    assert repeats["homeowners"] == 1 and repeats["motorcycle"] == expected
 
 
 # 7 - a small line owned by a held-out carrier is tested, and recorded as such

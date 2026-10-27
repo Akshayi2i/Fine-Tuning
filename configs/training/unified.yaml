@@ -345,8 +345,13 @@ seed: 42
 #       byte for byte. true: each repeat comes from the NEXT epoch file of the
 #       corpus (the fourth too, which a three-epoch run otherwise never reads),
 #       so it has its own mode draw and windows.
+#
+# OFF since 2026-10-27 (user decision, first commercial cycle): each line trains
+# at its natural share. Raising its small lines (boppr, wc, bopgl) to the
+# largest (gl) repeated their few documents three times an epoch and nearly
+# doubled the run (~30 h against ~16 h). 100 turns it back on.
 line_balance:
-  min_documents: 100
+  min_documents: 0
   max_repeat: 3
   count: documents
   distinct_repeats: false

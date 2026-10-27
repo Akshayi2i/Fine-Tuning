@@ -1070,7 +1070,7 @@ Scaffold the `insurance-extraction-finetuning` repo and create every config file
   - Batch/memory: per-device train batch 1, grad accumulation 8, **effective batch 8** at pilot volume (kept when training data-parallel on several GPUs: accumulation shrinks), gradient checkpointing on, bf16, `dataset_num_proc: 8`; `use_logits_to_keep`, `padding_free`, and `length_grouped_sampling: false` (with one row per device and `padding_free` there is no padding to save, and on it made ms-swift encode every row before step 1).
   - Vision: `train_vit: false` (the §3 gate default), resolution cap inherited from `base_model.yaml`.
   - Eval/checkpointing: eval and save every 50 steps, `save_total_limit: 4` (the candidates checkpoint selection scores), a resume point every 70 steps (`checkpoint_every_steps`), `load_best_model_at_end: false`; validation loss tracked (`metric_for_best_model: eval_loss`, `greater_is_better: false`) for the progress curve only — `early_stopping_patience` was in the file but not passed (removed 2026-10-26), since ms-swift 3 takes none. The validation cut: `evaluations_per_run: 10`, each in-training loss check on `loss_sample_rows: 160`; checkpoint selection on `validation_sample_rows: 400` in all modes, then `selection_document_finalists: 2` judged on whole validation documents in `selection_document_modes: [ocr_plus_image]` with `selection_guard_margin: 0.02`, and a near-tie (`selection_tie_break_margin: 0.015`) re-scored. `selection_run_to_run_check: true` reads the finalists' whole documents a second time in reverse order, and `run_to_run_check: true` repeats the golden eval's main mode the same way (run-to-run agreement, decision 2026-10-24, IMPL-08). What ships is chosen by generated accuracy (IMPL-06 §3), never by loss. Fixed recorded `seed: 42`, `logging_steps: 10`.
-  - Corpus view: `line_balance` (`min_documents: 100`, `max_repeat: 3`) and `render_rotation: true` (one render per twin per epoch), applied in the adapter's view of the corpus.
+  - Corpus view: `line_balance` (`min_documents: 0` - off since 2026-10-27; 100 turns it on - `max_repeat: 3`) and `render_rotation: true` (one render per twin per epoch), applied in the adapter's view of the corpus.
   - Data mix: `data_mix` with `synthetic_fraction` and `scanned_share`, a default and optional per-line values under `lines:`, all `null` (unsteered) until set; the file may also set its own `modality_mix`. It is the one adapter's training config (`common.adapter.ADAPTER.training_config`).
   - Distributed: `deepspeed_config: null`, `sequence_parallel_size: 1`, `gpus: auto` (data-parallel on every GPU the pod has).
   - Top comment: "hyperparameters are sweep starting points (arch §11/§11a) — tune on the validation set, not fixed truth."
@@ -3317,9 +3317,12 @@ first epoch's documents and the same for every epoch, in this order:
    scanned with one gold trains in one render per epoch and the other the next; half of a seed's twins start
    in each render. Real documents and single-render twins train every epoch; a line that rotation would take
    under the line-balance target keeps both renders.
-3. **Line balance** (`line_balance: {min_documents: 100, max_repeat: 3}`, `line_repeats`): a line with fewer
-   documents per epoch than the target (`min_documents`, capped at the largest line) has its rows repeated
-   ⌈target ÷ documents⌉ times, at most 3, in every epoch file.
+3. **Line balance** (`line_balance: {min_documents: 0, max_repeat: 3}`, `line_repeats`): when on, a line with
+   fewer documents per epoch than the target (`min_documents`, capped at the largest line) has its rows repeated
+   ⌈target ÷ documents⌉ times, at most 3, in every epoch file. **Off since 2026-10-27** (`min_documents: 0`,
+   user decision for the first commercial cycle): every line trains at its natural share; on, it repeated
+   boppr, wc and bopgl three times an epoch and nearly doubled the run (~30 h against ~16 h on an H200).
+   `min_documents: 100` turns it back on.
 
 Validation and test are never sampled, rotated or repeated. The CGL documents still train in their own tenant
 (`--tenant`), now as the policy adapter: one line, real documents only, so the three change nothing there. The
