@@ -458,22 +458,32 @@ def stage_preprocessing(ctx: StageContext) -> StageResult:
     """
     from data_pipeline.ocr.run_mineru import MinerUEngine, process_batch
     from data_pipeline.ocr.served_ocr import ServedMinerUEngine
+    from orchestration.ocr_server import SERVER_CONCURRENCY, managed_ocr_server
 
     engine = ctx.ocr_engine or ServedMinerUEngine.from_environment()
     processed, skipped, failed = [], [], []
     try:
         # A served engine also re-reads what another MinerU read: one corpus, one MinerU.
         pending = _pending_ocr(ctx, engine)
-        if engine is None and pending:
-            _assert_ocr_runnable(ctx, pending)
-            engine = MinerUEngine()
-        # Concurrently against a served MinerU only: the in-process one holds the GPU.
-        workers = max(1, int(getattr(ctx, "ocr_workers", 1) or 1)) if hasattr(engine, "environment") else 1
-        for doc_type, ids in pending.items():
-            outcome = process_batch(ids, doc_type, ctx.raw, engine, tenant_id=ctx.tenant_id, workers=workers)
-            processed += outcome["processed"]
-            skipped += outcome["skipped"]
-            failed += [f"{sid}: {reason}" for sid, reason in outcome["failed"]]
+        # The pod's own OCR server (scripts/mineru_server.sh) is run for this reading and stopped
+        # after it, so training has the GPU; a server somebody else runs is used as it is.
+        # An engine the caller injected (a test's) is never replaced.
+        with managed_ocr_server(bool(pending) and ctx.ocr_engine is None) as started:
+            if started is not None:
+                engine = started
+            if engine is None and pending:
+                _assert_ocr_runnable(ctx, pending)
+                engine = MinerUEngine()
+            # Concurrently against a served MinerU only: the in-process one holds the GPU.
+            workers = max(1, int(getattr(ctx, "ocr_workers", 1) or 1)) if hasattr(engine, "environment") else 1
+            if started is not None:
+                workers = max(workers, SERVER_CONCURRENCY)      # the server runs this many jobs at once
+            for doc_type, ids in pending.items():
+                outcome = process_batch(ids, doc_type, ctx.raw, engine, tenant_id=ctx.tenant_id,
+                                        workers=workers)
+                processed += outcome["processed"]
+                skipped += outcome["skipped"]
+                failed += [f"{sid}: {reason}" for sid, reason in outcome["failed"]]
     finally:
         # The readings just written are not the ones cached.
         if getattr(ctx, "ocr_meta_cache", None) is not None:

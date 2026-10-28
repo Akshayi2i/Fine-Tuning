@@ -217,23 +217,21 @@ account SAS, which reaches the raw PDFs from every pod that holds it. Keep each 
 the first `;` or `&` (the bootstrap checks `export` and indented lines too, and lists
 half a SAS login under "Still to do").
 
-**OCR runs first, through the served MinerU 4.0.12 (`configs/shared/ocr.yaml`)**: a corpus read by another
-MinerU version or tier is refused at corpus build, at preflight and at promotion. The bootstrap installs that
-MinerU as a server on the training pod; run it for the OCR, then stop it, because training needs the whole GPU:
+**OCR is part of the pipeline, through the served MinerU 4.0.12 (`configs/shared/ocr.yaml`)**: a corpus read by
+another MinerU version or tier is refused at corpus build, at preflight and at promotion. The bootstrap
+installs that MinerU as a server on the training pod, and the OCR stage runs it itself: when documents still need
+reading it starts the server (`scripts/mineru_server.sh start`), waits until it answers, reads the pages and stops
+it before anything else wants the GPU. A corpus already read starts nothing. So the whole cycle is one command:
 
 ```bash
-bash scripts/mineru_server.sh start          # the API in tmux, a token made for it, MINERU_URL + MINERU_TOKEN into .env
-bash scripts/mineru_server.sh check --pdf /workspace/intake/<batch>/<one folder>/document.pdf   # version + tier, a real read
-python -m data_pipeline.ocr.run_mineru --doc-type policy --all-unprocessed --workers 4
-python -m orchestration.preflight --skip-corpus
-bash scripts/mineru_server.sh stop           # then train:
-python -m orchestration.run finetune --skip-ingest --fresh
+python -m orchestration.run finetune --skip-ingest --fresh   # OCR (server started and stopped), corpus, training, selection
 ```
 
-The OCR can also run against a dedicated MinerU 4.0.12/basic API on another pod (not production's): put its
-`MINERU_URL` and `MINERU_TOKEN` in `.env` instead of `start`. If documents still need OCR, `finetune` stops with
-that command. The in-process MinerU 3.4.5 can no longer produce a trainable corpus, and the bootstrap no longer
-builds it.
+A `MINERU_URL` that is not this machine's (a dedicated MinerU 4.0.12/basic on another pod, not production's) is used as
+it is and never stopped. `bash scripts/mineru_server.sh start | check [--pdf FILE] | stop` runs the server by hand,
+for a check before the first run. The in-process MinerU 3.4.5 can no longer produce a trainable corpus, and the
+bootstrap no longer builds it. The delivered batch is imported once, before this:
+`python -m data_pipeline.ingestion.import_labeled_pdfs --from-blob <batch> --doc-type policy`.
 
 ### One role at a time
 

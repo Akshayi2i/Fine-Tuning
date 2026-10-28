@@ -93,9 +93,9 @@ def select_sources(bundles: Path, *, train_sources: int = 4, val_sources: int = 
 
 
 def _page_count(pdf: Path) -> int:
-    from common.pdf_access import unlocked_pdf
-
     import pymupdf
+
+    from common.pdf_access import unlocked_pdf
 
     with pymupdf.open(stream=unlocked_pdf(pdf.read_bytes()), filetype="pdf") as doc:
         return doc.page_count
@@ -108,8 +108,12 @@ def assert_served_ocr(steps: list[str], environ: dict[str, str] | None = None) -
     the corpus build and preflight refuse unless it is the pinned version
     (configs/shared/ocr.yaml) - found only after every page was read.
     """
+    from orchestration.ocr_server import installed
+
     environ = os.environ if environ is None else environ
-    if "ocr" in steps and not (environ.get("MINERU_URL") or "").strip():
+    # With the pod's own server installed (scripts/pod_bootstrap.sh) the OCR step starts it
+    # itself, and stops it after, so no address needs to be set.
+    if "ocr" in steps and not (environ.get("MINERU_URL") or "").strip() and not installed():
         raise SmokeError("MINERU_URL is not set: the OCR step would read with the OCR environment's "
                          "MinerU, not the pinned served one, and preflight would refuse every reading "
                          "after the whole subset was read. Set MINERU_URL to the served MinerU.")
@@ -277,14 +281,23 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
             print(f"smoke: {exc}", flush=True)
             return 1
         print(f"smoke subset: {stage_subset(folders, subset_dir)} document(s) in {subset_dir}", flush=True)
-    env = {**os.environ, "FIDEON_DETACHED": "1"}          # already in tmux: steps run in place
-    for step, command in commands(batch_dir=batch_dir, subset_dir=subset_dir, tenant=args.tenant,
-                                  version=args.version, check_out=check_out, steps=steps).items():
+    from orchestration.ocr_server import managed_ocr_server
 
+    def build() -> dict[str, list[str]]:
+        return commands(batch_dir=batch_dir, subset_dir=subset_dir, tenant=args.tenant,
+                        version=args.version, check_out=check_out, steps=steps)
+
+    for step in build():
         if step not in steps:
             continue
-        print(f"\n=== smoke: {step} ===\n{' '.join(command)}", flush=True)
-        code = subprocess.run(command, env=env).returncode
+        # The OCR step runs the pod's own server for its length and stops it, so the finetune
+        # step has the GPU; a MINERU_URL somebody else serves is used as it is. The command is
+        # built once the address is known: it reads through the served MinerU when there is one.
+        with managed_ocr_server(step == "ocr"):
+            command = build()[step]
+            print(f"\n=== smoke: {step} ===\n{' '.join(command)}", flush=True)
+            # Already in tmux: the step runs in place.
+            code = subprocess.run(command, env={**os.environ, "FIDEON_DETACHED": "1"}).returncode
         if code != 0:
             print(f"smoke: {step} failed (exit {code}); fix it and resume with --steps "
                   f"{','.join(steps[steps.index(step):])}", flush=True)

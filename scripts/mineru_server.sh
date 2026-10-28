@@ -46,6 +46,10 @@ case "$action" in
     if pgrep -f "mineru-api --port $PORT" >/dev/null 2>&1; then
       echo "a MinerU API is already running on port $PORT"
     else
+      # A server stopped earlier leaves its finished tmux session open (pod_run.sh keeps a run's
+      # last screen), and pod_run.sh refuses to reuse a name while it is: clear it first.
+      tmux kill-session -t "=fideon-mineru-server" 2>/dev/null || true
+      rm -f /workspace/logs/mineru-server.exit
       # The key is read from the file when the server starts, not put on the command line: `ps` shows a command line.
       cat > "$STATE/run.sh" <<EOF
 #!/usr/bin/env bash
@@ -134,6 +138,11 @@ PY
 
   stop)
     pkill -f "mineru-api --port $PORT" 2>/dev/null && echo "stopped" || echo "no MinerU API was running on port $PORT"
+    sleep 2
+    # Closes the finished session too, so the next start can reuse the name.
+    tmux kill-session -t "=fideon-mineru-server" 2>/dev/null || true
+    # The GPU memory is free once the process is gone; say so when it is not.
+    pgrep -f "mineru-api --port $PORT" >/dev/null 2>&1 && { echo "the server is still running" >&2; exit 1; } || true
     ;;
 
   *)
