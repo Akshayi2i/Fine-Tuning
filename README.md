@@ -130,6 +130,13 @@ python -m orchestration.run extract --model base --adapter /workspace/staging/..
 #    input/output tokens) in testing/metrics/<model>/test_record.csv - --round names the round, e.g. Baseline.
 #    Copy the rows into the team's workbook (fills its "Testing Record" sheet; never overwrites, never twice):
 python -m testing.testing_record --model base --round Baseline --xlsx "Documentation/Testing Records/FIdeon SLM - Model Training & Test Record_v1.xlsx"
+#    No project code on the pod (it serves only `vllm serve` and the MinerU API): stage the bundles here, read
+#    them with testing.latency_check against the pod, and turn its output into the same rows. --select baseline =
+#    every test and val document plus the train documents of each line those leave under 10. Doc IDs are hashes;
+#    the bundle names stay in the local doc_index.csv (testing/results/ is git-ignored).
+python -m testing.testing_record --stage --bundles data/bundles_c1 --select baseline --out testing/results/baseline_c1
+python -m testing.latency_check --model-url https://<pod>-8000.proxy.runpod.net --mineru-url https://<pod>-8001.proxy.runpod.net --mode image_only --out testing/results/baseline_c1/run "@testing/results/baseline_c1/docs.txt"
+python -m testing.testing_record --latency-dir testing/results/baseline_c1/run --index testing/results/baseline_c1/doc_index.csv --round Baseline --xlsx "Documentation/Testing Records/FIdeon SLM - Model Training & Test Record_v1.xlsx"
 
 # all = 1 + 2. Never includes extraction.
 python -m orchestration.run all --input ./intake
@@ -184,20 +191,21 @@ re-run: after a pod stop it only checks what is already there.
 
 ```bash
 cd /workspace && git clone https://github.com/Ideas-To-Impacts/fine-tuning.git && cd fine-tuning
-bash scripts/pod_bootstrap.sh --pdf /workspace/sample_policy.pdf   # --pdf is optional
+bash scripts/pod_bootstrap.sh
 ```
 
 It checks the GPU, the `/workspace` mount and 150 GB free; fills `.env`
 (`RUNPOD_VOLUME_MOUNT=/workspace`, `HF_HOME`, `MINERU_TOOLS_CONFIG_JSON`) without
-overwriting a value you set; builds **two environments** on the volume; moves
-MinerU's config onto the volume and sets it to cuda; downloads the base model at
+overwriting a value you set; builds **two environments** on the volume (training, and the
+MinerU 4.0.12 OCR server with its models, both read from `configs/shared/ocr.yaml` and the
+training lock); downloads the base model at
 the pinned revision into `/workspace/models`; and runs the Phase 0 spike. It ends
 with a list of anything still to do (the Blob login, MinerU's weights).
 
 | Environment | For | Why separate |
 |---|---|---|
 | `/workspace/venv` | training, `finetune`, `package`, serving (torch 2.8, ms-swift, vLLM 0.11, flash-attn) | |
-| `/workspace/venv-ocr` | OCR only (MinerU 3.4, pipeline backend) | MinerU's dependency set (its own transformers, onnxruntime, layout and OCR runtimes) is kept apart from the training stack |
+| `/workspace/venv-mineru4` | the OCR server: the MinerU version and tier pinned in `configs/shared/ocr.yaml` (4.0.12, basic), on the GPU through the torch the training lock pins | MinerU's dependency set (its own onnxruntime, layout and OCR runtimes) is kept apart from the training stack |
 
 Everything is on `/workspace` because the container disk is wiped when the pod
 stops. For Blob, prefer a SAS login (`AZURE_STORAGE_ACCOUNT_URL` +
@@ -209,21 +217,23 @@ account SAS, which reaches the raw PDFs from every pod that holds it. Keep each 
 the first `;` or `&` (the bootstrap checks `export` and indented lines too, and lists
 half a SAS login under "Still to do").
 
-**OCR runs first, through the served MinerU 4.0.12 (`configs/shared/ocr.yaml`), best before the pod
-starts**: a corpus read by another MinerU version or tier is refused at corpus build, at preflight and at
-promotion. Run it from any machine with Blob raw access, against a dedicated MinerU 4.0.12/basic API (not
-production's), several documents at once:
+**OCR runs first, through the served MinerU 4.0.12 (`configs/shared/ocr.yaml`)**: a corpus read by another
+MinerU version or tier is refused at corpus build, at preflight and at promotion. The bootstrap installs that
+MinerU as a server on the training pod; run it for the OCR, then stop it, because training needs the whole GPU:
 
 ```bash
-MINERU_URL=https://<dedicated mineru> MINERU_TOKEN=... python -m data_pipeline.ocr.run_mineru \
-    --doc-type policy --all-unprocessed --workers 4 [--shard 1/2]
-python -m orchestration.preflight
-# then on the pod, MINERU_URL unset: stage 2 finds every document read at the pin and skips
-python -m orchestration.run finetune --skip-ingest
+bash scripts/mineru_server.sh start          # the API in tmux, a token made for it, MINERU_URL + MINERU_TOKEN into .env
+bash scripts/mineru_server.sh check --pdf /workspace/intake/<batch>/<one folder>/document.pdf   # version + tier, a real read
+python -m data_pipeline.ocr.run_mineru --doc-type policy --all-unprocessed --workers 4
+python -m orchestration.preflight --skip-corpus
+bash scripts/mineru_server.sh stop           # then train:
+python -m orchestration.run finetune --skip-ingest --fresh
 ```
 
-If documents still need OCR, `finetune` stops with that command. `venv-ocr` (MinerU 3.4.5, in-process) can no
-longer produce a trainable corpus.
+The OCR can also run against a dedicated MinerU 4.0.12/basic API on another pod (not production's): put its
+`MINERU_URL` and `MINERU_TOKEN` in `.env` instead of `start`. If documents still need OCR, `finetune` stops with
+that command. The in-process MinerU 3.4.5 can no longer produce a trainable corpus, and the bootstrap no longer
+builds it.
 
 ### One role at a time
 
@@ -250,7 +260,7 @@ Linux x86-64 / Python 3.11, so a pod set up next month runs the same stack.
 | Environment | torch | Key pins |
 |---|---|---|
 | train (`/workspace/venv`) | 2.8.0 (CUDA 12.8) | vLLM 0.11.0, transformers 4.57.6, ms-swift 3.12.6, flash-attn 2.8.3 (pinned; check its prebuilt wheel on the pod, or it compiles for 30-60 min) |
-| ocr (`/workspace/venv-ocr`) | 2.8.0 | mineru 3.4.5 (pipeline backend; PDF-Extract-Kit-1.0 weights at a pinned revision) |
+| mineru4 (`/workspace/venv-mineru4`) | the training lock's (2.8.0) | mineru 4.0.12, as pinned in `configs/shared/ocr.yaml`; torch backend on the GPU |
 | serve | 2.8.0 | identical to train for every package they share |
 | quantize | 2.8.0 | llmcompressor 0.9 |
 
@@ -475,7 +485,7 @@ post-OCR report before the full `finetune`.
 ## Extracting a PDF through the pod's proxy URL
 
 To check the extraction routine on real PDFs and time it, run the test server on a pod and post PDFs to it
-from the laptop. Expose an HTTP port (8000) in the pod's settings; the server runs MinerU (in `venv-ocr`) and
+from the laptop. Expose an HTTP port (8000) in the pod's settings; the server runs MinerU (the OCR server of `scripts/mineru_server.sh`) and
 `serving.pipeline.extract` with the base model (or `--adapter`), one document at a time:
 
 ```bash

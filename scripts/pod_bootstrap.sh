@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 # One command to make a fresh H200 SXM pod ready to train.
 #
-#   bash scripts/pod_bootstrap.sh [--pdf /workspace/sample.pdf]
+#   bash scripts/pod_bootstrap.sh
 #
 # Run it from the repo, cloned onto the network volume (/workspace/fine-tuning).
-# It is safe to re-run: every step checks what is already there and does only
+# It is safe to re-run, and the one script that sets a pod up: every step checks what is already there and does only
 # what is missing, so after a pod stop it finishes in minutes.
 #
 # What it does, in order:
 #   1. checks: a GPU (an H200 expected), /workspace mounted, >= 150 GB free
 #   2. .env: fills the pod's keys without touching any value already set
 #   3. /workspace/venv      training + serving (torch 2.8, ms-swift, vLLM 0.11, flash-attn)
-#   4. /workspace/venv-ocr  OCR (MinerU 3.4.5, pipeline backend). Two environments
-#                           because MinerU's dependency set (its own transformers,
-#                           onnxruntime, layout and OCR runtimes) is kept apart from
-#                           vLLM 0.11 / torch 2.8.
-#   5. MinerU's config onto the volume, device-mode cuda
+#   4. /workspace/venv-mineru4  the OCR server: the MinerU version and tier pinned in
+#                           configs/shared/ocr.yaml (4.0.12, basic), with the torch the
+#                           training lock pins, so it reads pages on the GPU. Its own
+#                           environment: MinerU's dependencies are kept apart from vLLM.
+#   5. that server's models for the pinned tier
 #   6. the base model at the pinned revision into /workspace/models
-#   7. the Phase 0 spike (plus the MinerU checks when --pdf is given)
+#   7. the Phase 0 spike
+#
+# After it: `bash scripts/mineru_server.sh start`, read the corpus (OCR), then
+# `bash scripts/mineru_server.sh stop` before training: both want the GPU.
 #
 # Everything lives on /workspace because the container disk is wiped when the
 # pod stops. On the pod it runs detached in tmux: closing the laptop does not
@@ -28,22 +31,18 @@ cd "$(dirname "$0")/.."
 REPO="$(pwd)"
 WORKSPACE="${FIDEON_WORKSPACE:-/workspace}"
 VENV="$WORKSPACE/venv"
-VENV_OCR="$WORKSPACE/venv-ocr"
+VENV_MINERU="${MINERU_VENV:-$WORKSPACE/venv-mineru4}"
+MINERU_BACKEND="${MINERU_BACKEND:-torch}"   # torch (GPU) or onnx (CPU only: slow)
+MINERU_CONFIG="$WORKSPACE/mineru.json"
 MODELS="$WORKSPACE/models"
 MIN_FREE_GB="${FIDEON_MIN_FREE_GB:-150}"
-MINERU_CONFIG="$WORKSPACE/mineru.json"
 
-pdf=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --pdf) pdf="${2:?--pdf needs a path}"; shift 2 ;;
     -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
-    *) echo "usage: bash scripts/pod_bootstrap.sh [--pdf <a real policy PDF>]" >&2; exit 2 ;;
+    *) echo "usage: bash scripts/pod_bootstrap.sh" >&2; exit 2 ;;
   esac
 done
-if [ -n "$pdf" ] && [ ! -f "$pdf" ]; then
-  echo "pod_bootstrap: no PDF at $pdf" >&2; exit 2
-fi
 
 # --- detach: an install or download cut off by a closed laptop is half done ----
 on_pod=0
@@ -55,8 +54,7 @@ fi
 if [ "$on_pod" = 1 ] && [ -z "${TMUX:-}" ] && [ "${FIDEON_DETACHED:-}" != "1" ] \
    && [ "${FIDEON_NO_DETACH:-}" != "1" ]; then
   name="bootstrap-$(date -u +%Y%m%d-%H%M%S)"
-  args=(); [ -n "$pdf" ] && args=(--pdf "$pdf")
-  bash scripts/pod_run.sh start "$name" -- bash scripts/pod_bootstrap.sh "${args[@]}"
+  bash scripts/pod_run.sh start "$name" -- bash scripts/pod_bootstrap.sh
   echo "Bootstrap is running in tmux as '$name'; closing the laptop will not stop it."
   echo "  status: bash scripts/pod_run.sh status $name"
   echo "  watch:  bash scripts/pod_run.sh attach $name   (Ctrl-b then d to leave it running)"
@@ -111,7 +109,7 @@ echo "Python: $PYTHON ($("$PYTHON" -c 'import platform; print(platform.python_ve
 free_gb="$(df -BG --output=avail "$WORKSPACE" | tail -n1 | tr -dc '0-9')"
 echo "free on $WORKSPACE: ${free_gb} GB"
 [ "$free_gb" -ge "$MIN_FREE_GB" ] || die "only ${free_gb} GB free on $WORKSPACE; need ${MIN_FREE_GB} GB \
-(two environments ~25 GB, base model 17.5 GB, checkpoints, the staged corpus). Grow the network volume."
+(two environments ~25 GB, the MinerU models, base model 17.5 GB, checkpoints, the staged corpus). Grow the network volume."
 
 # --- 2. .env ---------------------------------------------------------------------
 step "2/7 .env"
@@ -231,22 +229,52 @@ make_venv() {
 }
 step "3/7 training + serving environment: $VENV"
 make_venv "$VENV" train requirements-train.txt
-step "4/7 OCR environment: $VENV_OCR"
-make_venv "$VENV_OCR" ocr requirements-ocr.txt
-
-# --- 5. MinerU's config --------------------------------------------------------------
-step "5/7 MinerU config"
-# The pinned pipeline weights and the config pointing at them, both on the volume
-# (download_mineru_models.sh) - fetched once, when the config does not name them.
-mineru_ready=0
-if ! "$VENV_OCR/bin/python" -m data_pipeline.ocr.mineru_config >/dev/null 2>&1; then
-  bash scripts/download_mineru_models.sh || echo "MinerU model download failed (see above)"
+# --- 4. the OCR server: MinerU 4, as pinned -------------------------------------------------
+# One MinerU reads the training corpus and every served document (configs/shared/ocr.yaml); it
+# runs as a server (scripts/mineru_server.sh). The pin is read from that file, not copied here.
+pin() { "$PYTHON" -c "
+import re
+text = open('configs/shared/ocr.yaml', encoding='utf-8').read()
+print(re.search(r'^\s*$1:\s*[\"]?([\w.]+)', text, re.M).group(1))"; }
+MINERU_VERSION="$(pin version)"
+MINERU_TIER="$(pin tier)"
+TORCH_PIN="$(grep -m1 '^torch==' requirements-train.lock | cut -d' ' -f1)"
+[ -n "$TORCH_PIN" ] || die "requirements-train.lock pins no torch"
+step "4/7 OCR server: MinerU $MINERU_VERSION ($MINERU_BACKEND backend) in $VENV_MINERU"
+mineru_want="$MINERU_VERSION:$MINERU_BACKEND:$TORCH_PIN"
+if [ -f "$VENV_MINERU/.fideon-mineru4" ] && [ "$(cat "$VENV_MINERU/.fideon-mineru4")" = "$mineru_want" ] \
+   && [ -x "$VENV_MINERU/bin/mineru-api" ]; then
+  echo "$VENV_MINERU is up to date (mineru $MINERU_VERSION, $MINERU_BACKEND)"
+else
+  # MinerU's layout models import OpenCV, which needs libGL and glib from the OS.
+  if [ "$(id -u)" = "0" ] && command -v apt-get >/dev/null 2>&1 && ! ldconfig -p 2>/dev/null | grep -q 'libGL.so.1'; then
+    apt-get update -qq && apt-get install -y -qq libgl1 libglib2.0-0 >/dev/null
+  fi
+  [ -x "$VENV_MINERU/bin/python" ] || "$PYTHON" -m venv "$VENV_MINERU"
+  "$VENV_MINERU/bin/pip" install --upgrade pip
+  "$VENV_MINERU/bin/pip" install "mineru==$MINERU_VERSION"
+  if [ "$MINERU_BACKEND" = "torch" ]; then
+    # The torch the training environment pins; read from a wheel cache in PIP_FIND_LINKS when one is there.
+    "$VENV_MINERU/bin/pip" install "$TORCH_PIN"
+    "$VENV_MINERU/bin/python" -c "import torch; assert torch.cuda.is_available(), 'torch cannot see the GPU'; print('torch', torch.__version__, torch.cuda.get_device_name(0))"
+  fi
+  echo "$mineru_want" > "$VENV_MINERU/.fideon-mineru4"
 fi
-if "$VENV_OCR/bin/python" -m data_pipeline.ocr.mineru_config; then
+
+# --- 5. the server's models ----------------------------------------------------------------
+step "5/7 MinerU models ($MINERU_TIER tier, $MINERU_BACKEND backend)"
+mkdir -p "$WORKSPACE/mineru-server"
+models_marker="$WORKSPACE/mineru-server/models-$MINERU_VERSION-$MINERU_TIER-$MINERU_BACKEND"
+mineru_ready=0
+if [ -f "$models_marker" ]; then
+  echo "models present"
+  mineru_ready=1
+elif "$VENV_MINERU/bin/mineru-models-download" --tier "$MINERU_TIER" --small-backend "$MINERU_BACKEND" -v; then
+  touch "$models_marker"
   mineru_ready=1
 else
-  PENDING+=("MinerU's model weights: bash scripts/download_mineru_models.sh, then re-run this script")
-  echo "MinerU is not ready yet (see the list at the end)"
+  PENDING+=("MinerU's models: $VENV_MINERU/bin/mineru-models-download --tier $MINERU_TIER --small-backend $MINERU_BACKEND, then re-run this script")
+  echo "MinerU's models are not ready yet (see the list at the end)"
 fi
 
 # --- 6. the base model ---------------------------------------------------------------
@@ -320,18 +348,12 @@ spike_status=0
 PATH="$VENV/bin:$PATH" VIRTUAL_ENV="$VENV" \
   "$VENV/bin/python" scripts/phase0_spike.py --skip-mineru --out "$WORKSPACE/logs/spike_report.json" \
   || spike_status=$?
-if [ -n "$pdf" ] && [ "$mineru_ready" = 1 ]; then
-  PATH="$VENV_OCR/bin:$PATH" VIRTUAL_ENV="$VENV_OCR" \
-    "$VENV_OCR/bin/python" scripts/phase0_spike.py --only-mineru --pdf "$pdf" \
-    --out "$WORKSPACE/logs/spike_report_mineru.json" || spike_status=$?
-elif [ -z "$pdf" ]; then
-  PENDING+=("run the MinerU spike checks: bash scripts/pod_bootstrap.sh --pdf <a real policy PDF>")
-fi
+# The MinerU checks are the server's own: scripts/mineru_server.sh check [--pdf FILE].
 
 echo
 echo "=== bootstrap summary ==="
 echo "training + serving: $VENV     (source $VENV/bin/activate)"
-echo "OCR:                $VENV_OCR (OCR runs here, before finetune)"
+echo "OCR server:         $VENV_MINERU  (bash scripts/mineru_server.sh start | check | stop)"
 echo "base model:         $MODELS"
 echo "spike report:       $WORKSPACE/logs/spike_report.json (exit $spike_status)"
 if [ ${#PENDING[@]} -gt 0 ]; then
@@ -339,4 +361,7 @@ if [ ${#PENDING[@]} -gt 0 ]; then
   for item in "${PENDING[@]}"; do echo "  - $item"; done
 fi
 [ "$spike_status" = 0 ] || die "the spike reported a failed check; read $WORKSPACE/logs/spike_report.json"
+if [ "$mineru_ready" = 1 ]; then
+  echo "Next: bash scripts/mineru_server.sh start && bash scripts/mineru_server.sh check"
+fi
 echo "pod_bootstrap: done"

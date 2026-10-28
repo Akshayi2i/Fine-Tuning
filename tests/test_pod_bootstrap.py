@@ -1,8 +1,9 @@
-"""The one-command pod bootstrap, and the two environments it builds.
+"""The one-command pod bootstrap, and the environments it builds.
 
-MinerU 1.x cannot share an environment with vLLM 0.11 / torch 2.8, so OCR has its
-own. The pipeline in the training environment then refuses clearly, rather than
-with an ImportError, when documents still need OCR.
+MinerU cannot share an environment with vLLM 0.11 / torch 2.8, so the OCR server has its
+own (the MinerU 4 pinned in configs/shared/ocr.yaml). The pipeline in the training
+environment then refuses clearly, rather than with an ImportError, when documents still
+need OCR.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ BASH = shutil.which("bash")
 def test_everything_it_builds_lives_on_the_volume():
     """The container disk is wiped on stop; the volume is not."""
     assert 'VENV="$WORKSPACE/venv"' in SCRIPT
-    assert 'VENV_OCR="$WORKSPACE/venv-ocr"' in SCRIPT
+    assert 'VENV_MINERU="${MINERU_VENV:-$WORKSPACE/venv-mineru4}"' in SCRIPT
     assert 'MODELS="$WORKSPACE/models"' in SCRIPT
     assert 'ensure_env HF_HOME "$WORKSPACE/.cache/huggingface"' in SCRIPT
     assert 'MINERU_CONFIG="$WORKSPACE/mineru.json"' in SCRIPT
@@ -41,9 +42,22 @@ def test_mineru_runs_on_the_gpu_on_its_pinned_weights_and_a_1x_config_path_is_re
     assert 'ensure_env MINERU_TOOLS_CONFIG_JSON "$MINERU_CONFIG" "$WORKSPACE/magic-pdf.json"' in SCRIPT
 
 
-def test_ocr_and_training_get_separate_environments():
+def test_the_ocr_server_and_training_get_separate_environments():
     assert 'make_venv "$VENV" train requirements-train.txt' in SCRIPT
-    assert 'make_venv "$VENV_OCR" ocr requirements-ocr.txt' in SCRIPT
+    # The OCR server is the pinned MinerU (read from configs/shared/ocr.yaml, never copied
+    # into the script), with the torch the training lock pins, in its own environment.
+    assert '"$VENV_MINERU/bin/pip" install "mineru==$MINERU_VERSION"' in SCRIPT
+    assert '"$VENV_MINERU/bin/pip" install "$TORCH_PIN"' in SCRIPT
+    assert "configs/shared/ocr.yaml" in SCRIPT and "grep -m1 '^torch=='" in SCRIPT
+    # The old in-process MinerU 3.4.5 environment is not built: training refuses its corpus.
+    assert "venv-ocr" not in SCRIPT and "requirements-ocr.txt" not in SCRIPT
+
+
+def test_a_rerun_installs_only_what_is_missing():
+    """Each MinerU stage is skipped when its marker matches the pin."""
+    assert '.fideon-mineru4' in SCRIPT
+    assert 'models-$MINERU_VERSION-$MINERU_TIER-$MINERU_BACKEND' in SCRIPT
+    assert 'is up to date (mineru' in SCRIPT and 'echo "models present"' in SCRIPT
 
 
 def test_it_detaches_into_tmux_on_the_pod():
@@ -81,9 +95,10 @@ def test_the_base_model_comes_at_the_pinned_revision():
     assert '"PIN_ME"' in SCRIPT   # refuses to download a floating revision
 
 
-def test_the_spike_runs_in_both_environments():
+def test_the_spike_runs_in_the_training_environment():
     assert re.search(r'"\$VENV/bin/python" scripts/phase0_spike.py --skip-mineru', SCRIPT)
-    assert re.search(r'"\$VENV_OCR/bin/python" scripts/phase0_spike.py --only-mineru', SCRIPT)
+    # The MinerU checks are the server's: scripts/mineru_server.sh check.
+    assert "--only-mineru" not in SCRIPT and "mineru_server.sh check" in SCRIPT
 
 
 def test_the_script_has_unix_line_endings():

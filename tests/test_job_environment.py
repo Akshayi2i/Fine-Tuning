@@ -58,7 +58,6 @@ def test_no_swift_anywhere_is_a_clear_error(tmp_path, monkeypatch):
 
 def test_the_bootstraps_spike_runs_with_its_venv_on_path():
     assert 'PATH="$VENV/bin:$PATH" VIRTUAL_ENV="$VENV"' in BOOTSTRAP
-    assert 'PATH="$VENV_OCR/bin:$PATH" VIRTUAL_ENV="$VENV_OCR"' in BOOTSTRAP
 
 
 def test_the_bootstrap_builds_venvs_with_python_311_or_newer():
