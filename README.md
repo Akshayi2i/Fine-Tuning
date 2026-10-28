@@ -183,7 +183,7 @@ so the laptop can close while it installs and downloads, and it is safe to
 re-run: after a pod stop it only checks what is already there.
 
 ```bash
-cd /workspace && git clone https://github.com/Akshayi2i/fine-tuning.git && cd fine-tuning
+cd /workspace && git clone https://github.com/Ideas-To-Impacts/fine-tuning.git && cd fine-tuning
 bash scripts/pod_bootstrap.sh --pdf /workspace/sample_policy.pdf   # --pdf is optional
 ```
 
