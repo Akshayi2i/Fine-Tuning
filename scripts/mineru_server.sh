@@ -14,7 +14,7 @@
 # On the training pod, OCR comes before training and they do not overlap: `stop` the
 # server before `finetune`, which needs the whole GPU.
 #
-#   MINERU_PORT       8001    the port the API listens on
+#   MINERU_PORT       18001   the port the API listens on (8001 is the pod proxy's nginx, 8000 is vLLM)
 #   MINERU_CONCURRENCY 4      parse jobs at once
 #   MINERU_VENV       /workspace/venv-mineru4
 set -euo pipefail
@@ -23,7 +23,7 @@ action="${1:-}"
 shift || true
 cd "$(dirname "$0")/.."
 
-PORT="${MINERU_PORT:-8001}"
+PORT="${MINERU_PORT:-18001}"
 VENV="${MINERU_VENV:-/workspace/venv-mineru4}"
 STATE="/workspace/mineru-server"
 # What the server must be, from the one pin both readers share.

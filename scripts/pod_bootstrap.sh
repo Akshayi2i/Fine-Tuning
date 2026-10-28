@@ -264,12 +264,15 @@ fi
 # --- 5. the server's models ----------------------------------------------------------------
 step "5/7 MinerU models ($MINERU_TIER tier, $MINERU_BACKEND backend)"
 mkdir -p "$WORKSPACE/mineru-server"
-models_marker="$WORKSPACE/mineru-server/models-$MINERU_VERSION-$MINERU_TIER-$MINERU_BACKEND"
+models_marker="$WORKSPACE/mineru-server/models-$MINERU_VERSION-$MINERU_TIER-$MINERU_BACKEND+onnx"
 mineru_ready=0
-if [ -f "$models_marker" ]; then
+# The models live in ~/.mineru (the pod's own disk, not the volume): a marker alone, left by an earlier pod, proves nothing.
+if [ -f "$models_marker" ] && [ -d "$HOME/.mineru/models/MinerU-4_models_onnx" ] && [ -d "$HOME/.mineru/models/MinerU-4_models_torch" ]; then
   echo "models present"
   mineru_ready=1
-elif "$VENV_MINERU/bin/mineru-models-download" --tier "$MINERU_TIER" --small-backend "$MINERU_BACKEND" -v; then
+# The OCR step of a parse reads the ONNX repo whichever backend runs the layout models (found on the
+# first pod: "MinerU-4_models_onnx is not ready"), so both are fetched.
+elif "$VENV_MINERU/bin/mineru-models-download" --tier "$MINERU_TIER" --small-backend "$MINERU_BACKEND" -v      && "$VENV_MINERU/bin/mineru-models-download" MinerU-4_models_onnx -v; then
   touch "$models_marker"
   mineru_ready=1
 else
