@@ -357,7 +357,7 @@ PAGE_CACHE = TESTING_ROOT / "ocr_cache"
 def document_request(
     client: Any, source_id: str, *, doc_type: str = "policy", tenant_id: str | None = None,
     mode: str = "ocr_plus_image", images_root: Path = PAGE_CACHE,
-    unscored: dict[str, str] | None = None,
+    unscored: dict[str, str] | None = None, info: dict[str, Any] | None = None,
 ) -> tuple[ExtractionRequest, dict[str, Any] | None]:
     """One imported, OCR'd document as an extraction request, and its gold label.
 
@@ -376,6 +376,9 @@ def document_request(
     decision 2026-10-22) is not scored: the extraction still runs, and the gold
     comes back ``None`` with a warning saying why - recorded in ``unscored``
     (source id -> why) when the caller passes one.
+
+    ``info``, when given, receives the label metadata and the page count, for
+    the testing record (:mod:`testing.testing_record`).
     """
     from artifact_registry import paths
     from common.lob import merge_line
@@ -411,6 +414,8 @@ def document_request(
         golden = None
     if golden is not None:
         golden = under_edition_rule(golden, doc_type, metadata.get("lob"))
+    if info is not None:
+        info.update(metadata=metadata, pages=pages)
 
     request = ExtractionRequest(
         source_id=source_id,
@@ -436,23 +441,30 @@ def run_batch(
     root: Path = TESTING_ROOT,
     score: bool = True,
     quant_format: str | None = None,
+    round_label: str | None = None,
 ) -> RunSummary:
     """Extract each document through the serving pipeline; write its JSON, metrics and a summary.
 
     One document failing is recorded in the summary and the batch carries on.
     No calibrators are loaded here, so every field comes back flagged for review:
     this run measures extraction, not the release's review thresholds.
+
+    Each document read also adds a row to the run's testing record
+    (``metrics/<model>/test_record.csv``, :mod:`testing.testing_record`), filed
+    under ``round_label`` (the model's tag when not given).
     """
     from serving.doc_type_classifier import StaticClassifier
+    from testing.testing_record import RECORD_FILE, append_csv, record_row
 
     results: list[tuple[ExtractionResult, dict[str, Any]]] = []
     failed: list[tuple[str, str]] = []
     # Documents whose gold has no review record: extracted, never scored.
     unscored: dict[str, str] = {}
     for index, source_id in enumerate(source_ids, start=1):
+        info: dict[str, Any] = {}
         try:
             request, golden = document_request(client, source_id, doc_type=doc_type, tenant_id=tenant_id,
-                                               mode=mode, images_root=images_root, unscored=unscored)
+                                               mode=mode, images_root=images_root, unscored=unscored, info=info)
             calibration = CalibrationParams(method="temperature", doc_type=doc_type,
                                             model_version=model.tag, temperature=1.0)
             result, metrics = run_document(
@@ -468,6 +480,9 @@ def run_batch(
         results_path, metrics_path = write_outputs(result, metrics, root=root)
         # Each output traced to the model, format and mode that wrote it.
         append_registry(result, results_path, metrics_path, root=root, quant_format=quant_format)
+        append_csv([record_row(result, metrics, metadata=info.get("metadata") or {}, golden=golden,
+                               pages=int(info.get("pages") or 0), round_label=round_label or model.tag)],
+                   metrics_dir(model.tag, root) / RECORD_FILE)
         results.append((result, metrics))
         log.info("[%d/%d] %s -> %s%s", index, len(source_ids), source_id, results_path,
                  f" (field match {metrics['field_normalized_match_rate']:.1%})"
@@ -523,6 +538,8 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     parser.add_argument("--format", dest="quant_format", default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--tenant", default=None)
+    parser.add_argument("--round", dest="round_label", default=None,
+                        help="the Training Round its testing-record rows are filed under (default: the model's tag)")
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.split and not args.corpus:
         parser.error("--split needs --corpus")
@@ -548,7 +565,8 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
                        adapter=args.adapter, label=args.label)
     try:
         summary = run_batch(model, client, source_ids, doc_type=args.doc_type, tenant_id=args.tenant,
-                            mode=args.mode, score=args.score, quant_format=args.quant_format)
+                            mode=args.mode, score=args.score, quant_format=args.quant_format,
+                            round_label=args.round_label)
     finally:
         release_model(model)
     print(json.dumps(summary.as_dict(), indent=2))

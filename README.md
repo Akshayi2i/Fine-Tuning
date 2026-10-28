@@ -126,6 +126,10 @@ python -m orchestration.run extract --model base|v1|v2 --tenant T --split test -
 #    base model + a LoRA adapter applied per request, NOT merged (a checkpoint or the run's adapter):
 python -m orchestration.run extract --model base --adapter /workspace/staging/.../checkpoint-280 --tenant T --split test --corpus v1
 #    JSON per document in testing/results/<model>/, metrics and summary.json in testing/metrics/<model>/
+#    and a testing-record row per document (round, date, split, carrier, line, pages, field match, latency,
+#    input/output tokens) in testing/metrics/<model>/test_record.csv - --round names the round, e.g. Baseline.
+#    Copy the rows into the team's workbook (fills its "Testing Record" sheet; never overwrites, never twice):
+python -m testing.testing_record --model base --round Baseline --xlsx "Documentation/Testing Records/FIdeon SLM - Model Training & Test Record_v1.xlsx"
 
 # all = 1 + 2. Never includes extraction.
 python -m orchestration.run all --input ./intake

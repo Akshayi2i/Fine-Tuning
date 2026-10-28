@@ -233,6 +233,8 @@ def run_extract(args: argparse.Namespace) -> int:
         argv += ["--limit", str(args.limit)]
     if args.tenant:
         argv += ["--tenant", args.tenant]
+    if getattr(args, "round_label", None):
+        argv += ["--round", args.round_label]
     return run_extraction.main(argv)
 
 
@@ -349,6 +351,9 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--format", dest="quant_format", default=None)
     extract.add_argument("--limit", type=int, default=None)
     extract.add_argument("--tenant", default=None)
+    extract.add_argument("--round", dest="round_label", default=None,
+                         help="the Training Round its testing-record rows are filed under "
+                              "(testing/metrics/<model>/test_record.csv; default: the model's tag)")
 
     shadow = sub.add_parser(
         "shadow", help="read a gated release on the real server path (fields first, the pod's vLLM and "
