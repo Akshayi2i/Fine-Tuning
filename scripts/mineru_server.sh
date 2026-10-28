@@ -53,6 +53,9 @@ case "$action" in
       # The key is read from the file when the server starts, not put on the command line: `ps` shows a command line.
       cat > "$STATE/run.sh" <<EOF
 #!/usr/bin/env bash
+# From the state folder: the server writes a lock file and a blobs/ folder into where it runs, and the repo
+# must stay clean (a training run refuses a modified tree).
+cd "$STATE"
 exec "$VENV/bin/mineru-api" --port $PORT --tier $TIER --api-key "\$(cat $STATE/token.txt)" --concurrency "${MINERU_CONCURRENCY:-4}"
 EOF
       chmod 700 "$STATE/run.sh"
