@@ -9,7 +9,15 @@ from types import SimpleNamespace
 import pytest
 
 from common.canonical import values_view
-from serving.fields_first import PENDING_FLAG, _pending, cited_pages, read_fields, verify_fields
+from serving.fields_first import (
+    PENDING_FLAG,
+    _pending,
+    cited_pages,
+    pages_to_verify,
+    read_fields,
+    verify_fields,
+    verify_page_budget,
+)
 
 PDF = b"%PDF-1.7 stand-in"
 HONDA = "1HGCV1F30KA000001"
@@ -25,6 +33,77 @@ def test_the_pages_the_fields_cite_are_every_page_ref_within_the_document():
     }
     assert cited_pages(extraction, page_count=10) == [1, 3, 4, 9]
     assert cited_pages({}, page_count=10) == []
+
+
+def _header_policy(pages):
+    """A carrier in every page's header (cites them all), a form listed on page 2
+    and printed on its own page, one more form on page 6."""
+    return {
+        "carrier": {"name": {"raw": "Acme Mutual", "page_ref": list(range(1, pages + 1))}},
+        "policy": {"policy_number": {"raw": "GL-1", "page_ref": [1]}},
+        "forms_and_endorsements": [
+            {"form_number": {"raw": "CG 00 01", "page_ref": [2, 5]}},
+            {"form_number": {"raw": "CG 21 47", "page_ref": [2, 6]}},
+            {"form_number": {"raw": "IL 00 17", "page_ref": [2, 7]}},
+        ],
+    }
+
+
+def test_a_budget_reads_a_page_that_covers_many_values_not_every_cited_page():
+    """A header cites every page; the schedule page cites three forms: with a
+    budget, one page covers the carrier and the policy, one the three forms -
+    not all 40 pages the values cite between them."""
+    extraction = _header_policy(40)
+    assert len(cited_pages(extraction, 40)) == 40
+    assert pages_to_verify(extraction, 40, budget=0) == cited_pages(extraction, 40)      # 0: no budget
+    assert pages_to_verify(extraction, 40, budget=10) == [1, 2]
+
+
+def test_the_budget_is_spent_on_the_pages_covering_the_most_values():
+    extraction = {"a": [{"x": {"raw": "1", "page_ref": [5, 9]}}, {"x": {"raw": "2", "page_ref": [9]}},
+                        {"x": {"raw": "3", "page_ref": [9, 12]}}, {"x": {"raw": "4", "page_ref": [3]}}]}
+    assert pages_to_verify(extraction, 20, budget=1) == [9]                # 3 values, against 1 for any other page
+    assert pages_to_verify(extraction, 20, budget=2) == [3, 9]
+    assert pages_to_verify(extraction, 20, budget=9) == [3, 9]             # all covered: no more pages read
+    assert pages_to_verify({}, 20, budget=5) == []
+    # Pages outside the document, and a page_ref that is no list, are not pages.
+    assert pages_to_verify({"v": {"raw": "1", "page_ref": [0, 99, True]}, "w": {"raw": "2", "page_ref": "3"}},
+                           20, budget=5) == []
+
+
+def test_the_budget_is_a_setting_and_a_bad_one_is_refused(monkeypatch):
+    from common.config import ConfigError
+
+    assert verify_page_budget() == 40                                       # the shipped setting
+    for bad in (-1, "40", True, 2.5):
+        monkeypatch.setattr("common.config.serving_config", lambda bad=bad: {"fields_first": {"verify_page_budget": bad}})
+        with pytest.raises(ConfigError, match="verify_page_budget"):
+            verify_page_budget()
+    monkeypatch.setattr("common.config.serving_config", lambda: {})
+    assert verify_page_budget() == 0                                        # none named: every cited page, as before
+
+
+def test_a_value_on_a_page_that_was_not_read_is_held_back_never_served(monkeypatch):
+    """The point of the budget: pages not read must not let an unchecked value
+    through. The form cites pages 2 and 6; only 2 is read (it covers the form),
+    and the policy number's page 1 is read too - but a value printed only on an
+    unread page is not found, so it is pending, not served."""
+    monkeypatch.setattr("common.config.serving_config", lambda: {"fields_first": {"verify_page_budget": 2}})
+    answer = SimpleNamespace(
+        extraction={"policy": {"policy_number": {"raw": "PA-2026-9999", "parsed": "PA-2026-9999", "page_ref": [1, 8]}},
+                    "carrier": {"name": {"raw": "Acme Phantom Insurance Co", "parsed": "x", "page_ref": [1]}},
+                    "extras": {"a": {"raw": "Late Rider 7", "parsed": "x", "page_ref": [2, 9]}}},
+        review_flags=["text_sections:no_page_text"], printed_check=None, doc_type="policy", mode="image_only",
+        route_info={}, fields={}, list_fields={}, validation_errors=[], schema_valid=True,
+        overall_confidence=1.0, line_of_business=None)
+    texts = {1: "Acme Phantom Insurance Co", 2: "Schedule", 8: "Policy Number PA-2026-9999", 9: "Late Rider 7"}
+    reader = _Reader(texts)
+    checked = verify_fields(PDF, answer, name="x.pdf", lob="personal_auto", reader=reader, page_count=9)
+    assert checked["pages"] == [1, 2] and reader.asked == [[1, 2]]          # 2 of the 5 cited pages
+    flags = set(checked["served"].review_flags)
+    assert f"policy.policy_number:{PENDING_FLAG}" in flags                    # printed on page 8, which was not read
+    assert f"extras.a:{PENDING_FLAG}" in flags
+    assert checked["served"].extraction["carrier"]["name"]["raw"] == "Acme Phantom Insurance Co"   # found: served
 
 
 @pytest.mark.parametrize(("flag", "becomes"), [

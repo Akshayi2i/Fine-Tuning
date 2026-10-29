@@ -149,6 +149,20 @@ printed_values:
   # serving.printed_values; any other value is refused.
   mode: strict
 
+fields_first:
+  # Pages MinerU reads before the fields are served (serving.fields_first.
+  # pages_to_verify): chosen so that as many values as possible have a page they
+  # cite among them (a set cover), at most this many. A value none of them
+  # covers is held back as pending_full_text and settled when the full text
+  # arrives, never served unchecked. Why a budget: the labels cite every page
+  # that prints a value, so a carrier name in every header cites every page, and
+  # the cited pages of a long policy are most of it (80% on the first base-model
+  # baseline; a 250-page policy needed ~140 pages to cover every value). MinerU
+  # reads ~1.3 s a page, so 40 pages is ~52 s of the gate's 2 minutes - an
+  # unmeasured fit with the model's time, to be set from the shadow check.
+  # 0: no budget (every cited page, as before).
+  verify_page_budget: 40
+
 long_documents:
   # Every page of a document is read, chunk by chunk, never selected pages
   # (decision 2026-10-19): a long policy in windows planned by the same

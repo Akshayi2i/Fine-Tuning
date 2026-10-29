@@ -48,6 +48,7 @@ import copy
 import logging
 import threading
 import time
+from collections import Counter
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -190,6 +191,64 @@ def rescore_on_text(result: Any, page_texts: Mapping[int, str], *, calibrators: 
     route_served(result.extraction, result.review_flags)
 
 
+def verify_page_budget() -> int:
+    """``fields_first.verify_page_budget`` from the serving config (0: none)."""
+    from common.config import SERVING_CONFIG, ConfigError, serving_config
+
+    budget = (serving_config().get("fields_first") or {}).get("verify_page_budget", 0)
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 0:
+        raise ConfigError(f"fields_first.verify_page_budget is {budget!r} in {SERVING_CONFIG.name}; "
+                          "expected a whole number of pages, 0 for no budget")
+    return budget
+
+
+def pages_to_verify(extraction: Any, page_count: int, budget: int = 0) -> list[int]:
+    """The pages MinerU reads to check the fields before they are served.
+
+    Every value cites the pages that print it (its ``page_ref``), and a value is
+    checked on any one of them: a printed value is printed on whichever page is
+    searched. So not every cited page need be read - only enough that each value
+    has one - and the labels' habit of citing every page that prints a value (a
+    carrier name in every header) made the cited pages most of a long policy.
+    With ``budget`` pages, the set is chosen greedily: each time the page that is
+    cited by the most values not yet covered (the lowest page on a tie), until
+    every value is covered or the budget is spent. A value left uncovered is not
+    served unchecked: :func:`verify_fields` holds back a value the pages read do
+    not print, and the full text settles it. ``budget`` 0 is every cited page
+    (:func:`cited_pages`).
+    """
+    if budget <= 0:
+        return cited_pages(extraction, page_count)
+    weight: Counter = Counter()          # a citation set, as often as values cite it
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            refs = node.get("page_ref")
+            if isinstance(refs, list):
+                pages = frozenset(p for p in refs if isinstance(p, int) and not isinstance(p, bool)
+                                  and 1 <= p <= page_count)
+                if pages:
+                    weight[pages] += 1
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(extraction)
+    uncovered = set(weight)
+    chosen: list[int] = []
+    while uncovered and len(chosen) < budget:
+        votes: Counter = Counter()
+        for pages in uncovered:
+            for page in pages:
+                votes[page] += weight[pages]
+        page = min(votes, key=lambda p: (-votes[p], p))
+        chosen.append(page)
+        uncovered = {pages for pages in uncovered if page not in pages}
+    return sorted(chosen)
+
+
 def verify_fields(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, page_count: int) -> dict[str, Any]:
     """The fields as they may be served now: held to the text of the pages they cite.
 
@@ -204,7 +263,8 @@ def verify_fields(pdf: bytes, result: Any, *, name: str, lob: str, reader: Any, 
     from serving.printed_values import hold_result_to_printed
     from serving.value_flags import route_served
 
-    pages = cited_pages(result.extraction, page_count) or list(range(1, min(page_count, FALLBACK_PAGES) + 1))
+    pages = (pages_to_verify(result.extraction, page_count, verify_page_budget())
+             or list(range(1, min(page_count, FALLBACK_PAGES) + 1)))
     started = time.perf_counter()
     text = reader.ocr_text(pdf, name=name, pages=pages)
     served = copy.deepcopy(result)
