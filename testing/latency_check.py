@@ -424,7 +424,10 @@ def table(rows: list[dict[str, Any]]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # @<file>: arguments from a file, one per line - the --doc list a staged run
+    # writes (testing.testing_record --stage), too long and too quoted to paste.
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     fromfile_prefix_chars="@")
     parser.add_argument("--model-url", required=True, help="the served model's base URL (vllm serve)")
     parser.add_argument("--served-model", default=None,
                         help="the name to ask it for, when it serves more than one (a LoRA adapter)")

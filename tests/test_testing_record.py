@@ -123,3 +123,58 @@ def test_the_extraction_run_writes_a_row_per_document(tmp_path):
     metrics = json.loads((tmp_path / "out" / "metrics" / model.tag / "policy_0001.metrics.json")
                          .read_text(encoding="utf-8"))
     assert float(rows[0]["F1 Score Accuracy"]) == round(metrics["field_normalized_match_rate"], 4)
+
+
+def _bundle(root, name, split, lob):
+    folder = root / name
+    folder.mkdir(parents=True)
+    (folder / "document.pdf").write_bytes(b"%PDF-1.4 fake")
+    (folder / "golden.json").write_text(json.dumps(GOLD), encoding="utf-8")
+    (folder / "metadata.json").write_text(json.dumps({"split": split, "lob": lob}), encoding="utf-8")
+
+
+def test_staging_takes_test_and_val_and_tops_up_short_lines_from_train(tmp_path):
+    from testing.latency_check import find_gold
+    from testing.testing_record import stage
+
+    bundles = tmp_path / "bundles"
+    for i in range(10):
+        _bundle(bundles, f"gl__hybrid__big_{i}", "test" if i < 4 else "val", "gl")
+    _bundle(bundles, "gl__hybrid__train_0", "train", "gl")              # gl already has 10: not taken
+    _bundle(bundles, "wc__scanned__insured_name_test", "test", "wc")
+    _bundle(bundles, "wc__scanned__insured_name_train", "train", "wc")  # wc has 1: topped up
+    index = stage(bundles, tmp_path / "out")
+    assert sorted((row["lob"], row["split"]) for row in index).count(("gl", "train")) == 0
+    assert {(row["lob"], row["split"]) for row in index if row["lob"] == "wc"} == {("wc", "test"), ("wc", "train")}
+    # The id carries no part of the bundle's name; the gold is found as latency_check looks for it.
+    pdf = next((tmp_path / "out" / "pdfs").glob("wc_*.pdf"))
+    assert "insured" not in pdf.name and find_gold(pdf) == tmp_path / "out" / "Gold_json" / f"{pdf.stem}.json"
+    args = (tmp_path / "out" / "docs.txt").read_text(encoding="utf-8").splitlines()
+    assert args[0::2] == ["--doc"] * len(index) and all(a.endswith(("=gl", "=wc")) for a in args[1::2])
+
+
+def test_a_latency_check_run_becomes_testing_record_rows(tmp_path):
+    from testing.testing_record import rows_from_latency_check, stage
+
+    bundles = tmp_path / "bundles"
+    _bundle(bundles, "gl__hybrid__one", "test", "gl")
+    index = stage(bundles, tmp_path / "staged", select="test")
+    ident = index[0]["doc_id"]
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / f"{ident}.json").write_text(json.dumps({
+        "document": f"{ident}.pdf", "lob": "gl", "mode": "image_only", "model": "Qwen3-VL-8B-Instruct", "pages": 12,
+        "timings_s": {"ocr": 15.0, "model": 33.27},
+        "window_stats": [{"prompt_tokens": 9_000, "answer_tokens": 700}, {"prompt_tokens": 8_000, "answer_tokens": 300}],
+        "accuracy": {"field_normalized_match_rate": 0.6667}}), encoding="utf-8")
+    (run / "summary.json").write_text("[]", encoding="utf-8")
+    (run / "broken.json").write_text(json.dumps({"document": "broken.pdf", "error": "boom"}), encoding="utf-8")
+
+    rows = rows_from_latency_check(run, tmp_path / "staged" / "doc_index.csv", round_label="Baseline",
+                                   date="2026-10-28")
+    assert len(rows) == 1
+    assert {k: rows[0][k] for k in ("Training Round", "Test/Val", "Carrier", "LOB", "Doc ID", "# Pages",
+                                    "F1 Score Accuracy", "Latency", "Input Tokens", "Output Tokens")} == {
+        "Training Round": "Baseline", "Test/Val": "test", "Carrier": "Harborline Mutual", "LOB": "gl",
+        "Doc ID": ident, "# Pages": 12, "F1 Score Accuracy": 0.6667, "Latency": 33.3,
+        "Input Tokens": 17_000, "Output Tokens": 1_000}        # the model's seconds, not OCR's
