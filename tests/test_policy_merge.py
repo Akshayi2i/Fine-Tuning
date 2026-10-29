@@ -91,6 +91,49 @@ def test_two_editions_of_one_form_stay_two_rows():
     assert merged.duplicates_collapsed == 0
 
 
+def _form(number, edition, page, **more):
+    row = {"form_number": _fv(number, page), **{k: _fv(v, page) for k, v in more.items()}}
+    if edition is not None:
+        row["edition_date"] = _fv(edition, page)
+    return row
+
+
+def _forms(*windows, lob=None):
+    merged = merge_policy_windows([
+        PolicyWindow("arrays", [rows[0]["form_number"]["page_ref"][0]], {"forms_and_endorsements": rows})
+        for rows in windows
+    ], lob)
+    return merged, merged.extraction["forms_and_endorsements"]
+
+
+def test_one_form_written_two_ways_by_two_windows_is_one_row():
+    """Its schedule line and its own page: the edition inside the number in one,
+    as a year in the other. Keyed on the number and edition as written, the
+    first baseline kept 542 of 1,939 form rows twice."""
+    merged, rows = _forms([_form("SP 30 23 10 18", "10/18", 13, premium="250")],
+                          [_form("SP 30 23", "2018", 94, title="ACCOUNTS RECEIVABLE")])
+    (row,) = rows
+    assert row["premium"]["raw"] == "250" and row["title"]["raw"] == "ACCOUNTS RECEIVABLE"
+    assert merged.duplicates_collapsed == 1
+
+
+def test_a_form_whose_edition_one_window_did_not_read_joins_its_row():
+    _, rows = _forms([_form("CG 00 01", "04/13", 3)], [_form("CG 00 01", None, 40, title="CGL Coverage Form")])
+    assert len(rows) == 1 and rows[0]["edition_date"]["raw"] == "04/13"
+
+
+def test_editions_that_contradict_each_other_stay_apart():
+    _, by_month = _forms([_form("CG 00 01 04 13", None, 3)], [_form("CG 00 01", "12/07", 40)])
+    _, by_year = _forms([_form("SP 30 23", "2018", 3)], [_form("SP 30 23", "2020", 40)])
+    _, other_form = _forms([_form("SP 30 23", "10/18", 3)], [_form("SP 30 24", "10/18", 40)])
+    assert len(by_month) == len(by_year) == len(other_form) == 2
+
+
+def test_a_common_model_line_joins_a_form_read_twice_too():
+    _, rows = _forms([_form("SP 30 18 10 18", "10/18", 13)], [_form("SP 30 18", "2018", 86)], lob="bopgl")
+    assert len(rows) == 1
+
+
 def test_rows_with_no_key_value_are_kept_rather_than_guessed_together():
     """A dropped row understates the policy and nothing downstream catches it;
     a duplicate is at worst a reviewable extra."""

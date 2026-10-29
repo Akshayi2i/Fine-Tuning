@@ -47,6 +47,7 @@ the one numbering function training also uses.
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -295,7 +296,27 @@ def _dedupe(
     # and a later window's re-read of the SECOND must join it, not be appended
     # again as a third.
     positions: dict[Any, list[int]] = {}
+    forms = section == FORMS_SECTION and bool(key_fields)
     for row in rows:
+        if forms and (form := _form_identity(row)) is not None:
+            # A form read twice - its schedule line and its own page - comes
+            # back as one number written two ways ("SP 30 23 10 18" with
+            # edition "10/18", "SP 30 23" with "2018"): keyed on number and
+            # edition as written, it stayed two rows (542 of 1,939 form rows
+            # on the first base-model baseline). One form when the number
+            # agrees and the editions do not contradict each other.
+            candidates = positions.setdefault(("form", form[0]), [])
+            position = next((i for i in candidates if not _editions_conflict(form, _form_identity(out[i]))), None)
+            if position is None:
+                candidates.append(len(out))
+                out.append(row)
+                continue
+            kept, other = out[position], row
+            if _filled(other) > _filled(kept):
+                kept, other = other, kept
+            out[position] = _merge_into(kept, other, f"{path}[{position}]", report, top=False, lob=lob)
+            report.duplicates_collapsed += 1
+            continue
         if key_fields:
             identity = _row_key(row, key_fields, path)
         elif inferred:
@@ -328,6 +349,54 @@ def _dedupe(
         out[position] = _merge_into(kept, other, f"{path}[{position}]", report, top=False, lob=lob)
         report.duplicates_collapsed += 1
     return out
+
+
+#: The forms table: its rows are joined on the form, not on its key as written.
+FORMS_SECTION = "forms_and_endorsements"
+
+
+def _form_identity(row: Any) -> tuple[str, str | None, str | None] | None:
+    """A form row's identity for the merge: ``(number, MM/YY, YY)``.
+
+    The number without the edition it may carry (label_rules.split_form_edition,
+    the rule the labels follow), normalised; the edition as month and year
+    (label_rules.edition_mm_yy) from the edition field or, failing that, the
+    number; and its year alone, from either, for an edition printed as a year
+    ("2018"). ``None`` for a row with no form number - joined as before.
+    """
+    from data_pipeline.ingestion.label_rules import edition_mm_yy, split_form_edition
+
+    if not isinstance(row, dict):
+        return None
+    number = values_view(row.get("form_number"))
+    if not isinstance(number, str) or not number.strip():
+        return None
+    split = split_form_edition(number)
+    base, from_number = (split[0], split[2]) if split else (number, None)
+    base = normalize_text(base) or ""
+    if not base:
+        return None
+    edition = values_view(row.get("edition_date"))
+    month_year = edition_mm_yy(edition) or from_number
+    year = month_year[-2:] if month_year else None
+    if year is None and edition is not None:
+        found = re.search(r"\b(?:19|20)(\d\d)\b", str(edition))
+        year = found.group(1) if found else None
+    return base, month_year, year
+
+
+def _editions_conflict(a: tuple[str, str | None, str | None] | None,
+                       b: tuple[str, str | None, str | None] | None) -> bool:
+    """Whether two readings of one form number name different editions:
+    both give a month and year and they differ, or both give a year and it
+    differs. An edition one side does not state is no conflict."""
+    if a is None or b is None:
+        return True
+    if a[1] and b[1]:
+        return a[1] != b[1]
+    if a[2] and b[2]:
+        return a[2] != b[2]
+    return False
 
 
 #: Identifiers strong enough to join two windows' rows on. Scoring may match on
