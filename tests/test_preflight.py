@@ -161,3 +161,21 @@ def test_every_label_needs_a_review_record_before_training():
     results = []
     preflight.check_reviewed_labels(None, results, [labels[1], labels[4]])
     assert results[0].status == "PASS"
+
+
+def test_uncommitted_files_fail_the_preflight_before_any_gpu_work(monkeypatch):
+    """Training refuses a dirty tree after the dataset build; the preflight says so first."""
+    import training.train as train
+
+    monkeypatch.delenv(train.ALLOW_DIRTY_ENV, raising=False)
+    monkeypatch.setattr(train, "worktree_state", lambda: (True, "abc"))
+    results = []
+    P.check_clean_tree(results)
+    assert _statuses(results) == {"code tree": "FAIL"}
+    results = []
+    P.check_clean_tree(results, allow_dirty=True)
+    assert _statuses(results) == {"code tree": "WARN"}
+    monkeypatch.setattr(train, "worktree_state", lambda: (False, None))
+    results = []
+    P.check_clean_tree(results)
+    assert _statuses(results) == {"code tree": "PASS"}

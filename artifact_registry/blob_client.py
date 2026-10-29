@@ -179,6 +179,24 @@ class InMemoryBackend(BlobBackend):
         return f"memory://{container}/{key}"
 
 
+#: Connections kept per host: the default of 10 is below the threads the pipeline reads Blob with,
+#: and every surplus connection was discarded with a "Connection pool is full" warning.
+POOL_SIZE = 32
+
+
+def _pooled_transport():
+    """An HTTP transport whose connection pool is large enough for the pipeline's parallel reads."""
+    import requests
+    from azure.core.pipeline.transport import RequestsTransport
+    from requests.adapters import HTTPAdapter
+
+    session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=POOL_SIZE, pool_maxsize=POOL_SIZE)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return RequestsTransport(session=session, session_owner=False)
+
+
 class AzureBackend(BlobBackend):
     """Real Azure Blob Storage. Imported lazily so CI needs no Azure SDK."""
 
@@ -203,9 +221,11 @@ class AzureBackend(BlobBackend):
                 'pip install -e ".[data]"'
             ) from exc
         if account_url:
-            self._service = BlobServiceClient(account_url=account_url, credential=credential)
+            self._service = BlobServiceClient(account_url=account_url, credential=credential,
+                                              transport=_pooled_transport())
         elif connection_string:
-            self._service = BlobServiceClient.from_connection_string(connection_string)
+            self._service = BlobServiceClient.from_connection_string(connection_string,
+                                                                     transport=_pooled_transport())
         else:
             raise BlobError("AzureBackend needs a connection string or an account URL")
         self._raw_container = raw_container
@@ -213,7 +233,8 @@ class AzureBackend(BlobBackend):
         if raw_credential:
             if not (account_url and raw_container):
                 raise BlobError("a raw-container SAS token needs the account URL and the raw container's name")
-            self._raw_service = BlobServiceClient(account_url=account_url, credential=raw_credential)
+            self._raw_service = BlobServiceClient(account_url=account_url, credential=raw_credential,
+                                                  transport=_pooled_transport())
 
     def _service_for(self, container: str):
         """The raw container's own login when it has one; the main login otherwise."""

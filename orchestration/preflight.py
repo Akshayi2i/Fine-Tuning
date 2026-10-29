@@ -156,6 +156,20 @@ def check_config(results: list[Check]) -> None:
     results.append(Check("config invariants", "PASS", "resolution caps, budgets, batch arithmetic, pinned revision"))
 
 
+def check_clean_tree(results: list[Check], allow_dirty: bool = False) -> None:
+    """Training refuses a tree with changes (training.train.assert_clean_tree): say so before the GPU work."""
+    from training.train import ALLOW_DIRTY_ENV, worktree_state
+
+    dirty, _ = worktree_state()
+    if not dirty:
+        results.append(Check("code tree", "PASS", "clean" if dirty is False else "git cannot be read here"))
+    elif allow_dirty or os.environ.get(ALLOW_DIRTY_ENV) == "1":
+        results.append(Check("code tree", "WARN", "uncommitted changes, allowed (the manifest records them)"))
+    else:
+        results.append(Check("code tree", "FAIL", "uncommitted or untracked files: training would refuse to start",
+                             "commit them, or remove stray files (git status --short)"))
+
+
 def check_disk(results: list[Check]) -> None:
     free_gb = shutil.disk_usage(WORKSPACE).free / 1e9
     status = "PASS" if free_gb >= MIN_FREE_DISK_GB else "FAIL"
@@ -363,6 +377,7 @@ def run_preflight(args: argparse.Namespace) -> tuple[list[Check], dict[str, Any]
     _run("base model", check_base_model, results)
     _run("config invariants", check_config, results)
     _run("disk", check_disk, results)
+    _run("code tree", lambda r: check_clean_tree(r, getattr(args, "allow_dirty", False)), results)
     ctx = build_context(args, dry_run=True)
     _run("azure", lambda r: check_blob(ctx.client, r), results)
     _run("data", lambda r: check_ocr_done(ctx, r), results)

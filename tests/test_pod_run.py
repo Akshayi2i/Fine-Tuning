@@ -29,3 +29,10 @@ def test_the_log_and_exit_code_live_on_the_volume():
 def test_the_script_has_unix_line_endings():
     raw = (Path(__file__).resolve().parent.parent / "scripts" / "pod_run.sh").read_bytes()
     assert b"\r\n" not in raw
+
+
+def test_a_job_started_without_a_virtualenv_runs_in_the_training_venv():
+    """The first smoke run died on `No module named 'azure'`: the system python has none."""
+    block = SCRIPT[SCRIPT.index('if [ -z "${VIRTUAL_ENV:-}" ]'):]
+    block = block[:block.index("  fi")]
+    assert "/venv/bin/python" in block and "export PATH=" in block and "export VIRTUAL_ENV=" in block
