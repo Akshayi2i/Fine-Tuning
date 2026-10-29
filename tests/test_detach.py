@@ -92,6 +92,8 @@ QUICK = {
     "scripts/check_section_builder.py", "scripts/served_adapter.py",
     # Unlocks one PDF in a second, asking for its password at the prompt: detached, nobody could type it.
     "common/pdf_access.py",
+    # A laptop tool: stages a few hundred MB of PDFs or writes rows into a workbook, in seconds; never run on the pod.
+    "testing/testing_record.py",
 }
 
 #: The Azure service's processes: each is its container's main process, so it
