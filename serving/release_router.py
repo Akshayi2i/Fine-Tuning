@@ -120,6 +120,25 @@ def _unroutable(lob: object) -> str | None:
     return None
 
 
+#: Names a caller gives a whole business-owners policy. The adapter reads one
+#: part of it at a time, as it trained: ``boppr`` (the property part) or
+#: ``bopgl`` (the liability part), each against its own schema. A name for the
+#: whole policy selects neither - ``bop`` has no schema, ``business_owners`` is
+#: read by the base model - so the caller is told which to send.
+BUSINESS_OWNERS_NAMES = frozenset({"bop", "bo", "business_owner", "business_owners", "businessowners"})
+
+
+def business_owners_hint(lob: object) -> str:
+    """What to send instead, for a business-owners name; "" for any other line."""
+    from common.lob import single_line
+
+    line = lob.strip().lower().replace(" ", "_") if isinstance(lob, str) else single_line(lob)
+    if line not in BUSINESS_OWNERS_NAMES:
+        return ""
+    return (" A business-owners policy is read one part at a time, as the adapter was trained: send "
+            "lob=boppr for its property part or lob=bopgl for its liability part.")
+
+
 @dataclass
 class ServingPlan:
     """What the endpoint serves: the promoted release, or nothing yet."""
@@ -157,7 +176,7 @@ class ServingPlan:
             raise UnservedDocType(
                 f"{release.release_id} serves policies of {list(release.lines)}, not line of "
                 f"business {lob!r}: a policy of another line - or with no line given - would be "
-                "read by a model that never trained on it."
+                f"read by a model that never trained on it.{business_owners_hint(lob)}"
             )
         return release
 

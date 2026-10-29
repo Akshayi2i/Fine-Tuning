@@ -181,7 +181,8 @@ def parse_classification(response: str) -> Classification:
         payload = json.loads(text)
     except (ValueError, TypeError) as exc:
         raise ClassificationError(
-            f"the classifier response was not JSON: {response[:120]!r}"
+            f"the classifier response was not JSON ({len(response)} characters; "
+            f"{type(exc).__name__}: not quoted, it may hold the document's text)"
         ) from exc
 
     doc_type = (payload.get("doc_type") or "").strip().lower() or None

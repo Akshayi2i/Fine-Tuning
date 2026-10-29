@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import re
 
+from types import SimpleNamespace
+
 import pytest
 
 from artifact_registry.blob_client import BlobClient, InMemoryBackend
@@ -336,7 +338,8 @@ def test_serving_returns_one_canonical_document(client, lob, response, carrier_n
 class _ScriptedBackend(ModelBackend):
     """Answers each window by a rule over (group, pages), and records batches.
 
-    ``fail(group, pages)`` returns ``"garbage"``, ``"truncated"`` or ``None``.
+    ``fail(group, pages)`` returns ``"garbage"``, ``"truncated"``, ``"transport"``
+    (the server could not be reached), ``"bad_request"`` (a 4xx) or ``None``.
     """
 
     def __init__(self, fail=lambda group, pages: None):
@@ -363,6 +366,14 @@ class _ScriptedBackend(ModelBackend):
         group, pages = self._window(messages, config)
         self.windows.append((group, pages))
         mode = self.fail(group, pages)
+        if mode == "transport":
+            from inference_core.model_runner import ModelTransportError
+
+            raise ModelTransportError("502 from /v1/chat/completions: an HTML error page (Waiting for service)")
+        if mode == "bad_request":
+            from inference_core.model_runner import ModelRunnerError
+
+            raise ModelRunnerError("400 from /v1/chat/completions: maximum context length exceeded")
         body = _decl_response() if group == "decl" else {}
         text = "{\"carrier\": {\"company" if mode == "garbage" else json.dumps(body)
         tokens = [text[i:i + 4] for i in range(0, len(text), 4)]
@@ -414,6 +425,28 @@ def test_a_failed_window_is_split_and_retried_over_fewer_pages(client):
     assert result.schema_valid
 
 
+def test_a_document_with_a_window_lost_to_the_transport_is_not_served_as_read(client):
+    """A pod that goes down mid-document answers 502 to every window after it. Those
+    windows were never read, so the document is refused (the worker tries it again)
+    - not returned, flagged, as a finished job with holes in it."""
+    from serving.pipeline import PipelineError
+
+    backend = _ScriptedBackend(fail=lambda group, pages: "transport" if group == "arrays" and 12 in pages else None)
+    with pytest.raises(PipelineError, match=r"never reached the model.*arrays:p12.*not served"):
+        _serve_with(client, backend)
+
+
+def test_a_window_the_server_refused_as_a_bad_request_is_still_flagged_not_refused(client, monkeypatch):
+    """A 4xx will fail again however often it is sent: the document is returned
+    without that window, flagged, as before."""
+    import serving.printed_values as printed_values
+
+    monkeypatch.setattr(printed_values, "configured_mode", lambda: printed_values.FLAG)
+    backend = _ScriptedBackend(fail=lambda group, pages: "bad_request" if group == "arrays" and 12 in pages else None)
+    result = _serve_with(client, backend)
+    assert "window_failed:arrays:p12" in result.review_flags
+
+
 def test_a_window_that_fails_alone_is_flagged_and_the_rest_returned(client, monkeypatch):
     import serving.printed_values as printed_values
 
@@ -455,3 +488,121 @@ def test_a_batch_reports_one_failure_without_losing_the_others(client):
 
     assert isinstance(results[1], ModelRunnerError) and "fell over" in str(results[1])
     assert not isinstance(results[0], Exception) and not isinstance(results[2], Exception)
+
+
+# --------------------------------------------------------------------------
+# What the served-model backend calls a transport failure
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize(("status", "transport"), [
+    (502, True), (520, True), (503, True), (429, True), (408, True), (500, True),
+    (400, False), (413, False), (422, False), (401, False), (404, False),
+])
+def test_only_a_server_side_http_status_is_a_transport_failure(status, transport):
+    import io
+    import urllib.error
+
+    from inference_core.model_runner import ModelRunnerError, ModelTransportError
+    from inference_core.openai_backend import OpenAIChatBackend
+
+    backend = OpenAIChatBackend("https://pod.example.test", "tok", model="m")
+    error = urllib.error.HTTPError("https://pod.example.test/v1/chat/completions", status, "x", {},
+                                   io.BytesIO(b"<!DOCTYPE html><html><head><title>Waiting for service to "
+                                              b"respond - RunPod</title></head><body>" + b"x" * 5000 + b"</body></html>"))
+
+    from unittest import mock
+
+    with mock.patch("common.transport.open_url", side_effect=error):
+        with pytest.raises(ModelRunnerError) as raised:
+            backend._request("/v1/chat/completions", b"{}")
+    assert isinstance(raised.value, ModelTransportError) is transport
+    # A proxy's HTML page is reduced to its title, never the whole page.
+    assert "Waiting for service to respond - RunPod" in str(raised.value) and len(str(raised.value)) < 200
+
+
+def test_an_unreachable_server_and_a_broken_off_answer_are_transport_failures():
+    import urllib.error
+    from unittest import mock
+
+    from inference_core.model_runner import ModelTransportError
+    from inference_core.openai_backend import OpenAIChatBackend
+
+    backend = OpenAIChatBackend("https://pod.example.test", "tok", model="m")
+    for failure in (urllib.error.URLError("[Errno 11001] getaddrinfo failed"), ConnectionResetError("reset")):
+        with mock.patch("common.transport.open_url", side_effect=failure):
+            with pytest.raises(ModelTransportError):
+                backend._request("/v1/chat/completions", b"{}")
+
+
+# --------------------------------------------------------------------------
+# No document content in a failure message or a log line
+# --------------------------------------------------------------------------
+
+SECRET = "Jane Q. Insured 123-45-6789"
+
+
+def test_an_answer_that_does_not_parse_is_never_quoted_in_its_error(client):
+    """The error is logged at WARNING, kept in the window's stats and returned in a
+    job's error: quoted, it carried the first 160 characters of the answer."""
+    from inference_core.model_runner import Generation
+    from serving.pipeline import PipelineError, _parse_generation
+
+    text = '{"named_insured": {"name": {"raw": "' + SECRET + '", "page_ref": [1]}}'     # cut off: no closing braces
+    result = Generation(text=text, tokens=[text], token_logprobs=[-0.1], finish_reason="stop")
+    route_ = SimpleNamespace(schema_doc_type="policy")
+    with pytest.raises(PipelineError) as raised:
+        _parse_generation(result, route_, refuse_truncated=True, compact=False)
+    assert SECRET not in str(raised.value) and "Jane" not in str(raised.value)
+    assert f"{len(text)} characters" in str(raised.value)
+
+
+def test_a_classifier_answer_that_is_not_json_is_never_quoted():
+    from serving.doc_type_classifier import ClassificationError, parse_classification
+
+    with pytest.raises(ClassificationError) as raised:
+        parse_classification("Named insured " + SECRET + " is a restaurant")
+    assert SECRET not in str(raised.value)
+
+
+# --------------------------------------------------------------------------
+# A whole business-owners policy: told which part to send, never guessed
+# --------------------------------------------------------------------------
+
+def _release_of(*lines):
+    from serving.release_router import ServedRelease
+
+    return ServedRelease(release_id="policy-v1", base_model="b", merged_model=None, doc_types=("policy",), adapter="a",
+                         adapter_dir=None, calibrators=None, prompt_hash="", window_plan_version=None, ocr_pin={},
+                         created_at="", lines=lines, served_as="lora_on_base")
+
+
+@pytest.mark.parametrize("alias", ["cgl", "general_liability", "workers_comp"])
+def test_a_line_sent_under_its_other_name_reaches_the_release(alias):
+    from serving.release_router import ServingPlan
+
+    plan = ServingPlan(_release_of("gl", "wc", "boppr", "bopgl"))
+    assert plan.route("policy", alias, allow_fallback=True).release is not None
+
+
+def test_a_business_owners_policy_is_not_guessed_into_a_part():
+    """business_owners goes to the base model (no part chosen), bop to a refusal;
+    boppr and bopgl, the parts the adapter trained on, to the release."""
+    from serving.release_router import ServingPlan, UnservedDocType, business_owners_hint
+
+    plan = ServingPlan(_release_of("gl", "wc", "boppr", "bopgl"))
+    assert plan.route("policy", "boppr").release is not None and plan.route("policy", "bopgl").release is not None
+    assert plan.route("policy", "business_owners", allow_fallback=True).release is None
+    with pytest.raises(UnservedDocType, match="lob=boppr .* lob=bopgl"):
+        plan.release_for("policy", "business_owners")
+    assert business_owners_hint("BOP") and business_owners_hint(["business_owners"]) and not business_owners_hint("gl")
+
+
+def test_a_request_naming_bop_is_told_which_part_to_send():
+    from serving.vllm_entrypoint import ServingError, request_lob
+
+    with pytest.raises(ServingError, match="lob=boppr .* lob=bopgl"):
+        request_lob({"lob": "bop"})
+    with pytest.raises(ServingError) as raised:
+        request_lob({"lob": "no_such_line"})
+    assert "lob=boppr" not in str(raised.value)                  # only for a business-owners name
+    assert request_lob({"lob": "boppr"}) == "boppr"

@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -402,6 +403,18 @@ def _window_answer_cap(group: str, doc_type: str | None) -> int:
     return answer_cap(task_for(group), doc_type)
 
 
+def _parse_failure(exc: BaseException) -> str:
+    """Why an answer did not parse, without a word of it: a JSON error's own
+    message and position, a span-map error's kind and offset (its message quotes
+    the character or the trailing text it met)."""
+    if isinstance(exc, json.JSONDecodeError):
+        return f"{exc.msg} at line {exc.lineno} column {exc.colno}"
+    if isinstance(exc, SpanMapError):
+        offset = re.search(r"offset (\d+)", str(exc))
+        return f"the answer's structure is broken{f' at offset {offset.group(1)}' if offset else ''}"
+    return type(exc).__name__
+
+
 def _parse_generation(
     result: Generation, route_: Route, *, refuse_truncated: bool = False, compact: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -451,10 +464,12 @@ def _parse_generation(
             spans = map_field_spans(result.text, result.tokens, result.token_logprobs,
                                     token_top2_logprobs=top2)
     except (ValueError, TypeError, SpanMapError) as exc:
+        # The answer is never quoted: it holds the document's values, and this
+        # message is logged, kept in the window's stats and returned in a job's error.
         raise PipelineError(
-            f"the model did not return parseable JSON for {route_.schema_doc_type}: "
-            f"{result.text[:160]!r}. The prompt asks for JSON only with no fences, so this is a "
-            f"generation failure rather than a formatting quirk to work around ({exc})."
+            f"the model did not return parseable JSON for {route_.schema_doc_type} "
+            f"({len(result.text)} characters; {_parse_failure(exc)}). The prompt asks for JSON only "
+            f"with no fences, so this is a generation failure rather than a formatting quirk to work around."
         ) from exc
     # Dates are reformatted AFTER the span map: the spans describe the tokens the
     # model generated, and a reformatted date is the same value in other
@@ -612,6 +627,16 @@ def _extract_policy_windows(
     if stats is not None:
         stats.extend(read.stats)
 
+    if read.lost:
+        # Never a document served as read when part of it was never sent to the
+        # model: dropped and flagged, those windows read as a finished job with
+        # holes in it (a pod that went down mid-document answered 502 to every
+        # window after it). Refused, the caller tries the document again.
+        raise PipelineError(
+            f"{len(read.lost)} window(s) of {request.source_id} never reached the model "
+            f"({', '.join(read.lost[:6])}): the server could not be reached or failed, so the "
+            f"document was not fully read and is not served. The first failure: {read.first_cause}"
+        )
     if not read.windows:
         raise PipelineError(
             f"no window of {request.source_id} could be read ({len(read.failed)} failed: "
@@ -635,6 +660,8 @@ class _WindowsRead:
 
     windows: list[Any] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    #: The windows in ``failed`` that never reached the model (transport).
+    lost: list[str] = field(default_factory=list)
     first_cause: str | None = None
     rounds: int = 0
     wall_ms: float = 0.0
@@ -665,6 +692,9 @@ class _Settled:
     failed: str | None = None
     cause: str | None = None
     flags: list[str] = field(default_factory=list)
+    #: ``failed`` because the call itself failed (``ModelTransportError``): the
+    #: window never reached the model, whatever its pages hold.
+    lost: bool = False
 
 
 #: The review flag on a value whose page reference named a page its window was
@@ -687,6 +717,9 @@ def _settle(source_id: str, route_: Route, window: _Planned, result: Any, attemp
     from serving.policy_merge import PolicyWindow
 
     group, pages = window.group, window.pages
+    from inference_core.model_runner import ModelTransportError
+
+    lost = isinstance(result, ModelTransportError)
     try:
         if isinstance(result, Exception):
             raise PipelineError(str(result))
@@ -701,7 +734,7 @@ def _settle(source_id: str, route_: Route, window: _Planned, result: Any, attemp
         log.warning("%s: %s window over page %s failed even alone (%s); dropped and flagged for review",
                     source_id, group, pages[0], exc)
         return _Settled(_window_stat(group, pages, attempt, result, "failed", str(exc)),
-                        failed=f"{group}:p{pages[0]}", cause=str(exc))
+                        failed=f"{group}:p{pages[0]}", cause=str(exc), lost=lost)
     outside = _cite_shown_pages(extraction, pages)
     if outside:
         log.warning("%s: %s window over pages %s cited pages it was not shown at %s; those "
@@ -914,6 +947,8 @@ def _record(read: _WindowsRead, settled: _Settled) -> None:
         read.windows.append(settled.window)
     if settled.failed:
         read.failed.append(settled.failed)
+        if settled.lost:
+            read.lost.append(settled.failed)
     read.flags.extend(settled.flags)
 
 
@@ -1206,8 +1241,9 @@ def attach_full_text(result: ExtractionResult, page_texts: dict[int, str], *, lo
     already = set(iter_validation_errors(result.extraction, result.doc_type, None, lob))
     errors = [error for error in iter_validation_errors(output, result.doc_type, None, lob) if error not in already]
     if errors:
-        log.warning("%s: the full-text tier fails the schema (%s); served without it",
-                    result.source_id, errors[0])
+        # The path only: the schema's message quotes the value it refused.
+        log.warning("%s: the full-text tier fails the schema (at %s, %d error(s)); served without it",
+                    result.source_id, errors[0].partition(": ")[0], len(errors))
         result.review_flags = sorted({*result.review_flags, FULL_TEXT_INVALID_FLAG})
         return result
     result.extraction = output

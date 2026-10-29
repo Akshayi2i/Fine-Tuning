@@ -58,6 +58,7 @@ import base64
 import http.client
 import json
 import logging
+import re
 import threading
 import time
 import urllib.error
@@ -71,8 +72,10 @@ from inference_core.model_runner import (
     STOPPED_REPEATING,
     STREAM_CUT,
     Generation,
+    TRANSPORT_STATUSES,
     ModelBackend,
     ModelRunnerError,
+    ModelTransportError,
 )
 from inference_core.runner_config import RunnerConfig
 
@@ -160,6 +163,17 @@ def repeating_tail(text: str, *, min_chars: int = 3000, min_repeats: int = 6,
         if tail[period:] == tail[:-period]:
             return period
     return None
+
+
+def _error_body(exc: Any) -> str:
+    """A server's error answer, short and on one line. A proxy's HTML error page
+    (RunPod's "Waiting for service to respond") is reduced to its title: whole,
+    it filled the failure message of every window that met it."""
+    body = exc.read().decode("utf-8", "replace")
+    if body.lstrip()[:15].lower().startswith(("<!doctype", "<html")):
+        title = re.search(r"<title>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+        return f"an HTML error page ({' '.join(title.group(1).split())[:80] if title else 'no title'})"
+    return " ".join(body.split())[:300]
 
 
 def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) -> dict[str, Any]:
@@ -306,14 +320,15 @@ class OpenAIChatBackend(ModelBackend):
                     return _read_stream(response, started=started, stop_repeats=self.stop_repeats)
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            raise ModelRunnerError(f"{exc.code} from {path}: {exc.read().decode('utf-8', 'replace')[:400]}") from exc
+            kind = ModelTransportError if exc.code in TRANSPORT_STATUSES else ModelRunnerError
+            raise kind(f"{exc.code} from {path}: {_error_body(exc)}") from exc
         except RedirectRefusedError as exc:
             raise ModelRunnerError(str(exc.reason)) from exc
         except urllib.error.URLError as exc:
-            raise ModelRunnerError(f"could not reach {self.base_url}{path}: {exc.reason}") from exc
+            raise ModelTransportError(f"could not reach {self.base_url}{path}: {exc.reason}") from exc
         except (http.client.HTTPException, OSError) as exc:
-            raise ModelRunnerError(f"the answer from {self.base_url}{path} broke off after "
-                                   f"{time.perf_counter() - started:.1f} s: {type(exc).__name__}: {exc}") from exc
+            raise ModelTransportError(f"the answer from {self.base_url}{path} broke off after "
+                                      f"{time.perf_counter() - started:.1f} s: {type(exc).__name__}: {exc}") from exc
 
     def _served_model(self) -> str:
         served = self._request("/v1/models").get("data") or []

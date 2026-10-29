@@ -664,9 +664,11 @@ def request_lob(payload: Mapping[str, Any]) -> str | list[str] | None:
         line = lines[0]
         known = {q for doc_type, _, q in schema_selectors() if doc_type == "policy" and q}
         if LOB_SCHEMA_ALIASES.get(line, line) not in known:
+            from serving.release_router import business_owners_hint
+
             raise ServingError(
                 f"no canonical policy schema for line {lob!r}; known lines: "
-                f"{sorted(known | set(LOB_SCHEMA_ALIASES))}"
+                f"{sorted(known | set(LOB_SCHEMA_ALIASES))}.{business_owners_hint(line)}"
             )
     return lob
 

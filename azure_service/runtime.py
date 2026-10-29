@@ -94,10 +94,12 @@ class TenantRuntime:
                                calibrators=runtime.calibrators if runtime else None,
                                thresholds=runtime.thresholds if runtime else None)
         if self.base_model is None:
+            from serving.release_router import business_owners_hint
+
             what = (f"release {release.release_id} serves lines {list(release.lines)}, not {lob!r}"
                     if release is not None else f"no release is promoted for tenant {self.tenant}")
             raise JobRefused(f"{what}, and this worker does not read with the base model "
-                             "(ALLOW_BASE_FALLBACK is off)")
+                             f"(ALLOW_BASE_FALLBACK is off).{business_owners_hint(lob)}")
         return Reading(self.base_model, None, BASE_FALLBACK_ROUTE)
 
 

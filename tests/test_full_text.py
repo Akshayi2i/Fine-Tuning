@@ -212,3 +212,23 @@ def test_the_run_summary_reports_the_every_word_rule():
     assert metrics["mean_text_coverage"] == round((1.0 + FULL_TEXT_COVERAGE - 0.05) / 2, 4)
     assert metrics["documents_below_full_text"] == ["pa_2"]
     assert metrics["documents_without_full_text"] == ["pa_3"]
+
+
+def test_the_full_text_tiers_schema_warning_names_the_path_not_the_value(monkeypatch, caplog):
+    """The schema's message quotes the value it refused - here the page's own text -
+    and the warning is a log line: only where it failed and how often."""
+    import logging
+
+    import serving.pipeline as pipeline
+    from serving.pipeline import attach_full_text
+
+    secret = "Jane Q. Insured 123-45-6789"
+    result, _backend, _answers = _serve_replay(_compact_auto(), 3, strict=True)
+    result.extraction = {**result.extraction, "text_sections": None}
+    result.review_flags = sorted({*result.review_flags, NO_FULL_TEXT_FLAG})
+    monkeypatch.setattr(pipeline, "build_text_sections", lambda pages: {"bad": {"raw_text": secret}})
+    with caplog.at_level(logging.WARNING, logger="serving.pipeline"):
+        attach_full_text(result, {1: secret, 2: "Schedule page 2", 3: "Schedule page 3"}, lob="personal_auto")
+    warning = next(r.getMessage() for r in caplog.records if "fails the schema" in r.getMessage())
+    assert secret not in warning and "Jane" not in warning
+    assert "error(s)" in warning

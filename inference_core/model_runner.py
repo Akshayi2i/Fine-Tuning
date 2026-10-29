@@ -38,6 +38,23 @@ class ModelRunnerError(RuntimeError):
     """Raised when a model cannot be loaded or generation fails."""
 
 
+class ModelTransportError(ModelRunnerError):
+    """The request never produced an answer from the model: the server could not
+    be reached, the connection broke off, or it (or a proxy before it) answered
+    with a server-side error. Another try may work; a bad request (a 4xx) is
+    the plain :class:`ModelRunnerError` and will fail again.
+
+    Told apart so that a document is never served as read when part of it was
+    never sent to the model (``serving.pipeline``): a window lost to the
+    transport is not a window the model read badly.
+    """
+
+#: HTTP statuses that mean the server side failed, not the request: a request
+#: timeout, too many requests, any 5xx (a RunPod proxy answers 502 and 520-524
+#: while its pod is down or restarting).
+TRANSPORT_STATUSES = frozenset({408, 425, 429}) | frozenset(range(500, 600))
+
+
 @dataclass
 class Generation:
     """One generation, with everything confidence needs."""
