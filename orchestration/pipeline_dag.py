@@ -1816,6 +1816,11 @@ def _rediscover_checkpoints(ctx: StageContext) -> None:
         ctx.checkpoints, ctx.best_loss_checkpoint = discover_checkpoints(staged)
 
 
+#: Set to 1 (by the smoke run only) to cut checkpoint selection down to a plumbing test.
+FAST_SELECTION_ENV = "FIDEON_FAST_SELECTION"
+FAST_SELECTION_ROWS = 8
+
+
 def _selection_settings(ctx: StageContext) -> dict[str, Any]:
     """The validation cut's settings for checkpoint selection, from the training config."""
     from common.config import training_config
@@ -1841,7 +1846,7 @@ def _selection_settings(ctx: StageContext) -> dict[str, Any]:
     if not repeat_modes:
         log.warning("selection: the finalists' pass reads %s, not the gate's repeat mode %s; its rows are "
                     "all read twice for the run-to-run guard", modes, repeat_mode)
-    return {
+    settings = {
         "validation_sample_rows": int(evaluation.get("validation_sample_rows") or 0),
         "selection_tie_break_margin": float(evaluation.get("selection_tie_break_margin") or 0.0),
         "selection_document_finalists": int(evaluation.get("selection_document_finalists") or 0),
@@ -1859,6 +1864,19 @@ def _selection_settings(ctx: StageContext) -> dict[str, Any]:
         # than generating the validation split again (collect_calibration_samples).
         "calibration_reuses_selection": bool(evaluation.get("calibration_reuses_selection", True)),
     }
+    if os.environ.get(FAST_SELECTION_ENV) == "1":
+        # A smoke run (orchestration.smoke_run) tests that selection RUNS, not what it picks: no finalist
+        # pass, no repeat reading, no two-thirds candidate, a small sample. On the first smoke run the
+        # repeat reads and the finalist pass were most of its 33 minutes.
+        log.warning("%s=1: checkpoint selection is cut down to a plumbing test (at most %d rows, no "
+                    "finalists, no repeat reading); never for a real cycle", FAST_SELECTION_ENV,
+                    FAST_SELECTION_ROWS)
+        settings.update(
+            validation_sample_rows=min(settings["validation_sample_rows"] or FAST_SELECTION_ROWS,
+                                       FAST_SELECTION_ROWS),
+            selection_document_finalists=0, selection_run_to_run_check=False,
+            selection_repeat_modes=[], selection_two_thirds_candidate=False)
+    return settings
 
 
 def _checkpoint_scorer(ctx: StageContext) -> Any:

@@ -24,7 +24,11 @@ build reports rejections) and how long a step takes. Its scores mean nothing.
 
 Steps: ``select`` (pick the documents), ``import``, ``ocr`` (in the OCR
 environment), ``check`` (post-OCR values), ``preflight`` (everything finetune
-depends on, the corpus built in memory), ``finetune``.
+depends on, the corpus built in memory), ``finetune``, and ``compare`` (the base model and the trained adapter read the validation documents
+in image-only mode, both scores printed: information only, a smoke adapter is expected to be weak).
+
+``finetune`` runs here with a cut-down checkpoint selection (``FIDEON_FAST_SELECTION=1``; pass
+``--full-selection`` to run it whole): the first smoke run spent 33 of its 48 minutes there.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-STEPS = ("select", "import", "ocr", "check", "preflight", "finetune")
+STEPS = ("select", "import", "ocr", "check", "preflight", "finetune", "compare")
 DEFAULT_TENANT = "smoke"
 DEFAULT_VERSION = "v0"
 WORKSPACE = Path(os.environ.get("FIDEON_WORKSPACE") or "/workspace")  # an empty .env value means unset
@@ -220,6 +224,61 @@ def commands(*, batch_dir: Path, subset_dir: Path, tenant: str, version: str,
     }
 
 
+def latest_checkpoint(workspace: Path, version: str) -> Path | None:
+    """The last checkpoint of the newest run of ``version`` under the staging area.
+
+    The last one, not the one selection picked: this is a smoke look at whether training moved
+    the model, and the last has had the most steps.
+    """
+    root = workspace / "staging" / "adapters" / "scope" / "policy" / version
+    found = [(int(p.name.rsplit("-", 1)[1]), p) for p in root.glob("*/checkpoint-*")
+             if p.is_dir() and p.name.rsplit("-", 1)[1].isdigit()]
+    if not found:
+        return None
+    newest_run = max(p.parent.name for _, p in found)
+    return max((n, p) for n, p in found if p.parent.name == newest_run)[1]
+
+
+def read_scores(output: str) -> dict[str, float] | None:
+    """Field match and list recall from an ``extract`` run's output, via the summary it names."""
+    for line in reversed(output.splitlines()):
+        if "summary ->" in line:
+            summary = json.loads(Path(line.split("summary ->", 1)[1].strip()).read_text(encoding="utf-8"))
+            return {"field_match": summary.get("mean_field_normalized_match"),
+                    "list_recall": summary.get("mean_list_field_recall")}
+    return None
+
+
+def compare_with_base(args: argparse.Namespace) -> None:
+    """Read the validation documents with the base alone and with the trained adapter; print both.
+
+    Information only. A smoke adapter has had a handful of steps and is expected to be weaker than
+    the base; what this shows is that the adapter loads, answers, and by how much it trails.
+    """
+    checkpoint = latest_checkpoint(WORKSPACE, args.version)
+    if checkpoint is None:
+        print("smoke: compare: no checkpoint found under staging; nothing to compare", flush=True)
+        return
+    base = [sys.executable, "-m", "orchestration.run", "extract", "--model", "base", "--tenant", args.tenant,
+            "--split", "val", "--corpus", args.version, "--mode", "image_only"]
+    scores: dict[str, dict[str, float] | None] = {}
+    for label, extra in (("base", []), (f"adapter ({checkpoint.name})", ["--adapter", str(checkpoint)])):
+        print(f"\n=== smoke: compare, {label} ===", flush=True)
+        done = subprocess.run([*base, *extra], capture_output=True, text=True,
+                              env={**os.environ, "FIDEON_DETACHED": "1"})
+        try:
+            scores[label] = read_scores(done.stdout + done.stderr)
+        except (OSError, ValueError) as exc:
+            print(f"smoke: compare: could not read the scores of {label}: {exc}", flush=True)
+            scores[label] = None
+    print("\nsmoke compare (validation documents, image-only; information only):", flush=True)
+    for label, result in scores.items():
+        shown = ("not available" if not result else
+                 f"field match {100 * (result['field_match'] or 0):.1f}%, "
+                 f"list recall {100 * (result['list_recall'] or 0):.1f}%")
+        print(f"  {label}: {shown}", flush=True)
+
+
 def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
     """The smoke run's arguments and its steps, refused when they cannot run."""
     parser = argparse.ArgumentParser(description="A small end-to-end run on the pod")
@@ -233,6 +292,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--test-sources", type=int, default=1)
     parser.add_argument("--max-pages", type=int, default=40,
                         help="take only families of at most this many pages in all (0: no limit)")
+    parser.add_argument("--full-selection", action="store_true",
+                        help="run checkpoint selection whole (finalists, repeat reads): slower")
     parser.add_argument("--steps", default=",".join(STEPS), help=f"comma-separated, from {STEPS}")
     args = parser.parse_args(argv)
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
@@ -297,11 +358,16 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
             command = build()[step]
             print(f"\n=== smoke: {step} ===\n{' '.join(command)}", flush=True)
             # Already in tmux: the step runs in place.
-            code = subprocess.run(command, env={**os.environ, "FIDEON_DETACHED": "1"}).returncode
+            run_env = {**os.environ, "FIDEON_DETACHED": "1"}
+            if step == "finetune" and not args.full_selection:
+                run_env["FIDEON_FAST_SELECTION"] = "1"
+            code = subprocess.run(command, env=run_env).returncode
         if code != 0:
             print(f"smoke: {step} failed (exit {code}); fix it and resume with --steps "
                   f"{','.join(steps[steps.index(step):])}", flush=True)
             return code
+    if "compare" in steps:
+        compare_with_base(args)
     print("\nsmoke run complete. Read the corpus build's rejected-row count and the post-OCR report "
           f"({check_out}/report.md) before the real run.", flush=True)
     return 0
