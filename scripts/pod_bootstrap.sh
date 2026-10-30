@@ -137,6 +137,8 @@ ensure_env HF_HOME "$WORKSPACE/.cache/huggingface"
 ensure_env MINERU_TOOLS_CONFIG_JSON "$MINERU_CONFIG" "$WORKSPACE/magic-pdf.json"
 # MinerU 3.x on the GPU, on the pinned weights it was pointed at - never the latest.
 ensure_env MINERU_DEVICE_MODE cuda
+# MinerU's own default, auto, quietly picks the CPU reader (onnx) when any torch extra is missing: forced, a missing one is an error.
+ensure_env MINERU_MODEL_SMALL_BACKEND torch
 ensure_env MINERU_MODEL_SOURCE local
 ensure_env HF_HUB_ENABLE_HF_TRANSFER 0 1
 # The value .env gives KEY, read as bash reads the line when sourcing it: blanks
@@ -241,7 +243,9 @@ MINERU_TIER="$(pin tier)"
 TORCH_PIN="$(grep -m1 '^torch==' requirements-train.lock | cut -d' ' -f1)"
 [ -n "$TORCH_PIN" ] || die "requirements-train.lock pins no torch"
 step "4/7 OCR server: MinerU $MINERU_VERSION ($MINERU_BACKEND backend) in $VENV_MINERU"
-mineru_want="$MINERU_VERSION:$MINERU_BACKEND:$TORCH_PIN"
+# The CUDA 12 build of onnxruntime: 1.31 is built for CUDA 13 and fails to load on the pod's 12.8 (the OCR then runs on the CPU).
+ORT_GPU_PIN="${ORT_GPU_PIN:-1.22.0}"
+mineru_want="$MINERU_VERSION:$MINERU_BACKEND:$TORCH_PIN:ort-gpu-$ORT_GPU_PIN"
 if [ -f "$VENV_MINERU/.fideon-mineru4" ] && [ "$(cat "$VENV_MINERU/.fideon-mineru4")" = "$mineru_want" ] \
    && [ -x "$VENV_MINERU/bin/mineru-api" ]; then
   echo "$VENV_MINERU is up to date (mineru $MINERU_VERSION, $MINERU_BACKEND)"
@@ -252,10 +256,17 @@ else
   fi
   [ -x "$VENV_MINERU/bin/python" ] || "$PYTHON" -m venv "$VENV_MINERU"
   "$VENV_MINERU/bin/pip" install --upgrade pip
-  "$VENV_MINERU/bin/pip" install "mineru==$MINERU_VERSION"
   if [ "$MINERU_BACKEND" = "torch" ]; then
-    # The torch the training environment pins; read from a wheel cache in PIP_FIND_LINKS when one is there.
-    "$VENV_MINERU/bin/pip" install "$TORCH_PIN"
+    # The [torch] extra (torchvision, transformers, accelerate, safetensors): without it MinerU reads on the CPU. With the torch
+    # the training environment pins, so pip does not pick another; read from a wheel cache in PIP_FIND_LINKS when one is there.
+    "$VENV_MINERU/bin/pip" install "mineru[torch]==$MINERU_VERSION" "$TORCH_PIN"
+    # MinerU pulls the CPU onnxruntime, and the two share one folder: remove both, add the GPU build alone.
+    "$VENV_MINERU/bin/pip" uninstall -y onnxruntime onnxruntime-gpu
+    "$VENV_MINERU/bin/pip" install "onnxruntime-gpu==$ORT_GPU_PIN"
+  else
+    "$VENV_MINERU/bin/pip" install "mineru==$MINERU_VERSION"
+  fi
+  if [ "$MINERU_BACKEND" = "torch" ]; then
     "$VENV_MINERU/bin/python" -c "import torch; assert torch.cuda.is_available(), 'torch cannot see the GPU'; print('torch', torch.__version__, torch.cuda.get_device_name(0))"
   fi
   echo "$mineru_want" > "$VENV_MINERU/.fideon-mineru4"

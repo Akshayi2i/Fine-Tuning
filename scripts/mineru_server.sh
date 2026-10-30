@@ -37,6 +37,47 @@ TIER="$(pin tier)"
 case "$action" in
   start)
     [ -x "$VENV/bin/mineru-api" ] || { echo "no MinerU in $VENV: run bash scripts/pod_bootstrap.sh first" >&2; exit 1; }
+    # GPU only: the server does not start where it would read on the CPU. MinerU's own default (auto) falls back to the CPU
+    # reader without a word when a torch extra is missing, and onnxruntime lists its CUDA provider even when it cannot load
+    # (the CUDA 13 build on a CUDA 12 pod): so this loads a real model.
+    if ! gpu_problem="$("$VENV/bin/python" - <<'PY' 2>&1
+import glob
+import os
+import sys
+
+problems = []
+try:
+    import torch
+    if not torch.cuda.is_available():
+        problems.append("torch cannot see the GPU")
+except Exception as exc:
+    problems.append(f"torch is not usable ({exc})")
+for module in ("torchvision", "transformers", "accelerate", "safetensors"):
+    try:
+        __import__(module)
+    except Exception:
+        problems.append(f"{module} is missing (MinerU[torch]): MinerU would read on the CPU")
+try:
+    import onnxruntime
+    models = glob.glob(os.path.expanduser("~/.mineru/models/MinerU-4_models_onnx/**/*.onnx"), recursive=True)
+    if models:
+        session = onnxruntime.InferenceSession(
+            models[0], providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        if session.get_providers()[0] != "CUDAExecutionProvider":
+            problems.append("onnxruntime cannot run on the GPU (wrong CUDA build?)")
+    elif "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+        problems.append("onnxruntime is the CPU build")
+except Exception as exc:
+    problems.append(f"onnxruntime is not usable ({exc})")
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+PY
+)"; then
+      echo "GPU is not available for the OCR server: $gpu_problem" >&2
+      echo "Refusing to start: OCR on the CPU is several times slower and not what the pipeline is meant to run. bash scripts/pod_bootstrap.sh installs the GPU packages." >&2
+      exit 1
+    fi
     mkdir -p "$STATE"
     # A token we make ourselves: the server is on this pod and only we call it. Kept on
     # the volume, never printed, and written to .env for the OCR stage to read.
@@ -56,6 +97,8 @@ case "$action" in
 # From the state folder: the server writes a lock file and a blobs/ folder into where it runs, and the repo
 # must stay clean (a training run refuses a modified tree).
 cd "$STATE"
+export MINERU_DEVICE_MODE=cuda
+export MINERU_MODEL_SMALL_BACKEND=torch
 exec "$VENV/bin/mineru-api" --port $PORT --tier $TIER --api-key "\$(cat $STATE/token.txt)" --concurrency "${MINERU_CONCURRENCY:-4}"
 EOF
       chmod 700 "$STATE/run.sh"

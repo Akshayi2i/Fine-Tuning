@@ -46,8 +46,8 @@ def test_the_ocr_server_and_training_get_separate_environments():
     assert 'make_venv "$VENV" train requirements-train.txt' in SCRIPT
     # The OCR server is the pinned MinerU (read from configs/shared/ocr.yaml, never copied
     # into the script), with the torch the training lock pins, in its own environment.
-    assert '"$VENV_MINERU/bin/pip" install "mineru==$MINERU_VERSION"' in SCRIPT
-    assert '"$VENV_MINERU/bin/pip" install "$TORCH_PIN"' in SCRIPT
+    assert '"$VENV_MINERU/bin/pip" install "mineru==$MINERU_VERSION"' in SCRIPT      # without the torch backend
+    assert '"$VENV_MINERU/bin/pip" install "mineru[torch]==$MINERU_VERSION" "$TORCH_PIN"' in SCRIPT
     assert "configs/shared/ocr.yaml" in SCRIPT and "grep -m1 '^torch=='" in SCRIPT
     # The old in-process MinerU 3.4.5 environment is not built: training refuses its corpus.
     assert "venv-ocr" not in SCRIPT and "requirements-ocr.txt" not in SCRIPT
@@ -339,3 +339,20 @@ def test_only_mineru_needs_a_pdf():
 
     with pytest.raises(SystemExit):
         phase0_spike.main(["--only-mineru"])
+
+
+def test_mineru_reads_on_the_gpu_not_the_cpu_reader():
+    # auto quietly picks the CPU reader when a torch extra is missing; onnxruntime 1.31 is built for CUDA 13.
+    assert 'ensure_env MINERU_MODEL_SMALL_BACKEND torch' in SCRIPT
+    assert '"mineru[torch]==$MINERU_VERSION"' in SCRIPT
+    assert 'ORT_GPU_PIN="${ORT_GPU_PIN:-1.22.0}"' in SCRIPT
+    assert 'pip" uninstall -y onnxruntime onnxruntime-gpu' in SCRIPT
+    assert 'install "onnxruntime-gpu==$ORT_GPU_PIN"' in SCRIPT
+
+
+def test_the_ocr_server_refuses_to_start_without_a_gpu_and_forces_the_gpu_reader():
+    server = (Path(__file__).resolve().parents[1] / "scripts" / "mineru_server.sh").read_text(encoding="utf-8")
+    assert "GPU is not available for the OCR server" in server
+    assert "export MINERU_MODEL_SMALL_BACKEND=torch" in server
+    # a real model is loaded: the provider list names CUDA even when its library cannot load
+    assert "onnxruntime.InferenceSession(" in server
