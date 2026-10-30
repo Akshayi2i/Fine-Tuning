@@ -141,7 +141,10 @@ PY
 
   stop)
     pkill -f "mineru-api --port $PORT" 2>/dev/null && echo "stopped" || echo "no MinerU API was running on port $PORT"
-    sleep 2
+    # The API holds the GPU models and worker processes and takes more than a moment to exit; training
+    # follows straight after, so wait for it (up to 30 s), then force it, rather than report too early.
+    for _ in $(seq 1 30); do pgrep -f "mineru-api --port $PORT" >/dev/null 2>&1 || break; sleep 1; done
+    pgrep -f "mineru-api --port $PORT" >/dev/null 2>&1 && { pkill -9 -f "mineru-api --port $PORT" 2>/dev/null || true; sleep 3; }
     # Closes the finished session too, so the next start can reuse the name.
     tmux kill-session -t "=fideon-mineru-server" 2>/dev/null || true
     # The GPU memory is free once the process is gone; say so when it is not.
