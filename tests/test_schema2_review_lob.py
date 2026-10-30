@@ -459,7 +459,7 @@ def test_the_prompt_reports_a_package_line_as_that_line():
 def test_the_endpoint_reads_the_line_hint(hint, expected):
     from serving.vllm_entrypoint import build_request
 
-    payload = {"source_id": "p1", "image_paths": ["page_1.png"], "doc_type": "policy"}
+    payload = {"source_id": "p1", "image_paths": ["page_1.png"], "page_texts": {"1": "Declarations"}, "doc_type": "policy"}
     if hint is not None:
         payload["lob_hypothesis"] = hint
     assert build_request(payload).lob_hypothesis == expected
@@ -470,7 +470,8 @@ def test_a_hint_that_is_no_line_name_is_refused(hint):
     from serving.vllm_entrypoint import ServingError, build_request
 
     with pytest.raises(ServingError, match="lob_hypothesis"):
-        build_request({"source_id": "p1", "image_paths": ["page_1.png"], "lob_hypothesis": hint})
+        build_request({"source_id": "p1", "image_paths": ["page_1.png"], "page_texts": {"1": "Declarations"},
+                       "lob_hypothesis": hint})
 
 
 def test_an_endpoint_hint_that_agrees_lifts_an_uncertain_reading(client):

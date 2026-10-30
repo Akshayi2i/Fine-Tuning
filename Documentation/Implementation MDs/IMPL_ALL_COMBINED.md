@@ -4925,6 +4925,7 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - **No key the client's schema does not name is served** (`pipeline._without_unknown_keys`, flag `<path>:unknown_key_removed`, kept for review): decoding is held to a closed schema (every object of every group slice of gl, wc, bopgl and boppr is `additionalProperties: false`, tested), and this removes one whatever the backend.
 - **Consistency checks** (`serving.consistency`): values that cannot all be true together - expiration not after effective, a term over 24 months, an implausible year, a per-occurrence limit above the aggregate, a total premium below its items, a malformed postal code, state or policy number - are kept, flagged and sent to review (`value_flags.REVIEW_ROUTED`). Every rule held on the 84 reviewed golds but one postal code; rules that did not hold there (a total equal to its items: 43%; form references in the schedule: 11%) are not used.
 - **A business-owners name** is told which part to send (`boppr` or `bopgl`).
+- **Extraction never skips MinerU** (user, 2026-10-30): the endpoint refuses a request that carries no MinerU text (`page_texts` for `ocr_plus_image`; `printed_texts` for `image_only`: the same text, held back from the prompt and used to check the answer against the pages); and a job whose MinerU text fails for good ends `failed` instead of `done` without the full text. The research tools (`testing.latency_check`, `testing.run_extraction`) can still read `image_only` to measure the model alone.
 
 ---
 

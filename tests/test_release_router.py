@@ -524,7 +524,8 @@ def test_the_endpoint_loads_the_base_whenever_a_line_would_fall_back(client):
 def test_the_endpoint_passes_the_callers_choice_through():
     from serving.vllm_entrypoint import build_request
 
-    payload = {"source_id": "p1", "image_paths": ["page_1.png"], "doc_type": "policy", "allow_lob_fallback": True}
+    payload = {"source_id": "p1", "image_paths": ["page_1.png"], "page_texts": {"1": "Declarations"},
+               "doc_type": "policy", "allow_lob_fallback": True}
     assert build_request(payload).allow_lob_fallback is True
     assert build_request({**payload, "allow_lob_fallback": False}).allow_lob_fallback is False
 
@@ -532,7 +533,8 @@ def test_the_endpoint_passes_the_callers_choice_through():
 def test_a_caller_who_chose_the_fallback_may_name_a_line_with_no_schema():
     from serving.vllm_entrypoint import ServingError, build_request
 
-    payload = {"source_id": "p1", "image_paths": ["page_1.png"], "doc_type": "policy", "lob": "title"}
+    payload = {"source_id": "p1", "image_paths": ["page_1.png"], "page_texts": {"1": "Declarations"},
+               "doc_type": "policy", "lob": "title"}
     with pytest.raises(ServingError, match="no canonical policy schema"):
         build_request(payload)
     assert build_request({**payload, "allow_lob_fallback": True}).known_lob == "title"

@@ -540,18 +540,19 @@ def test_a_worker_that_dies_during_the_fields_has_them_read_again(service):
     assert service.status(job_id)["status"] == "done"
 
 
-def test_checked_fields_stand_when_the_full_text_fails_for_good(tmp_path):
+def test_a_job_whose_mineru_text_fails_for_good_is_failed_not_done(tmp_path):
+    """Extraction never skips MinerU (decision 2026-10-30). The fields were delivered at
+    fields_ready, checked on the pages they cite; a document whose MinerU text could
+    not be read is not a finished one, and has no final result."""
     service = Service(tmp_path, reader=FakeReader(fail_full_text=True), max_attempts=1)
     job_id = service.submit(webhook=HOOK)["job_id"]
     worker = service.worker()
     worker.poll_once()
     worker.text_once()
     view = service.status(job_id)
-    assert view["status"] == "done" and view["full_text"] is False and "full text: ConnectionError" in view["error"]
-    result = service.get(f"/v1/extractions/{job_id}/result").json()
-    assert result["final"] is True and result["full_text"] is False
-    assert result["output"]["extraction"]["policy"]["policy_number"]["raw"] == "PA-1"
-    assert service.hooks.events() == ["extraction.fields_ready", "extraction.done"]
+    assert view["status"] == "failed" and "full text: ConnectionError" in view["error"]
+    assert service.get(f"/v1/extractions/{job_id}/result").status_code == 409        # no final result
+    assert service.hooks.events() == ["extraction.fields_ready", "extraction.failed"]
 
 
 def test_a_stopping_worker_hands_its_jobs_back_at_once(service):

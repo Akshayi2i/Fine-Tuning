@@ -17,7 +17,7 @@ the testing extraction server's do (``testing.extract_server.ExtractService``):
 
 **Job lifecycle.** ``queued`` (the API) -> ``running`` -> ``fields_ready`` ->
 ``done``, or ``failed``. Fields that could not be checked (no cited page had
-text) are never served: such a job goes from ``running`` to ``done``.
+text) are never served: such a job goes from ``running`` to ``failed``.
 
 **The queue keeps a job alive** (:mod:`azure_service.job_queue`). A received job
 stays hidden while the worker renews its lease, and its message is deleted only
@@ -36,8 +36,10 @@ counted. A job whose phase-1 checkpoint exists (``fields_ready``, or
 reads its pages and the final result is written, with no model time spent
 again and the served fields left as they were. A job with no checkpoint (the
 worker died during phase 1) is **read again from the start**. A job whose
-fields were served but whose full text fails for good ends ``done`` with
-``full_text: false``: its checked fields stand (as ExtractService does).
+fields were served but whose full text fails for good ends ``failed``
+(decision 2026-10-30: extraction never skips MinerU): the fields it served at
+``fields_ready`` were delivered, checked on the pages they cite; the job has
+no final result and says why.
 
 On SIGTERM (a scale-in, a new revision) the worker takes no new job and makes
 its jobs visible again at once, for the next replica.
@@ -436,24 +438,22 @@ class Worker:
         self._give_up(record, lease, reason)
 
     def _give_up(self, record: dict[str, Any], lease: Lease, reason: str) -> None:
-        """End the job for good: ``done`` without the full text when its checked
-        fields were served, ``failed`` otherwise."""
-        job_id, tenant = record["job_id"], record["tenant"]
+        """End the job for good: ``failed``, whatever was served before.
+
+        It was ``done`` without the full text when the checked fields had been
+        served: MinerU's text read only for the pages the fields cite, the rest
+        failing. Extraction never skips MinerU (decision 2026-10-30), so a
+        document whose MinerU text could not be read is not a finished one. The
+        fields it served at ``fields_ready`` were checked on the pages they
+        cite and had been delivered; the job itself ends ``failed``, with the
+        reason, and has no final result.
+        """
+        job_id = record["job_id"]
         now = self.clock()
-        record.update(error=reason, finished=now)
+        record.update(error=reason, finished=now, status="failed")
         record.pop("retry_at", None)
         status = "failed"
         try:
-            if record.get("fields_served") and self.store.client.exists(self.store.result_key(tenant, job_id)):
-                served = self.store.read_result(tenant, job_id)
-                served.update(status="done", final=True, full_text=False, full_text_error=reason)
-                record.update(status="done", full_text=False)
-                record.setdefault("timings_s", {})["total"] = round(now - record["submitted"], 2)
-                self._assert_current(record, lease)
-                self.store.write_result(tenant, job_id, served)
-                status = "done"
-            else:
-                record["status"] = "failed"
             self._write_status(record, lease)
         except LeaseLostError:
             self._drop(job_id, lease)

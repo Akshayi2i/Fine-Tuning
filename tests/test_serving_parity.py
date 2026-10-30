@@ -22,7 +22,9 @@ LOB_SCHEMAS = Path(__file__).resolve().parent.parent / "configs" / "canonical sc
 
 
 def _payload(**over):
-    return {"source_id": "s1", "image_paths": ["a/page_1.png", "a/page_2.png"], **over}
+    # Every request carries MinerU's text of every page (extraction never skips MinerU).
+    return {"source_id": "s1", "image_paths": ["a/page_1.png", "a/page_2.png"],
+            "page_texts": {"1": "Declarations", "2": "Schedule"}, **over}
 
 
 # --------------------------------------------------------------------------

@@ -600,11 +600,38 @@ def build_request(payload: dict[str, Any]) -> ExtractionRequest:
             f"sent; it must hold exactly pages 1..{len(images)}, one text per image."
         )
 
+    # MinerU's text of every page is part of every request (decision 2026-10-30:
+    # extraction never skips MinerU). ``page_texts`` is the text the prompt carries
+    # (ocr_plus_image); ``printed_texts`` is the same text held back from an
+    # image-only prompt and used to check the answer - a value no page prints is
+    # taken out (serving.printed_values). Without either, the fields would be
+    # served unchecked, flagged and nothing more.
+    try:
+        printed_texts = {int(k): v for k, v in (payload.get("printed_texts") or {}).items()} or None
+    except (TypeError, ValueError) as exc:
+        raise ServingError(f"printed_texts keys must be page numbers: {exc}") from exc
+    if printed_texts is not None and sorted(printed_texts) != list(range(1, len(images) + 1)):
+        raise ServingError(
+            f"printed_texts covers pages {sorted(printed_texts)} but {len(images)} page image(s) were "
+            f"sent; it must hold exactly pages 1..{len(images)}, one text per image."
+        )
+    if mode != "image_only" and printed_texts is not None:
+        raise ServingError("printed_texts is the text that checks an image_only answer; "
+                           f"{mode} carries its text as page_texts")
+    if not (page_texts or ocr_text or printed_texts):
+        raise ServingError(
+            "request carries no MinerU text. Extraction never skips MinerU: send its text of every page - "
+            "page_texts for ocr_plus_image, printed_texts for image_only (the text that checks the answer "
+            "against the pages, without being shown to the model). Without it nothing the model wrote "
+            "could be checked against what the PDF prints."
+        )
+
     return ExtractionRequest(
         source_id=str(source_id),
         image_paths=[str(p) for p in images],
         ocr_text=ocr_text,
         page_texts=page_texts,
+        printed_texts=printed_texts,
         ocr_meta=payload.get("ocr_meta") or {},
         modality_mode=mode,
         known_doc_type=payload.get("doc_type"),
