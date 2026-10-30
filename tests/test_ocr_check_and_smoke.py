@@ -9,7 +9,15 @@ import pytest
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient, InMemoryBackend
-from data_pipeline.ocr_check import OcrCheckReport, check_document, run_check, verdict, write_report
+from data_pipeline.ocr_check import (
+    OcrCheckReport,
+    check_document,
+    document_facts,
+    document_problems,
+    run_check,
+    verdict,
+    write_report,
+)
 
 
 def env(raw, page=1):
@@ -95,6 +103,96 @@ def test_the_check_reads_labels_and_ocr_from_blob_and_writes_its_report(tmp_path
     assert {"added", "original", "real documents"} == set(summary["by_origin_synthetic"])
     for name in ("summary.json", "value_checks.csv", "report.md"):
         assert (tmp_path / name).is_file()
+
+
+# --------------------------------------------------------------------------
+# Every document holds a floor of its own
+# --------------------------------------------------------------------------
+
+
+def _facts(sid, texts, found_of, *, document_kind="scanned", checkable=10):
+    """A document of ``texts`` pages with ``found_of`` of ``checkable`` values found."""
+    from data_pipeline.ocr_check import Row
+
+    rows = [Row(sid, f"v{i}", "x", "1", "ok" if i < found_of else "not_found", "", "original", "real", "gl")
+            for i in range(checkable)]
+    return rows, document_facts(sid, rows, texts, kind="real", line="gl", document_kind=document_kind)
+
+
+def _batch(*documents):
+    rows, details = [], []
+    for sid, texts, found, kind in documents:
+        r, d = _facts(sid, texts, found, document_kind=kind)
+        rows += r
+        details.append(d)
+    return OcrCheckReport(rows=rows, documents=len(details), details=details)
+
+
+def test_a_blank_scan_in_a_healthy_batch_fails_the_batch():
+    """The hole this closes: 3 good documents and one MinerU returned blank. The
+    batch's found rate (27 of 40) passed it; the document's own floor does not."""
+    good = ("page text " * 20,) * 2
+    report = _batch(("a", good, 9, "hybrid"), ("b", good, 9, "hybrid"), ("c", good, 9, "scanned"),
+                     ("blank_scan", ("", "   "), 0, "scanned"))
+    assert report.rate(report.rows) >= 0.50                       # the batch alone would pass
+    passed, reason = verdict(report)
+    assert passed is False
+    assert "blank_scan: none of its 2 page(s) has any OCR text" in reason and "a:" not in reason
+
+
+def test_a_document_of_mostly_blank_pages_fails():
+    mostly_blank = ("text",) * 2 + ("",) * 6
+    problems = document_problems(_batch(("m", mostly_blank, 9, "scanned")).details)
+    assert [sid for sid, _ in problems] == ["m"] and "6 of its 8 pages have no OCR text" in problems[0][1]
+    # A scan's one blank back page is not a problem.
+    assert document_problems(_batch(("ok", ("text",) * 9 + ("",), 9, "scanned")).details) == []
+
+
+def test_the_floor_is_by_the_kind_of_document():
+    """A hybrid's labels were audited against its text layer, so it must be found more often than a scan."""
+    pages = ("page text " * 20,) * 2
+    report = _batch(("hybrid_doc", pages, 5, "hybrid"), ("scan_doc", pages, 5, "scanned"))
+    problems = dict(document_problems(report.details))
+    assert "hybrid_doc" in problems and "scan_doc" not in problems       # 50%: under 60%, over 40%
+    assert "a hybrid needs 60%" in problems["hybrid_doc"]
+    # The floor is an option.
+    assert document_problems(report.details, {"hybrid": 0.40}) == []
+    assert {sid for sid, _ in document_problems(report.details, {"scanned": 0.9, "hybrid": 0.9})} == {
+        "hybrid_doc", "scan_doc"}
+
+
+def test_a_document_with_no_recorded_kind_is_held_to_the_default_floor():
+    pages = ("page text " * 20,) * 2
+    assert document_problems(_batch(("u", pages, 3, None)).details) != []          # 30% < 40%
+    assert document_problems(_batch(("u", pages, 5, None)).details) == []
+
+
+def test_the_report_names_the_documents_and_lists_the_values_for_review(tmp_path):
+    pages = ("page text " * 20,) * 2
+    report = _batch(("good", pages, 10, "hybrid"), ("weak", pages, 2, "scanned"))
+    summary = write_report(report, tmp_path)
+    assert summary["passed"] is False
+    assert [d["source_id"] for d in summary["failing_documents"]] == ["weak"]
+    review = (tmp_path / "needs_review.csv").read_text(encoding="utf-8").splitlines()
+    assert review[0].startswith("source_id,line,path,raw") and len(review) == 1 + 8          # the 8 values not found
+    assert all(line.startswith("weak,") for line in review[1:])
+    assert "fail their own floor" in (tmp_path / "report.md").read_text(encoding="utf-8")
+
+
+def test_blob_to_report_records_each_documents_kind_and_blank_pages(tmp_path):
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="main")
+    for sid, texts, kind in (("r1", PAGES, "hybrid"), ("blank", ["", ""], "scanned")):
+        client.write_json(paths.golden_label("policy", sid, "smoke"), LABEL)
+        client.write_json(paths.label_metadata("policy", sid, "smoke"),
+                          {"lob": "homeowners", "synthetic": False, "document_kind": kind})
+        client.write_json(paths.ocr_meta("policy", sid, "smoke"), {"page_count": 2})
+        for page, text in enumerate(texts, 1):
+            client.write_text(paths.processed_page("policy", sid, page, "md", "smoke"), text)
+    report = run_check(client, "policy", tenant_id="smoke")
+    by_id = {d.source_id: d for d in report.details}
+    assert (by_id["r1"].document_kind, by_id["r1"].blank_pages) == ("hybrid", 0)
+    assert (by_id["blank"].document_kind, by_id["blank"].blank_pages) == ("scanned", 2)
+    assert verdict(report)[0] is False
 
 
 # --------------------------------------------------------------------------

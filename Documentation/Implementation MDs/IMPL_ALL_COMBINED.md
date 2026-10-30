@@ -1918,7 +1918,11 @@ With it off, the per-document rule above applies.
 compared with its page's OCR text, with the audit's matching, and reported per line, real apart from synthetic,
 and fields the fill-in added (`fideon:filled`) apart from the generator's own. It fails when fewer than half of
 all values are found on a page they cite, or when added fields are found more than `--max-gap` (0.05) less
-often than original ones. Report and CSVs in `/workspace/ocr_check` (they quote label values).
+often than original ones. Each document also holds a floor of its own (`MIN_DOC_FOUND_RATE` by `document_kind`:
+hybrid 0.60, scanned 0.40; `MAX_BLANK_PAGE_SHARE` 0.30 of its pages without text; `--min-doc-found`): a batch
+rate hid a few blank scans. Starting values, to be read against the first real OCR. `needs_review.csv` lists
+real documents' values found on no page or only on another. Report and CSVs in `/workspace/ocr_check` (they
+quote label values).
 
 ### Deliveries into bundles (`prepare_bundles`)
 

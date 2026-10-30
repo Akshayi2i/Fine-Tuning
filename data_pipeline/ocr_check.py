@@ -20,6 +20,19 @@ put values on the synthetic pages that are not there - training must wait.
 Results per value: ``ok`` (on a page it cites), ``wrong_page``, ``not_found``,
 ``no_page_ref`` (found, cites no page), ``skipped_short`` (under 3 characters).
 The CSVs quote label values: they stay on the pod's volume, never in git.
+
+**Every document is held to a floor of its own**, not only the batch to one: a
+few scans MinerU returned blank are 1 or 2 documents in 84, and the batch's found
+rate hid them. A document fails when none of its pages has text, when too many
+of its pages have none (:data:`MAX_BLANK_PAGE_SHARE`), or when too few of its
+values are found on a page they cite - by the kind of document
+(:data:`MIN_DOC_FOUND_RATE`: a hybrid PDF's labels were audited against its own
+text layer and should be found, a scan's only against this OCR). The floors are
+starting values, to be read against the first real OCR output;
+``--min-doc-found`` sets them. Each failing document is named, with the way out:
+read it, correct its gold, or leave it out (``<input>/exclusions.csv``). The
+values for a person to look at - found on no page, or only on another - are in
+``needs_review.csv``, real documents only.
 """
 
 from __future__ import annotations
@@ -49,6 +62,14 @@ DEFAULT_MAX_GAP = 0.05
 #: catch OCR that did not work, not to grade labels.
 MIN_FOUND_RATE = 0.50
 CHECKED = ("ok", "wrong_page", "not_found", "no_page_ref")
+#: The share of a document's labelled values found on a page they cite, below
+#: which the document is refused, by kind (``document_kind`` of its label
+#: metadata). Starting values, not measurements: lower for a scan, whose labels
+#: were never audited against any text but this OCR. ``None``: kind not recorded.
+MIN_DOC_FOUND_RATE: dict[str | None, float] = {"hybrid": 0.60, "scanned": 0.40, None: 0.40}
+#: The share of a document's pages MinerU may return with no text. A scan
+#: has blank pages (a blank back); a document of mostly blank pages was not read.
+MAX_BLANK_PAGE_SHARE = 0.30
 
 
 @dataclass
@@ -65,10 +86,25 @@ class Row:
 
 
 @dataclass
+class DocumentFacts:
+    """One document, as its OCR and its values came out."""
+
+    source_id: str
+    line: str
+    kind: str                       # "real" or "synthetic"
+    document_kind: str | None       # "scanned" or "hybrid" (label metadata), when recorded
+    pages: int
+    blank_pages: int                # pages MinerU returned with no text
+    values: int                     # checkable values
+    found_rate: float | None
+
+
+@dataclass
 class OcrCheckReport:
     rows: list[Row] = field(default_factory=list)
     documents: int = 0
     skipped: Counter = field(default_factory=Counter)
+    details: list[DocumentFacts] = field(default_factory=list)
 
     def rate(self, rows: list[Row]) -> float | None:
         """Share of checkable values found on a page they cite."""
@@ -125,6 +161,40 @@ def check_document(source_id: str, label: dict, page_texts: list[str], *, kind: 
     return rows
 
 
+def document_facts(source_id: str, rows: list[Row], page_texts: list[str], *, kind: str, line: str,
+                   document_kind: str | None = None) -> DocumentFacts:
+    """What one document's OCR and values came to (see :func:`document_problems`)."""
+    checked = [r for r in rows if r.result in CHECKED]
+    rate = round(sum(r.result == "ok" for r in checked) / len(checked), 4) if checked else None
+    return DocumentFacts(source_id, line, kind, document_kind, len(page_texts),
+                         sum(1 for text in page_texts if not text.strip()), len(checked), rate)
+
+
+def document_problems(details: list[DocumentFacts], floors: dict[str | None, float] | None = None,
+                      max_blank_share: float = MAX_BLANK_PAGE_SHARE) -> list[tuple[str, str]]:
+    """``(source_id, what is wrong)`` for each document that fails its own floor.
+
+    No page with text; more blank pages than ``max_blank_share`` allows; or a
+    found rate under the floor for its kind. A document whose values could not be
+    checked at all has no rate: only its pages are judged.
+    """
+    floors = {**MIN_DOC_FOUND_RATE, **(floors or {})}
+    problems = []
+    for d in details:
+        if d.pages and d.blank_pages == d.pages:
+            problems.append((d.source_id, f"none of its {d.pages} page(s) has any OCR text"))
+            continue
+        if d.pages and d.blank_pages / d.pages > max_blank_share:
+            problems.append((d.source_id, f"{d.blank_pages} of its {d.pages} pages have no OCR text "
+                                          f"(more than {max_blank_share:.0%})"))
+            continue
+        floor = floors.get(d.document_kind, floors[None])
+        if d.found_rate is not None and d.found_rate < floor:
+            problems.append((d.source_id, f"{d.found_rate:.1%} of its {d.values} values are found on a page "
+                                          f"they cite (a {d.document_kind or 'document'} needs {floor:.0%})"))
+    return problems
+
+
 def run_check(client: BlobClient, doc_type: str, *, tenant_id: str | None = None,
               limit: int | None = None) -> OcrCheckReport:
     from data_pipeline.labeling.export_golden_labels import list_labeled_source_ids, load_golden_label
@@ -147,19 +217,29 @@ def run_check(client: BlobClient, doc_type: str, *, tenant_id: str | None = None
             key = paths.processed_page(doc_type, source_id, page, "md", tenant_id)
             texts.append(client.read_text(key) if client.exists(key) else "")
         lob = metadata.get("lob")
-        report.rows += check_document(
-            source_id, label, texts,
-            kind="synthetic" if metadata.get("synthetic") else "real",
-            line="+".join(lob) if isinstance(lob, list) else str(lob or "-"),
-        )
+        kind = "synthetic" if metadata.get("synthetic") else "real"
+        line = "+".join(lob) if isinstance(lob, list) else str(lob or "-")
+        rows = check_document(source_id, label, texts, kind=kind, line=line)
+        report.rows += rows
+        report.details.append(document_facts(source_id, rows, texts, kind=kind, line=line,
+                                             document_kind=metadata.get("document_kind")))
         report.documents += 1
         if (index + 1) % 100 == 0:
             log.info("checked %d documents", index + 1)
     return report
 
 
-def verdict(report: OcrCheckReport, max_gap: float = DEFAULT_MAX_GAP) -> tuple[bool, str]:
-    """Pass when added fields are found about as often as original ones."""
+def verdict(report: OcrCheckReport, max_gap: float = DEFAULT_MAX_GAP,
+            floors: dict[str | None, float] | None = None) -> tuple[bool, str]:
+    """Pass when every document holds its floor and added fields are found about
+    as often as original ones."""
+    problems = document_problems(report.details, floors)
+    if problems:
+        named = "; ".join(f"{sid}: {what}" for sid, what in problems[:8])
+        more = f" (and {len(problems) - 8} more)" if len(problems) > 8 else ""
+        return False, (f"{len(problems)} document(s) fail their own floor - {named}{more}. Read each one's OCR "
+                       "and its gold, then correct the gold, read the document again, or leave it out "
+                       "(<input>/exclusions.csv).")
     # First, did OCR produce text the labels can be found in at all? A batch of
     # original documents has no added fields, so the comparison below had
     # nothing to compare and passed whatever the pages held - empty included.
@@ -186,9 +266,10 @@ def verdict(report: OcrCheckReport, max_gap: float = DEFAULT_MAX_GAP) -> tuple[b
                   f"within {max_gap:.0%})")
 
 
-def write_report(report: OcrCheckReport, out: Path, max_gap: float = DEFAULT_MAX_GAP) -> dict[str, Any]:
+def write_report(report: OcrCheckReport, out: Path, max_gap: float = DEFAULT_MAX_GAP,
+                 floors: dict[str | None, float] | None = None) -> dict[str, Any]:
     out.mkdir(parents=True, exist_ok=True)
-    passed, reason = verdict(report, max_gap)
+    passed, reason = verdict(report, max_gap, floors)
     summary = {
         "documents": report.documents,
         "skipped": dict(report.skipped),
@@ -198,6 +279,9 @@ def write_report(report: OcrCheckReport, out: Path, max_gap: float = DEFAULT_MAX
         "by_kind": report.by(lambda r: r.kind),
         "by_line": report.by(lambda r: r.line),
         "worst_documents": report.worst_documents(),
+        "failing_documents": [{"source_id": sid, "problem": what}
+                              for sid, what in document_problems(report.details, floors)],
+        "blank_pages": sum(d.blank_pages for d in report.details),
         "passed": passed,
         "verdict": reason,
     }
@@ -207,6 +291,13 @@ def write_report(report: OcrCheckReport, out: Path, max_gap: float = DEFAULT_MAX
         writer.writerow(["source_id", "path", "raw", "page_ref", "result", "found_on", "origin", "kind", "line"])
         writer.writerows([r.source_id, r.path, r.raw, r.page_ref, r.result, r.found_on, r.origin, r.kind, r.line]
                          for r in report.rows)
+    # The values for a person to look at: found on no page, or only on another.
+    # Real documents only - a synthetic twin's labels are checked as a group.
+    with (out / "needs_review.csv").open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["source_id", "line", "path", "raw", "cited_pages", "result", "found_on"])
+        writer.writerows([r.source_id, r.line, r.path, r.raw, r.page_ref, r.result, r.found_on]
+                         for r in report.rows if r.kind == "real" and r.result in ("not_found", "wrong_page"))
     lines = [f"# Post-OCR value check — {'PASS' if passed else 'FAIL'}", "", reason, "",
              f"- documents checked: {report.documents}; skipped: {dict(report.skipped) or 'none'}",
              f"- values: {len(report.rows)}; found on a cited page: {summary['found_rate']}", "",
@@ -232,7 +323,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI
     parser.add_argument("--max-gap", type=float, default=DEFAULT_MAX_GAP,
                         help="how much lower the added fields' found rate may be than the original fields'")
     parser.add_argument("--limit", type=int, default=None, help="check only the first N documents")
+    parser.add_argument("--min-doc-found", type=float, default=None, metavar="RATE",
+                        help="every document's floor for the share of its values found on a page they cite "
+                             "(default by kind: hybrid 0.60, scanned 0.40)")
     args = parser.parse_args(argv)
+    floors = {kind: args.min_doc_found for kind in MIN_DOC_FOUND_RATE} if args.min_doc_found is not None else None
     # On the pod, run detached in tmux: a closed laptop must not stop this job.
     from orchestration.detach import detach_module_if_needed
 
@@ -240,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI
         return 0
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     report = run_check(for_ocr(), args.doc_type, tenant_id=args.tenant, limit=args.limit)
-    summary = write_report(report, args.out, args.max_gap)
+    summary = write_report(report, args.out, args.max_gap, floors)
     print((args.out / "report.md").read_text(encoding="utf-8"))
     print(f"report and CSV in {args.out}")
     return 0 if summary["passed"] else 1

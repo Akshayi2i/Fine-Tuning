@@ -454,6 +454,12 @@ added (`fideon:filled`) apart from the generator's own, real apart from syntheti
 documents. It fails when added fields are found on their page more than 5 points less often than original ones
 (`--max-gap`): then the fill-in put values on synthetic pages that are not there, and training waits.
 
+**Each document also holds a floor of its own**, so a few blank scans cannot hide in a healthy batch: it fails
+when none of its pages has OCR text, when more than 30% of them have none, or when too few of its values are
+found on a page they cite (hybrid 60%, scanned 40%; `--min-doc-found` sets one floor for both). The floors are
+starting values, to be read against the first real OCR output. The failing documents are named in the report;
+`needs_review.csv` lists the values of real documents found on no page, or only on another, for a person.
+
 Before the real run, a smoke run proves the whole path on a few documents, under its own tenant and version:
 
 ```bash
