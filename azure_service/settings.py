@@ -38,6 +38,11 @@ DEFAULT_RETENTION_FLAG_KINDS = (
     "printed_off_cited_page", "near_tie", "likely_missed", "unverified_unread_page", "link_to_removed_row",
     # Data that may be missing: rows the table's own count says were not read, a window the model failed.
     "row_count_mismatch", "window_failed",
+    # A key the schema has no place for, taken out of the served JSON (serving.pipeline).
+    "unknown_key_removed",
+    # Values that cannot all be true together, or of a shape the field never has (serving.consistency).
+    "date_order", "term_too_long", "implausible_date", "limit_order", "premium_below_items",
+    "bad_postal_code", "bad_state", "bad_policy_no",
 )
 
 

@@ -338,7 +338,8 @@ def test_serving_returns_one_canonical_document(client, lob, response, carrier_n
 class _ScriptedBackend(ModelBackend):
     """Answers each window by a rule over (group, pages), and records batches.
 
-    ``fail(group, pages)`` returns ``"garbage"``, ``"truncated"``, ``"transport"``
+    ``fail(group, pages)`` returns ``"garbage"``, ``"truncated"``, ``"unknown_key"``
+    (the decl answer carries a key no schema names), ``"transport"``
     (the server could not be reached), ``"bad_request"`` (a 4xx) or ``None``.
     """
 
@@ -375,6 +376,12 @@ class _ScriptedBackend(ModelBackend):
 
             raise ModelRunnerError("400 from /v1/chat/completions: maximum context length exceeded")
         body = _decl_response() if group == "decl" else {}
+        if mode == "bad_dates" and group == "decl":
+            body = {**body, "policy": {**body["policy"], "effective_date": _fv_("07/12/2025"),
+                                       "expiration_date": _fv_("06/01/2025")}}
+        if mode == "unknown_key" and group == "decl":
+            body = {**body, "made_up_section": {"x": _fv_("1")},
+                    "carrier": {**body.get("carrier", {}), "invented_rating": _fv_("A++")}}
         text = "{\"carrier\": {\"company" if mode == "garbage" else json.dumps(body)
         tokens = [text[i:i + 4] for i in range(0, len(text), 4)]
         return Generation(
@@ -606,3 +613,59 @@ def test_a_request_naming_bop_is_told_which_part_to_send():
         request_lob({"lob": "no_such_line"})
     assert "lob=boppr" not in str(raised.value)                  # only for a business-owners name
     assert request_lob({"lob": "boppr"}) == "boppr"
+
+
+
+# --------------------------------------------------------------------------
+# No key the schema has no place for
+# --------------------------------------------------------------------------
+
+def _fv_(value, page=1):
+    return {"raw": value, "parsed": value, "page_ref": [page]}
+
+
+@pytest.mark.parametrize("line", ["gl", "wc", "bopgl", "boppr"])
+def test_every_object_the_model_is_decoded_against_is_closed(line):
+    """The grammar can only refuse a key the schema leaves out if the schema says
+    so: every object of every field group's slice is additionalProperties false."""
+    from common.schema_sections import group_names
+    from common.schemas import resolved_schema
+
+    open_objects = []
+
+    def walk(node, where):
+        if isinstance(node, dict):
+            if (node.get("type") == "object" or "properties" in node) and node.get("additionalProperties", None) is not False:
+                open_objects.append(where)
+            for key, value in node.items():
+                walk(value, f"{where}/{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{where}[{index}]")
+
+    for group in group_names(line):
+        walk(resolved_schema("policy", None, line, sections=group), f"{line}:{group}")
+    assert not open_objects, open_objects[:5]
+
+
+def test_a_key_no_schema_names_is_never_served_and_is_said(client, monkeypatch):
+    """Whatever the backend: an answer carrying a key the client's schema has no place
+    for is served without it, flagged where it was, and the key's confidence goes too."""
+    import serving.printed_values as printed_values
+
+    monkeypatch.setattr(printed_values, "configured_mode", lambda: printed_values.FLAG)
+    result = _serve_with(client, _ScriptedBackend(fail=lambda group, pages: "unknown_key" if group == "decl" else None))
+    flags = set(result.review_flags)
+    assert "made_up_section:unknown_key_removed" in flags and "carrier.invented_rating:unknown_key_removed" in flags
+    assert "made_up_section" not in result.extraction and "invented_rating" not in result.extraction["carrier"]
+    assert not any("invented_rating" in path for path in result.fields)
+    assert result.extraction["carrier"]["company_name"]["parsed"] == "Granite Mutual"      # the rest is untouched
+    assert not any("made_up_section" in error or "invented_rating" in error for error in result.validation_errors)
+
+
+def test_a_clean_answer_has_nothing_taken_out(client, monkeypatch):
+    import serving.printed_values as printed_values
+
+    monkeypatch.setattr(printed_values, "configured_mode", lambda: printed_values.FLAG)
+    result = _serve_with(client, _ScriptedBackend())
+    assert not any(flag.endswith("unknown_key_removed") for flag in result.review_flags)

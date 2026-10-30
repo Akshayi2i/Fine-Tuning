@@ -483,6 +483,7 @@ def test_the_default_flag_kinds_are_kinds_serving_emits_and_no_document_level_on
     from azure_service.settings import DEFAULT_RETENTION_FLAG_KINDS
     from calibration.list_completeness import ROW_MISMATCH_SUFFIX
     from serving import conventions, pipeline, printed_values, value_flags
+    from serving.consistency import CONSISTENCY_FLAGS
 
     emitted = {
         "low_confidence", "no_confidence",                         # serving.pipeline, calibration.apply_calibration
@@ -490,6 +491,7 @@ def test_the_default_flag_kinds_are_kinds_serving_emits_and_no_document_level_on
         printed_values.UNREAD_PAGE_FLAG, printed_values.LINK_REMOVED_FLAG, value_flags.OFF_CITED_PAGE_FLAG,
         value_flags.ROLE_MISMATCH_FLAG, value_flags.NEAR_TIE_FLAG, value_flags.PARSED_MISMATCH_FLAG,
         ROW_MISMATCH_SUFFIX.lstrip(":"), pipeline.WINDOW_FAILED_FLAG,  # data that may be missing
+        pipeline.UNKNOWN_KEY_FLAG, *CONSISTENCY_FLAGS,       # a key the schema lacks; values that cannot all be true
     }
     assert set(DEFAULT_RETENTION_FLAG_KINDS) == emitted
     serving_source = "\n".join(path.read_text(encoding="utf-8")

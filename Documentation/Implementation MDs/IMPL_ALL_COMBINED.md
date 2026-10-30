@@ -4917,6 +4917,15 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 
 - Retention for review (#43), OFF by default: for tenants listed in `REVIEW_RETENTION_TENANTS` (after legal and contract sign-off), the Azure worker copies a `done` job's PDF, result and a manifest to the separate `REVIEW_CONTAINER` (`retained/<tenant>/<job>/`) before the PDF is deleted, when a value needs a person (`REVIEW_RETENTION_FLAG_KINDS`: low or no confidence, not printed, parse or role mismatch, off its cited page, near tie, likely missed, unread page, a link to a removed row, a row-count mismatch, a failed window; document-level flags never do), its confidence is below `REVIEW_RETENTION_LOW_CONFIDENCE` (0.80), or it falls in the `REVIEW_RETENTION_SAMPLE` (5%). Kept `REVIEW_RETENTION_DAYS` (90). `python -m azure_service.retention purge | export | mark-reviewed`: export copies documents into the labelling intake unlabelled (never a gold); a failed copy never fails a job. See azure_service/DEPLOY.md section 9.
 
+## Changes of 2026-10-30 (production hardening)
+
+- **Fields first reads a budget of pages** (`fields_first.verify_page_budget`, 40): `pages_to_verify` picks the pages that cover the most values (a set cover) instead of every cited page, which on the first baseline was 80% of a document. A value no page read covers is held back as `pending_full_text`, never served unchecked.
+- **A document is not served as read when windows never reached the model** (`ModelTransportError`: unreachable, cut off, 408/429/5xx). It is refused so the worker retries it; a 4xx is still dropped and flagged. A proxy's HTML error page is reduced to its title.
+- **No document content in a failure message or a log line:** the parse error, the classifier error and the full-text schema warning carry a length, an offset or a path, never the model's answer or a value the schema quoted.
+- **No key the client's schema does not name is served** (`pipeline._without_unknown_keys`, flag `<path>:unknown_key_removed`, kept for review): decoding is held to a closed schema (every object of every group slice of gl, wc, bopgl and boppr is `additionalProperties: false`, tested), and this removes one whatever the backend.
+- **Consistency checks** (`serving.consistency`): values that cannot all be true together - expiration not after effective, a term over 24 months, an implausible year, a per-occurrence limit above the aggregate, a total premium below its items, a malformed postal code, state or policy number - are kept, flagged and sent to review (`value_flags.REVIEW_ROUTED`). Every rule held on the 84 reviewed golds but one postal code; rules that did not hold there (a total equal to its items: 43%; form references in the schedule: 11%) are not used.
+- **A business-owners name** is told which part to send (`boppr` or `bopgl`).
+
 ---
 
 # IMPL-12_testing_extraction_routine

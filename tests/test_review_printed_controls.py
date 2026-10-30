@@ -404,7 +404,10 @@ def test_extract_sends_a_value_under_the_wrong_label_to_review(monkeypatch):
     assert "policy.effective_date:role_mismatch" in result.review_flags
     assert result.extraction["policy"]["effective_date"]["raw"] == "10/01/2026"      # flagged, not changed
     assert result.extraction["policy"]["effective_date"]["flagged"] is True
-    assert result.extraction["policy"]["expiration_date"]["flagged"] is False
+    # Only the effective date is sent for its label. The date now falls after the fixture's
+    # expiration, which the consistency check (serving.consistency) rightly sends too.
+    assert "policy.expiration_date:role_mismatch" not in result.review_flags
+    assert "policy.expiration_date:date_order" in result.review_flags
 
 
 def test_extract_takes_out_a_contradicted_parse():

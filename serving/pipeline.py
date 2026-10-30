@@ -67,6 +67,7 @@ from inference_core.input_builder import EMPTY_PAGE_TEXT, build_messages
 from inference_core.model_runner import Generation, LoadedModel, generate, generate_batch
 from inference_core.span_map import SpanMapError, map_compact_field_spans, map_field_spans
 from serving.adapter_router import Route, RoutingError, route
+from serving.consistency import consistency_flags
 from serving.doc_type_classifier import Classifier
 from serving.value_flags import near_tie_flags, route_served, routed_paths
 
@@ -1579,6 +1580,25 @@ def _feature_calibrated(
     return result
 
 
+#: A key the client's schema has no place for, taken out of the served JSON.
+UNKNOWN_KEY_FLAG = "unknown_key_removed"
+
+
+def _without_unknown_keys(output: dict[str, Any], route_: Route, lob: Any) -> tuple[dict[str, Any], list[str]]:
+    """``output`` without the keys the client's schema does not declare, and their paths.
+
+    Against the client's full schema (``load_schema``), not the model's slice of
+    it: the slice leaves out what serving adds (the system fields, the full
+    text), which the full schema declares. On every served answer of the first
+    baseline (24 documents) nothing is taken out.
+    """
+    from common.canonical import within_schema
+    from common.schemas import load_schema
+
+    closed, dropped = within_schema(output, load_schema(route_.schema_doc_type, route_.schema_acord_form, lob))
+    return (closed if dropped else output), dropped
+
+
 def _with_every_key(output: dict[str, Any], route_: Route, lob: Any) -> dict[str, Any]:
     """``output`` with every key of its schema (common.canonical.with_all_keys)."""
     return _every_key(output, route_.schema_doc_type, route_.schema_acord_form, lob)
@@ -2045,6 +2065,10 @@ def extract(
     # flagged on every value in it: the rows present may each be confident, and
     # the list as a whole still needs a person.
     if canonical:
+        # Values that cannot all be true together (serving.consistency): checked on
+        # the merged answer, so a date from the declarations and one from a later
+        # window are compared, and routed to review below with the other value flags.
+        flags.extend(consistency_flags(extraction))
         incomplete = tuple(
             flag.split(":", 1)[0] for flag in flags if is_row_completeness_flag(flag)
         )
@@ -2080,6 +2104,17 @@ def extract(
                 flags.append(NO_FULL_TEXT_FLAG)
     else:
         output = extraction
+
+    # --- no key the client's schema does not name ------------------------------
+    # Decoding is held to a closed schema, so the model cannot write one - but
+    # that rests on the server's grammar alone, and a backend without it (or a
+    # bug) would serve an invented key flagged schema:invalid at most
+    # (fields first serves with strict_schema off). Taken out here, whatever
+    # the backend, and said: nothing is served that the schema has no place for.
+    unknown_keys: list[str] = []
+    if canonical and isinstance(output, dict):
+        output, unknown_keys = _without_unknown_keys(output, route_, lob)
+        flags.extend(f"{path}:{UNKNOWN_KEY_FLAG}" for path in unknown_keys)
 
     # --- schema validation, mirroring the audit gate ------------------------
     # Against the client's FULL schema for a canonical document, envelope and
@@ -2125,6 +2160,7 @@ def extract(
             path: f.as_output()
             for path, f in sorted(calibrated.fields.items())
             if path != "line_of_business" and "[" not in path
+            and not any(path == gone or path.startswith(f"{gone}.") for gone in unknown_keys)
         },
         list_fields={
             name: {"rows": values.get(name, []), **signal.as_output()}

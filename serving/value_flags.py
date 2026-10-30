@@ -16,6 +16,10 @@ a doubt the tokens cannot show:
   (``inference_core.span_map.FieldSpan.top2_margin`` below
   ``serving.near_tie_margin``): greedy decoding with ``repeatable: false`` can
   write the other one on another run;
+* ``<path>:date_order``, ``term_too_long``, ``implausible_date``, ``limit_order``,
+  ``premium_below_items``, ``bad_postal_code``, ``bad_state``, ``bad_policy_no`` -
+  values that cannot all be true together, or a value of a shape the field never
+  has (``serving.consistency``): printed, so the text cannot say it is wrong;
 * ``<path>:parsed_mismatch`` - its ``parsed`` is not what its ``raw`` reads as
   (flag mode keeps it; strict mode takes it out, and then there is nothing to
   send).
@@ -30,14 +34,18 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from serving.consistency import CONSISTENCY_FLAGS
+
 OFF_CITED_PAGE_FLAG = "printed_off_cited_page"
 ROLE_MISMATCH_FLAG = "role_mismatch"
 NEAR_TIE_FLAG = "near_tie"
 PARSED_MISMATCH_FLAG = "parsed_mismatch"
 ROW_NOT_COLOCATED_FLAG = "row_not_colocated"
 
-#: The flags that send the value they name to review.
-REVIEW_ROUTED = frozenset({OFF_CITED_PAGE_FLAG, ROLE_MISMATCH_FLAG, NEAR_TIE_FLAG, PARSED_MISMATCH_FLAG})
+#: The flags that send the value they name to review: a value the page text cannot
+#: settle, and the values that cannot all be true together (``serving.consistency``).
+REVIEW_ROUTED = frozenset({OFF_CITED_PAGE_FLAG, ROLE_MISMATCH_FLAG, NEAR_TIE_FLAG, PARSED_MISMATCH_FLAG}
+                          | CONSISTENCY_FLAGS)
 
 #: ``serving.near_tie_margin`` when the config names none: nats.
 DEFAULT_NEAR_TIE_MARGIN = 0.1
