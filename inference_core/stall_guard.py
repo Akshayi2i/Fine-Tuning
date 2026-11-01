@@ -38,6 +38,14 @@ def abort(reason: str) -> None:
     sys.stderr.flush()
     faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
     sys.stderr.flush()
+    try:
+        # Told before the process goes: a stall is exactly when nobody is watching the log. Five seconds
+        # at most; a message that cannot be sent must not keep a wedged process alive.
+        from orchestration.notify import stalled
+
+        stalled(reason)
+    except Exception:  # noqa: BLE001
+        pass
     os._exit(EXIT_CODE)
 
 

@@ -3156,6 +3156,9 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         # The run summary shows the tier, how sure it is, and the bound.
         + (f"; {result.tier_evidence.describe()}" if result.tier_evidence else ""),
         {"metrics": candidate, "failed_gates": [], "cascade_dependents": cascade.dependents,
+         # What the closing text message says (orchestration.notify): whether the gate was passed on its
+         # own, or the release was promoted by an override past gates that failed.
+         "gate_passed": result.gate_passed, "gate_message": result.message,
          "validation_gate_mirror_accuracy": decision["validation_gate_mirror_accuracy"],
          "tier": decision["tier"], "tier_confidence": decision["tier_confidence"],
          "tier_evidence": decision["tier_evidence"]},
@@ -4313,6 +4316,12 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
             return report
 
     from common.logging_setup import reassert
+    from orchestration.notify import run_started, stage_started
+
+    try:
+        run_started(report, ctx, stages)        # the first text message; never fails the run
+    except Exception as exc:  # noqa: BLE001
+        log.warning("start message not sent: %s", exc)
 
     for stage in stages:
         # A library imported by the stage before (ms-swift, vLLM) may have
@@ -4327,6 +4336,7 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
 
         attempts = 0
         began = time.monotonic()
+        stage_started(stage)
         while True:
             attempts += 1
             log.info("stage %d %s%s%s", stage.number, stage.name,

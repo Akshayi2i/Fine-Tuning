@@ -36,3 +36,11 @@ def test_a_job_started_without_a_virtualenv_runs_in_the_training_venv():
     block = SCRIPT[SCRIPT.index('if [ -z "${VIRTUAL_ENV:-}" ]'):]
     block = block[:block.index("  fi")]
     assert "/venv/bin/python" in block and "export PATH=" in block and "export VIRTUAL_ENV=" in block
+
+
+def test_a_silent_log_and_an_unreported_exit_are_told_by_the_launcher():
+    """A hard-killed process cannot say it died or hung: the launcher watches the log and, when the run
+    exits badly without its own closing message, sends one (orchestration.notify, a no-op without a channel)."""
+    assert "POD_RUN_STALE_MINUTES" in SCRIPT and "may be stuck" in SCRIPT
+    assert "orchestration.notify --text" in SCRIPT
+    assert "FIDEON_RUN_NAME" in SCRIPT and ".notified" in SCRIPT   # the pipeline's own message is not repeated

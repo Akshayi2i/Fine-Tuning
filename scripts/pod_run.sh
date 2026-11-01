@@ -151,7 +151,7 @@ cmd_start() {
     fi
     die "run '$name' is still running. Watch it with: bash scripts/pod_run.sh attach $name"
   fi
-  rm -f "$exit_file"
+  rm -f "$exit_file" "${LOG_DIR}/$name.notified"
 
   # POD_RUN_RETRY_STALLED=N: run the same command again, up to N times, when it stopped itself on a stall
   # (inference_core.stall_guard). Running the same command again is only right for one that resumes a named
@@ -169,7 +169,27 @@ cmd_start() {
   local runner="${LOG_DIR}/$name.run.sh"
   {
     prelude "$keep"
+    # The run's name, for the pipeline's closing message to mark in the log folder (orchestration.notify).
+    printf 'export FIDEON_RUN_NAME=%q\n' "$name"
     printf 'echo "=== %s started $(date -u +%%FT%%TZ) on $(hostname) ==="\n' "$name"
+    # A log that has not moved for POD_RUN_STALE_MINUTES (default 15; 0 turns it off) is told once as a
+    # possible hang, and again if it stalls once more after moving. A hard-killed process cannot say so
+    # itself. Text messages are sent only when a channel is set up (orchestration.notify).
+    printf 'stale_minutes=%q\n' "${POD_RUN_STALE_MINUTES:-15}"
+    echo 'watcher='
+    echo 'if [ "$stale_minutes" -gt 0 ] 2>/dev/null; then'
+    echo '  ('
+    echo '    told=0'
+    echo '    while sleep 60; do'
+    printf '      age=$(( $(date +%%s) - $(stat -c %%Y %q 2>/dev/null || date +%%s) ))\n' "$log"
+    echo '      if [ "$age" -ge $((stale_minutes * 60)) ]; then'
+    printf '        [ "$told" = 0 ] && python -m orchestration.notify --text "Run %s: the log has not moved for $((age / 60)) minutes, so it may be stuck." >/dev/null 2>&1\n' "$name"
+    echo '        told=1'
+    echo '      else told=0; fi'
+    echo '    done'
+    echo '  ) &'
+    echo '  watcher=$!'
+    echo 'fi'
     echo 'attempt=1'
     echo 'while :; do'
     # Where this attempt's output starts in the log, to read only that for a stall.
@@ -192,6 +212,11 @@ cmd_start() {
     echo '  fi'
     echo '  break'
     echo 'done'
+    echo '[ -n "$watcher" ] && kill "$watcher" 2>/dev/null'
+    # A run that failed without having told anyone (a crash, a kill): the pipeline marks its own closing
+    # message in the log folder, so a run that already reported its failure is not reported twice.
+    printf 'if [ "$status" != 0 ] && [ ! -e %q ]; then python -m orchestration.notify --text "Run %s ended with exit code $status and sent no closing message: it may have crashed or been killed. Log: %s" >/dev/null 2>&1; fi\n' \
+      "${LOG_DIR}/$name.notified" "$name" "$log"
     printf 'echo "$status" > %q\n' "$exit_file"
     printf 'echo "=== %s finished $(date -u +%%FT%%TZ), exit $status ==="\n' "$name"
     # Keep the session open after the run, so its last screen can still be read.

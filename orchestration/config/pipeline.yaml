@@ -88,6 +88,19 @@ notifications:
   on_stage_failure: true
   on_gate_block: true
   on_run_complete: true
+  # Text messages on Telegram and/or e-mail (orchestration/notify.py explains the environment variables
+  # that set them up; unset, nothing is sent): the run starting, each phase finishing and the next one
+  # starting, and a stall. A failed phase, a block and the end are always sent.
+  on_run_start: true
+  on_phase_change: true
+  on_stall: true
+  # Which text channels are on: email, telegram, webhook. E-mail only for now; the Telegram code is kept
+  # and does nothing, whatever its environment variables hold, until "telegram" is added here.
+  # "webhook" needs no mailbox password: each message is posted as {"text", "subject"} JSON to the URL in
+  # webhook_url_env (a Power Automate "When an HTTP request is received" flow that sends the e-mail or a
+  # Teams message under the signed-in user's own login). With it on, the structured event posts above
+  # are not sent as well: the same facts arrive once, as text.
+  channels: [email]
   timeout_seconds: 10
 
 deferred:

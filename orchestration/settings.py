@@ -107,11 +107,24 @@ def continued_training_rules(config: dict[str, Any] | None = None) -> dict[str, 
 def notification_settings(config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Which run events post to the webhook (``orchestration.notify``)."""
     block = (config if config is not None else pipeline_config()).get("notifications") or {}
+    # Which text channels are on. E-mail only unless the config says more: Telegram's code is kept but
+    # stays off, whatever its environment variables hold, until "telegram" is listed here.
+    channels = block.get("channels")
+    channels = ["email"] if channels is None else [str(c).strip().lower() for c in channels]
+    unknown = sorted(set(channels) - {"email", "telegram", "webhook"})
+    if unknown:
+        raise SettingsError(f"notifications.channels names {unknown}; the channels are email, telegram and webhook")
     return {
+        "channels": channels,
         "webhook_url_env": str(block.get("webhook_url_env") or "FIDEON_NOTIFY_WEBHOOK_URL"),
         "on_stage_failure": bool(block.get("on_stage_failure", True)),
         "on_gate_block": bool(block.get("on_gate_block", True)),
         "on_run_complete": bool(block.get("on_run_complete", True)),
+        # The text messages (Telegram, e-mail): the run starting, each phase handing over to the next,
+        # and a stall. A failure, a block and the end are always told.
+        "on_run_start": bool(block.get("on_run_start", True)),
+        "on_phase_change": bool(block.get("on_phase_change", True)),
+        "on_stall": bool(block.get("on_stall", True)),
         "timeout_seconds": float(block.get("timeout_seconds", 10) or 10),
     }
 

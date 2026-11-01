@@ -1087,6 +1087,44 @@ def test_a_written_override_can_be_given_on_the_command_line(client, controller)
     assert bundle["override"]["approver"] == "A. Reviewer"
 
 
+def test_a_whole_run_tells_each_phase_and_ends_with_the_gate_result(client, controller, monkeypatch):
+    """The text messages of a run end to end: the start, each phase handing over to the next, and the
+    closing line with whether the gate was passed. Recorded at the sender, so no channel is needed."""
+    from orchestration import notify
+
+    sent = []
+    monkeypatch.setattr(notify, "send_text", lambda text, **_kw: sent.append(text) or {})
+    seed_corpus(client)
+    ctx = _cli_context(client, controller, ["all", "--input", "./intake", "--version", "v1"],
+                       baseline_metrics=dict(PASSING_METRICS), metrics_provider=lambda _c: dict(PASSING_METRICS))
+    report = cli.run_command("all", ctx)
+    notify.run_complete(report, ctx)
+
+    assert report.ok, report.render()
+    assert sent[0].startswith("Fine-tuning v1 started (all). Starting Phase 1")
+    handovers = [text for text in sent if " completed in " in text and "Now starting Phase" in text]
+    assert any("Phase 5 'Training' completed" in text and "Now starting Phase 6 'Checkpoint selection'" in text
+               for text in handovers), sent
+    assert sent[-1].startswith("Fine-tuning v1 is completed, all phases done successfully. Gate is passed."), sent[-1]
+
+
+def test_a_blocked_gate_ends_the_run_with_a_message_that_the_gate_is_not_passed(client, controller, monkeypatch):
+    from orchestration import notify
+
+    sent = []
+    monkeypatch.setattr(notify, "send_text", lambda text, **_kw: sent.append(text) or {})
+    seed_corpus(client)
+    regressed = {**PASSING_METRICS, "list_field_recall": 0.60}
+    ctx = _cli_context(client, controller, ["all", "--input", "./intake", "--version", "v1"],
+                       baseline_metrics=dict(PASSING_METRICS), metrics_provider=lambda _c: dict(regressed))
+    report = cli.run_command("all", ctx)
+    notify.run_complete(report, ctx)
+
+    assert not report.ok and report.blocked_at == "evaluation_gate"
+    assert any("STOPPED: Phase 8 'Evaluation gate' was blocked. Gate is not passed (blocked)." in text for text in sent)
+    assert not any("all phases done successfully" in text for text in sent)
+
+
 def test_override_gate_all_promotes_a_release_whose_gate_is_not_passed_and_says_so(client, controller):
     """`--override-gate all`: the run goes on to the release although a gate failed; the stage says
     "Gate is not passed", the decision records passed for promotion and gate_passed false, and the
