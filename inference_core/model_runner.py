@@ -579,7 +579,7 @@ class VLLMBackend(ModelBackend):
         engine = self._load(config)
         params = self._sampling_params(config)
         started = time.perf_counter()
-        with stall_guard(config.call_timeout_seconds, "a vLLM generation call"):
+        with stall_guard(getattr(config, "call_timeout_seconds", None), "a vLLM generation call"):
             outputs = engine.chat(to_vllm_messages(messages), params,
                                   lora_request=self._lora(adapter))
         latency_ms = (time.perf_counter() - started) * 1000
@@ -602,7 +602,8 @@ class VLLMBackend(ModelBackend):
         params = [self._sampling_params(config) for config in configs]
         started = time.perf_counter()
         try:
-            with stall_guard(configs[0].call_timeout_seconds, f"a vLLM call of {len(messages_list)} request(s)"):
+            with stall_guard(getattr(configs[0], "call_timeout_seconds", None),
+                             f"a vLLM call of {len(messages_list)} request(s)"):
                 outputs = engine.chat([to_vllm_messages(m) for m in messages_list], params,
                                       lora_request=self._lora(adapter))
         except Exception as exc:  # noqa: BLE001 - the whole batch failed; say so per slot

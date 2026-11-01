@@ -1910,7 +1910,9 @@ def _checkpoint_scorer(ctx: StageContext) -> Any:
     work_dir = Path(paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)) / "checkpoint_scores"
     if len(gpus) > 1:
         return parallel_vllm_scorer(**settings, gpus=gpus, work_dir=work_dir, save_dir=work_dir / "finalists")
-    return vllm_scorer(**settings, save_dir=work_dir / "finalists")
+    # Each pass's score is saved here as it finishes, so a selection that stopped part-way resumes from
+    # the checkpoints it had scored instead of generating them all again (evaluation.checkpoint_eval).
+    return vllm_scorer(**settings, save_dir=work_dir / "finalists", cache_dir=work_dir / "score_cache")
 
 
 def stage_checkpoint_eval(ctx: StageContext) -> StageResult:

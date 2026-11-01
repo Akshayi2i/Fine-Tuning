@@ -405,9 +405,65 @@ def select_best(
     return report
 
 
+def _pass_cache_key(checkpoint: str, rows: list[dict[str, Any]], settings: dict[str, Any], model: Any) -> str:
+    """What a saved pass is good for: the same weights, rows, readings, generation settings and scoring code."""
+    import hashlib
+
+    from evaluation.run_eval import scoring_fingerprint
+
+    weights = []
+    for name in ("adapter_model.safetensors", "adapter_config.json"):
+        try:
+            stat = (Path(str(checkpoint)) / name).stat()
+            weights.append([name, stat.st_size, stat.st_mtime_ns])
+        except OSError:
+            weights.append([name, None, None])
+    config = getattr(model, "config", None)
+    parts = {
+        "checkpoint": str(checkpoint).rstrip("/"), "weights": weights,
+        "rows": hashlib.sha256(json.dumps(rows, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest(),
+        "repeat": bool(settings["repeat"]), "repeat_modes": sorted(settings["repeat_modes"]),
+        "finalists": bool(settings["finalists"]), "scoring": scoring_fingerprint(),
+        "generation": config.fingerprint() if hasattr(config, "fingerprint") else None,
+    }
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
+
+
+def _pass_cache_path(cache_dir: Path | str, checkpoint: str, key: str) -> Path:
+    return Path(cache_dir) / f"{Path(str(checkpoint).rstrip('/')).name}-{key[:16]}.json"
+
+
+def _load_cached_pass(path: Path, key: str) -> dict[str, Any] | None:
+    """A pass saved under ``key``, or None: absent, unreadable, another key, or answers it points to gone."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("key") != key or not isinstance(data.get("metrics"), dict):
+        return None
+    saved = data.get("saved")
+    if saved and not all(Path(p).exists() for p in saved.values()):
+        return None
+    return data
+
+
+def _save_cached_pass(path: Path, key: str, metrics: dict[str, float], saved: dict[str, str] | None) -> None:
+    """Written whole or not at all, so a run stopped mid-write leaves no half pass to be read as a score."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"key": key, "metrics": metrics, "saved": saved,
+                                         "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
+                             encoding="utf-8")
+        temporary.replace(path)
+    except OSError as exc:
+        log.warning("could not save the pass score under %s (a resume will generate it again): %s", path, exc)
+
+
 def generation_scorer(
     rows: list[dict[str, Any]], model: Any, *, repeat: bool = False, repeat_modes: Sequence[str] | None = None,
     finalists: bool = False, save_dir: Path | None = None, val_path: str | None = None,
+    cache_dir: Path | str | None = None,
 ) -> Scorer:
     """Score a checkpoint by generating the validation rows with it as a LoRA.
 
@@ -426,6 +482,9 @@ def generation_scorer(
     ``finalists``: this is the pass the finalists are judged on
     (:func:`score_pass`): its metrics carry the gate mirror, and with
     ``save_dir`` each checkpoint's answers and error tallies are saved there.
+    ``cache_dir``: each checkpoint's finished score is saved there as it is made, and reused by a
+    later run of the same weights, rows, readings and scoring code, so a run that stopped part-way
+    (a stall, a reclaimed pod) does not generate the checkpoints it had already scored again.
     Each setting can also be given after the scorer is made (``.configure``).
     """
     from evaluation.validation_generation import (
@@ -447,7 +506,8 @@ def generation_scorer(
 
     passes: list[dict[str, Any]] = []
     settings: dict[str, Any] = {"repeat": repeat, "repeat_modes": list(repeat_modes or []),
-                                "finalists": finalists, "save_dir": save_dir, "val_path": val_path}
+                                "finalists": finalists, "save_dir": save_dir, "val_path": val_path,
+                                "cache_dir": cache_dir}
     saved: dict[str, dict[str, str]] = {}
 
     def configure(**changes: Any) -> None:
@@ -457,6 +517,19 @@ def generation_scorer(
         settings.update(changes)
 
     def score(checkpoint: str) -> dict[str, float]:
+        key = cache_path = None
+        if settings["cache_dir"] is not None:
+            key = _pass_cache_key(checkpoint, rows, settings, model)
+            cache_path = _pass_cache_path(settings["cache_dir"], checkpoint, key)
+            hit = _load_cached_pass(cache_path, key)
+            if hit is not None:
+                log.info("reusing %s's saved score (%s): its %d row(s) are not generated again",
+                         checkpoint, cache_path.name, len(rows))
+                passes.append({"checkpoint": checkpoint, "cached": True, "rows": len(rows), "generated": 0,
+                               "seconds": 0.0})
+                if hit.get("saved"):
+                    saved[checkpoint] = dict(hit["saved"])
+                return dict(hit["metrics"])
         stats: dict[str, Any] = {}
         generations = generate_validation(rows, model, adapter=checkpoint, stats=stats)
         # What each pass cost, for the stage result: rows, calls, seconds.
@@ -476,9 +549,12 @@ def generation_scorer(
             again = generate_validation(twice, model, adapter=checkpoint, stats=repeat_stats, order="reversed")
             record["repeat"] = repeat_stats
             assert_generations_usable(again, what=f"checkpoint {checkpoint}'s second pass")
-        return score_pass(generations, checkpoint=checkpoint, repeat=again, finalists=settings["finalists"],
-                          save_dir=settings["save_dir"], val_path=settings["val_path"], saved=saved,
-                          settings=generation_settings(getattr(model, "config", None)))
+        metrics = score_pass(generations, checkpoint=checkpoint, repeat=again, finalists=settings["finalists"],
+                             save_dir=settings["save_dir"], val_path=settings["val_path"], saved=saved,
+                             settings=generation_settings(getattr(model, "config", None)))
+        if cache_path is not None:
+            _save_cached_pass(cache_path, key, metrics, saved.get(checkpoint))
+        return metrics
 
     # Called by the checkpoint stage once selection is done, to free the engine.
     score.close = close  # type: ignore[attr-defined]
@@ -843,8 +919,12 @@ def vllm_scorer(
     *, client: Any, val_path: str, model: Any = None, images_root: str | None = None,
     sample_rows: int = 0, full_modes: Sequence[str] | None = None, repeat: bool = False,
     repeat_modes: Sequence[str] | None = None, save_dir: Path | str | None = None,
+    cache_dir: Path | str | None = None,
 ) -> Scorer:
     """A :func:`generation_scorer` over the stored validation split, on the base.
+
+    ``cache_dir``: every pass this scorer makes saves its score there as it finishes and reuses it
+    on a later run (:func:`generation_scorer`).
 
     The base is loaded in bf16 with LoRA enabled and each checkpoint applied as a
     decoder LoRA: one LoRA per request is exactly what vLLM supports, so no
@@ -871,7 +951,8 @@ def vllm_scorer(
         configure = getattr(score, "configure", None)
         if callable(configure):
             configure(finalists=True, repeat_modes=list(repeat_modes or []),
-                      save_dir=Path(save_dir) if save_dir is not None else None, val_path=val_path)
+                      save_dir=Path(save_dir) if save_dir is not None else None, val_path=val_path,
+                      cache_dir=cache_dir)
         return score
 
     rows = read_rows(client.read_text(val_path))
@@ -901,6 +982,8 @@ def vllm_scorer(
     if len(sample) >= len(rows):
         return scorer(sample)
     score = generation_scorer(sample, model)
+    if cache_dir is not None:
+        score.configure(cache_dir=cache_dir)  # type: ignore[attr-defined]
     score.full = scorer(rows_in_modes(rows, full_modes))  # type: ignore[attr-defined]
     return score
 
