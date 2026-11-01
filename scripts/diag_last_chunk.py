@@ -1,9 +1,10 @@
 """Show how heavy each call of checkpoint selection's finalists' pass is, and which rows make it so.
 
-    python scripts/diag_last_chunk.py [--corpus v3] [--scope policy] [--mode ocr_plus_image]
+    python scripts/diag_last_chunk.py [--corpus v3] [--scope policy] [--mode ocr_plus_image] [--reversed]
 
-Rebuilds the plan the finalists' whole-document pass uses (the validation rows read
-in one mode, in calls of ``configured_batch_rows()`` rows) and prints, per call, its
+Rebuilds the plan a generation pass uses (the validation rows read in one mode, in
+calls of ``configured_batch_rows()`` rows; ``--reversed`` for the second reading the
+run-to-run check makes) and prints, per call, its
 rows, total page-image megapixels and heaviest rows; for the last call, every row's
 pages, largest page side, prompt text length and expected answer length, and any page
 image that does not open. Reads the split and the cached page images; it loads no
@@ -63,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scope", default="policy")
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--mode", default="ocr_plus_image", help="the reading mode the finalists' pass reads")
+    parser.add_argument("--reversed", action="store_true",
+                        help="the second reading's order (the run-to-run check reads its rows backwards)")
     parser.add_argument("--top", type=int, default=12, help="heaviest rows to list for the last call")
     args = parser.parse_args(argv)
 
@@ -74,7 +77,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"validation rows: {len(rows)}; read in {args.mode}: {len(chosen)}; rows per call: {size}")
     chosen = localize_rows(chosen, client, paths.staging_train_images_dir(args.corpus, args.tenant))
 
-    calls = [chosen[first:first + size] for first in range(0, len(chosen), size)]
+    # The plan generate_validation makes: calls of ``size`` rows in row order, each call's longest
+    # answer first; the second reading of a pass (order="reversed") is that whole list backwards.
+    planned = [row for first in range(0, len(chosen), size)
+               for row in sorted(chosen[first:first + size], key=lambda row: -_answer_length(row))]
+    if args.reversed:
+        planned.reverse()
+    calls = [planned[first:first + size] for first in range(0, len(planned), size)]
     print(f"calls: {len(calls)} of {[len(call) for call in calls]} rows")
     for number, call in enumerate(calls, 1):
         facts = sorted((_row_facts(row) | {"answer_chars": _answer_length(row)} for row in call),
