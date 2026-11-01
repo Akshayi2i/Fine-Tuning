@@ -90,6 +90,8 @@ QUICK = {
     "data_pipeline/ocr/mineru_config.py", "scripts/propose_field_types.py",
     "scripts/diagnose_windowing.py", "scripts/check_alias_coverage.py",
     "scripts/check_section_builder.py", "scripts/served_adapter.py",
+    # Reads the validation split and the cached page images' headers: a minute or two on the pod, no model, no GPU.
+    "scripts/diag_last_chunk.py",
     # Unlocks one PDF in a second, asking for its password at the prompt: detached, nobody could type it.
     "common/pdf_access.py",
     # A laptop tool: stages a few hundred MB of PDFs or writes rows into a workbook, in seconds; never run on the pod.
