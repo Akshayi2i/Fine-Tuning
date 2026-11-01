@@ -39,6 +39,10 @@ class RunnerConfig:
     max_loras: int = 4
     max_lora_rank: int = 64
 
+    #: GiB of vLLM's processed-image cache; ``None`` leaves vLLM's default (4), 0 turns it off
+    #: (configs/inference/vllm_serving.yaml says why it is off).
+    mm_processor_cache_gb: float | None = None
+
     #: The Fideon SPEC_00 target schema for structured decoding (arch v2.1 §13).
     #: ``None`` leaves generation unconstrained, which is what the evaluation job
     #: uses for its training-health signal: whether the model learned the format
@@ -145,6 +149,8 @@ def load_runner_config(backend: Backend | None = None) -> RunnerConfig:
         enable_lora=bool(serve.get("enable_lora", True)),
         max_loras=int(serve.get("max_loras", 4)),
         max_lora_rank=int(serve.get("max_lora_rank", 64)),
+        mm_processor_cache_gb=(float(serve["mm_processor_cache_gb"])
+                               if serve.get("mm_processor_cache_gb") is not None else None),
         # Read, not defaulted: both were in the YAML and reached nothing, so the
         # engine loaded with vLLM's own logprobs mode and generation ran
         # unconstrained while the config said otherwise.

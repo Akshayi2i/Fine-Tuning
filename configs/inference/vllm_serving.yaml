@@ -79,6 +79,14 @@ serving:
   max_loras: 4
   max_lora_rank: 64            # must be >= the Foundation rank
   gpu_memory_utilization: 0.90
+  # vLLM's cache of processed page images, in GiB (its default is 4); 0 turns it off. The cache has a
+  # copy in the frontend and one in the engine that must stay in step, and a request rejected after the
+  # frontend recorded its images leaves them apart: every later call that shares a page then fails with
+  # "Expected a cached item for mm_hash", is retried in halves with the same error, and checkpoint
+  # selection stalled there with the GPU idle (cycle 1, 2026-11-01). Windows of one document share
+  # pages, so the cache would have saved only their preparation; without it a page is prepared once per
+  # request. Remove the line to get vLLM's own default.
+  mm_processor_cache_gb: 0
   # A value whose tokens came this close (in nats, logprob of the token written
   # minus the best other token's) to another token is flagged <path>:near_tie
   # and sent to review: greedy decoding with repeatable: false can write the

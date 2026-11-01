@@ -448,6 +448,9 @@ class VLLMBackend(ModelBackend):
         # resized to a budget nobody chose — identical today by coincidence, and
         # silently different the day either side's budget moved.
         min_pixels, max_pixels = pixel_budget()
+        engine_extras = dict(repeatable)
+        if config.mm_processor_cache_gb is not None:
+            engine_extras["mm_processor_cache_gb"] = config.mm_processor_cache_gb
         self._engine = LLM(
             model=model_path,
             mm_processor_kwargs={"min_pixels": min_pixels, "max_pixels": max_pixels},
@@ -461,7 +464,7 @@ class VLLMBackend(ModelBackend):
             # read the post-mask distribution under structured decoding (§5.1).
             logprobs_mode=config.logprobs_mode,
             structured_outputs_config=STRUCTURED_OUTPUTS_ENGINE,
-            **repeatable,
+            **engine_extras,
         )
         log.info("vLLM engine up on %s (lora=%s, repeatable=%s)", model_path, config.enable_lora,
                  config.repeatable)

@@ -245,6 +245,14 @@ def test_runner_config_is_greedy_and_logprob_enabled():
     assert config.logprobs
 
 
+def test_the_image_cache_is_off_in_the_serving_config_and_unset_by_default():
+    """vLLM's processed-image cache can fall out of step after a rejected request and fail every
+    later call that shares a page ("Expected a cached item for mm_hash"): the shipped config turns
+    it off, and a config that names no value leaves vLLM's own default."""
+    assert load_runner_config().mm_processor_cache_gb == 0.0
+    assert RunnerConfig().mm_processor_cache_gb is None
+
+
 def test_generation_fingerprint_changes_with_settings():
     a = RunnerConfig(temperature=0.0)
     b = RunnerConfig(temperature=0.7)
