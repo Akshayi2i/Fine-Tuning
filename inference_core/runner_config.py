@@ -43,6 +43,11 @@ class RunnerConfig:
     #: (configs/inference/vllm_serving.yaml says why it is off).
     mm_processor_cache_gb: float | None = None
 
+    #: Seconds one engine call may run before the process stops itself with every stack written
+    #: out (inference_core.stall_guard); ``None`` turns the guard off. Not part of the fingerprint:
+    #: it changes no answer.
+    call_timeout_seconds: float | None = None
+
     #: The Fideon SPEC_00 target schema for structured decoding (arch v2.1 §13).
     #: ``None`` leaves generation unconstrained, which is what the evaluation job
     #: uses for its training-health signal: whether the model learned the format
@@ -151,6 +156,8 @@ def load_runner_config(backend: Backend | None = None) -> RunnerConfig:
         max_lora_rank=int(serve.get("max_lora_rank", 64)),
         mm_processor_cache_gb=(float(serve["mm_processor_cache_gb"])
                                if serve.get("mm_processor_cache_gb") is not None else None),
+        call_timeout_seconds=(float(serve["call_timeout_seconds"])
+                              if serve.get("call_timeout_seconds") is not None else None),
         # Read, not defaulted: both were in the YAML and reached nothing, so the
         # engine loaded with vLLM's own logprobs mode and generation ran
         # unconstrained while the config said otherwise.

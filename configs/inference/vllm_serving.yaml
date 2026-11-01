@@ -87,6 +87,12 @@ serving:
   # pages, so the cache would have saved only their preparation; without it a page is prepared once per
   # request. Remove the line to get vLLM's own default.
   mm_processor_cache_gb: 0
+  # Seconds one engine call may run before the process stops itself, writing every thread's stack to the
+  # log (inference_core.stall_guard); scripts/pod_run.sh resumes a run that stopped this way when started
+  # with POD_RUN_RETRY_STALLED. The longest call seen was 489 s (the first, with warm-up) and a looping
+  # answer to the 12,288-token cap takes about 6 minutes at the slowest measured speed, so 30 minutes
+  # means stuck, not slow. Remove the line to turn the guard off.
+  call_timeout_seconds: 1800
   # A value whose tokens came this close (in nats, logprob of the token written
   # minus the best other token's) to another token is flagged <path>:near_tie
   # and sent to review: greedy decoding with repeatable: false can write the

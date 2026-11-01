@@ -306,6 +306,7 @@ def generate_validation(
             if all(isinstance(r, Exception) for r in got):
                 log.warning("validation generation: %d row(s) failed together again (%s: %s); retrying in halves",
                             len(half), type(got[0]).__name__, str(got[0])[:300])
+                _stop_if_image_cache_out_of_step(got)
                 out += _retry_in_halves(half)
             else:
                 out += got
@@ -338,6 +339,7 @@ def generate_validation(
             log.warning("validation generation: a call of %d row(s) failed together after %.0f s (%s: %s); "
                         "retrying it in halves", len(chunk), time.monotonic() - began,
                         type(results[0]).__name__, str(results[0])[:300])
+            _stop_if_image_cache_out_of_step(results)
             # A whole call fails together (one unreadable page image refuses the
             # batch): retried in halves until the bad row is alone - the only
             # loss - in a few batched rounds, not one call per row (at ~50 s a
@@ -356,6 +358,24 @@ def generate_validation(
         if shard is not None:
             stats["shard"] = f"{shard[0] + 1}/{shard[1]}"
     return out
+
+
+#: What vLLM raises when its frontend and engine caches of processed page images disagree.
+_IMAGE_CACHE_OUT_OF_STEP = "Expected a cached item"
+
+
+def _stop_if_image_cache_out_of_step(results: Sequence[Any]) -> None:
+    """End the process when a whole call failed on vLLM's image-cache check.
+
+    The engine is then unusable for any call that shares a page, and these calls do (the windows of one
+    document), so retrying in halves only fails again, and the cycle-1 run froze after doing so.
+    Stopping lets ``scripts/pod_run.sh`` resume it on a fresh engine (``POD_RUN_RETRY_STALLED``).
+    """
+    if any(_IMAGE_CACHE_OUT_OF_STEP in str(result) for result in results if isinstance(result, Exception)):
+        from inference_core.stall_guard import abort
+
+        abort("vLLM's processed-image cache is out of step with its engine ('Expected a cached item'), so every "
+              "later call that shares a page would fail; stopping so the run can be resumed on a fresh engine")
 
 
 def _record_failure(entry: ValidationGeneration, exc: BaseException, kind: str,

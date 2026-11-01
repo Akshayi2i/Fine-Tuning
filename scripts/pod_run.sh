@@ -153,6 +153,15 @@ cmd_start() {
   fi
   rm -f "$exit_file"
 
+  # POD_RUN_RETRY_STALLED=N: run the same command again, up to N times, when it stopped itself on a stall
+  # (inference_core.stall_guard). Running the same command again is only right for one that resumes a named
+  # cycle; a fresh `finetune` would start the next version, so that is refused here.
+  local retries="${POD_RUN_RETRY_STALLED:-0}"
+  case "$retries" in ''|*[!0-9]*) die "POD_RUN_RETRY_STALLED is a whole number of times to start the run again" ;; esac
+  if [ "$retries" -gt 0 ] && [[ " $* " != *" --from-stage "* ]]; then
+    die "POD_RUN_RETRY_STALLED runs the same command again, which is only safe for a command that resumes a cycle (--from-stage STAGE --version vN); this one would start a new cycle"
+  fi
+
   # The caller's own settings, for the run to read over .env.
   local keep="${LOG_DIR}/$name.env"
   (umask 077; callers_settings > "$keep")
@@ -161,6 +170,11 @@ cmd_start() {
   {
     prelude "$keep"
     printf 'echo "=== %s started $(date -u +%%FT%%TZ) on $(hostname) ==="\n' "$name"
+    echo 'attempt=1'
+    echo 'while :; do'
+    # Where this attempt's output starts in the log, to read only that for a stall.
+    printf '  offset=$(stat -c %%s %q 2>/dev/null || echo 0)\n' "$log"
+    printf '  '
     if [ "$1" = "--" ]; then
       shift
       [ $# -ge 1 ] || die "start $name -- needs a command"
@@ -170,7 +184,14 @@ cmd_start() {
     fi
     printf ' %q' "$@"
     printf ' 2>&1 | tee -a %q\n' "$log"
-    echo 'status=${PIPESTATUS[0]}'
+    echo '  status=${PIPESTATUS[0]}'
+    # The two lines a stalled process leaves: inference_core.stall_guard's own, and faulthandler's backstop.
+    printf '  if [ "$status" != 0 ] && [ "$attempt" -le %d ] && tail -c +$((offset + 1)) %q | grep -aqE %q; then\n' \
+      "$retries" "$log" '^(STALL-GUARD:|Timeout \()'
+    echo '    attempt=$((attempt + 1)); echo "=== stalled; starting it again, attempt $attempt ==="; sleep 30; continue'
+    echo '  fi'
+    echo '  break'
+    echo 'done'
     printf 'echo "$status" > %q\n' "$exit_file"
     printf 'echo "=== %s finished $(date -u +%%FT%%TZ), exit $status ==="\n' "$name"
     # Keep the session open after the run, so its last screen can still be read.

@@ -29,6 +29,7 @@ from typing import Any
 
 from artifact_registry.blob_client import BlobClient
 from inference_core.runner_config import Backend, RunnerConfig, load_runner_config
+from inference_core.stall_guard import stall_guard
 from registry_utils.query_registry import ResolvedModel, resolve_model_version
 
 log = logging.getLogger(__name__)
@@ -578,8 +579,9 @@ class VLLMBackend(ModelBackend):
         engine = self._load(config)
         params = self._sampling_params(config)
         started = time.perf_counter()
-        outputs = engine.chat(to_vllm_messages(messages), params,
-                              lora_request=self._lora(adapter))
+        with stall_guard(config.call_timeout_seconds, "a vLLM generation call"):
+            outputs = engine.chat(to_vllm_messages(messages), params,
+                                  lora_request=self._lora(adapter))
         latency_ms = (time.perf_counter() - started) * 1000
         return self._to_generation(outputs[0] if outputs else None, config, latency_ms)
 
@@ -600,8 +602,9 @@ class VLLMBackend(ModelBackend):
         params = [self._sampling_params(config) for config in configs]
         started = time.perf_counter()
         try:
-            outputs = engine.chat([to_vllm_messages(m) for m in messages_list], params,
-                                  lora_request=self._lora(adapter))
+            with stall_guard(configs[0].call_timeout_seconds, f"a vLLM call of {len(messages_list)} request(s)"):
+                outputs = engine.chat([to_vllm_messages(m) for m in messages_list], params,
+                                      lora_request=self._lora(adapter))
         except Exception as exc:  # noqa: BLE001 - the whole batch failed; say so per slot
             return [exc for _ in messages_list]
         latency_ms = (time.perf_counter() - started) * 1000
