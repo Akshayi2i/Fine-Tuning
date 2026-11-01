@@ -1915,6 +1915,37 @@ def _checkpoint_scorer(ctx: StageContext) -> Any:
     return vllm_scorer(**settings, save_dir=work_dir / "finalists", cache_dir=work_dir / "score_cache")
 
 
+def _assert_registry_writable(ctx: StageContext) -> None:
+    """Prove the registry takes a write, before the hour and a half of scoring that ends in one.
+
+    Selection saves its result to Blob only when it finishes, so a storage login that is wrong or expired
+    would show up after all the work. This writes a small file beside the real report (so it needs the
+    same permissions), reads it back and removes it: a failure is seconds, and says nothing was scored.
+    A file that cannot be removed is only a warning: the write is what the stage needs.
+    """
+    import uuid
+
+    report_key = paths.checkpoint_selection(ctx.out_version, scope=ADAPTER.name)
+    probe = report_key.rsplit("/", 1)[0] + "/_preflight.json"
+    token = {"probe": uuid.uuid4().hex, "version": ctx.out_version}
+    try:
+        ctx.client.write_json(probe, token)
+        if ctx.client.read_json(probe) != token:
+            raise PipelineError("what was read back is not what was written")
+    except Exception as exc:  # noqa: BLE001 - any storage fault means the result could not be saved
+        from orchestration.notify import short_reason
+
+        raise PipelineError(
+            f"checkpoint selection could not save its result: a test write to {probe} failed "
+            f"({type(exc).__name__}: {short_reason(exc)}). Nothing has been scored. Check the storage login "
+            "(the AZURE_* settings in .env) and run the stage again."
+        ) from exc
+    try:
+        ctx.client.delete(probe)
+    except Exception as exc:  # noqa: BLE001 - the write worked; a leftover test file is not a failure
+        log.warning("the storage test file %s was written but could not be removed: %s", probe, exc)
+
+
 def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
     """Pick the checkpoint that ships, by GENERATED field F1.
 
@@ -1944,6 +1975,7 @@ def stage_checkpoint_eval(ctx: StageContext) -> StageResult:
     # No separate dry-run branch: a dry run never launched ms-swift, so it has no
     # checkpoints, and the check above already covers it. A second condition
     # meaning the same thing is one that can disagree with the first.
+    _assert_registry_writable(ctx)      # before the engine loads and the scoring starts
     scorer = ctx.checkpoint_scorer
     if scorer is None:  # pragma: no cover - needs a GPU
         try:

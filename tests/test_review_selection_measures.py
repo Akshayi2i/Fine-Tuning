@@ -285,3 +285,38 @@ def test_the_keys_are_tenant_scoped_beside_the_run():
     assert paths.validation_generations_key("policy-v3", "broker_a").startswith("run-artifacts/broker_a/policy-v3/")
     with pytest.raises(paths.PathError):
         paths.validation_errors_key("not a run")
+
+
+# --------------------------------------------------------------------------
+# The storage pre-flight: a result that cannot be saved is found before the scoring, not after
+# --------------------------------------------------------------------------
+
+def test_the_selection_proves_the_registry_takes_a_write_and_leaves_nothing_behind(client, tmp_path):
+    from orchestration.pipeline_dag import stage_checkpoint_eval
+
+    on_disk = _run(tmp_path, (100, 200))
+    metrics = {c: {"field_normalized_match": f, **_metrics(f, 0.02, mirror=f)} for c, f in zip(on_disk, (0.6, 0.7), strict=True)}
+    stage_checkpoint_eval(_stage_ctx(client, on_disk, _Scorer(metrics)))
+    folder = paths.checkpoint_selection("v3", scope="policy").rsplit("/", 1)[0]
+    assert not [key for key in client.list(folder) if key.endswith("_preflight.json")]
+    assert client.exists(paths.checkpoint_selection("v3", scope="policy"))
+
+
+def test_a_registry_that_refuses_the_write_stops_the_stage_before_anything_is_scored(client, tmp_path):
+    from orchestration.pipeline_dag import PipelineError, stage_checkpoint_eval
+
+    on_disk = _run(tmp_path, (100, 200))
+
+    class _NeverScores:
+        def __call__(self, checkpoint):
+            raise AssertionError("scoring began although the registry cannot be written")
+
+    def refuse(key, obj, **kwargs):
+        raise OSError("AuthorizationFailure: this request is not authorized")
+
+    client.write_json = refuse
+    with pytest.raises(PipelineError) as stopped:
+        stage_checkpoint_eval(_stage_ctx(client, on_disk, _NeverScores()))
+    message = str(stopped.value)
+    assert "could not save its result" in message and "Nothing has been scored" in message
+    assert "_preflight.json" in message and "AZURE_" in message
