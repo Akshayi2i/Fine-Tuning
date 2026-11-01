@@ -3034,6 +3034,10 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         "baseline_rescored": bool(rescoring and rescoring.get("rescored") and not not_comparable),
         "baseline_rescoring": rescoring,
         "passed": result.passed and not cascade_blocked,
+        # `passed` is what promotion reads, and it is also true for a release an override lifted past
+        # failed gates; `gate_passed` is true only when no gate failed, and `message` says which it was.
+        "gate_passed": result.gate_passed and not cascade_blocked,
+        "message": result.message,
         "cascade_blocked": cascade.describe() if cascade_blocked else None,
         "failed_gates": result.failed_gates,
         # The full verdict per metric — floor, interval and basis — not just a
@@ -3139,11 +3143,16 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
             gate_result=result,
         )
 
+    if result.waived:
+        # Said loudly, not only in the report: the run goes on and the release can be promoted, but the
+        # gate is not passed, and whoever reads the run's summary must see that.
+        log.warning("%s (override by %s: %s)", result.message, result.override.approver, result.override.reason)
     return StageResult(
         "evaluation_gate", "completed",
-        "gate passed" + (" (first version, no baseline)" if result.is_first_version else
-                         " (floors only: the promoted release is on another yardstick)"
-                         if result.baseline_not_comparable else "")
+        (f"{result.message} (override by {result.override.approver})" if result.waived else "gate passed")
+        + (" (first version, no baseline)" if result.is_first_version else
+           " (floors only: the promoted release is on another yardstick)"
+           if result.baseline_not_comparable else "")
         # The run summary shows the tier, how sure it is, and the bound.
         + (f"; {result.tier_evidence.describe()}" if result.tier_evidence else ""),
         {"metrics": candidate, "failed_gates": [], "cascade_dependents": cascade.dependents,
@@ -3752,11 +3761,17 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
 
     override = None
     if ctx.gate_override is not None:
-        override = GateOverride(
-            approver=ctx.gate_override.approver,
-            reason=ctx.gate_override.reason,
-            waived_gates=list(ctx.gate_override.waived_gates),
-        )
+        # The gates named, or - for `--override-gate all` - the ones the gate decision records as waived.
+        waived_gates = list(ctx.gate_override.waived_gates)
+        if ctx.gate_override.waive_all and bf16_decision:
+            waived_gates = sorted(set(waived_gates) | set(ctx.client.read_json(bf16_decision).get("waived_gates") or []))
+        # Nothing failed, so nothing was waived: no override to record (the bundle's record names a gate).
+        if waived_gates:
+            override = GateOverride(
+                approver=ctx.gate_override.approver,
+                reason=ctx.gate_override.reason,
+                waived_gates=waived_gates,
+            )
 
     lines = trained_lines(ctx, corpus_manifest)
     if not lines:

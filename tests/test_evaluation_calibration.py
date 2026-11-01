@@ -407,6 +407,60 @@ def test_a_waived_pass_is_not_recorded_as_a_clean_pass():
     assert any("WAIVED" in g for g in manifest.promotion.failed_gates)
 
 
+_WAIVE_ALL_REASON = "owner decision: promote this release although the gate is not passed"
+#: Two gates that genuinely fail on their absolute floors (0.95 and 0.85).
+_TWO_FAILING = {"doc_type_classifier_accuracy": 0.90, "lob_detection_accuracy": 0.50}
+
+
+def test_waiving_all_promotes_a_release_whose_gate_is_not_passed_and_says_so():
+    """`--override-gate all`: the release is promotable, every gate that failed is recorded as waived,
+    and nothing reads as a clean pass."""
+    from evaluation.gating import GateOverrideRecord
+
+    blocked = promotion_gate({**_passing(), **_TWO_FAILING}, None)
+    assert not blocked.passed and blocked.message == "Gate is not passed: the release is blocked"
+
+    result = promotion_gate(
+        {**_passing(), **_TWO_FAILING}, None,
+        override=GateOverrideRecord("A. Reviewer", _WAIVE_ALL_REASON, [], waive_all=True))
+    assert result.passed, result.report()                 # promotion reads this
+    assert result.gate_passed is False                    # and the gate is not passed
+    assert result.waived == sorted(_TWO_FAILING) and not result.failed_gates
+    assert result.message.startswith("Gate is not passed") and "Gate is not passed" in result.report()
+    decision = result.as_dict()
+    assert decision["passed"] is True and decision["gate_passed"] is False
+    assert decision["waived_gates"] == sorted(_TWO_FAILING) and decision["override"]["waive_all"] is True
+
+
+def test_waiving_all_still_needs_a_person_and_a_written_reason():
+    from evaluation.gating import GateError, GateOverrideRecord
+
+    with pytest.raises(GateError, match="name the person"):
+        GateOverrideRecord("ci", _WAIVE_ALL_REASON, [], waive_all=True).validate()
+    with pytest.raises(GateError, match="written reason"):
+        GateOverrideRecord("A. Reviewer", "too busy", [], waive_all=True).validate()
+    GateOverrideRecord("A. Reviewer", _WAIVE_ALL_REASON, [], waive_all=True).validate()
+
+
+def test_waiving_all_when_nothing_failed_waives_nothing_and_the_gate_is_passed():
+    from evaluation.gating import GateOverrideRecord
+
+    result = promotion_gate(
+        _passing(), None, override=GateOverrideRecord("A. Reviewer", _WAIVE_ALL_REASON, [], waive_all=True))
+    assert result.passed and result.gate_passed and result.waived == []
+    assert result.message == "Gate is passed"
+
+
+def test_waiving_all_does_not_promote_an_eval_that_was_not_scored():
+    """Readings the engine failed were not scored: there is no measurement to promote on."""
+    from evaluation.gating import INFRASTRUCTURE_FAILURES, GateOverrideRecord
+
+    result = promotion_gate(
+        {**_passing(), INFRASTRUCTURE_FAILURES: 3}, None,
+        override=GateOverrideRecord("A. Reviewer", _WAIVE_ALL_REASON, [], waive_all=True))
+    assert not result.passed and result.waived == []
+
+
 def test_min_aggregation_is_sensitive_to_the_weakest_token():
     """Nine confident tokens and one uncertain one is worth checking; mean would
     average that away."""

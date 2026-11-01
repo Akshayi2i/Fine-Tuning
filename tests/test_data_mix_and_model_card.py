@@ -327,5 +327,5 @@ def test_a_waived_pass_reads_as_one_and_the_held_out_carrier_score_is_recorded(c
         ["doc_type_classifier_accuracy"]))
     apply_to_manifest(result, manifest, metrics=metrics)
     card = render_model_card(manifest)
-    assert "Verdict: passed with a waiver, interim release." in card
+    assert "Verdict: gate not passed, promoted by override, interim release." in card
     assert manifest.eval_metrics.held_out_carrier_match == 0.71 and "| held_out_carrier_match | 0.71 |" in card

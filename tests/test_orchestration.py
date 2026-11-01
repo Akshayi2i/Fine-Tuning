@@ -1087,6 +1087,30 @@ def test_a_written_override_can_be_given_on_the_command_line(client, controller)
     assert bundle["override"]["approver"] == "A. Reviewer"
 
 
+def test_override_gate_all_promotes_a_release_whose_gate_is_not_passed_and_says_so(client, controller):
+    """`--override-gate all`: the run goes on to the release although a gate failed; the stage says
+    "Gate is not passed", the decision records passed for promotion and gate_passed false, and the
+    bundle names the gates that were actually waived."""
+    seed_corpus(client)
+    regressed = {**PASSING_METRICS, "list_field_recall": 0.60}
+    ctx = _cli_context(client, controller, [
+        "all", "--input", "./intake", "--version", "v1",
+        "--override-approver", "A. Reviewer", "--override-reason", _REASON,
+        "--override-gate", "all",
+    ], baseline_metrics=dict(PASSING_METRICS), metrics_provider=lambda _c: dict(regressed))
+    assert ctx.gate_override.waive_all and ctx.gate_override.waived_gates == []
+
+    report = cli.run_command("all", ctx)
+    assert report.ok, report.render()
+    gate = next(r for r in report.results if r.name == "evaluation_gate")
+    assert gate.detail.startswith("Gate is not passed") and "A. Reviewer" in gate.detail
+    decision = client.read_json(paths.gate_decision("v1", scope="policy"))
+    assert decision["passed"] is True and decision["gate_passed"] is False
+    assert decision["waived_gates"] == ["list_field_recall"]
+    bundle = client.read_json(paths.release_bundle("v1"))
+    assert bundle["override"]["waived_gates"] == ["list_field_recall"]
+
+
 @pytest.mark.parametrize("flags, match", [
     (["--override-gate", "list_field_recall"], "name the person"),
     (["--override-approver", "A. Reviewer", "--override-gate", "improvement"], "written reason"),

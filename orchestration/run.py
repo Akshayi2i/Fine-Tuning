@@ -147,15 +147,19 @@ def gate_override_from(args: argparse.Namespace) -> GateOverrideRecord | None:
         return None
     from evaluation.gating import GateError, GateOverrideRecord
 
+    # `--override-gate all`: promote although the gate is not passed, whichever gates failed. The person
+    # and the reason are still required, and the gates actually waived are recorded.
+    waive_all = any(g.lower() == "all" for g in gates)
     override = GateOverrideRecord(
-        approver=(approver or "").strip(), reason=(reason or "").strip(), waived_gates=gates,
+        approver=(approver or "").strip(), reason=(reason or "").strip(),
+        waived_gates=[g for g in gates if g.lower() != "all"], waive_all=waive_all,
     )
     try:
         override.validate()
     except GateError as exc:
         raise GateOverrideError(
             f"{exc} An override needs --override-approver, --override-reason and at least one "
-            "--override-gate."
+            "--override-gate (or --override-gate all)."
         ) from exc
     return override
 
@@ -299,7 +303,9 @@ def _add_package_flags(parser: argparse.ArgumentParser, *, version_required: boo
                              "(20 characters or more)")
     parser.add_argument("--override-gate", dest="override_gates", action="append", default=[],
                         help="written gate override: a failed gate to waive, as the gate decision "
-                             "names it (repeatable); only gates that failed are lifted")
+                             "names it (repeatable); only gates that failed are lifted. 'all' waives "
+                             "every gate that failed: the release is then promoted although the gate "
+                             "is not passed, and the decision says so")
     if version_required:
         # Standalone `package` only — under `all` these come from the finetune
         # flags and adding them twice is an argparse conflict.

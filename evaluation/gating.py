@@ -437,6 +437,12 @@ class GateOverrideRecord:
     approver: str
     reason: str
     waived_gates: list[str] = field(default_factory=list)
+    #: Waive every gate that failed, whatever it is (``--override-gate all``): the release is
+    #: promoted although the gate is not passed. The person and the reason are still required, and the
+    #: gates actually waived are recorded in the decision and the bundle, so the record is as
+    #: attributable as a named waiver. A failure that is not a gate (INFRASTRUCTURE_FAILURES: the
+    #: eval was not scored) is never waived: there is nothing to promote on.
+    waive_all: bool = False
 
     def validate(self) -> None:
         if not self.approver.strip() or self.approver.strip().lower() in {
@@ -451,10 +457,10 @@ class GateOverrideRecord:
                 "a gate override needs a written reason, not a word. The reason is what a "
                 "later reviewer reads when asking why this shipped."
             )
-        if not self.waived_gates:
+        if not self.waived_gates and not self.waive_all:
             raise GateError(
-                "an override must name the gates it waives. A blanket override is the "
-                "unaccountable waiver in a different costume."
+                "an override must name the gates it waives, or waive them all (--override-gate all). "
+                "Either way a person and a written reason are recorded with it."
             )
         # A misspelt gate waives nothing, and the release it was written for
         # stays blocked by the gate the approver meant.
@@ -471,6 +477,7 @@ class GateOverrideRecord:
             "approver": self.approver,
             "reason": self.reason,
             "waived_gates": sorted(self.waived_gates),
+            "waive_all": self.waive_all,
         }
 
 
@@ -531,11 +538,29 @@ class GateResult:
     def improved_metrics(self) -> list[str]:
         return [v.name for v in self.verdicts if v.improved]
 
+    @property
+    def gate_passed(self) -> bool:
+        """Whether the candidate met every gate on its own: ``passed`` is also true for a release an
+        override lifted past gates that failed, and that one has not passed them."""
+        return self.passed and not self.waived
+
+    @property
+    def message(self) -> str:
+        """What a reader of the decision is told, in one line."""
+        if self.gate_passed:
+            return "Gate is passed"
+        if self.passed:
+            return (f"Gate is not passed: {len(self.waived)} gate(s) failed ({', '.join(sorted(self.waived))}) "
+                    "and were waived by override, so the release can still be promoted")
+        return "Gate is not passed: the release is blocked"
+
     def report(self) -> str:
         verdict = "PASS" if self.passed else "BLOCKED"
         if self.passed and self.waived:
-            verdict = f"PASS (with {len(self.waived)} waived gate(s))"
+            verdict = f"NOT PASSED, promoted by override ({len(self.waived)} waived gate(s))"
         lines = [f"promotion gate: {verdict}"]
+        if self.passed and self.waived:
+            lines.append(f"  {self.message}")
         if self.is_first_version:
             lines.append("  first release — gated on absolute floors alone (arch v2.1 §15.5)")
         if self.baseline_not_comparable:
@@ -557,15 +582,20 @@ class GateResult:
         lines.extend(f"  BLOCKED: {reason}" for reason in self.blocking_reasons)
         lines.extend(f"  WARNING: {warning}" for warning in self.warnings)
         if self.override:
+            waived = sorted(self.waived) if self.override.waive_all else sorted(self.override.waived_gates)
             lines.append(
                 f"  OVERRIDE by {self.override.approver}: {self.override.reason} "
-                f"(waived {sorted(self.override.waived_gates)})"
+                f"(waived {waived})"
             )
         return "\n".join(lines)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "passed": self.passed,
+            # `passed` is also true for a release an override lifted past failed gates (promotion reads
+            # it); `gate_passed` is true only when no gate failed, and `message` says which it was.
+            "gate_passed": self.gate_passed,
+            "message": self.message,
             "tier": self.tier,
             "tier_confidence": self.tier_confidence,
             "tier_evidence": self.tier_evidence.as_dict() if self.tier_evidence else None,
@@ -787,7 +817,12 @@ def promotion_gate(
     # failed. Waiving a gate that passed would make the record say something
     # untrue about what the approver decided.
     if result.override:
-        waived = sorted(set(result.override.waived_gates) & set(result.failed_gates))
+        if result.override.waive_all:
+            # Every gate that failed and that an override may name: the release is promoted although the
+            # gate is not passed, and the decision lists exactly which gates that was.
+            waived = sorted({g for g in result.failed_gates if is_gate(g)})
+        else:
+            waived = sorted(set(result.override.waived_gates) & set(result.failed_gates))
         result.waived = waived
         result.failed_gates = [g for g in result.failed_gates if g not in waived]
         result.blocks = [(g, r) for g, r in result.blocks if g not in waived]

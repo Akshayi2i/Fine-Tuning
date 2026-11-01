@@ -159,7 +159,7 @@ def _gate(manifest: RunManifest) -> list[str]:
         return out + ["Not gated yet.", ""]
     waived = bool(promotion.failed_gates) and all(g.endswith("(WAIVED)") for g in promotion.failed_gates)
     verdict = ("passed" if promotion.beat_previous_on_all_gates
-               else "passed with a waiver" if waived else "blocked")
+               else "gate not passed, promoted by override" if waived else "blocked")
     if promotion.tier and verdict != "blocked":
         verdict += f", {promotion.tier} release"
     out += [f"Verdict: {verdict}.",
