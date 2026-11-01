@@ -303,7 +303,12 @@ def generate_validation(
                 out += _retry_in_halves(half)
                 continue
             got = generate_batch(model, [(m, s, cap) for _e, m, s, cap, _n in half], adapter=adapter)
-            out += _retry_in_halves(half) if all(isinstance(r, Exception) for r in got) else got
+            if all(isinstance(r, Exception) for r in got):
+                log.warning("validation generation: %d row(s) failed together again (%s: %s); retrying in halves",
+                            len(half), type(got[0]).__name__, str(got[0])[:300])
+                out += _retry_in_halves(half)
+            else:
+                out += got
         return out
 
     size = max(1, batch_rows if batch_rows is not None else configured_batch_rows())
@@ -328,6 +333,11 @@ def generate_validation(
         began = time.monotonic()
         results = generate_batch(model, [(m, s, cap) for _e, m, s, cap, _n in chunk], adapter=adapter)
         if len(chunk) > 1 and all(isinstance(r, Exception) for r in results):
+            # Said before the retry: the retry only records the rows that still fail alone, so
+            # without this line the reason the whole call failed is nowhere in the log.
+            log.warning("validation generation: a call of %d row(s) failed together after %.0f s (%s: %s); "
+                        "retrying it in halves", len(chunk), time.monotonic() - began,
+                        type(results[0]).__name__, str(results[0])[:300])
             # A whole call fails together (one unreadable page image refuses the
             # batch): retried in halves until the bad row is alone - the only
             # loss - in a few batched rounds, not one call per row (at ~50 s a
@@ -338,7 +348,7 @@ def generate_validation(
         calls += 1
         done += len(chunk)
         slowest = max(slowest, time.monotonic() - began)
-        log.info("validation generation: %d/%d row(s)%s%s", done, mine,
+        log.info("validation generation: %d/%d row(s) in %.0f s%s%s", done, mine, time.monotonic() - began,
                  f" ({adapter})" if adapter else "", f" [shard {shard[0] + 1}/{shard[1]}]" if shard else "")
     if stats is not None:
         stats.update(rows=len(out), generated=mine, batch_rows=size, calls=calls,
