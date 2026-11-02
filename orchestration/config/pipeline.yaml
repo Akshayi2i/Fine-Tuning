@@ -56,7 +56,7 @@ defaults:
   # merged or quantized, so there is no format or merge dtype to choose
   # (decision 2026-10-23).
   min_labels_per_type: 25
-  keep_staging: false
+  keep_staging: true
   seed: 42
   # Documents the OCR stage reads at once against the served MinerU (stage 2's
   # --ocr-workers; run_mineru --workers). 1 reads one at a time; 4 is a good

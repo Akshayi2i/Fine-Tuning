@@ -93,7 +93,9 @@ def build_context(args: argparse.Namespace, *, client: BlobClient | None = None,
         "train_vit": getattr(args, "train_vit", False),
         "min_labels_per_type": getattr(args, "min_labels_per_type", DAY_ZERO_MIN_LABELS_PER_TYPE),
         "push_adapters": getattr(args, "push_adapters", False),
-        "keep_staging": getattr(args, "keep_staging", False),
+        # The pod's copy stays unless the person asks for it to be cleared (`--clear-staging`): pushing
+        # to Blob is a second copy, not a move.
+        "keep_staging": not getattr(args, "clear_staging", False),
         "from_blob": getattr(args, "from_blob", False),
         "fixes_defect": fixes_defect_for(getattr(args, "fixes_defect", None)),
         "gate_override": gate_override_from(args),
@@ -285,7 +287,13 @@ def _add_finetune_flags(parser: argparse.ArgumentParser) -> None:
 def _add_package_flags(parser: argparse.ArgumentParser, *, version_required: bool = True) -> None:
     if version_required:
         parser.add_argument("--version", required=True)
-    parser.add_argument("--keep-staging", dest="keep_staging", action="store_true")
+    staging = parser.add_mutually_exclusive_group()
+    staging.add_argument("--keep-staging", dest="keep_staging", action="store_true",
+                         help="keep the pod's copy of the adapter after the push (the default; accepted so "
+                              "older commands still run)")
+    staging.add_argument("--clear-staging", dest="clear_staging", action="store_true",
+                         help="delete this version's staged adapter from the pod volume once it is pushed "
+                              "and published. Off by default: the pod's copy is kept")
     parser.add_argument("--from-blob", dest="from_blob", action="store_true",
                         help="artifacts were pushed with --push-adapters; read them from Blob")
     # Satisfies the gate's improvement rule only (arch §15.5): floors and
@@ -373,6 +381,10 @@ def build_parser() -> argparse.ArgumentParser:
     shadow.add_argument("--documents", type=int, default=None,
                         help="frozen eval documents to read (default 50): stratified by line, real first")
     shadow.add_argument("--tenant", default=None)
+    shadow.add_argument("--promote-by", dest="promote_by", default=None, metavar="NAME",
+                        help="promote the release in this person's name when the shadow check passes and "
+                             "nothing was waived: a full-tier gate pass, no override, no skipped check. "
+                             "Anything else is refused and left for `promote` by hand")
 
     promote = sub.add_parser(
         "promote", help="make a version the tenant's promoted release; the one promoted now is "
@@ -547,10 +559,11 @@ def shadow_flag_problem(args: argparse.Namespace) -> str | None:
 def run_shadow_command(args: argparse.Namespace, *, client: BlobClient | None = None) -> int:
     """``shadow``: the check, its table, and 0 when it passed."""
     from orchestration.shadow import SHADOW_DOCUMENTS, ShadowError, render, run_shadow
-    from registry_utils.releases import latency_failure
+    from registry_utils.releases import ReleaseError, latency_failure, promote_if_cleared
 
+    client = client or BlobClient()
     try:
-        report = run_shadow(client or BlobClient(), args.version, model_url=args.model_url,
+        report = run_shadow(client, args.version, model_url=args.model_url,
                             mineru_url=args.mineru_url, documents=args.documents or SHADOW_DOCUMENTS,
                             tenant_id=args.tenant)
     except ShadowError as exc:
@@ -560,6 +573,17 @@ def run_shadow_command(args: argparse.Namespace, *, client: BlobClient | None = 
     tenant = f" --tenant {args.tenant}" if args.tenant else ""
     interim = " --accept-interim" if (report.get("candidate") or {}).get("tier") == "interim" else ""
     promote = f"python -m orchestration.run promote --version {args.version} --by \"<person>\"{tenant}{interim}"
+    promote_by = (getattr(args, "promote_by", None) or "").strip()
+    if report["passed"] and promote_by:
+        try:
+            archived = promote_if_cleared(client, args.version, args.tenant, promoted_by=promote_by)
+        except ReleaseError as exc:
+            print(f"  not promoted automatically: {exc}\n  by hand: {promote}", file=sys.stderr)
+            return 1
+        print(f"{args.version} is promoted by {promote_by}" + (f"; archived {', '.join(archived)}" if archived else ""))
+        if evidence := promotion_evidence(client, args.version, args.tenant):
+            print(f"  {evidence}")
+        return 0
     if report["passed"]:
         print(f"  next: {promote}")
     elif latency_failure(report):

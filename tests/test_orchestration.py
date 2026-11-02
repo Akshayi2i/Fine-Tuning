@@ -1426,22 +1426,39 @@ def test_a_default_build_publishes_the_adapter_alone(client, controller):
     assert client.exists(f"{paths.scoped_adapter_dir('policy', 'v1')}/adapter_config.json")
 
 
-def test_package_clears_staging_after_a_verified_push(client, controller):
+def test_package_clears_staging_only_when_asked(client, controller):
+    """`--clear-staging`: the pod's copy goes once it is pushed and published."""
     seed_corpus(client)
-    ctx = make_context(client, controller)
+    ctx = make_context(client, controller, keep_staging=False)
     run_stages(ctx, stages_for("finetune"), command="finetune")
     run_stages(ctx, stages_for("package"), command="package")
 
     assert ctx.volume.list(paths.staging_root()) == []
 
 
-def test_keep_staging_retains_the_volume_copy(client, controller):
+def test_package_keeps_the_pods_copy_by_default(client, controller):
+    """Pushing to Blob is a second copy, not a move (user, 2026-11-02): the volume copy stays."""
     seed_corpus(client)
-    ctx = make_context(client, controller, keep_staging=True)
+    ctx = make_context(client, controller)
+    assert ctx.keep_staging
     run_stages(ctx, stages_for("finetune"), command="finetune")
     run_stages(ctx, stages_for("package"), command="package")
 
     assert ctx.volume.list(paths.staging_root())
+
+
+def test_the_cli_keeps_the_pods_copy_unless_clear_staging_is_passed(client, controller):
+    parse = cli.build_parser().parse_args
+
+    def kept(*flags: str) -> bool:
+        args = parse(["package", "--version", "v1", *flags])
+        return cli.build_context(args, client=client, controller=controller).keep_staging
+
+    assert kept() is True
+    assert kept("--clear-staging") is False
+    assert kept("--keep-staging") is True        # the old flag still parses, and means the default
+    with pytest.raises(SystemExit):
+        parse(["package", "--version", "v1", "--keep-staging", "--clear-staging"])
 
 
 def test_package_fails_loudly_with_remediation_when_nothing_is_staged(client, controller):
@@ -2309,7 +2326,7 @@ def test_packaging_one_version_leaves_another_version_s_staged_adapter_alone(cli
 
     # The same controller, so the same staging volume - which is exactly the
     # situation the old blanket clear destroyed.
-    second = make_context(client, controller, out_version="v2")
+    second = make_context(client, controller, out_version="v2", keep_staging=False)   # --clear-staging
     report = run_stages(second, stages_for("all"), command="all")
 
     assert report.ok, report.render()

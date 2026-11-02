@@ -420,6 +420,33 @@ def promote(
     return promote_release(client, release_id, tenant_id, promoted_by=promoted_by.strip(), record=record)
 
 
+def promote_if_cleared(
+    client: BlobClient,
+    release_id: str,
+    tenant_id: str | None = None,
+    *,
+    promoted_by: str,
+) -> list[str]:
+    """Promote ``release_id`` in the named person's name when nothing is waived, else refuse.
+
+    The person is named when the run is launched (``shadow --promote-by``), so the promotion is still
+    one accountable person's, recorded as such. Only a clean pass goes through: the gate passed with
+    nothing overridden, the tier is production (an interim tier needs ``--accept-interim`` by hand), and
+    a passing shadow report exists. There is no way to skip the shadow check or accept a slow release here.
+    A release whose gate was overridden is promoted by hand with ``promote``, where that is a decision made
+    knowingly.
+    """
+    decision_key = paths.release_gate_decision(release_id, "bf16", tenant_id)
+    decision = client.read_json(decision_key) if client.exists(decision_key) else {}
+    if decision.get("override"):
+        raise ReleaseError(
+            f"{release_id}'s gate was passed by a written override, so it is not promoted automatically. "
+            f"Promote it by hand, knowingly: python -m orchestration.run promote --version {release_id} --by "
+            "\"<person>\"."
+        )
+    return promote(client, release_id, tenant_id, promoted_by=promoted_by)
+
+
 def serving_refusal(bundle: dict[str, Any]) -> str | None:
     """Why the serving endpoint would refuse this bundle at cold start, or None.
 

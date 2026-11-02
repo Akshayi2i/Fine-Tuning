@@ -107,7 +107,7 @@ class StageContext:
     train_vit: bool = False
     min_labels_per_type: int = DAY_ZERO_MIN_LABELS_PER_TYPE
     push_adapters: bool = False
-    keep_staging: bool = False
+    keep_staging: bool = True
     from_blob: bool = False
     git_commit: str | None = None
     seed: int = 42
@@ -1705,6 +1705,7 @@ def stage_training(ctx: StageContext) -> StageResult:
 
     corpus_manifest = ctx.client.read_json(paths.corpus_manifest(ctx.corpus, ctx.tenant_id))
     _assert_corpus_pins(corpus_manifest, f"training run {ctx.out_version}")
+    warn_eval_set_not_frozen(ctx)     # the gate needs it hours from now; say so while there is time
     # Continue the promoted adapter, or start from the base, and why.
     parent, fresh_reason = continuation(ctx)
     if parent is not None and (held := corpus_validates_on_trained(ctx, corpus_manifest, parent)):
@@ -3619,6 +3620,59 @@ def assert_not_released(ctx: StageContext) -> None:
         )
 
 
+def _freeze_command(ctx: StageContext) -> str:
+    corpus = ctx.corpus_version or ctx.corpus or "<corpus>"
+    return (f"python -m orchestration.run freeze-eval-set --corpus {corpus} --allow-small   "
+            "(--allow-small only for a pilot under 150 documents per type; then add "
+            "`freeze-eval-set --mark-reviewed`)")
+
+
+def eval_set_frozen(ctx: StageContext) -> bool | None:
+    """Whether this tenant's golden eval set is frozen; ``None`` when the store cannot say.
+
+    An unreadable store is not "not frozen": the caller keeps going and lets the stage that needs the set
+    report its own error.
+    """
+    from evaluation.freeze_eval_set import is_frozen
+
+    try:
+        return is_frozen(ctx.client, tenant_id=ctx.tenant_id)
+    except Exception as exc:  # noqa: BLE001 - a check that cannot run must not stop a run
+        log.warning("could not tell whether the eval set is frozen: %s", exc)
+        return None
+
+
+def assert_eval_set_frozen(ctx: StageContext) -> None:
+    """Stop a gated run in its first seconds when the frozen eval set does not exist.
+
+    The gate scores the tenant's frozen set (``golden-eval-set/{tenant}/``), a one-time copy of a corpus's
+    test split; nothing in the build makes it. Found at the gate, it cost the whole training run's
+    wait before anyone learned the step was missing. A dry run scores nothing, so it checks nothing.
+    """
+    if ctx.dry_run or eval_set_frozen(ctx) is not False:
+        return
+    raise PipelineError(
+        f"the golden eval set for tenant {paths._tenant(ctx.tenant_id)} is not frozen, so the gate "
+        f"would have nothing to score. Nothing was run. Freeze it once, then run this again: "
+        f"{_freeze_command(ctx)}"
+    )
+
+
+def warn_eval_set_not_frozen(ctx: StageContext) -> None:
+    """Before training: say now that the gate will stop later, while there is time to freeze.
+
+    A warning, not a stop: the first cycle has to build its corpus before it can freeze a test split from
+    it, and a smoke run trains with no gate at all.
+    """
+    if ctx.dry_run or eval_set_frozen(ctx) is not False:
+        return
+    log.warning(
+        "the golden eval set for tenant %s is NOT frozen. Training can go on, but `package` will stop at "
+        "its start (and the gate would have nothing to score) until it is: %s",
+        paths._tenant(ctx.tenant_id), _freeze_command(ctx),
+    )
+
+
 def assert_gate_passed(ctx: StageContext) -> None:
 
     """Refuse to package a version whose promotion gate did not pass.
@@ -4156,6 +4210,9 @@ def stage_push(ctx: StageContext) -> StageResult:
             "is left intact. Clearing it here would delete the only copy of the weights. Check "
             "that training wrote its manifests before re-running package.", ctx.out_version,
         )
+    else:
+        log.info("the pod's staged copy of %s is kept (pass --clear-staging to delete it once pushed)",
+                 ctx.out_version)
 
     return StageResult(
         "package", "completed",
@@ -4331,6 +4388,10 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
         # Before any work: packaging a released version again re-runs its gate
         # against the release live now and overwrites its own decision.
         preconditions.append(assert_not_released)
+    if any(stage.name == "evaluation_gate" for stage in stages) and not any(
+            stage.name == "dataset_build" for stage in stages):
+        # A run that builds the corpus (a fresh `all`) cannot have frozen a test split of it yet.
+        preconditions.append(assert_eval_set_frozen)
     for precondition in preconditions:
         try:
             precondition(ctx)

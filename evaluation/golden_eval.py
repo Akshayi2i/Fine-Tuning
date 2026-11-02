@@ -759,6 +759,20 @@ def _refuse_interrupted_freeze(client: BlobClient, tenant_id: str | None) -> Non
         )
 
 
+def _freeze_hint(client: BlobClient, corpus_version: str, tenant_id: str | None) -> str:
+    """The step that makes the frozen set, named when it has not been made."""
+    from evaluation.freeze_eval_set import is_frozen
+
+    try:
+        if is_frozen(client, tenant_id=tenant_id):
+            return ""
+    except Exception:  # noqa: BLE001 - a hint must not hide the error it follows
+        return ""
+    return (f". The set is not frozen yet: run `python -m orchestration.run freeze-eval-set --corpus "
+            f"{corpus_version}` once (add --allow-small for a pilot under 150 documents per type), then "
+            "`freeze-eval-set --mark-reviewed`, and gate again")
+
+
 def evaluate_version(
     client: BlobClient,
     model: Any,
@@ -823,6 +837,7 @@ def evaluate_version(
             f"{list(ADAPTER.doc_types)} documents"
             + (f" of the lines this release serves ({sorted(lines)})" if lines is not None else "")
             + ", so there is nothing to gate on"
+            + _freeze_hint(client, corpus_version, tenant_id)
         )
     from evaluation.release_measurements import GpuMemorySampler
 
