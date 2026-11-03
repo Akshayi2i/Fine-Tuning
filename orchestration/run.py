@@ -346,6 +346,9 @@ def build_parser() -> argparse.ArgumentParser:
         "package", help="stages 7-9: calibrate, gate, push the adapter and write the release, gated "
                         "(never promoted: shadow, then promote)")
     _add_package_flags(package)
+    package.add_argument("--from-stage", dest="from_stage", default=None,
+                         help="resume at this stage (calibrate, evaluation_gate or package); earlier stages "
+                              "are not re-run. Needs --version")
     package.add_argument("--skip-preflight", dest="skip_preflight", action="store_true",
                          help="do not check the pod (GPU free, packages, base model, config, disk) before "
                               "the run starts")

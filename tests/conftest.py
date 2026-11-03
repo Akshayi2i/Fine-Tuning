@@ -20,6 +20,13 @@ def no_window_overlap(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_gate_cache(monkeypatch):
+    """The gate keeps its readings on the pod's volume so a stopped run can resume. A test must not leave them
+    behind, nor take another test's: the cache tests pass their own (tests/test_gate_reading_cache.py)."""
+    monkeypatch.setenv("FIDEON_GATE_CACHE", "0")
+
+
+@pytest.fixture(autouse=True)
 def _format_profile(request, monkeypatch):
     """``@pytest.mark.format_profile("standard")``: the test runs in that format
     profile instead of the shipped one (configs/shared/format.yaml, ``fast``).

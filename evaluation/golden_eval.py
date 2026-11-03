@@ -52,6 +52,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import re
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
@@ -266,6 +267,7 @@ def evaluate(
     noisy_share: float | None = None,
     repeat_share: float | None = None,
     in_flight: int | None = None,
+    cache: Any = None,
 ) -> GoldenTriples:
     """``(expected, got, metadata)`` triples for :func:`run_eval.build_report`,
     in document order, then mode order - however many documents were in flight.
@@ -305,6 +307,10 @@ def evaluate(
     the model at once - more than one only on a backend that answers requests
     as they finish (a served engine); results are put back in order, so the
     triples are the sequential run's.
+
+    ``cache`` (:class:`evaluation.reading_cache.ReadingCache`): a reading that finished is kept as it is scored,
+    and a run started again with the same key takes it from the cache, so a stop half way costs only the
+    readings not yet made. A reading that failed is never kept.
     """
     from evaluation.run_eval import REPEAT_ANSWER
     from serving.pipeline import ExtractionRequest
@@ -332,9 +338,9 @@ def evaluate(
     plan = [(doc, mode) for doc in documents for mode in modes
             if mode != "noisy_ocr_image" or in_share(doc.source_id, noisy_share, "noisy")]
     readings = _in_order([
-        (lambda doc=doc, mode=mode: _read(context, doc, mode,
-                                          repeat=repeat and mode == repeat_mode
-                                          and in_share(doc.source_id, repeat_share, "repeat")))
+        (lambda doc=doc, mode=mode: _read_kept(cache, context, doc, mode,
+                                               repeat=repeat and mode == repeat_mode
+                                               and in_share(doc.source_id, repeat_share, "repeat")))
         for doc, mode in plan
     ], workers)
 
@@ -366,7 +372,8 @@ def evaluate(
     # The repeat pass, after every document's own: the same request, its
     # windows sent in reverse order (the merge keeps planned order), so the
     # engine batches them differently.
-    repeats = _in_order([(lambda entry=entry: _read_again(context, *entry)) for entry in again], workers)
+    repeats = _in_order([(lambda entry=entry: _read_again_kept(cache, context, *entry)) for entry in again],
+                        workers)
     for (_doc, _request, _calibration, metadata), (answer, failure, retried) in zip(again, repeats, strict=True):
         if retried:
             triples.retried.append(retried)
@@ -508,6 +515,36 @@ def _read(context: _ReadContext, doc: GoldenDocument, mode: str, *, repeat: bool
     metadata["validation_errors"] = list(result.validation_errors[:4])
     reading.triple = (doc.golden, result.extraction, metadata)
     return reading
+
+
+def _read_kept(cache: Any, context: _ReadContext, doc: GoldenDocument, mode: str, *, repeat: bool) -> _Reading:
+    """:func:`_read`, taken from ``cache`` when this reading was made before and kept after it is made."""
+    if cache is None:
+        return _read(context, doc, mode, repeat=repeat)
+    kept = cache.get(doc.source_id, mode)
+    if isinstance(kept, _Reading):
+        return kept
+    reading = _read(context, doc, mode, repeat=repeat)
+    if reading.failure is None:
+        cache.put(doc.source_id, mode, reading)
+    return reading
+
+
+def _read_again_kept(cache: Any, context: _ReadContext, doc: GoldenDocument, request: Any, calibration: Any,
+                     metadata: dict[str, Any]) -> tuple[Any, dict[str, Any] | None, dict[str, Any] | None]:
+    """:func:`_read_again`, with the second answer kept the same way."""
+    from evaluation.reading_cache import REPEAT
+
+    if cache is None:
+        return _read_again(context, doc, request, calibration, metadata)
+    mode = metadata["modality_mode"]
+    kept = cache.get(doc.source_id, mode, REPEAT)
+    if isinstance(kept, tuple) and len(kept) == 3:
+        return kept
+    outcome = _read_again(context, doc, request, calibration, metadata)
+    if outcome[1] is None:
+        cache.put(doc.source_id, mode, outcome, REPEAT)
+    return outcome
 
 
 def _read_again(context: _ReadContext, doc: GoldenDocument, request: Any, calibration: Any,
@@ -845,13 +882,18 @@ def evaluate_version(
     # mode - image_only, the mode production reads.
     repeat, repeat_mode = run_to_run_check(), run_to_run_mode()
     noisy_share, repeat_share = golden_noisy_share(), run_to_run_share()
+    cache = reading_cache_for(client, tenant_id, version, corpus_version, documents, model,
+                              adapter_checkpoint, calibrators, thresholds,
+                              settings=(repeat, repeat_mode, noisy_share, repeat_share))
     with GpuMemorySampler() as memory:
         triples = evaluate(
             documents, model, client,
             paths.staging_train_images_dir(f"golden-{corpus_version}", tenant_id),
             calibrators=calibrators, thresholds=thresholds, run_to_run=repeat, repeat_mode=repeat_mode,
-            noisy_share=noisy_share, repeat_share=repeat_share,
+            noisy_share=noisy_share, repeat_share=repeat_share, cache=cache,
         )
+    if cache is not None:
+        log.info("golden eval of %s: %s", version, cache.summary())
     failures = list(getattr(triples, "infrastructure_failures", []))
     first_failed = [f for f in failures if f.get("pass") == "first"]
     report = build_report(version, triples, corpus_version=corpus_version)
@@ -940,6 +982,29 @@ def evaluate_version(
     log.info("golden eval of %s: %d document-mode run(s), %d infrastructure failure(s)",
              version, len(triples), len(failures))
     return body
+
+
+def reading_cache_for(client: BlobClient, tenant_id: str | None, version: str, corpus_version: str,
+                      documents: Sequence[GoldenDocument], model: Any, adapter_checkpoint: str | None,
+                      calibrators: Any, thresholds: Any, *, settings: Any) -> Any:
+    """The cache this gate keeps its readings in, or ``None`` when it cannot be kept (``FIDEON_GATE_CACHE=0``).
+
+    The key names what a reading depends on: the release, the adapter checkpoint, the model's tag, the
+    calibrators and thresholds, the frozen documents, the settings and the code commit. A change to any of
+    them reads everything fresh.
+    """
+    if os.environ.get("FIDEON_GATE_CACHE", "1") == "0":
+        return None
+    from evaluation.reading_cache import ReadingCache, cache_key, default_root
+    from registry_utils.write_run_manifest import capture_git_commit
+
+    key = cache_key(
+        version=version, corpus=corpus_version, tenant=tenant_id, checkpoint=adapter_checkpoint,
+        model=getattr(model, "tag", None), commit=capture_git_commit(),
+        calibrators=repr(calibrators), thresholds=repr(thresholds), settings=repr(settings),
+        documents=sorted(d.source_id for d in documents), modes=list(GOLDEN_MODES),
+    )
+    return ReadingCache(default_root(), key)
 
 
 #: Where the eval report's gate metrics carry the readings that failed to

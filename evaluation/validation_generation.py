@@ -467,7 +467,7 @@ def score_generations(
         rows = [(gold, answer, {**metadata, REPEAT_ANSWER: again.extraction or {}} if again is not None else metadata)
                 for (gold, answer, metadata), again in zip(rows, paired, strict=True)]
     report = build_report(model_version, rows)
-    metrics = {**report.gate_metrics(), **_invention_coverage(report)}
+    metrics = {**report.gate_metrics(), **_invention_coverage(report), **_generation_outcomes(generations)}
     if any(_is_window(g) for g in generations):
         documents = merged_documents(generations)
         if repeat is not None and not partial:
@@ -480,6 +480,23 @@ def score_generations(
         metrics.update({f"document_{name}": value for name, value in whole.items()
                         if isinstance(value, (int, float)) and not isinstance(value, bool)})
     return metrics
+
+
+def _generation_outcomes(generations: Sequence[ValidationGeneration]) -> dict[str, float]:
+    """How many rows had no usable answer, beside the accuracy they lower.
+
+    A row that looped to its token limit or came back as unreadable JSON, and a row that failed to generate at
+    all, is scored as an empty extraction: every field on it wrong, which lowers accuracy but adds nothing to
+    ``hallucination_rate`` and used to leave no trace in the metrics. These two rates say how much of a score
+    is the model failing to answer at all, rather than answering wrongly.
+    """
+    total = len(generations)
+    if not total:
+        return {}
+    unusable = sum(1 for g in generations if g.error and g.failure_kind == "output")
+    failed = sum(1 for g in generations if g.error and g.failure_kind != "output")
+    return {"unusable_output_rate": unusable / total, "generation_failed_rate": failed / total,
+            "unusable_output_rows": unusable, "generation_failed_rows": failed}
 
 
 def _invention_coverage(report: Any) -> dict[str, int]:
