@@ -116,11 +116,49 @@ def render(classified: list[dict[str, Any]]) -> str:
     return "\n".join(out)
 
 
-def _pages_from_blob(tenant: str | None) -> dict[str, dict[Any, str]]:
+#: The list sections whose size the gold is compared with: (section, the field naming one row).
+LIST_SECTIONS = (("forms_and_endorsements", "forms_and_endorsements[].form_number"),
+                 ("coverages", "coverages[].coverage_name"))
+
+
+def list_sizes(classified: list[dict[str, Any]], golds: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per document and list section: the rows the gold lists, and the distinct rows the model wrote that the gold
+    does not hold but the document prints.
+
+    A gold that lists 12 forms beside 90 printed forms the model also found is an incomplete gold, and every one
+    of those 90 scores against the model as an invented value.
+    """
+    out: list[dict[str, Any]] = []
+    for source in sorted(golds):
+        for section, field in LIST_SECTIONS:
+            rows = golds[source].get(section)
+            extra = {json.dumps(r["missing"] or _values(r.get("got")), default=str)
+                     for r in classified if r.get("source_id") == source and r["verdict"] == "printed"
+                     and field_pattern(str(r.get("field_path"))) == field}
+            out.append({"source_id": source, "section": section,
+                        "gold_rows": len(rows) if isinstance(rows, list) else 0,
+                        "printed_but_not_in_gold": len(extra)})
+    return out
+
+
+def render_sizes(sizes: list[dict[str, Any]]) -> str:
+    out = ["\nGold list size against what the document prints that the gold does not hold",
+           f"  {'document':26} {'section':26} {'gold rows':>9} {'printed, not in gold':>21}"]
+    out += [f"  {r['source_id']:26} {r['section']:26} {r['gold_rows']:9} {r['printed_but_not_in_gold']:21}"
+            for r in sizes]
+    return "\n".join(out)
+
+
+def _golds_and_pages(tenant: str | None) -> tuple[dict[str, dict[Any, str]], dict[str, dict[str, Any]]]:
     from artifact_registry.blob_client import BlobClient
     from evaluation.golden_eval import load_golden_set
 
-    return {d.source_id: dict(d.page_texts) for d in load_golden_set(BlobClient(), None, tenant_id=tenant)}
+    documents = load_golden_set(BlobClient(), None, tenant_id=tenant)
+    return ({d.source_id: dict(d.page_texts) for d in documents}, {d.source_id: d.golden for d in documents})
+
+
+def _pages_from_blob(tenant: str | None) -> dict[str, dict[Any, str]]:
+    return _golds_and_pages(tenant)[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -140,10 +178,17 @@ def main(argv: list[str] | None = None) -> int:
 
         report = _from_blob(args.version, args.tenant)
     records, _metrics = collect(report)
-    pages = (json.loads(Path(args.pages).read_text(encoding="utf-8")) if args.pages
-             else _pages_from_blob(args.tenant))
+    golds: dict[str, dict[str, Any]] = {}
+    if args.pages:
+        pages = json.loads(Path(args.pages).read_text(encoding="utf-8"))
+    else:
+        pages, golds = _golds_and_pages(args.tenant)
     classified = classify(invented(records), pages)
-    print(json.dumps(summarise(classified), indent=2, ensure_ascii=False) if args.json else render(classified))
+    sizes = list_sizes(classified, golds) if golds else []
+    if args.json:
+        print(json.dumps({**summarise(classified), "list_sizes": sizes}, indent=2, ensure_ascii=False))
+    else:
+        print(render(classified) + (render_sizes(sizes) if sizes else ""))
     return 0
 
 

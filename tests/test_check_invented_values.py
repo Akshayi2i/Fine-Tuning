@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from scripts.check_invented_values import classify, main, render, summarise
+from scripts.check_invented_values import classify, list_sizes, main, render, render_sizes, summarise
 
 PAGES = {"p1": {1: "Commercial General Liability. Forms: CG 00 01 04 13, SL 30 32 06 21. Each Occurrence $1,000,000",
                 2: "Damages to premises rented to you"},
@@ -59,3 +59,17 @@ def test_the_script_reads_a_downloaded_report_and_pages(tmp_path, capsys):
     (tmp_path / "pages.json").write_text(json.dumps(PAGES), encoding="utf-8")
     assert main(["--file", str(tmp_path / "report.json"), "--pages", str(tmp_path / "pages.json"), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["by_verdict"] == {"not printed": 1}
+
+
+def test_a_gold_list_shorter_than_what_the_document_prints_shows_in_the_sizes():
+    pages = {"p1": {1: "Forms CG 00 01 04 13 and SL 30 32 06 21 and IL 00 17 11 98. Coverage Hired Auto"}}
+    rows = classify([_r("p1", "forms_and_endorsements[0].form_number", "CG 00 01 04 13"),
+                     _r("p1", "forms_and_endorsements[1].form_number", "SL 30 32 06 21"),
+                     _r("p1", "forms_and_endorsements[1].form_number", "SL 30 32 06 21"),   # another reading's
+                     _r("p1", "forms_and_endorsements[2].form_number", "ZZ 99 99 99 99")], pages)
+    sizes = list_sizes(rows, {"p1": {"forms_and_endorsements": [{"form_number": "IL 00 17 11 98"}], "coverages": []}})
+    by_section = {r["section"]: r for r in sizes}
+    assert by_section["forms_and_endorsements"] == {"source_id": "p1", "section": "forms_and_endorsements",
+                                                    "gold_rows": 1, "printed_but_not_in_gold": 2}
+    assert by_section["coverages"]["gold_rows"] == 0
+    assert "gold rows" in render_sizes(sizes) and "p1" in render_sizes(sizes)
