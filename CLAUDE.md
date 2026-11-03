@@ -18,3 +18,13 @@ Whenever the user asks how long anything will take (training, smoke run, OCR, se
 - **Check before answering:** re-derive the numbers each time rather than repeating an earlier estimate, since selections, configs and decisions change (a stale number was given once after the smoke-run pick changed).
 - **Say what is measured and what is not:** label every part that rests on no measurement as an assumption, with its range, and name what will measure it (e.g. `smoke_report.json` step time). Never give a single confident number for an unmeasured part.
 - **If it cannot be calculated, say so** and say what is needed to calculate it, rather than offering a figure.
+
+## Answers: proven facts only, never guesses
+
+The user requires well-proven, fact-based answers (2026-11-03, after a diagnosis was given as "the gold is incomplete" and the next output disproved it). A guess is not allowed.
+
+- **State only what has been checked:** in the code (file:line), in data or output the user pasted, or in a command's result in this session. Name the source with each claim.
+- **No hypothesis offered as an answer.** If the cause is not yet proven, say "not known yet" and name the check that will prove it (a command, a file to read, an output to paste), then run that check or ask for its output before answering.
+- **Never stack a conclusion on an unchecked one.** Do not plan fixes, estimate effects or recommend a retrain from a cause that has not been proven.
+- **When an earlier answer turns out wrong, say so plainly,** name what was wrong and what proved it.
+- Words like "likely", "probably", "suggests", "looks like" signal a guess: replace the sentence with the fact, or with "not checked yet: <how to check>".
