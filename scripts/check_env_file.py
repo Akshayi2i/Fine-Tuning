@@ -35,6 +35,11 @@ def problems(text: str) -> list[str]:
     found: list[str] = []
     for number, raw in enumerate(text.split("\n"), start=1):
         raw = raw.removesuffix("\r")        # a .env saved on Windows: the code strips the CR from each value
+        if "\r" in raw:
+            # bash reads up to the newline only, so this is ONE line to it: text pasted from a terminal.
+            found.append(f"line {number}: has a carriage return inside it (text pasted from a terminal); "
+                         "delete the line and write it again")
+            continue
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -57,7 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     path = Path(args[0] if args else ".env")
     if not path.is_file():
         return 0
-    found = problems(path.read_text(encoding="utf-8", errors="replace"))
+    # Bytes, not read_text: text mode would turn a lone CR into a line break, which bash does not.
+    found = problems(path.read_bytes().decode("utf-8", errors="replace"))
     for message in found:
         print(f"{path}: {message}", file=sys.stderr)
     return 1 if found else 0

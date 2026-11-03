@@ -46,3 +46,16 @@ def test_the_command_line_exit_code(tmp_path, capsys):
     assert main([str(good)]) == 0
     assert main([str(bad)]) == 1 and "line 1" in capsys.readouterr().err
     assert main([str(tmp_path / "missing.env")]) == 0
+
+
+def test_a_carriage_return_inside_a_line_is_one_line_to_bash_and_named_once():
+    found = problems("A=1\nFROM=me\rPASSWORD=x y\rPATH=a b\nB=2\n")
+    assert len(found) == 1 and "line 2" in found[0] and "carriage return inside" in found[0]
+
+
+def test_the_command_line_does_not_split_a_line_at_a_lone_carriage_return(tmp_path, capsys):
+    bad = tmp_path / "bad.env"
+    bad.write_bytes(b"A=1\nFROM=me\rPASSWORD=x y\nB=2\n")
+    assert main([str(bad)]) == 1
+    err = capsys.readouterr().err
+    assert "line 2" in err and "line 3" not in err

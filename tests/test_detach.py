@@ -100,6 +100,8 @@ QUICK = {
     "scripts/pull_blob_file.py",
     # Reads the .env text and names the lines bash would misread: milliseconds, run before a job starts.
     "scripts/check_env_file.py",
+    # Reads a stored eval report and the frozen set's page text and prints a table: no model, no GPU.
+    "scripts/check_invented_values.py",
     # Reads the log folder and prints what a run is doing: a second, nothing is started or touched.
     "orchestration/status.py",
     # Unlocks one PDF in a second, asking for its password at the prompt: detached, nobody could type it.
