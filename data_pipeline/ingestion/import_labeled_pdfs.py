@@ -415,7 +415,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI
     if detach_module_if_needed('data_pipeline.ingestion.import_labeled_pdfs', argv):
         return 0
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
     raw_client = for_ingestion()
     input_dir = args.input
     if args.from_blob:

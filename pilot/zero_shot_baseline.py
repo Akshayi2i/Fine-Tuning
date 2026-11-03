@@ -332,7 +332,8 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     parser.add_argument("--reports", type=Path, default=REPORTS_DIR)
     parser.parse_args(list(argv) if argv is not None else None)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
     raise SystemExit(
         "Run this through the extraction command rather than here. Import and OCR the baseline "
         "documents into their own tenant, then extract them with the untuned model:\n"

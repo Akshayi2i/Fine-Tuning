@@ -125,3 +125,26 @@ def test_the_cache_can_be_turned_off(monkeypatch):
     monkeypatch.setenv("FIDEON_GATE_CACHE", "0")
     assert golden_eval.reading_cache_for(None, None, "v3", "v3", _golden_docs(), object(), "c", None, None,
                                          settings=()) is None
+
+
+def test_each_reading_logs_how_far_the_pass_is(monkeypatch, tmp_path, caplog):
+    calls: list = []
+    _fake_extract(monkeypatch, calls)
+    with caplog.at_level("INFO", logger="evaluation.golden_eval"):
+        _run(ReadingCache(tmp_path, "k"))
+        first = [r.getMessage() for r in caplog.records if "reading(s) done" in r.getMessage()]
+        caplog.clear()
+        _run(ReadingCache(tmp_path, "k"))
+        second = [r.getMessage() for r in caplog.records if "reading(s) done" in r.getMessage()]
+    assert [m.split(" reading(s)")[0] for m in first] == [f"golden eval: {n}/6" for n in range(1, 7)]
+    assert all("from the cache" not in m for m in first) and all("from the cache" in m for m in second)
+
+
+def test_the_status_command_reads_those_lines():
+    from orchestration.status import find_progress
+
+    lines = ["2026-11-03 10:00:00 INFO evaluation.golden_eval: golden eval: 1/6 reading(s) done: p1 (image_only) in 60 s",
+             "2026-11-03 10:02:00 INFO evaluation.golden_eval: golden eval: 3/6 reading(s) done: p2 (image_only) in 60 s"]
+    progress = find_progress(lines)
+    assert (progress.name, progress.done, progress.total) == ("gate readings", 3, 6)
+    assert round(progress.eta_seconds) == 180                  # 2 readings per 2 min, 3 left

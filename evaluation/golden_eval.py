@@ -337,10 +337,13 @@ def evaluate(
 
     plan = [(doc, mode) for doc in documents for mode in modes
             if mode != "noisy_ocr_image" or in_share(doc.source_id, noisy_share, "noisy")]
+    progress = _Progress(len(plan))
     readings = _in_order([
-        (lambda doc=doc, mode=mode: _read_kept(cache, context, doc, mode,
-                                               repeat=repeat and mode == repeat_mode
-                                               and in_share(doc.source_id, repeat_share, "repeat")))
+        (lambda doc=doc, mode=mode: progress.done_with(
+            doc, mode, cache,
+            lambda: _read_kept(cache, context, doc, mode,
+                               repeat=repeat and mode == repeat_mode
+                               and in_share(doc.source_id, repeat_share, "repeat"))))
         for doc, mode in plan
     ], workers)
 
@@ -387,6 +390,34 @@ def evaluate(
                     "will not decide on this measurement", len(triples.infrastructure_failures),
                     [f"{f['source_id']} ({f['mode']}, {f['pass']})" for f in triples.infrastructure_failures[:5]])
     return triples
+
+
+class _Progress:
+    """One log line per reading made: how many of the pass are done, which one, how long it took.
+
+    The gate is hours of work with nothing else in the log; ``orchestration.status`` reads these lines to say
+    how far it is and how long it still needs.
+    """
+
+    def __init__(self, total: int) -> None:
+        import threading
+
+        self.total, self.count, self._lock = total, 0, threading.Lock()
+
+    def done_with(self, doc: GoldenDocument, mode: str, cache: Any, read: Any) -> Any:
+        import time
+
+        hits_before = getattr(cache, "hits", 0)
+        began = time.monotonic()
+        reading = read()
+        with self._lock:
+            self.count += 1
+            number = self.count
+        kept = getattr(cache, "hits", 0) > hits_before
+        log.info("golden eval: %d/%d reading(s) done: %s (%s) in %.0f s%s%s", number, self.total, doc.source_id,
+                 mode, time.monotonic() - began, ", from the cache" if kept else "",
+                 f", FAILED: {reading.failure['error'][:120]}" if getattr(reading, "failure", None) else "")
+        return reading
 
 
 @dataclass

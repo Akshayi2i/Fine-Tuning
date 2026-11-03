@@ -2052,7 +2052,8 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
                                hint="train-benchmark" if args.benchmark_steps else None):
         return 0
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
     client = BlobClient()
     if args.benchmark_steps is not None:
         benchmark(corpus_version=args.corpus, out_version=args.out_version, client=client,

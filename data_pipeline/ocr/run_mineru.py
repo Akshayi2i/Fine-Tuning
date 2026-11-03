@@ -784,7 +784,8 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     if detach_module_if_needed('data_pipeline.ocr.run_mineru', argv):
         return 0
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
     client = for_ocr()
     if args.mineru_url:
         from data_pipeline.ocr.served_ocr import MINERU_TOKEN_ENV, ServedMinerUEngine

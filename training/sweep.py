@@ -329,7 +329,8 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     if detach_module_if_needed('training.sweep', argv):
         return 0
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
     raise SystemExit(
         "Wire the trainer here: pass a callable that applies a Candidate's overrides to the "
         "training config, launches it through training.train_foundation / train_adapter with "

@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import logging
 
-FORMAT = "%(levelname)s %(name)s %(message)s"
+#: Every line carries the time it was written: a fifteen-hour cycle is read by its gaps, and a line with no time
+#: cannot say how long a stage has been quiet.
+FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 #: This repository's top-level packages: their loggers are never left disabled.
 OWN_PACKAGES = frozenset({
@@ -51,7 +54,7 @@ def setup(level: int = logging.INFO) -> None:
 
 def _console() -> ConsoleHandler:
     handler = ConsoleHandler()
-    handler.setFormatter(logging.Formatter(FORMAT))
+    handler.setFormatter(logging.Formatter(FORMAT, DATE_FORMAT))
     return handler
 
 

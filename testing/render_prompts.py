@@ -287,7 +287,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=PROMPTS_DIR)
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
     if args.write_fingerprints:
         print(write_fingerprints())
         return 0

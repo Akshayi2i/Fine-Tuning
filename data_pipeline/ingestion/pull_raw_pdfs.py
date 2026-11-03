@@ -805,7 +805,8 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     if detach_module_if_needed('data_pipeline.ingestion.pull_raw_pdfs', argv):
         return 0
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
 
     if args.tenant_purge_plan:
         print(json.dumps(tenant_purge_plan(args.tenant, BlobClient()), indent=2))

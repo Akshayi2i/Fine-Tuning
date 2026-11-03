@@ -229,7 +229,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--write", action="store_true", help="also write pilot_summary.{txt,json}")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
     reports = load_reports(args.reports)
     decision = decide(reports)
     print(render(reports, decision))

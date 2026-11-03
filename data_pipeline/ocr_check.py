@@ -333,7 +333,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI
 
     if detach_module_if_needed("data_pipeline.ocr_check", argv):
         return 0
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
     report = run_check(for_ocr(), args.doc_type, tenant_id=args.tenant, limit=args.limit)
     summary = write_report(report, args.out, args.max_gap, floors)
     print((args.out / "report.md").read_text(encoding="utf-8"))

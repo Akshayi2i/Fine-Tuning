@@ -314,7 +314,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
     if detach_module_if_needed("testing.compare_models", argv, hint="compare"):
         return 0
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
     from artifact_registry.blob_client import BlobClient
     from inference_core.model_runner import load_model, release_model, without_adapter
 

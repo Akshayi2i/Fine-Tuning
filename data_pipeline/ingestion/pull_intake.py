@@ -139,7 +139,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI
     if detach_module_if_needed("data_pipeline.ingestion.pull_intake", argv):
         return 0
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
     try:
         report = pull_intake(for_ingestion(), args.batch, args.out,
                              workers=args.workers, refresh=args.refresh)
