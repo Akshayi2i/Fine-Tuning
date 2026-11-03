@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import json
 
-from scripts.check_invented_values import classify, list_sizes, main, render, render_sizes, summarise
+from scripts.check_invented_values import (
+    classify,
+    list_sizes,
+    main,
+    render,
+    render_sizes,
+    show_document,
+    summarise,
+)
 
 PAGES = {"p1": {1: "Commercial General Liability. Forms: CG 00 01 04 13, SL 30 32 06 21. Each Occurrence $1,000,000",
                 2: "Damages to premises rented to you"},
@@ -73,3 +81,14 @@ def test_a_gold_list_shorter_than_what_the_document_prints_shows_in_the_sizes():
                                                     "gold_rows": 1, "printed_but_not_in_gold": 2}
     assert by_section["coverages"]["gold_rows"] == 0
     assert "gold rows" in render_sizes(sizes) and "p1" in render_sizes(sizes)
+
+
+def test_a_document_is_shown_side_by_side_with_the_text_around_each_extra_value():
+    pages = {"p1": {1: "Schedule of forms", 2: "Attached: CG  00 01 04 13 Commercial General Liability Coverage Form"}}
+    rows = classify([_r("p1", "forms_and_endorsements[3].form_number", "CG 00 01 04 13")], pages)
+    golds = {"p1": {"forms_and_endorsements": [{"form_number": {"raw": "IL 00 17 11 98", "parsed": "IL 00 17 11 98",
+                                                                "page_ref": [1]}}],
+                    "coverages": []}}
+    text = show_document("p1", rows, golds, pages)
+    assert "the gold lists 1 row(s)" in text and "gold: IL 00 17 11 98" in text
+    assert "CG 00 01 04 13   [p. 2]" in text and "Commercial General Liability Coverage Form" in text

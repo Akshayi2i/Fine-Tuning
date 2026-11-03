@@ -149,6 +149,60 @@ def render_sizes(sizes: list[dict[str, Any]]) -> str:
     return "\n".join(out)
 
 
+def _plain(value: Any) -> Any:
+    """A gold's values without the envelopes around them (``{"value": ..., "page": ...}`` becomes the value)."""
+    from common.canonical import values_view
+
+    return values_view(value)
+
+
+def _snippet(value: Any, pages: dict[Any, str], width: int = 55) -> tuple[list[Any], str]:
+    """The pages whose text holds ``value`` (its words in order, any spacing) and a little text around the first."""
+    import re
+
+    words = [re.escape(w) for w in str(value).split() if w]
+    if not words:
+        return [], ""
+    pattern = re.compile(r"\s+".join(words), re.IGNORECASE)
+    found: list[Any] = []
+    snippet = ""
+    for page, text in sorted(pages.items(), key=lambda item: str(item[0])):
+        match = pattern.search(text or "")
+        if match:
+            found.append(page)
+            if not snippet:
+                snippet = " ".join(text[max(0, match.start() - width):match.end() + width].split())
+    return found, snippet
+
+
+def show_document(source_id: str, classified: list[dict[str, Any]], golds: dict[str, dict[str, Any]],
+                  pages_by_document: dict[str, dict[Any, str]], shown: int = 30) -> str:
+    """One document, side by side: the rows the gold lists, and the values the document prints that the gold
+    does not hold, each with the pages it is on and the text around it. Whether those are forms the policy
+    carries, or only mentioned in passing, is for a person to read."""
+    out = [source_id]
+    pages = pages_by_document.get(source_id, {})
+    plain = _plain(golds.get(source_id, {}))
+    for section, field in LIST_SECTIONS:
+        leaf = field.rsplit(".", 1)[-1]
+        rows = plain.get(section) if isinstance(plain, dict) else None
+        gold_values = [str(r.get(leaf)) for r in rows if isinstance(r, dict) and r.get(leaf)] if rows else []
+        extra: dict[str, None] = {}
+        for r in classified:
+            if (r.get("source_id") == source_id and r["verdict"] == "printed"
+                    and field_pattern(str(r.get("field_path"))) == field):
+                for value in _values(r.get("got")):
+                    extra[str(value)] = None
+        out.append(f"\n{section}: the gold lists {len(rows or [])} row(s)")
+        out.append("  gold: " + "; ".join(gold_values[:shown]) + ("; ..." if len(gold_values) > shown else ""))
+        out.append(f"  printed in the document, not in the gold ({len(extra)}):")
+        for value in list(extra)[:shown]:
+            found, text = _snippet(value, pages)
+            where = ",".join(str(p) for p in found[:6]) + ("..." if len(found) > 6 else "")
+            out.append(f"    {value}   [p. {where or '?'}]   ...{text}...")
+    return "\n".join(out)
+
+
 def _golds_and_pages(tenant: str | None) -> tuple[dict[str, dict[Any, str]], dict[str, dict[str, Any]]]:
     from artifact_registry.blob_client import BlobClient
     from evaluation.golden_eval import load_golden_set
@@ -169,6 +223,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pages", help="with --file: JSON {source_id: {page: text}} instead of reading Blob")
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--show", metavar="SOURCE_ID", default=None,
+                        help="one document side by side: the gold's rows, and what the document prints that "
+                             "the gold does not hold, with the text around each")
     args = parser.parse_args(argv)
 
     if args.file:
@@ -184,6 +241,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         pages, golds = _golds_and_pages(args.tenant)
     classified = classify(invented(records), pages)
+    if args.show:
+        print(show_document(args.show, classified, golds, pages))
+        return 0
     sizes = list_sizes(classified, golds) if golds else []
     if args.json:
         print(json.dumps({**summarise(classified), "list_sizes": sizes}, indent=2, ensure_ascii=False))
