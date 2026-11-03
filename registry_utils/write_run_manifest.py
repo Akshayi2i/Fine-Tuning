@@ -125,8 +125,15 @@ def update_registry_index(manifest: RunManifest, client: BlobClient) -> None:
             index: dict[str, Any] = (
                 client.read_json(index_key) if client.exists(index_key) else {"runs": []}
             )
-        except BlobError:
-            index = {"runs": []}
+        except BlobError as exc:
+            # Never start from an empty index: it would be written back over every other run's row,
+            # and a read that failed once tells nothing about what the index holds. The manifest
+            # itself is already written and safe; the index can be updated by running this again.
+            raise RegistryError(
+                f"could not read the registry index {index_key} ({type(exc).__name__}: {exc}), so "
+                f"{manifest.run_id} was not added to it. Nothing was overwritten. The run manifest is "
+                "written; check the storage login and run the stage again to record it in the index."
+            ) from exc
 
         rows = [r for r in index.get("runs", []) if r.get("run_id") != manifest.run_id]
         rows.append(row)
@@ -139,7 +146,8 @@ def update_registry_index(manifest: RunManifest, client: BlobClient) -> None:
         # Confirm nothing that was there before this write has gone missing.
         try:
             written = {r.get("run_id") for r in client.read_json(index_key).get("runs", [])}
-        except BlobError:
+        except BlobError as exc:
+            log.warning("the registry index was written but could not be read back to confirm it (%s)", exc)
             return
         if {r.get("run_id") for r in rows} <= written:
             return

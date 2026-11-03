@@ -1916,7 +1916,8 @@ def _checkpoint_scorer(ctx: StageContext) -> Any:
     return vllm_scorer(**settings, save_dir=work_dir / "finalists", cache_dir=work_dir / "score_cache")
 
 
-def _assert_registry_writable(ctx: StageContext) -> None:
+def _assert_registry_writable(ctx: StageContext, *, what: str = "checkpoint selection",
+                              nothing_done: str = "Nothing has been scored.") -> None:
     """Prove the registry takes a write, before the hour and a half of scoring that ends in one.
 
     Selection saves its result to Blob only when it finishes, so a storage login that is wrong or expired
@@ -1937,8 +1938,8 @@ def _assert_registry_writable(ctx: StageContext) -> None:
         from orchestration.notify import short_reason
 
         raise PipelineError(
-            f"checkpoint selection could not save its result: a test write to {probe} failed "
-            f"({type(exc).__name__}: {short_reason(exc)}). Nothing has been scored. Check the storage login "
+            f"{what} could not save its result: a test write to {probe} failed "
+            f"({type(exc).__name__}: {short_reason(exc)}). {nothing_done} Check the storage login "
             "(the AZURE_* settings in .env) and run the stage again."
         ) from exc
     try:
@@ -3627,6 +3628,38 @@ def _freeze_command(ctx: StageContext) -> str:
             "`freeze-eval-set --mark-reviewed`)")
 
 
+def _corpus_exists(ctx: StageContext) -> bool:
+    """Whether the corpus this run names is already built; ``False`` when the store cannot say."""
+    try:
+        return bool(ctx.client.exists(paths.corpus_manifest(ctx.corpus, ctx.tenant_id)))
+    except Exception as exc:  # noqa: BLE001 - a check that cannot run must not stop a run
+        log.warning("could not tell whether corpus %s is built: %s", ctx.corpus, exc)
+        return False
+
+
+def assert_storage_ready(ctx: StageContext) -> None:
+    """At the start of a real run: the storage login lasts, and the registry takes a write.
+
+    Both used to show up late: a SAS token that ran out mid-cycle failed at the next write, and a registry that
+    would not take one failed at the end of selection, eight hours into training. A dry run touches no storage.
+    """
+    if ctx.dry_run:
+        return
+    import os
+
+    from artifact_registry.sas import sas_problems
+
+    refusals, warnings = sas_problems(os.environ)
+    for warning in warnings:
+        log.warning("%s", warning)
+    if refusals:
+        raise PipelineError(
+            "; ".join(refusals) + ". Nothing was run. Make a new SAS token and put it in the pod's .env "
+            "(quoted), then start again."
+        )
+    _assert_registry_writable(ctx, what="this run", nothing_done="Nothing has been run.")
+
+
 def eval_set_frozen(ctx: StageContext) -> bool | None:
     """Whether this tenant's golden eval set is frozen; ``None`` when the store cannot say.
 
@@ -4388,10 +4421,14 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
         # Before any work: packaging a released version again re-runs its gate
         # against the release live now and overwrites its own decision.
         preconditions.append(assert_not_released)
-    if any(stage.name == "evaluation_gate" for stage in stages) and not any(
-            stage.name == "dataset_build" for stage in stages):
-        # A run that builds the corpus (a fresh `all`) cannot have frozen a test split of it yet.
+    builds_corpus = any(stage.name == "dataset_build" for stage in stages)
+    if any(stage.name == "evaluation_gate" for stage in stages) and (not builds_corpus or _corpus_exists(ctx)):
+        # A run that builds a corpus that is not there yet (a fresh `all`) cannot have frozen a test split of
+        # it. One that names a corpus already built (`all --corpus-version v1`) can, and trains for hours
+        # before the gate says it has not.
         preconditions.append(assert_eval_set_frozen)
+    if stages and not ctx.dry_run:
+        preconditions.insert(0, assert_storage_ready)      # a login that cannot last is found before any work
     for precondition in preconditions:
         try:
             precondition(ctx)
