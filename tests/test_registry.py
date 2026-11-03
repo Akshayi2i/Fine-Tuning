@@ -871,7 +871,7 @@ def test_raw_container_calls_use_the_raw_token(monkeypatch):
     class FakeServiceClient:
         """Stands in for the SDK's client: says which token each call would carry."""
 
-        def __init__(self, account_url, credential):
+        def __init__(self, account_url, credential, **_options):
             made.append(credential)
             self.credential = credential
 
@@ -926,7 +926,7 @@ def test_a_client_sends_raw_layer_calls_on_the_raw_login_and_the_rest_on_the_mai
             return [SimpleNamespace(name=f"{name_starts_with}/x.json")]
 
     class FakeServiceClient:
-        def __init__(self, account_url, credential):
+        def __init__(self, account_url, credential, **_options):
             self.credential = credential
 
         def get_blob_client(self, container, blob):

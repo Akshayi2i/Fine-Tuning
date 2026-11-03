@@ -166,3 +166,102 @@ def test_all_on_a_new_corpus_is_not_stopped(client, controller):
     ran: list[str] = []
     run_stages(make_context(client, controller, dry_run=False, corpus_version="v9"), _stages(ran), command="all")
     assert ran == ["build", "gate"]
+
+
+# --------------------------------------------------------------------------
+# The pod, checked before a real run
+# --------------------------------------------------------------------------
+
+
+def _fail(name, detail, fix=""):
+    from orchestration import preflight
+
+    def check(results, *_args):
+        results.append(preflight.Check(name, "FAIL", detail, fix))
+
+    return check
+
+
+def _pass(name):
+    from orchestration import preflight
+
+    def check(results, *_args):
+        results.append(preflight.Check(name, "PASS", "ok"))
+
+    return check
+
+
+@pytest.fixture
+def pod(monkeypatch):
+    """Every pod check passes; a test makes one fail."""
+    from orchestration import preflight
+
+    for name in ("check_disk", "check_gpu", "check_packages", "check_base_model", "check_config"):
+        monkeypatch.setattr(preflight, name, _pass(name))
+    monkeypatch.setattr(preflight, "check_clean_tree", lambda results, allow=False: _pass("tree")(results))
+    return preflight
+
+
+def test_a_busy_gpu_stops_a_training_run_before_any_work(client, controller, pod, monkeypatch):
+    from orchestration.pipeline_dag import assert_environment_ready
+
+    monkeypatch.setattr(pod, "check_gpu", _fail("gpu", "another process holds GPU [0]", "stop it"))
+    ctx = make_context(client, controller, dry_run=False, preflight=True)
+    with pytest.raises(PipelineError, match="pod is not ready.*another process holds GPU.*Nothing was run"):
+        assert_environment_ready(ctx, ["training", "checkpoint_eval"])
+
+
+def test_a_stage_that_needs_no_gpu_is_not_held_up_by_one(client, controller, pod, monkeypatch):
+    from orchestration.pipeline_dag import assert_environment_ready
+
+    monkeypatch.setattr(pod, "check_gpu", _fail("gpu", "no CUDA"))
+    assert_environment_ready(make_context(client, controller, dry_run=False, preflight=True), ["dataset_build"])
+
+
+def test_a_full_disk_stops_any_stage(client, controller, pod, monkeypatch):
+    from orchestration.pipeline_dag import assert_environment_ready
+
+    monkeypatch.setattr(pod, "check_disk", _fail("disk", "12 GB free", "grow the network volume"))
+    with pytest.raises(PipelineError, match="12 GB free"):
+        assert_environment_ready(make_context(client, controller, dry_run=False, preflight=True), ["dataset_build"])
+
+
+def test_the_dirty_tree_matters_only_to_training(client, controller, pod, monkeypatch):
+    from orchestration.pipeline_dag import assert_environment_ready
+
+    monkeypatch.setattr(pod, "check_clean_tree", lambda results, allow=False: _fail("code tree", "dirty")(results))
+    ctx = make_context(client, controller, dry_run=False, preflight=True)
+    assert_environment_ready(ctx, ["evaluation_gate"])
+    with pytest.raises(PipelineError, match="dirty"):
+        assert_environment_ready(ctx, ["training"])
+
+
+def test_the_check_is_off_unless_asked_and_in_a_dry_run(client, controller, pod, monkeypatch):
+    from orchestration.pipeline_dag import assert_environment_ready
+
+    monkeypatch.setattr(pod, "check_gpu", _fail("gpu", "busy"))
+    assert_environment_ready(make_context(client, controller, dry_run=False), ["training"])
+    assert_environment_ready(make_context(client, controller, dry_run=True, preflight=True), ["training"])
+
+
+def test_run_stages_stops_on_a_failing_pod_as_the_first_stage_failing(client, controller, pod, monkeypatch):
+    monkeypatch.setattr(pod, "check_gpu", _fail("gpu", "busy"))
+    ran: list[str] = []
+
+    def run(_ctx):
+        ran.append("ran")
+        return StageResult("training", "completed")
+
+    report = run_stages(make_context(client, controller, dry_run=False, preflight=True),
+                        (Stage(5, "training", "finetune", False, run),), command="finetune")
+    assert ran == [] and report.failed_at == "training" and "pod is not ready" in report.results[-1].detail
+
+
+def test_the_command_line_turns_the_check_on_and_skip_preflight_turns_it_off(client, controller):
+    import argparse
+
+    from orchestration.run import build_context
+
+    base = dict(command="finetune", version="v9", dry_run=True)
+    assert build_context(argparse.Namespace(**base), client=client, controller=controller).preflight is True
+    assert build_context(argparse.Namespace(**base, skip_preflight=True), client=client, controller=controller).preflight is False

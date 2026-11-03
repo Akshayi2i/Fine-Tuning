@@ -96,6 +96,7 @@ def build_context(args: argparse.Namespace, *, client: BlobClient | None = None,
         # The pod's copy stays unless the person asks for it to be cleared (`--clear-staging`): pushing
         # to Blob is a second copy, not a move.
         "keep_staging": not getattr(args, "clear_staging", False),
+        "preflight": not getattr(args, "skip_preflight", False),
         "from_blob": getattr(args, "from_blob", False),
         "fixes_defect": fixes_defect_for(getattr(args, "fixes_defect", None)),
         "gate_override": gate_override_from(args),
@@ -282,6 +283,9 @@ def _add_finetune_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true",
                         help="assemble and record everything without launching GPU work")
+    parser.add_argument("--skip-preflight", dest="skip_preflight", action="store_true",
+                        help="do not check the pod (GPU free, packages, base model, config, disk, clean tree) "
+                             "before the run starts")
 
 
 def _add_package_flags(parser: argparse.ArgumentParser, *, version_required: bool = True) -> None:
@@ -342,6 +346,9 @@ def build_parser() -> argparse.ArgumentParser:
         "package", help="stages 7-9: calibrate, gate, push the adapter and write the release, gated "
                         "(never promoted: shadow, then promote)")
     _add_package_flags(package)
+    package.add_argument("--skip-preflight", dest="skip_preflight", action="store_true",
+                         help="do not check the pod (GPU free, packages, base model, config, disk) before "
+                              "the run starts")
     parser_all = sub.add_parser("all", help="finetune then package. Never runs extract.")
     _add_finetune_flags(parser_all)
     _add_package_flags(parser_all, version_required=False)

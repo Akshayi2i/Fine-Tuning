@@ -98,6 +98,8 @@ QUICK = {
     "scripts/show_eval_errors.py",
     # Downloads one Blob file in pieces with a time limit per piece and resumes where it stopped; run by hand to watch it.
     "scripts/pull_blob_file.py",
+    # Reads the .env text and names the lines bash would misread: milliseconds, run before a job starts.
+    "scripts/check_env_file.py",
     # Unlocks one PDF in a second, asking for its password at the prompt: detached, nobody could type it.
     "common/pdf_access.py",
     # A laptop tool: stages a few hundred MB of PDFs or writes rows into a workbook, in seconds; never run on the pod.

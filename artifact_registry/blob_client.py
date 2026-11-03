@@ -183,6 +183,14 @@ class InMemoryBackend(BlobBackend):
 #: and every surplus connection was discarded with a "Connection pool is full" warning.
 POOL_SIZE = 32
 
+#: Seconds a connection may take to open, and a read may wait for the next bytes. Both are the SDK's own
+#: defaults made explicit, so a stalled connection fails (and is retried) after a known time, not never.
+CONNECTION_TIMEOUT_S = 30
+READ_TIMEOUT_S = 120
+
+#: Seconds before the first retry of a failed Azure call; each further retry waits twice as long.
+AZURE_RETRY_BACKOFF_S = 2.0
+
 
 def _pooled_transport():
     """An HTTP transport whose connection pool is large enough for the pipeline's parallel reads."""
@@ -222,10 +230,12 @@ class AzureBackend(BlobBackend):
             ) from exc
         if account_url:
             self._service = BlobServiceClient(account_url=account_url, credential=credential,
-                                              transport=_pooled_transport())
+                                              transport=_pooled_transport(),
+                                              connection_timeout=CONNECTION_TIMEOUT_S, read_timeout=READ_TIMEOUT_S)
         elif connection_string:
-            self._service = BlobServiceClient.from_connection_string(connection_string,
-                                                                     transport=_pooled_transport())
+            self._service = BlobServiceClient.from_connection_string(
+                connection_string, transport=_pooled_transport(),
+                connection_timeout=CONNECTION_TIMEOUT_S, read_timeout=READ_TIMEOUT_S)
         else:
             raise BlobError("AzureBackend needs a connection string or an account URL")
         self._raw_container = raw_container
@@ -234,7 +244,9 @@ class AzureBackend(BlobBackend):
             if not (account_url and raw_container):
                 raise BlobError("a raw-container SAS token needs the account URL and the raw container's name")
             self._raw_service = BlobServiceClient(account_url=account_url, credential=raw_credential,
-                                                  transport=_pooled_transport())
+                                                  transport=_pooled_transport(),
+                                                  connection_timeout=CONNECTION_TIMEOUT_S,
+                                                  read_timeout=READ_TIMEOUT_S)
 
     def _service_for(self, container: str):
         """The raw container's own login when it has one; the main login otherwise."""
@@ -341,7 +353,8 @@ class BlobClient:
             (:func:`azure_from_environment`).
         context: what is doing the reading — ``ingestion`` and ``ocr`` may reach
             ``raw-documents/``; everything else is refused.
-        max_retries: transient-failure retries, with exponential backoff.
+        max_retries: transient-failure retries, with exponential backoff from ``retry_backoff_s``
+            (2 s on a real store, 0.1 s on the in-memory one).
     """
 
     def __init__(
@@ -351,11 +364,16 @@ class BlobClient:
         raw_container: str | None = None,
         context: str = "general",
         max_retries: int = 3,
+        retry_backoff_s: float | None = None,
     ) -> None:
         self.container = container or os.environ.get("AZURE_BLOB_CONTAINER") or "insurance-extraction"
         self.raw_container = raw_container or os.environ.get("AZURE_RAW_CONTAINER") or self.container
         self.context = context
         self.max_retries = max_retries
+        # A real store needs seconds between tries (a network that dropped is not back in 0.1 s); the
+        # in-memory test store has no network to wait for.
+        self.retry_backoff_s = retry_backoff_s if retry_backoff_s is not None else (
+            0.1 if isinstance(backend, InMemoryBackend) else AZURE_RETRY_BACKOFF_S)
 
         if backend is not None:
             self._backend = backend
@@ -395,7 +413,10 @@ class BlobClient:
             except BlobError as exc:
                 last = exc
                 if attempt < self.max_retries - 1:
-                    time.sleep(2**attempt * 0.1)
+                    delay = 2**attempt * self.retry_backoff_s
+                    log.warning("Blob call failed (%s); try %d of %d again in %.1f s",
+                                str(exc)[:200], attempt + 2, self.max_retries, delay)
+                    time.sleep(delay)
         assert last is not None  # the loop cannot exit without one
         raise last
 

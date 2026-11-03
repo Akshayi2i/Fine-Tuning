@@ -108,6 +108,9 @@ class StageContext:
     min_labels_per_type: int = DAY_ZERO_MIN_LABELS_PER_TYPE
     push_adapters: bool = False
     keep_staging: bool = True
+    #: Check the pod (GPU free, packages, base model, config, disk, clean tree) before a real run starts.
+    #: On from the command line (``--skip-preflight`` turns it off); off by default for code that builds a context.
+    preflight: bool = False
     from_blob: bool = False
     git_commit: str | None = None
     seed: int = 42
@@ -3660,6 +3663,44 @@ def assert_storage_ready(ctx: StageContext) -> None:
     _assert_registry_writable(ctx, what="this run", nothing_done="Nothing has been run.")
 
 
+#: Stages that load the model on the GPU: a run containing one needs the pod checks.
+GPU_STAGES = frozenset({"training", "checkpoint_eval", "calibrate", "evaluation_gate"})
+
+
+def environment_problems(ctx: StageContext, stages: Sequence[str]) -> list[str]:
+    """What is wrong with the pod for the stages named, as one line each; empty when it is ready.
+
+    Reuses the checks of ``orchestration.preflight``: a busy GPU, a missing package, an unverified base model,
+    a config that breaks an invariant, a full disk and (for training) a dirty code tree each took a run down
+    after it had started.
+    """
+    from orchestration import preflight
+
+    results: list[preflight.Check] = []
+    gpu = bool(GPU_STAGES.intersection(stages))
+    checks = [("disk", preflight.check_disk)]
+    if gpu:
+        checks += [("gpu", preflight.check_gpu), ("packages", preflight.check_packages),
+                   ("base model", preflight.check_base_model), ("config", preflight.check_config)]
+    if "training" in stages:
+        checks.append(("code tree", lambda r: preflight.check_clean_tree(r, ctx.allow_dirty)))
+    for name, check in checks:
+        preflight._run(name, check, results)
+    return [f"{c.name}: {c.detail}" + (f" -> {c.fix}" if c.fix else "") for c in results if c.status == "FAIL"]
+
+
+def assert_environment_ready(ctx: StageContext, stages: Sequence[str]) -> None:
+    """At the start of a real run on the pod: stop on a failing pod check before any work is done."""
+    if ctx.dry_run or not ctx.preflight:
+        return
+    problems = environment_problems(ctx, stages)
+    if problems:
+        raise PipelineError(
+            "the pod is not ready: " + "; ".join(problems) + ". Nothing was run. Fix the above and start "
+            "again, or add --skip-preflight to run anyway."
+        )
+
+
 def eval_set_frozen(ctx: StageContext) -> bool | None:
     """Whether this tenant's golden eval set is frozen; ``None`` when the store cannot say.
 
@@ -4395,7 +4436,8 @@ def _already_complete(stage: Stage, ctx: StageContext) -> bool:
     try:
         return stage.is_complete(ctx)
     except Exception as exc:  # noqa: BLE001 - an unreadable check means "not complete"
-        log.debug("completion check for %s failed (%s); running the stage", stage.name, exc)
+        log.warning("completion check for %s failed (%s: %s); running the stage again",
+                    stage.name, type(exc).__name__, exc)
         return False
 
 
@@ -4429,6 +4471,8 @@ def run_stages(ctx: StageContext, stages: Sequence[Stage], *, command: str = "fi
         preconditions.append(assert_eval_set_frozen)
     if stages and not ctx.dry_run:
         preconditions.insert(0, assert_storage_ready)      # a login that cannot last is found before any work
+        names = [stage.name for stage in stages]
+        preconditions.insert(1, lambda c: assert_environment_ready(c, names))   # and a pod that cannot train
     for precondition in preconditions:
         try:
             precondition(ctx)

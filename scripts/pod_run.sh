@@ -162,6 +162,11 @@ cmd_start() {
     die "POD_RUN_RETRY_STALLED runs the same command again, which is only safe for a command that resumes a cycle (--from-stage STAGE --version vN); this one would start a new cycle"
   fi
 
+  # A .env bash would misread (an unquoted value with a space, a CR from Windows) is found here, not an hour in.
+  if [ -f "$REPO/.env" ] && command -v python3 >/dev/null 2>&1 && [ -f "$REPO/scripts/check_env_file.py" ]; then
+    python3 "$REPO/scripts/check_env_file.py" "$REPO/.env" || die "fix the .env lines above, then start again (nothing was started)"
+  fi
+
   # The caller's own settings, for the run to read over .env.
   local keep="${LOG_DIR}/$name.env"
   (umask 077; callers_settings > "$keep")

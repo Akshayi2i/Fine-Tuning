@@ -59,3 +59,50 @@ def test_a_failed_read_leaves_the_index_alone_and_says_so(client, monkeypatch):
     monkeypatch.undo()
     assert client.read_json(paths.registry_index()) == before      # both earlier rows are still there
     assert _runs(client) == ["policy-v1", "policy-v2"]
+
+
+def test_a_real_store_waits_seconds_between_tries_and_says_so(monkeypatch, caplog):
+    from artifact_registry import blob_client as bc
+
+    class Failing(bc.InMemoryBackend):
+        def read(self, container, key):
+            raise bc.BlobError("connection reset")
+
+    waited: list[float] = []
+    monkeypatch.setattr(bc.time, "sleep", waited.append)
+    real = bc.BlobClient(backend=Failing(), container="main", raw_container="raw", retry_backoff_s=None)
+    assert real.retry_backoff_s == 0.1                       # the in-memory store: no network to wait for
+    real.retry_backoff_s = bc.AZURE_RETRY_BACKOFF_S
+    with caplog.at_level("WARNING"), pytest.raises(bc.BlobError):
+        real.read_bytes("a/b.json")
+    assert waited == [2.0, 4.0]
+    assert any("connection reset" in r.getMessage() for r in caplog.records)
+
+
+def test_the_azure_services_are_built_with_explicit_timeouts(monkeypatch):
+    import sys
+    import types
+
+    from artifact_registry import blob_client as bc
+
+    seen: list[dict] = []
+
+    class Service:
+        def __init__(self, *a, **kw):
+            seen.append(kw)
+
+        @classmethod
+        def from_connection_string(cls, conn, **kw):
+            seen.append(kw)
+            return object.__new__(cls)
+
+    module = types.ModuleType("azure.storage.blob")
+    module.BlobServiceClient = Service
+    monkeypatch.setitem(sys.modules, "azure.storage.blob", module)
+    monkeypatch.setattr(bc, "_pooled_transport", lambda: object())
+    bc.AzureBackend(account_url="https://x.blob.core.windows.net", credential="sv=1",
+                    raw_container="raw", raw_credential="sv=2")
+    bc.AzureBackend(connection_string="DefaultEndpointsProtocol=https;AccountName=a;AccountKey=k")
+    assert len(seen) == 3
+    assert all(kw["connection_timeout"] == bc.CONNECTION_TIMEOUT_S and kw["read_timeout"] == bc.READ_TIMEOUT_S
+               for kw in seen)

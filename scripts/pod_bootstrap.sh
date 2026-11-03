@@ -125,7 +125,9 @@ ensure_env() {
       [ "$current" = "$value" ] || echo "  keeping $key=$current (expected $value on this pod)"
       return
     fi
-    sed -i "s|^${key}=.*|${key}=${value}|" .env
+    local escaped
+    escaped="$(printf '%s' "$value" | sed -e 's/[\\&|]/\\&/g')"
+    sed -i "s|^${key}=.*|${key}=${escaped}|" .env
   else
     printf '%s=%s\n' "$key" "$value" >> .env
   fi
@@ -175,6 +177,9 @@ for sas_key in AZURE_STORAGE_SAS_TOKEN AZURE_RAW_SAS_TOKEN; do
 quotes: bash would otherwise run each part after an '&' in the background." ;;
   esac
 done
+if command -v python3 >/dev/null 2>&1 && [ -f scripts/check_env_file.py ]; then
+  python3 scripts/check_env_file.py .env || die "fix the .env lines above (quote any value with a space or a special character), then run this again"
+fi
 set -a; . ./.env; set +a
 export HF_HOME MINERU_TOOLS_CONFIG_JSON MINERU_DEVICE_MODE MINERU_MODEL_SOURCE RUNPOD_VOLUME_MOUNT
 # RunPod images turn on the hf_transfer downloader for every process; it is not
