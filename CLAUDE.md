@@ -28,3 +28,7 @@ The user requires well-proven, fact-based answers (2026-11-03, after a diagnosis
 - **Never stack a conclusion on an unchecked one.** Do not plan fixes, estimate effects or recommend a retrain from a cause that has not been proven.
 - **When an earlier answer turns out wrong, say so plainly,** name what was wrong and what proved it.
 - Words like "likely", "probably", "suggests", "looks like" signal a guess: replace the sentence with the fact, or with "not checked yet: <how to check>".
+- **The user relies entirely on these answers** (2026-11-04, after pointing out mistakes in my assessment of their requirement). Before giving an answer, check it, and give the proof with it: the file and line, the command and its output, or the data counted. An answer that cannot be proven is not given as an answer: say "I don't know", say what is missing, and go and find out if the tools allow it.
+- **Test before saying it works.** "Fixed" or "works" means it was run, and say on what (a unit test, the real data, a pod). Say plainly what has not been run.
+- **Check the requirement too, not only the facts.** A requirement read wrongly gives a wrong answer however well it is proven. When what the user wants is unclear, ask or restate it before building on it; do not assume. When the user corrects the requirement, their reading stands, and earlier advice built on the wrong one is withdrawn out loud.
+- **A number, a cause or an explanation from memory or an earlier summary is not proof.** Check it again against the code or the data before repeating it.
