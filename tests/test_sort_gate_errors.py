@@ -6,6 +6,10 @@ import json
 
 from scripts.show_eval_set import describe, form_counts, render
 from scripts.sort_gate_errors import (
+    COVERAGE_CODE_IN_GOLD,
+    COVERAGE_CODE_NOT_IN_GOLD,
+    COVERAGE_GOLD_ONLY,
+    COVERAGE_PAIRED,
     EDITION_TWIN,
     GOLD_ONLY,
     MODEL_ONLY,
@@ -52,13 +56,53 @@ def test_rows_are_sorted_by_what_their_form_number_record_shows():
         _r("forms_and_endorsements[6].form_number", "omission", expected="IL 00 17"),
         # a paired row with a wrong title
         _r("forms_and_endorsements[1].title", "schema_reasoning", expected="CGL Form", got="Other"),
-        # outside forms
-        _r("coverages[0].coverage_name", "invented", got="MED PAY"),
+        # another list, and outside lists
+        _r("locations[0].city", "invented", got="Austin"),
         _r("policy.policy_number", "omission", expected="X1"),
     ]
     causes = [r["cause"] for r in sort_records(records, GOLDS)]
     assert causes == [EDITION_TWIN, EDITION_TWIN, MODEL_ONLY, EDITION_TWIN, EDITION_TWIN, GOLD_ONLY, PAIRED,
-                      "coverages: invented", "outside lists: omission"]
+                      "locations: invented", "outside lists: omission"]
+
+
+COVERAGE_GOLDS = {"p1": {"coverages": [
+    {"coverage_name": {"raw": "Coverage C Medical Payments", "parsed": "Coverage C Medical Payments", "page_ref": [2]},
+     "coverage_code": {"raw": "X_MED_PAY", "parsed": "X_MED_PAY", "page_ref": [2]}}]}}
+
+
+def test_coverage_rows_are_sorted_by_what_their_name_and_code_show():
+    records = [
+        # a second row for a coverage the gold has: its code is in the gold, its name is not
+        _r("coverages[3].coverage_name", "invented", got="MED PAY"),
+        _r("coverages[3].coverage_code", "schema_reasoning", got="X_MED_PAY"),
+        _r("coverages[3].limits[0].amount", "invented", got="5000"),
+        # a row whose code the gold does not hold, named as a limit
+        _r("coverages[4].coverage_name", "invented", got="GENERAL AGGREGATE LIMIT"),
+        _r("coverages[4].coverage_code", "invented", got="GL_BI_PD"),
+        # a gold row nothing paired with
+        _r("coverages[5].coverage_name", "omission", expected="Coverage C Medical Payments"),
+        _r("coverages[5].coverage_code", "omission", expected="X_MED_PAY"),
+        # a paired row with a wrong amount
+        _r("coverages[0].limits[0].amount", "schema_reasoning", expected="5000", got="50000"),
+    ]
+    rows = sort_records(records, COVERAGE_GOLDS)
+    assert [r["cause"] for r in rows] == [
+        COVERAGE_CODE_IN_GOLD, COVERAGE_CODE_IN_GOLD, COVERAGE_CODE_IN_GOLD,
+        COVERAGE_CODE_NOT_IN_GOLD, COVERAGE_CODE_NOT_IN_GOLD,
+        COVERAGE_GOLD_ONLY, COVERAGE_GOLD_ONLY, COVERAGE_PAIRED]
+    summary = summarise(rows)
+    assert summary["coverage_unpaired_rows"] == 2 and summary["coverage_unpaired_rows_named_as_limits"] == 1
+    assert summary["coverage_paired_fields"] == {"coverages[].limits[].amount": 1}
+
+
+def test_the_rescore_table_shows_each_metric_with_its_floor_and_change():
+    from scripts.rescore_version import comparison
+
+    text = comparison({"field_exact_match": 0.5, "hallucination_rate": 0.01},
+                      {"field_exact_match": 0.75, "hallucination_rate": 0.01}, {"field_exact_match": 0.85})
+    line = next(row for row in text.splitlines() if row.startswith("field_exact_match"))
+    assert "0.8500" in line and "0.5000" in line and "0.7500" in line and "+0.2500" in line
+    assert "worst_line_field_match" not in text        # not in either report
 
 
 def test_rows_of_different_readings_are_kept_apart():

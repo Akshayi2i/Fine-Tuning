@@ -103,7 +103,7 @@ QUICK = {
     # Reads a stored eval report and the frozen set's page text and prints a table: no model, no GPU.
     "scripts/check_invented_values.py",
     # Read stored records and the frozen set from Blob and print tables: no model, no GPU.
-    "scripts/sort_gate_errors.py", "scripts/show_eval_set.py",
+    "scripts/sort_gate_errors.py", "scripts/show_eval_set.py", "scripts/rescore_version.py",
     # Reads the log folder and prints what a run is doing: a second, nothing is started or touched.
     "orchestration/status.py",
     # Unlocks one PDF in a second, asking for its password at the prompt: detached, nobody could type it.

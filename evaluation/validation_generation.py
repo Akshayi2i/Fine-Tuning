@@ -771,6 +771,7 @@ def calibration_samples(
         rows_aligned_to,
         values_agree,
     )
+    from evaluation.metrics.form_editions import align_form_editions
     from serving.conventions import conform
 
     halves: dict[str, list[tuple[Any, bool]]] = {"calibration": [], "threshold": []}
@@ -789,6 +790,8 @@ def calibration_samples(
         # after the answer's, where no feature path reaches them.
         gold_values = values_view(golden)
         got_values = values_view(answer or {})
+        # As the gate scores it (run_eval.build_report), so a form written two ways is not fitted as wrong.
+        gold_values, _moved = align_form_editions(gold_values, got_values)
         expected = flatten_scalars(
             aligned_for_scoring(gold_values, got_values)[0] if common_model
             else rows_aligned_to(gold_values, got_values)

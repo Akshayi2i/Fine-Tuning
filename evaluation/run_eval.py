@@ -495,6 +495,9 @@ class EvalReport:
     #: Filled in on a later pass: classifier accuracy needs the IMPL-11
     #: classifier, and eval must stay runnable before serving is built.
     classifier_scored: bool = False
+    #: Form rows whose label was written the way the answer splits number and edition, by which side held the
+    #: edition in its number (``evaluation.metrics.form_editions``): how much of the score rests on it.
+    form_editions_aligned: dict[str, int] = field(default_factory=dict)
 
     def for_doc_type(self, doc_type: str) -> list[SubsetReport]:
         return [s for s in self.subsets if s.doc_type == doc_type]
@@ -646,6 +649,7 @@ class EvalReport:
             "corpus_version": self.corpus_version,
             "generated_at": self.generated_at,
             "classifier_scored": self.classifier_scored,
+            "form_editions_aligned": dict(sorted(self.form_editions_aligned.items())),
             "subsets_scored": sorted({s.subset for s in self.subsets}),
             "by_doc_type": {
                 doc_type: [s.as_dict() for s in self.for_doc_type(doc_type)]
@@ -1828,6 +1832,7 @@ def build_report(
     )
 
     from common.lob import merge_line
+    from evaluation.metrics.form_editions import align_form_editions
 
     pages = _document_pages(documents)
     buckets: dict[tuple[str, str], list[Any]] = {}
@@ -1844,6 +1849,10 @@ def build_report(
         line = merge_line(metadata.get("lob")) if common_model else None
         expected = _scored_view(expected, selectors, line, common_model)
         got = _scored_view(got, selectors, line, common_model)
+        # One form written two ways is one form, before anything pairs or scores a row.
+        expected, moved = align_form_editions(expected, got)
+        for direction, rows_moved in moved.items():
+            report.form_editions_aligned[direction] = report.form_editions_aligned.get(direction, 0) + rows_moved
         if REPEAT_ANSWER in metadata:
             # The second answer is compared with the first as the first is
             # scored: the same fields, the same comparable ids.
