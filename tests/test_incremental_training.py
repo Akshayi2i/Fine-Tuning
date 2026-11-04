@@ -854,21 +854,22 @@ def test_a_continued_cycle_that_held_every_line_is_released(released, controller
     assert [(v["line"], v["held_to"]) for v in comparison["lines"]] == [("equipment_breakdown", "policy-v1")]
 
 
-def test_a_continued_cycle_that_lost_a_line_is_blocked_at_the_gate(released, controller):
+def test_a_continued_cycle_that_lost_a_line_is_flagged_at_the_gate(released, controller):
     report, decision = _continued_v2_gate(
         released, controller,
         parent=_report({"equipment_breakdown": [0.95] * 30}, policy=200),
         candidate=_report({"equipment_breakdown": [0.90] * 30}, policy=200))
-    assert report.blocked_at == "evaluation_gate"
+    assert report.blocked_at is None and decision["passed"] is False and decision["gate_passed"] is False
     assert "line:equipment_breakdown" in decision["failed_gates"]
     assert any("equipment_breakdown is not non-inferior to policy-v1" in r for r in decision["blocking_reasons"])
-    assert "package" not in {r.name for r in report.results}
+    assert "equipment_breakdown is not non-inferior to policy-v1" in decision["gate_failure_flag"]
+    assert "package" in {r.name for r in report.results}, "the release is built with the flag on it"
 
 
-def test_a_continued_cycle_whose_parent_s_report_went_missing_is_blocked(released, controller):
+def test_a_continued_cycle_whose_parent_s_report_went_missing_is_flagged(released, controller):
     """continuation() refuses a parent with no report before training; one that
     goes after (a package run later) leaves the gate nothing to hold the cycle
-    to, and it is blocked rather than passed on floors."""
+    to, and the gate fails with that reason rather than passing on floors."""
     trained = make_context(released, controller, out_version="v2")
     assert run_stages(trained, stages_for("finetune"), command="finetune").ok
     assert trained.results["training"].data["continued"] == "policy-v1"
@@ -876,18 +877,19 @@ def test_a_continued_cycle_whose_parent_s_report_went_missing_is_blocked(release
     released.write_json(paths.eval_report("v2", scope="policy"),
                         _report({"auto": [0.9] * 6}, policy=200))
 
-    report = run_stages(make_context(released, controller, out_version="v2"), stages_for("package"),
-                        command="package")
-    assert report.blocked_at == "evaluation_gate"
+    package = make_context(released, controller, out_version="v2")
+    report = run_stages(package, stages_for("package"), command="package")
+    assert report.blocked_at is None
     decision = released.read_json(paths.gate_decision("v2", scope="policy"))
-    assert decision["failed_gates"] == ["line_regression_evidence"]
-    assert "policy-v1: it has no eval report" in report.results[-1].detail
+    assert decision["passed"] is False and decision["failed_gates"] == ["line_regression_evidence"]
+    assert "policy-v1: it has no eval report" in package.results["evaluation_gate"].detail
+    assert "policy-v1: it has no eval report" in decision["gate_failure_flag"]
     assert decision["line_comparison"]["missing"].startswith("policy-v1: it has no eval report")
 
 
 def test_a_run_continued_from_a_directory_has_no_parent_to_compare_with(released, controller):
     """training.train --continue-from names a directory, not a run of the
-    adapter: there is no parent report to hold it to, so it is blocked."""
+    adapter: there is no parent report to hold it to, so the gate fails with that reason."""
     ctx = make_context(released, controller, out_version="v2", fresh=True)
     assert run_stages(ctx, stages_for("finetune"), command="finetune").ok
     _edit_manifest(released, "policy-v2",
@@ -895,11 +897,11 @@ def test_a_run_continued_from_a_directory_has_no_parent_to_compare_with(released
 
     package = make_context(released, controller, out_version="v2")
     report = run_stages(package, stages_for("package"), command="package")
-    assert report.blocked_at == "evaluation_gate"
+    assert report.blocked_at is None
     decision = released.read_json(paths.gate_decision("v2", scope="policy"))
-    assert decision["failed_gates"] == ["line_regression_evidence"]
+    assert decision["passed"] is False and decision["failed_gates"] == ["line_regression_evidence"]
     assert ("it continued /runpod-volume/staging/some-adapter, a directory, not a run of the adapter"
-            in report.results[-1].detail)
+            in package.results["evaluation_gate"].detail)
 
 
 # --------------------------------------------------------------------------

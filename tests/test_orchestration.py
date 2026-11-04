@@ -444,14 +444,12 @@ def test_the_policy_run_stages_one_adapter_and_merges_nothing(client, controller
 # --------------------------------------------------------------------------
 
 
-def test_a_regression_stops_the_release_not_the_build(client, controller):
-    """Under v1 the gate ran before merge, so a regression stopped the build. It
-    now runs AFTER checkpoint selection and calibrate (arch v2.1 §13), because the
-    gate scores what is served: the base with the selected adapter applied.
+def test_a_regression_flags_the_release_and_the_run_goes_on(client, controller):
+    """The gate checks the model's quality; it does not bar packaging or promotion (user, 2026-11-04).
 
-    So the adapter is still built and chosen. What a regression stops is the
-    RELEASE: nothing is packaged, nothing is published, and the staged adapter
-    sits on a volume that will be reclaimed."""
+    It runs AFTER checkpoint selection and calibrate (arch v2.1 §13), because the gate scores what is
+    served: the base with the selected adapter applied. A regression is recorded as a flag, "Gate failed
+    due to ...", the release is built, and a named person decides whether to promote it."""
     seed_corpus(client)
     regressed = {**PASSING_METRICS, "list_field_recall": 0.60}
     ctx = make_context(
@@ -461,28 +459,33 @@ def test_a_regression_stops_the_release_not_the_build(client, controller):
     )
     report = run_stages(ctx, stages_for("all"), command="all")
 
-    assert report.blocked_at == "evaluation_gate"
-    assert report.exit_code == 1
+    assert report.blocked_at is None and report.ok, report.render()
     assert "checkpoint_eval" in ctx.results and "calibrate" in ctx.results, (
         "the gate scores the selected, calibrated adapter, so both precede it")
-    assert "package" not in ctx.results, "a blocked release is never packaged"
+    gate = ctx.results["evaluation_gate"]
+    assert gate.status == "completed" and gate.data["gate_passed"] is False
+    assert gate.detail.startswith("GATE NOT PASSED, flagged. Gate failed due to ")
+    assert "package" in ctx.results, "the release is built, with its gate not passed recorded on it"
+    bundle = client.read_json(paths.release_bundle("v1"))
+    assert bundle["status"] == "gated" and bundle["gate_flag"].startswith("Gate failed due to ")
+    assert "list_field_recall" in bundle["gate_flag"]
 
 
-def test_the_block_names_the_metric_and_its_delta(client, controller):
+def test_the_flag_names_the_metric_and_its_delta(client, controller):
     seed_corpus(client)
     ctx = make_context(
         client, controller,
         baseline_metrics=dict(PASSING_METRICS),
         metrics_provider=lambda _ctx: {**PASSING_METRICS, "lob_detection_accuracy": 0.55},
     )
-    report = run_stages(ctx, stages_for("all"), command="all")
-    blocked = report.results[-1]
+    run_stages(ctx, stages_for("all"), command="all")
+    flagged = ctx.results["evaluation_gate"]
 
-    assert "lob_detection_accuracy" in blocked.detail
+    assert "lob_detection_accuracy" in flagged.detail
     # Both sides of the comparison, so an operator can see the size of the drop
     # without opening the gate decision file.
-    assert "0.9200" in blocked.detail and "0.5500" in blocked.detail
-    assert blocked.data["failed_gates"] == ["lob_detection_accuracy"]
+    assert "0.9200" in flagged.detail and "0.5500" in flagged.detail
+    assert flagged.data["failed_gates"] == ["lob_detection_accuracy"]
 
 
 def test_the_block_records_the_evidence_not_just_the_verdict(client, controller):
@@ -503,7 +506,7 @@ def test_the_block_records_the_evidence_not_just_the_verdict(client, controller)
     assert verdict["delta"] > 0
 
 
-def test_all_never_reaches_package_on_a_failed_gate(client, controller):
+def test_all_reaches_package_on_a_failed_gate_and_the_gate_is_recorded_as_not_passed(client, controller):
     seed_corpus(client)
     ctx = make_context(
         client, controller,
@@ -515,19 +518,32 @@ def test_all_never_reaches_package_on_a_failed_gate(client, controller):
     ran = {r.name for r in report.results}
     # Calibrate runs BEFORE the gate now: the gate reads auto_accept_error_rate,
     # which does not exist until thresholds are chosen.
-    assert "calibrate" in ran
-    assert "package" not in ran, "nothing is packaged past a failed gate"
-    assert report.blocked_at == "evaluation_gate"
+    assert "calibrate" in ran and "package" in ran
+    assert report.blocked_at is None
+    decision = client.read_json(paths.gate_decision("v1", scope="policy"))
+    assert decision["passed"] is False and decision["gate_passed"] is False
+    assert decision["promotable_with_flag"] is True and "field_exact_match" in decision["gate_failure_flag"]
 
 
-def test_an_unmeasured_metric_blocks_rather_than_passing(client, controller):
-    """A metric that was not measured has not passed."""
+def test_an_unmeasured_metric_is_flagged_not_passed(client, controller):
+    """A metric that was not measured has not passed: it is named in the flag."""
     seed_corpus(client)
     partial = {k: v for k, v in PASSING_METRICS.items() if k != "image_only_accuracy"}
     ctx = make_context(client, controller, baseline_metrics=dict(PASSING_METRICS),
                        metrics_provider=lambda _ctx: partial)
+    run_stages(ctx, stages_for("all"), command="all")
+    gate = ctx.results["evaluation_gate"]
+    assert gate.data["gate_passed"] is False and "image_only_accuracy was not measured" in gate.detail
+
+
+def test_a_gate_that_could_not_decide_still_blocks(client, controller):
+    """Readings the engine failed twice were not scored: there is no verdict to flag, so the release is
+    not built on a partial measurement (evaluation.gating.INFRASTRUCTURE_FAILURES)."""
+    seed_corpus(client)
+    ctx = make_context(client, controller, baseline_metrics=dict(PASSING_METRICS),
+                       metrics_provider=lambda _ctx: {**PASSING_METRICS, "infrastructure_failures": 3})
     report = run_stages(ctx, stages_for("all"), command="all")
-    assert report.blocked_at == "evaluation_gate"
+    assert report.blocked_at == "evaluation_gate" and "package" not in ctx.results
 
 
 def _all_option_strings(parser: argparse.ArgumentParser) -> set[str]:
@@ -652,9 +668,10 @@ def test_per_document_scores_in_both_reports_gate_on_a_paired_bootstrap(client, 
     ctx = make_context(client, controller, out_version="v1.1",
                        metrics_provider=None)
     report = run_stages(ctx, stages_for("all"), command="all")
-    assert report.blocked_at == "evaluation_gate"
+    assert report.blocked_at is None and ctx.results["evaluation_gate"].data["gate_passed"] is False
     decision = client.read_json(paths.gate_decision("v1.1", scope="policy"))
     assert decision["failed_gates"] == ["improvement"]
+    assert "no primary metric improved" in decision["gate_failure_flag"]
     assert decision["paired_documents"]["field_normalized_match"] == 20
     basis = {v["name"]: v["basis"] for v in decision["verdicts"]}
     assert basis["field_normalized_match"] == "paired_bootstrap"
@@ -1108,7 +1125,7 @@ def test_a_whole_run_tells_each_phase_and_ends_with_the_gate_result(client, cont
     assert sent[-1].startswith("Fine-tuning v1 is completed, all phases done successfully. Gate is passed."), sent[-1]
 
 
-def test_a_blocked_gate_ends_the_run_with_a_message_that_the_gate_is_not_passed(client, controller, monkeypatch):
+def test_a_failed_gate_ends_the_run_with_a_message_that_names_why_the_gate_is_not_passed(client, controller, monkeypatch):
     from orchestration import notify
 
     sent = []
@@ -1120,9 +1137,9 @@ def test_a_blocked_gate_ends_the_run_with_a_message_that_the_gate_is_not_passed(
     report = cli.run_command("all", ctx)
     notify.run_complete(report, ctx)
 
-    assert not report.ok and report.blocked_at == "evaluation_gate"
-    assert any("STOPPED: Phase 8 'Evaluation gate' was blocked. Gate is not passed (blocked)." in text for text in sent)
-    assert not any("all phases done successfully" in text for text in sent)
+    assert report.ok and report.blocked_at is None
+    assert not any("STOPPED" in text for text in sent)
+    assert "Gate failed due to list_field_recall" in sent[-1], sent[-1]
 
 
 def test_override_gate_all_promotes_a_release_whose_gate_is_not_passed_and_says_so(client, controller):
@@ -2405,9 +2422,10 @@ def test_a_resumed_package_reads_the_checkpoint_already_selected(client, control
     assert selected_checkpoint(ctx) == chosen
 
 
-def test_package_refuses_a_version_whose_gate_blocked(client, controller):
-    """`package` is its own command; it read nothing the gate wrote, so running it
-    after a blocked gate published the blocked version anyway."""
+def test_package_refuses_a_version_whose_gate_could_not_decide(client, controller):
+    """`package` is its own command; it read nothing the gate wrote, so running it after a gate that had
+    not decided published the version anyway. A gate that decided the model failed on quality does not
+    stop it (the flag travels with the release)."""
     from orchestration.pipeline_dag import stage_push
 
     seed_corpus(client)
@@ -2416,9 +2434,15 @@ def test_package_refuses_a_version_whose_gate_blocked(client, controller):
     assert report.ok, report.render()
 
     key = paths.gate_decision("v1", scope="policy")
-    client.write_json(key, {**client.read_json(key), "passed": False, "failed_gates": ["x"]})
-    with pytest.raises(PipelineError, match="did not pass its promotion gate"):
+    decided = client.read_json(key)
+    client.write_json(key, {**decided, "passed": False, "promotable_with_flag": False,
+                            "failed_gates": ["infrastructure_failures"]})
+    with pytest.raises(PipelineError, match="could not decide"):
         stage_push(ctx)
+
+    client.write_json(key, {**decided, "passed": False, "promotable_with_flag": True,
+                            "gate_failure_flag": "Gate failed due to field_exact_match is 0.1000"})
+    stage_push(ctx)                                  # flagged, not blocked
 
 
 def test_a_resumed_package_finds_the_calibrators_in_blob(client, controller):

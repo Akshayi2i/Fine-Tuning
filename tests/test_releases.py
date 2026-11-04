@@ -44,7 +44,7 @@ def client() -> BlobClient:
     return BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
 
 
-def _release(client, version, *, tenant_id=None, passed=True, calibrated=True, run=True,
+def _release(client, version, *, tenant_id=None, passed=True, undecided=False, calibrated=True, run=True,
              created_at="2026-10-01T00:00:00+00:00", **over):
     """A candidate release of the adapter's ``version``: its bundle, its index
     row, its bf16 gate decision and (``run``) the run manifest behind it."""
@@ -61,8 +61,13 @@ def _release(client, version, *, tenant_id=None, passed=True, calibrated=True, r
     rows = client.read_json(index_key) if client.exists(index_key) else []
     write_index(client, [r for r in rows if r["release_id"] != version] + [bundle.index_row()], tenant_id)
     if passed is not None:
+        # passed=False: the gate failed on quality (flagged, promotable); undecided: it could not decide.
+        failure = ({} if passed else {
+            "gate_passed": False, "promotable_with_flag": not undecided,
+            "gate_failure_flag": "Gate failed due to field_normalized_match is 0.5429 against a floor of 0.8500"})
         client.write_json(paths.release_gate_decision(version, "bf16", tenant_id), {
-            "passed": passed, "failed_gates": [] if passed else ["field_normalized_match"]})
+            "passed": passed, "failed_gates": [] if passed else
+            ["infrastructure_failures" if undecided else "field_normalized_match"], **failure})
     if run:
         W.write_manifest(_scoped(f"policy-{version}", "policy", ["policy"]), client)
     return bundle
@@ -108,12 +113,22 @@ def test_a_rollback_promotes_an_older_version_back(client):
     assert client.exists(paths.release_gate_decision("v3", "bf16"))
 
 
-def test_a_release_whose_gate_did_not_pass_is_not_promoted(client):
+def test_a_release_whose_gate_failed_on_quality_can_be_promoted(client):
+    """The gate checks the model's quality; it does not bar a promotion (user, 2026-11-04)."""
     _release(client, "v2")
     promote_release(client, "v2", promoted_by="package v2")
     _release(client, "v3", passed=False)
 
-    with pytest.raises(ReleaseError, match=r"did not pass its promotion gate .*field_normalized_match"):
+    promote_release(client, "v3", promoted_by="package v3")
+    assert _statuses(client) == {"v2": "archived", "v3": "promoted"}
+
+
+def test_a_release_the_gate_never_judged_or_could_not_decide_is_not_promoted(client):
+    _release(client, "v2")
+    promote_release(client, "v2", promoted_by="package v2")
+    _release(client, "v3", passed=False, undecided=True)
+
+    with pytest.raises(ReleaseError, match=r"no usable gate decision .*could not decide.*infrastructure_failures"):
         promote_release(client, "v3", promoted_by="package v3")
     assert _statuses(client) == {"v2": "promoted", "v3": "candidate"}
 

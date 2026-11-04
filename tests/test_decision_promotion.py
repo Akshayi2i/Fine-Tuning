@@ -29,6 +29,7 @@ from orchestration import shadow as S
 from registry_utils.releases import (
     ReleaseError,
     promote,
+    promote_if_cleared,
     promote_release,
     shadow_report_key,
     write_index,
@@ -75,8 +76,11 @@ def raw(backend) -> BlobClient:
 
 def _gated(client: BlobClient, version: str, *, tier: str | None = "production", tier_confidence=None,
            created_at: str = "2026-10-26T00:00:00+00:00", status: str = "gated", passed: bool = True,
-           **over) -> dict:
-    """A release as `package` writes it since 2026-10-26: a LoRA on the base, gated, its gate passed."""
+           undecided: bool = False, **over) -> dict:
+    """A release as `package` writes it since 2026-10-26: a LoRA on the base, gated, its gate passed.
+
+    ``passed=False`` is a gate that failed on quality (flagged, and promotable by a person, 2026-11-04);
+    with ``undecided=True`` it is one that could not decide (readings the engine failed twice)."""
     from common.config import served_mineru
     from common.prompts import prompt_hash
     from data_pipeline.dataset_builder.policy_windows import window_plan_id
@@ -100,8 +104,13 @@ def _gated(client: BlobClient, version: str, *, tier: str | None = "production",
     index_key = paths.release_index()
     rows = client.read_json(index_key) if client.exists(index_key) else []
     write_index(client, [r for r in rows if r["release_id"] != version] + [bundle.index_row()], None)
+    failure = ({} if passed else {
+        "gate_passed": False, "promotable_with_flag": not undecided,
+        "failed_gates": ["infrastructure_failures"] if undecided else ["field_normalized_match"],
+        "gate_failure_flag": "Gate failed due to field_normalized_match is 0.5429 against a floor of 0.8500",
+        "message": "Gate is not passed"})
     client.write_json(paths.release_gate_decision(version, "bf16"), {
-        "passed": passed, "failed_gates": [] if passed else ["field_normalized_match"], "tier": tier,
+        "passed": passed, "failed_gates": [], "tier": tier, **failure,
         **({"tier_confidence": tier_confidence} if tier_confidence is not None else {})})
     return body
 
@@ -526,7 +535,7 @@ def test_an_adapter_the_pod_does_not_serve_fails_the_check(client, raw, document
 
 
 def test_shadow_refuses_a_release_promote_would_refuse_or_does_not_need(client, raw, documents, tmp_path):
-    _gated(client, "v3", passed=False)
+    _gated(client, "v3", passed=False, undecided=True)
     with pytest.raises(S.ShadowError, match="would not be promoted whatever its shadow check says"):
         _shadow(client, raw, documents, tmp_path, Models({}))
     _gated(client, "v4")
@@ -734,3 +743,52 @@ def test_shadow_detaches_on_the_pod_and_runs_in_place_off_it(launched, monkeypat
     assert cli.main([*SHADOW_ARGS, "--documents", "7", "--tenant", "acme"]) == 1     # failed: exit 1
     assert seen["version"] == "v3" and seen["documents"] == 7 and seen["tenant_id"] == "acme"
     assert "FAILED" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# A gate that was not passed is a flag, not a bar (user, 2026-11-04)
+# --------------------------------------------------------------------------
+
+
+def test_a_release_whose_gate_failed_on_quality_is_promoted_with_the_flag_recorded(client):
+    _gated(client, "v3", tier=None, passed=False)
+    _passing_report(client, "v3", compared_with=None)
+
+    assert promote(client, "v3", promoted_by="A. Reviewer") == []
+
+    assert _statuses(client) == {"v3": "promoted"}
+    [record] = client.read_json(paths.release_bundle("v3"))["promotions"]
+    assert record["promoted_by"] == "A. Reviewer"
+    assert record["gate_flag"].startswith("Gate failed due to field_normalized_match")
+    assert record["gate_failed_gates"] == ["field_normalized_match"]
+
+
+def test_a_flagged_release_still_needs_its_shadow_check_or_a_written_reason(client):
+    _gated(client, "v3", tier=None, passed=False)
+    with pytest.raises(ReleaseError, match="there is no shadow report of v3"):
+        promote(client, "v3", promoted_by="A. Reviewer")
+    promote(client, "v3", promoted_by="A. Reviewer", skip_shadow_reason="an urgent fix agreed with the client")
+    assert _statuses(client) == {"v3": "promoted"}
+
+
+def test_a_flagged_release_is_never_promoted_automatically(client):
+    _gated(client, "v3", tier=None, passed=False)
+    _passing_report(client, "v3", compared_with=None)
+    with pytest.raises(ReleaseError, match="is flagged: Gate failed due to field_normalized_match.*by hand"):
+        promote_if_cleared(client, "v3", promoted_by="A. Reviewer")
+    assert _statuses(client) == {"v3": "gated"}
+
+
+def test_a_release_the_gate_could_not_decide_is_not_promoted(client):
+    _gated(client, "v3", passed=False, undecided=True)
+    with pytest.raises(ReleaseError, match="no usable gate decision.*could not decide"):
+        promote(client, "v3", promoted_by="A. Reviewer", skip_shadow_reason="an urgent fix agreed with the client")
+    assert _statuses(client) == {"v3": "gated"}
+
+
+def test_a_clean_pass_records_no_flag(client):
+    _gated(client, "v3", tier="production")
+    _passing_report(client, "v3", compared_with=None)
+    promote(client, "v3", promoted_by="A. Reviewer")
+    [record] = client.read_json(paths.release_bundle("v3"))["promotions"]
+    assert record["gate_flag"] is None and record["gate_failed_gates"] == []

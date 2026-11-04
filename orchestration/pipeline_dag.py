@@ -3075,6 +3075,10 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         # failed gates; `gate_passed` is true only when no gate failed, and `message` says which it was.
         "gate_passed": result.gate_passed and not cascade_blocked,
         "message": result.message,
+        # "Gate failed due to ...", and whether that failure is a verdict on quality, which a person may
+        # promote past (user, 2026-11-04). A cascade block is not: there the release cannot be judged.
+        "gate_failure_flag": result.flag,
+        "promotable_with_flag": result.quality_failure and not cascade_blocked,
         "cascade_blocked": cascade.describe() if cascade_blocked else None,
         "failed_gates": result.failed_gates,
         # The full verdict per metric — floor, interval and basis — not just a
@@ -3164,9 +3168,11 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
 
     write_manifest(foundation, ctx.client)
 
-    if not result.passed:
+    if not result.passed and not result.quality_failure:
+        # No verdict to flag: readings the engine failed twice were not scored, so the gate did not decide
+        # (evaluation.gating.INFRASTRUCTURE_FAILURES). The eval is run again.
         raise GateBlocked(
-            f"promotion gate blocked {ctx.out_version} — not packaging.\n{result.report()}",
+            f"promotion gate could not decide {ctx.out_version} — not packaging.\n{result.report()}",
             gate_result=result,
         )
 
@@ -3184,18 +3190,26 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
         # Said loudly, not only in the report: the run goes on and the release can be promoted, but the
         # gate is not passed, and whoever reads the run's summary must see that.
         log.warning("%s (override by %s: %s)", result.message, result.override.approver, result.override.reason)
+    elif result.quality_failure:
+        # The gate is a check of the model's quality, not a bar to promoting it (user, 2026-11-04): the run
+        # goes on, the release is built, and the failure travels with it as a flag a person reads when they
+        # decide whether to promote.
+        log.warning("%s. %s", result.flag, result.message)
     return StageResult(
         "evaluation_gate", "completed",
-        (f"{result.message} (override by {result.override.approver})" if result.waived else "gate passed")
+        (f"{result.message} (override by {result.override.approver})" if result.waived
+         else f"GATE NOT PASSED, flagged. {result.flag}\n{result.report()}" if result.quality_failure
+         else "gate passed")
         + (" (first version, no baseline)" if result.is_first_version else
            " (floors only: the promoted release is on another yardstick)"
            if result.baseline_not_comparable else "")
         # The run summary shows the tier, how sure it is, and the bound.
         + (f"; {result.tier_evidence.describe()}" if result.tier_evidence else ""),
-        {"metrics": candidate, "failed_gates": [], "cascade_dependents": cascade.dependents,
+        {"metrics": candidate, "failed_gates": sorted(result.failed_gates),
+         "cascade_dependents": cascade.dependents if cascade else [],
          # What the closing text message says (orchestration.notify): whether the gate was passed on its
          # own, or the release was promoted by an override past gates that failed.
-         "gate_passed": result.gate_passed, "gate_message": result.message,
+         "gate_passed": result.gate_passed, "gate_message": result.flag or result.message,
          "validation_gate_mirror_accuracy": decision["validation_gate_mirror_accuracy"],
          "tier": decision["tier"], "tier_confidence": decision["tier_confidence"],
          "tier_evidence": decision["tier_evidence"]},
@@ -3749,12 +3763,13 @@ def warn_eval_set_not_frozen(ctx: StageContext) -> None:
 
 def assert_gate_passed(ctx: StageContext) -> None:
 
-    """Refuse to package a version whose promotion gate did not pass.
+    """Refuse to package a version the gate never judged, or could not judge.
 
-    ``finetune`` stops at a blocked gate, but ``package`` is its own command and
-    read nothing the gate wrote — so a blocked version could be published by
-    running package next. The recorded decision is the authority; an override is
-    already folded into its ``passed``.
+    ``package`` is its own command and read nothing the gate wrote, so a version whose gate
+    had not decided could be published by running package next. The recorded decision is the
+    authority. A decision that says the model failed on quality (``promotable_with_flag``) does
+    not stop packaging: the gate checks quality, a person decides promotion (user, 2026-11-04),
+    and the failure travels with the release as its flag. An override is folded into ``passed``.
     """
     key = paths.gate_decision(ctx.out_version, scope=ADAPTER.name)
     if not ctx.client.exists(key):
@@ -3766,12 +3781,16 @@ def assert_gate_passed(ctx: StageContext) -> None:
             "evaluation gate (`finetune --from-stage evaluation_gate`) before packaging."
         )
     decision = ctx.client.read_json(key)
-    if not decision.get("passed"):
-        raise PipelineError(
-            f"{ctx.out_version} did not pass its promotion gate (failed: "
-            f"{decision.get('failed_gates')}), so it is not packaged. Fix the model, or record a "
-            "written override through the gate (arch v2.1 §15.5) — not by running package."
-        )
+    if decision.get("passed"):
+        return
+    if decision.get("promotable_with_flag"):
+        log.warning("%s is packaged with its gate not passed. %s", ctx.out_version,
+                    decision.get("gate_failure_flag") or decision.get("message"))
+        return
+    raise PipelineError(
+        f"the gate could not decide {ctx.out_version} (failed: {decision.get('failed_gates')}), so it is "
+        "not packaged. Run the evaluation gate again (`package --from-stage evaluation_gate`)."
+    )
 
 
 def resolve_corpus_version(ctx: StageContext) -> None:
@@ -3911,7 +3930,11 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
 
     # Production or interim, as the bf16 gate decided it (gating.release_tier).
     bf16_decision = gate_reports.get("bf16")
-    tier = ctx.client.read_json(bf16_decision).get("tier") if bf16_decision else None
+    decided = ctx.client.read_json(bf16_decision) if bf16_decision else {}
+    tier = decided.get("tier")
+    # What the gate said when it was not passed (a decision written before the flag existed has only its
+    # message): the release carries it, so anyone reading the release sees the model did not meet the gate.
+    gate_flag = (decided.get("gate_failure_flag") or decided.get("message")) if decided.get("gate_passed") is False else None
 
     reasons = [
         f"{fmt} has no calibrator, so its confidence is not calibrated (arch v2.1 §5.3)"
@@ -3991,6 +4014,7 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
             vllm_config_hash=_file_hash(root / "configs" / "inference" / "vllm_serving.yaml"),
             lockfile_hash=_file_hash(lockfile),
             override=override,
+            gate_flag=gate_flag,
         )
     except ValueError as exc:
         raise PipelineError(f"the release bundle for {ctx.release_id} is invalid: {exc}") from exc

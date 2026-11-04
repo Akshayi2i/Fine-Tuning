@@ -502,6 +502,11 @@ class ReleasePromotion(_Base):
     latency_problem: str | None = None
     tier: Literal["production", "interim"] | None = None
     tier_confidence: Any = None
+    #: The gate had not passed when this release was promoted (user, 2026-11-04: the gate checks the
+    #: model's quality and does not bar promotion): what it said ("Gate failed due to ..."), and the
+    #: gates that failed, so the promotion's own record shows it was made knowingly.
+    gate_flag: str | None = None
+    gate_failed_gates: list[str] = Field(default_factory=list)
 
     @field_validator("promoted_by")
     @classmethod
@@ -593,6 +598,9 @@ class ReleaseBundle(_Base):
     lockfile_hash: str
 
     override: GateOverride | None = None
+    #: ``Gate failed due to ...`` when the release was packaged with its gate not passed; ``None`` when
+    #: the gate passed. A flag, not a bar: a named person can still promote it.
+    gate_flag: str | None = None
 
     #: Every promotion of this release, oldest first (decision 2026-10-26):
     #: the last one is the live one while ``status`` is ``promoted``. Empty on
@@ -650,4 +658,5 @@ class ReleaseBundle(_Base):
             "serving_formats": sorted(self.serving_formats),
             "overridden": self.override is not None,
             "override_approver": self.override.approver if self.override else None,
+            "gate_flag": self.gate_flag,
         }

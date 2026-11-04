@@ -124,11 +124,14 @@ def _promotable(client: BlobClient, release_id: str,
         raise ReleaseError(f"there is no release {release_id} at {bundle_key}")
     decision_key = paths.release_gate_decision(release_id, "bf16", tenant_id)
     decision = client.read_json(decision_key) if client.exists(decision_key) else {}
-    if not decision.get("passed"):
+    # The gate checks the model's quality; it does not bar a promotion (user, 2026-11-04). A decision that
+    # failed on quality is promotable and its flag is recorded with the promotion. What stays refused is a
+    # release the gate never judged, or could not judge (readings the engine failed twice): no verdict.
+    if not (decision.get("passed") or decision.get("promotable_with_flag")):
         raise ReleaseError(
-            f"{release_id} did not pass its promotion gate ({decision_key}: "
-            f"{'failed ' + str(decision.get('failed_gates')) if decision else 'no decision'}), "
-            "so it is not promoted."
+            f"{release_id} has no usable gate decision ({decision_key}: "
+            f"{'the gate could not decide, failed ' + str(decision.get('failed_gates')) if decision else 'no decision'}), "
+            "so it is not promoted. Run the evaluation gate again."
         )
     body = client.read_json(bundle_key)
     try:
@@ -347,6 +350,12 @@ def promotion_clearance(
     record: dict[str, Any] = {}
     if previously_promoted(body):
         return {"rollback": True}
+    if decision.get("gate_passed") is False:
+        # Said where the person promoting reads it, and kept in the promotion's record.
+        flag = decision.get("gate_failure_flag") or decision.get("message") or "Gate is not passed"
+        log.warning("%s is promoted with its gate not passed. %s", release_id, flag)
+        record["gate_flag"] = flag
+        record["gate_failed_gates"] = sorted({*(decision.get("failed_gates") or []), *(decision.get("waived_gates") or [])})
     if tier == "interim":
         if not accept_interim:
             confidence = f", tier confidence {tier_confidence}" if tier_confidence is not None else ""
@@ -438,9 +447,11 @@ def promote_if_cleared(
     """
     decision_key = paths.release_gate_decision(release_id, "bf16", tenant_id)
     decision = client.read_json(decision_key) if client.exists(decision_key) else {}
-    if decision.get("override"):
+    if decision.get("override") or decision.get("gate_passed") is False:
+        why = ("was passed by a written override" if decision.get("override")
+               else f"is flagged: {decision.get('gate_failure_flag') or decision.get('message')}")
         raise ReleaseError(
-            f"{release_id}'s gate was passed by a written override, so it is not promoted automatically. "
+            f"{release_id}'s gate {why}, so it is not promoted automatically. "
             f"Promote it by hand, knowingly: python -m orchestration.run promote --version {release_id} --by "
             "\"<person>\"."
         )

@@ -545,6 +545,32 @@ class GateResult:
         return self.passed and not self.waived
 
     @property
+    def quality_failure(self) -> bool:
+        """Whether the gate failed only on the model's quality (a metric, the improvement rule, a line).
+
+        Such a failure is a verdict to record, not a bar to promotion: a release that failed this way is
+        built and can be promoted by a named person, carrying :attr:`flag`. A block that is not a verdict
+        - readings the engine failed twice (:data:`INFRASTRUCTURE_FAILURES`) - leaves nothing to flag,
+        and stays a block.
+        """
+        return (not self.passed and bool(self.failed_gates) and INFRASTRUCTURE_FAILURES not in self.failed_gates
+                and all(is_gate(gate) for gate in self.failed_gates))
+
+    @property
+    def flag(self) -> str | None:
+        """``Gate failed due to ...``, naming each gate that failed and why; ``None`` when the gate passed.
+
+        A gate an override waived is named too: the release is promotable, and the record must still say the
+        model did not meet it.
+        """
+        if self.gate_passed:
+            return None
+        parts = list(self.blocking_reasons)
+        if self.waived:
+            parts.append(f"waived by override: {', '.join(sorted(self.waived))}")
+        return "Gate failed due to " + ("; ".join(parts) if parts else "an unnamed gate")
+
+    @property
     def message(self) -> str:
         """What a reader of the decision is told, in one line."""
         if self.gate_passed:
@@ -552,14 +578,20 @@ class GateResult:
         if self.passed:
             return (f"Gate is not passed: {len(self.waived)} gate(s) failed ({', '.join(sorted(self.waived))}) "
                     "and were waived by override, so the release can still be promoted")
+        if self.quality_failure:
+            return (f"Gate is not passed: {len(self.failed_gates)} gate(s) failed "
+                    f"({', '.join(sorted(self.failed_gates))}); the release is flagged and can still be "
+                    "promoted by a named person")
         return "Gate is not passed: the release is blocked"
 
     def report(self) -> str:
         verdict = "PASS" if self.passed else "BLOCKED"
         if self.passed and self.waived:
             verdict = f"NOT PASSED, promoted by override ({len(self.waived)} waived gate(s))"
+        elif self.quality_failure:
+            verdict = f"NOT PASSED, flagged ({len(self.failed_gates)} gate(s) failed)"
         lines = [f"promotion gate: {verdict}"]
-        if self.passed and self.waived:
+        if (self.passed and self.waived) or self.quality_failure:
             lines.append(f"  {self.message}")
         if self.is_first_version:
             lines.append("  first release — gated on absolute floors alone (arch v2.1 §15.5)")
@@ -579,7 +611,8 @@ class GateResult:
         lines.extend(f"  {_describe_line_verdict(v)}" for v in self.line_verdicts)
         if self.tier_evidence is not None:
             lines.append(f"  {self.tier_evidence.describe()}")
-        lines.extend(f"  BLOCKED: {reason}" for reason in self.blocking_reasons)
+        label = "FAILED" if self.quality_failure else "BLOCKED"
+        lines.extend(f"  {label}: {reason}" for reason in self.blocking_reasons)
         lines.extend(f"  WARNING: {warning}" for warning in self.warnings)
         if self.override:
             waived = sorted(self.waived) if self.override.waive_all else sorted(self.override.waived_gates)
@@ -595,6 +628,10 @@ class GateResult:
             # `passed` is also true for a release an override lifted past failed gates (promotion reads
             # it); `gate_passed` is true only when no gate failed, and `message` says which it was.
             "gate_passed": self.gate_passed,
+            # The flag a failed gate leaves on the release ("Gate failed due to ..."), and whether that
+            # failure is a verdict on quality, which does not bar packaging or promotion.
+            "gate_failure_flag": self.flag,
+            "promotable_with_flag": self.quality_failure,
             "message": self.message,
             "tier": self.tier,
             "tier_confidence": self.tier_confidence,

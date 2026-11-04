@@ -417,8 +417,14 @@ def test_waiving_all_promotes_a_release_whose_gate_is_not_passed_and_says_so():
     and nothing reads as a clean pass."""
     from evaluation.gating import GateOverrideRecord
 
-    blocked = promotion_gate({**_passing(), **_TWO_FAILING}, None)
-    assert not blocked.passed and blocked.message == "Gate is not passed: the release is blocked"
+    flagged = promotion_gate({**_passing(), **_TWO_FAILING}, None)
+    # Without an override the gate does not pass, and says so: a verdict on quality, flagged with why. It
+    # does not bar packaging or promotion by a named person (user, 2026-11-04).
+    assert not flagged.passed and flagged.quality_failure
+    assert flagged.message.startswith("Gate is not passed: 2 gate(s) failed") and "flagged" in flagged.message
+    assert flagged.flag.startswith("Gate failed due to ") and "lob_detection_accuracy" in flagged.flag
+    assert flagged.as_dict()["promotable_with_flag"] is True
+    assert flagged.as_dict()["gate_failure_flag"] == flagged.flag
 
     result = promotion_gate(
         {**_passing(), **_TWO_FAILING}, None,
