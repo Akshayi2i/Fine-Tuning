@@ -339,6 +339,8 @@ class _Redirecting(BaseHTTPRequestHandler):
         pass
 
     def _redirect(self):
+        # The upload read first: closing on an unread body lets Windows abort the connection before the client sees the 307.
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
         self.send_response(307)
         self.send_header("Location", _Redirecting.target + self.path)
         self.send_header("Content-Length", "0")
