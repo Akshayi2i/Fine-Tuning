@@ -482,11 +482,41 @@ def prepare_twin_bundles(
         # Rewritten every run, if only with its header: an earlier run's list
         # would describe golds this run did not write.
         out.mkdir(parents=True, exist_ok=True)
+        _repair_split_coverage_names(out, report)
         with (out / "corrections.csv").open("w", encoding="utf-8", newline="") as fh:
             writer = csv.writer(fh)
             writer.writerow(["twin", "correction", "detail"])
             writer.writerows(report.correction_rows)
     return report
+
+
+def _repair_split_coverage_names(out: Path, report: PrepareReport) -> None:
+    """Repair coverage names OCR broke inside their words, over every gold written to ``out``, once all are there: a
+    name is repaired from the same name printed whole in another document (``label_rules.split_name_repairs``)."""
+    from common.canonical import is_field_value
+    from data_pipeline.ingestion.label_rules import split_name_repairs
+
+    folders = sorted(p for p in out.iterdir() if p.is_dir() and (p / "golden.json").is_file())
+    golds = {folder: json.loads((folder / "golden.json").read_text(encoding="utf-8")) for folder in folders}
+
+    def cells(gold: dict) -> list[dict]:
+        return [row["coverage_name"] for row in gold.get("coverages") or []
+                if isinstance(row, dict) and is_field_value(row.get("coverage_name"))]
+
+    repairs = split_name_repairs(str(cell.get("raw")) for gold in golds.values() for cell in cells(gold))
+    for folder, gold in golds.items():
+        changed = False
+        for cell in cells(gold):
+            raw = " ".join(str(cell.get("raw")).split())
+            if raw in repairs:
+                report.corrections["coverage name repaired"] += 1
+                report.correction_rows.append((folder.name, "coverage name repaired", f"{raw!r} -> {repairs[raw]!r}"))
+                cell["raw"] = repairs[raw]
+                if isinstance(cell.get("parsed"), str):
+                    cell["parsed"] = repairs[raw]
+                changed = True
+        if changed:
+            _write_gold(folder / "golden.json", gold)
 
 
 def _gold_changed(notes: list[tuple[str, str]]) -> bool:
@@ -880,6 +910,7 @@ def prepare_original_bundles(
 
     if not dry_run:
         out.mkdir(parents=True, exist_ok=True)
+        _repair_split_coverage_names(out, report)
         with (out / "corrections.csv").open("w", encoding="utf-8", newline="") as fh:
             writer = csv.writer(fh)
             writer.writerow(["document", "correction", "detail"])
@@ -1176,9 +1207,15 @@ def corrected_gold(
         # The agreed conventions (data_pipeline.ingestion.label_rules): each value
         # once, citing every page that prints it; extra fields only for values
         # with no field of their own; numbers only where printed as numbers.
-        from data_pipeline.ingestion.label_rules import apply_label_rules, page_texts, scanned_pages
+        from data_pipeline.ingestion.label_rules import (
+            apply_label_rules,
+            merge_coverage_limits,
+            page_texts,
+            scanned_pages,
+        )
 
         notes.extend(apply_label_rules(gold, page_texts(text_pdf), scanned=scanned_pages(text_pdf)))
+        notes.extend(merge_coverage_limits(gold))
 
     errors = list(iter_validation_errors(gold, "policy", None, lob))
     if not errors and is_common_model("policy", None, lob):

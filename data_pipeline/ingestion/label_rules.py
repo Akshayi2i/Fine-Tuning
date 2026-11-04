@@ -74,8 +74,9 @@ gold; a document with no text layer gets only the rules that need no text.
 from __future__ import annotations
 
 import copy
+import json
 import re
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -218,9 +219,24 @@ _ISO_EDITION = re.compile(r"^(?P<form>[A-Z]{2} [A-Z0-9]{2} \d{2}) (?P<mm>0[1-9]|
 #: ... or a month and year in brackets after the number ("IL0017(11-98)").
 _BRACKETED_EDITION = re.compile(
     r"^(?P<form>.*?\S)\s*\(\s*(?P<mm>0[1-9]|1[0-2])\s*[-/ ]\s*(?P<yy>\d{4}|\d{2})\s*\)$")
+#: ... or a carrier's number with the month and year run together ("SSI SF 00 03 0123", "PGL 00200 0422") ...
+_JOINED_EDITION = re.compile(r"^(?P<form>\S+(?: \S+)+) (?P<mm>0[1-9]|1[0-2])(?P<yy>\d{2})$")
+#: ... or apart ("CTB CW SLV 06 20", "MUS 01 01 10047 03-18"), when what comes before is a number of its own
+#: (:func:`_a_whole_number`) ...
+_SPACED_EDITION = re.compile(r"^(?P<form>\S+(?: \S+)+) (?P<mm>0[1-9]|1[0-2])[ -](?P<yy>\d{2})$")
+#: ... or a month and a full year ("SSPJ-07-2021").
+_FULL_YEAR_EDITION = re.compile(r"^(?P<form>.*?\S)[ -](?P<mm>0[1-9]|1[0-2])[ -](?P<yy>(?:19|20)\d{2})$")
 #: A number ending in what may be a month and year, or may be its own groups
 #: ("CG 20 10 04"): named for a person to look at, never changed.
 _MAYBE_EDITION = re.compile(r"^(?P<form>.*\d.*?)[ /-](?P<mm>0[1-9]|1[0-2])[ /-](?P<yy>\d{2})$")
+
+
+def _a_whole_number(form: str) -> bool:
+    """Whether what precedes a possible edition stands as a form number alone: three groups or more ("IL P 001"), or
+    two ending in a word ("SS Privacy"). Two ending in digits ("CG 20", of "CG 20 10 04") are half of a number whose
+    last groups only look like a month and a year, and those stay for a person (:func:`may_hold_edition`)."""
+    groups = form.split()
+    return len(groups) >= 3 or (len(groups) == 2 and groups[1].isalpha())
 
 
 def split_form_edition(text: Any) -> tuple[str, str, str] | None:
@@ -229,9 +245,17 @@ def split_form_edition(text: Any) -> tuple[str, str, str] | None:
     value = " ".join(str(text or "").split())
     if match := _ISO_EDITION.match(value):
         return match["form"], f"{match['mm']} {match['yy']}", f"{match['mm']}/{match['yy']}"
-    if (match := _BRACKETED_EDITION.match(value)) and _form_code(match["form"]):
+    if (match := _BRACKETED_EDITION.match(value)) and (_form_code(match["form"]) or match["form"].strip().isupper()):
         printed = value[value.rindex("(") + 1:].rstrip(")").strip()
         return match["form"].strip(), printed, f"{match['mm']}/{match['yy'][-2:]}"
+    # A number printed as one token ("CG00010413") is never split: its parts are not printed on their own, so neither
+    # would be found on the page, and the value would be taken for one no page prints.
+    if match := _JOINED_EDITION.match(value):
+        return match["form"], f"{match['mm']}{match['yy']}", f"{match['mm']}/{match['yy']}"
+    if (match := _SPACED_EDITION.match(value)) and _a_whole_number(match["form"]):
+        return match["form"], value[len(match["form"]):].strip(), f"{match['mm']}/{match['yy']}"
+    if match := _FULL_YEAR_EDITION.match(value):
+        return match["form"], value[len(match["form"]):].strip(" -"), f"{match['mm']}/{match['yy'][-2:]}"
     return None
 
 
@@ -282,6 +306,125 @@ def split_form_editions(gold: dict[str, Any]) -> list[tuple[str, str]]:
                       f"forms_and_endorsements[{index}].form_number {before!r} -> {form!r}, "
                       f"edition {printed!r}"))
     return notes
+
+
+# --------------------------------------------------------------------------
+# Coverage rows and names (user's rules, 2026-11-04). Labels only: serving keys each value's confidence by its row's
+# place, so a served answer's rows are not moved; a model taught one row per coverage writes one.
+# --------------------------------------------------------------------------
+
+#: The fields of a coverage row that say which row it is, and so are not carried over when two rows become one.
+_COVERAGE_ROW_IDENTITY = frozenset({"coverage_code", "coverage_id", "coverage_name", "limits", "applies_to"})
+
+
+def _plain(cell: Any) -> Any:
+    """A cell's value: an envelope's ``parsed``, else its ``raw``; a plain value as it is."""
+    from common.canonical import values_view
+
+    return values_view(cell)
+
+
+def _blank(value: Any) -> bool:
+    return value in (None, "", [], {})
+
+
+def merge_coverage_limits(gold: dict[str, Any]) -> list[tuple[str, str]]:
+    """One row per coverage, its limits inside ``limits[]``: IN PLACE; one note per row merged in.
+
+    "EACH OCCURRENCE LIMIT" and "GENERAL AGGREGATE LIMIT" on two rows of one code are two limits of one coverage. Rows
+    merge when they share a code and what they apply to, every one holds limits, and no limit type comes twice: two
+    rows that each hold a per-claim and an aggregate limit are two coverages, and one with no limit may be anything.
+    The first row stays and takes the others' limits, each keeping its printed line as its ``description``, so no
+    printed word is lost. A field two rows both fill leaves them apart: nothing is chosen between two values.
+    """
+    rows = gold.get("coverages")
+    if not isinstance(rows, list):
+        return []
+    groups: dict[tuple[str, str], list[int]] = {}
+    for index, row in enumerate(rows):
+        if isinstance(row, dict) and not _blank(_plain(row.get("coverage_code"))):
+            key = (str(_plain(row.get("coverage_code"))), json.dumps(_plain(row.get("applies_to")), sort_keys=True))
+            groups.setdefault(key, []).append(index)
+    notes: list[tuple[str, str]] = []
+    gone: set[int] = set()
+    for (code, _applies), indexes in groups.items():
+        if len(indexes) < 2 or not all(rows[i].get("limits") for i in indexes):
+            continue
+        limits = [limit for i in indexes for limit in rows[i]["limits"]]
+        types = [str(_plain(limit.get("limit_type"))) if isinstance(limit, dict) else "" for limit in limits]
+        if "" in types or len(types) != len(set(types)):
+            continue
+        first, *others = [rows[i] for i in indexes]
+        moved: dict[str, Any] = {}
+        clash = False
+        for other in others:
+            for name, value in other.items():
+                if name in _COVERAGE_ROW_IDENTITY or _blank(_plain(value)):
+                    continue
+                if name in moved or not _blank(_plain(first.get(name))):
+                    clash = True
+                moved[name] = value
+        if clash:
+            continue
+        first.update(moved)
+        for other in others:
+            taken = copy.deepcopy(other["limits"])
+            name = other.get("coverage_name")
+            if not _blank(_plain(name)) and _blank(_plain(taken[0].get("description"))):
+                taken[0]["description"] = copy.deepcopy(name)
+            first["limits"].extend(taken)
+            notes.append(("coverage limits merged",
+                          f"coverages: {code}: {_plain(name)!r} merged into {_plain(first.get('coverage_name'))!r}"))
+        gone.update(indexes[1:])
+    if gone:
+        gold["coverages"] = [row for index, row in enumerate(rows) if index not in gone]
+    return notes
+
+
+def _name_shape(name: str) -> str:
+    """A name with spaces around punctuation gone: printed spacing there is not a broken word."""
+    return re.sub(r"\s*([^\w\s])\s*", r"\1", " ".join(name.split())).casefold()
+
+
+def _spaced_as(name: str, clean: str) -> str:
+    """``name`` keeping its own letters, case and punctuation, with only the spaces ``clean`` has inside words."""
+    out: list[str] = []
+    position = 0
+    text = " ".join(name.split())
+    for index, char in enumerate(text):
+        if not char.isspace():
+            out.append(char)
+            position += 1
+            continue
+        beside_punctuation = not (text[index - 1].isalnum() and text[index + 1].isalnum())
+        if beside_punctuation:
+            out.append(char)
+        elif position < len(clean) and clean[position] == " ":
+            out.append(char)
+            position += 1
+    return "".join(out)
+
+
+def split_name_repairs(names: Iterable[str]) -> dict[str, str]:
+    """``{name: repaired}`` for names OCR broke inside their words, from the same name printed whole elsewhere.
+
+    "each occurrence lim it" is repaired because "each occurrence limit" is in the folder, by the letters alone; a name
+    no other label prints whole stays as it is, and "products / completed" beside "products/completed" are both left
+    alone, since spacing around punctuation is how a page prints them.
+    """
+    shapes: dict[str, set[str]] = {}
+    raw_names = {" ".join(str(name).split()) for name in names if name}
+    for name in raw_names:
+        shape = _name_shape(name)
+        shapes.setdefault(re.sub(r"\s", "", shape), set()).add(shape)
+    repairs: dict[str, str] = {}
+    for name in raw_names:
+        shape = _name_shape(name)
+        variants = shapes[re.sub(r"\s", "", shape)]
+        clean = min(variants, key=lambda variant: variant.count(" "))
+        if shape != clean:
+            repairs[name] = _spaced_as(name, clean)
+    return repairs
 
 
 #: A month and a year as an edition prints them: "04 13", "04-13", "4/2013",

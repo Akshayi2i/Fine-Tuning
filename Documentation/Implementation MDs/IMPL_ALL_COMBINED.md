@@ -1772,6 +1772,20 @@ Consequences, all enforced in code:
 
 ## Current implementation (2026-10-21)
 
+- **The labelling rules of 2026-11-04**, applied by `prepare_bundles` and logged in `corrections.csv`:
+  - **A form's edition belongs in `edition_date`** wherever the page prints it as its own group: ISO numbers, a carrier's
+    run-together month and year (`SSI SF 00 03 0123`), spaced (`CTB CW SLV 06 20`), a full year (`SSPJ-07-2021`) and
+    brackets (`UPD (08-07)`). A number printed as one token (`CG00010413`) stays whole: its parts are not printed on their
+    own, and the printed-value checks would take them for values no page prints.
+  - **One coverage row per coverage** (`label_rules.merge_coverage_limits`, labels only): rows of one code and one
+    `applies_to`, each with limits, no limit type twice, become one row; a merged row's printed name becomes its limit's
+    `description`. Serving does not merge: it keys each value's confidence by its row's place.
+  - **A coverage name OCR broke inside its words** is repaired from the same name printed whole in another document of
+    the folder (`label_rules.split_name_repairs`); spacing around punctuation is left as printed.
+  - **Application pages are no source for forms or coverages.** The golds already follow it (no form or coverage row of
+    the 84 cites only pages reading as an application), so nothing is changed in the labels.
+  - **`additional_fields` stay** (SPEC_21); they are scored apart from field match.
+
 - **MinerU 3.4.5, pipeline backend**: the `ocr` dependency group installs `mineru[pipeline]>=3.4.5,<3.5`
   (plus `six`, which its OCR text system imports, and the training stack's torch 2.8), locked in
   `requirements-ocr.lock` with the same PyMuPDF and pillow as every other environment, so page images are

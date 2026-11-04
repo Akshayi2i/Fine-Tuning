@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from data_pipeline.ingestion.label_rules import PRINTED_NOWHERE, apply_label_rules, page_texts
 
 #: Enough ordinary words that a page's text counts as a whole page.
@@ -518,10 +520,31 @@ def test_a_bracketed_edition_moves_without_its_brackets():
 
 def test_a_form_number_shaped_like_an_edition_is_left_alone():
     """'HO 04 35' is a real form number whose last groups look like MM YY."""
-    gold = _forms("HO 04 35", "CG 00 01", "CG 20 10 04")
+    gold = _forms("HO 04 35", "CG 00 01", "CG 20 10 04", "IPP-2000", "IPP-1005", "WC 00 04 19", "WC310308",
+                  "APDEC 0919", "F2191099", "SAA1000898", "CG00010413", "IL00171198")
     before = copy.deepcopy(gold)
     assert not apply_label_rules(gold, {})
     assert gold == before
+
+
+@pytest.mark.parametrize("number,form,printed,parsed", [
+    ("SSI SF 00 03 0123", "SSI SF 00 03", "0123", "01/23"),
+    ("PGL 00200 0422", "PGL 00200", "0422", "04/22"),
+    ("FS 00 H357 00 1016", "FS 00 H357 00", "1016", "10/16"),
+    ("CTB CW SLV 06 20", "CTB CW SLV", "06 20", "06/20"),
+    ("IL P 001 01 04", "IL P 001", "01 04", "01/04"),
+    ("MUS 01 01 10047 03-18", "MUS 01 01 10047", "03-18", "03/18"),
+    ("SS Privacy 10 21", "SS Privacy", "10 21", "10/21"),
+    ("SSPJ-07-2021", "SSPJ", "07-2021", "07/21"),
+    ("UPD (08-07)", "UPD", "08-07", "08/07"),
+    ("EOD (01/95)", "EOD", "01/95", "01/95"),
+])
+def test_every_shape_a_carrier_prints_its_edition_in_moves_to_edition_date(number, form, printed, parsed):
+    gold = _forms(number)
+    apply_label_rules(gold, {})
+    row = gold["forms_and_endorsements"][0]
+    assert row["form_number"]["raw"] == form
+    assert (row["edition_date"]["raw"], row["edition_date"]["parsed"]) == (printed, parsed)
 
 
 def test_a_filled_edition_date_is_never_overwritten():
@@ -548,7 +571,6 @@ def test_a_frozen_gold_is_scored_under_the_edition_rule_without_being_rewritten(
 # --------------------------------------------------------------------------
 
 
-import pytest  # noqa: E402 - the parametrised tests below
 
 
 @pytest.mark.parametrize(("doc_type", "lob", "applies"), [
