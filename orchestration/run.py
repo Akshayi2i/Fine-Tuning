@@ -449,6 +449,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="accepted so older commands still run; a test split of any size freezes",
     )
     freeze.add_argument(
+        "--mark-templates", dest="mark_templates", action="store_true",
+        help="mark, in the existing frozen set, which documents' templates the model trained on: scores are then "
+             "reported apart. Changes only the marks",
+    )
+    freeze.add_argument(
         "--mark-held-out", dest="mark_held_out", action="store_true",
         help="in the tenant's EXISTING frozen set, mark the documents the delivery calls unseen "
              "carriers' (re-import the batch first); nothing else in the set changes",
@@ -479,13 +484,14 @@ def flag_problem(args: argparse.Namespace) -> str | None:
     """
     if args.command == "freeze-eval-set":
         marks = [flag for flag, given in (("--mark-held-out", args.mark_held_out),
-                                          ("--mark-reviewed", args.mark_reviewed)) if given]
+                                          ("--mark-reviewed", args.mark_reviewed),
+                                          ("--mark-templates", getattr(args, "mark_templates", False))) if given]
         if marks and (args.corpus or args.allow_small):
             # Given together, the freeze flags were dropped without a word.
             return (f"freeze-eval-set {' '.join(marks)} changes the tenant's EXISTING frozen set "
                     "and freezes nothing, so it takes no --corpus or --allow-small")
         if not marks and not args.corpus:
-            return "freeze-eval-set needs --corpus (or --mark-held-out / --mark-reviewed on a frozen set)"
+            return "freeze-eval-set needs --corpus (or --mark-held-out / --mark-reviewed / --mark-templates on a frozen set)"
         return None
     if args.command == "promote":
         from registry_utils.releases import SKIP_SHADOW_MIN_CHARS, is_named_person
@@ -716,15 +722,17 @@ def main(argv: Iterable[str] | None = None) -> int:
         return run_extract(args)
 
     if args.command == "freeze-eval-set":
-        from evaluation.freeze_eval_set import freeze_eval_set, mark_held_out, mark_reviewed
+        from evaluation.freeze_eval_set import freeze_eval_set, mark_held_out, mark_reviewed, mark_templates
         from registry_utils.write_run_manifest import capture_git_commit
 
-        if args.mark_held_out or args.mark_reviewed:
+        if args.mark_held_out or args.mark_reviewed or getattr(args, "mark_templates", False):
             # Each one named runs: given together, --mark-reviewed was skipped
             # without a word.
             marked: dict[str, object] = {}
             if args.mark_held_out:
                 marked["held_out_source_ids"] = mark_held_out(BlobClient(), tenant_id=args.tenant)
+            if getattr(args, "mark_templates", False):
+                marked["templates"] = mark_templates(BlobClient(), tenant_id=args.tenant)
             missing: dict[str, str] = {}
             if args.mark_reviewed:
                 missing = mark_reviewed(BlobClient(), tenant_id=args.tenant)

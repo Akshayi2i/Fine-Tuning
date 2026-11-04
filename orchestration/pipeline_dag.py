@@ -1268,7 +1268,13 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
     # this corpus trained on has changed since (continued_training.fresh_when_golds_changed).
     manifest["gold_sha256"] = stored_gold_hashes(
         ctx.client, {d.source_id: d.doc_type for d in documents if d.source_id in kept}, ctx.tenant_id)
+    # Every document that did not reach the corpus, and why, where the corpus is described: cycle 1 lost 8 documents
+    # below the 25% guard, and the reason was in a run report on the pod and nowhere else.
+    manifest["documents_set_aside"] = dict(built.set_aside)
+    manifest["set_aside"] = [{"source_id": source_id, "reason": reason} for source_id, reason in built.skipped]
     ctx.client.write_json(paths.corpus_manifest(ctx.corpus, ctx.tenant_id), manifest)
+    for source_id, reason in built.skipped:
+        log.warning("corpus %s: %s was set aside: %s", ctx.corpus, source_id, reason)
 
     for warning in coverage.warnings:
         log.warning("corpus coverage: %s", warning)

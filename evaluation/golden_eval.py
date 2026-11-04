@@ -96,6 +96,8 @@ class GoldenDocument:
     lob: str | list[str] | None = None
     is_scanned: bool = False
     synthetic: bool = False
+    #: Whether the model trained on this document's template; ``None`` when the frozen set does not say.
+    template_seen_in_train: bool | None = None
     #: The document's carrier was held out of train and val (Fideon SPEC_09
     #: amendment item 4); evaluation reports these documents apart.
     held_out_carrier: bool = False
@@ -177,6 +179,7 @@ def load_golden_set(
             lob=merge_line(metadata.get("lob")),
             is_scanned=bool(metadata.get("is_scanned", False)),
             synthetic=bool(metadata.get("synthetic", False)),
+            template_seen_in_train=metadata.get("template_seen_in_train"),
             held_out_carrier=bool(metadata.get("held_out_carrier", False)),
             carrier=str(metadata["carrier"]) if metadata.get("carrier") else None,
             carrier_seen_in_train=(metadata["carrier_seen_in_train"]
@@ -484,6 +487,7 @@ def _read(context: _ReadContext, doc: GoldenDocument, mode: str, *, repeat: bool
         "is_scanned": doc.is_scanned,
         "synthetic": doc.synthetic,
         "held_out_carrier": doc.held_out_carrier,
+        "template_seen_in_train": doc.template_seen_in_train,
         "page_count": len(doc.image_keys),
     }
     if doc.carrier:

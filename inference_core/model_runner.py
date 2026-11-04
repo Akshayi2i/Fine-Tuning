@@ -604,11 +604,17 @@ class VLLMBackend(ModelBackend):
         try:
             with stall_guard(getattr(configs[0], "call_timeout_seconds", None),
                              f"a vLLM call of {len(messages_list)} request(s)"):
-                outputs = engine.chat([to_vllm_messages(m) for m in messages_list], params,
-                                      lora_request=self._lora(adapter))
+                requests = [to_vllm_messages(m) for m in messages_list]
+                decoded = time.perf_counter()
+                outputs = engine.chat(requests, params, lora_request=self._lora(adapter))
         except Exception as exc:  # noqa: BLE001 - the whole batch failed; say so per slot
             return [exc for _ in messages_list]
-        latency_ms = (time.perf_counter() - started) * 1000
+        finished = time.perf_counter()
+        latency_ms = (finished - started) * 1000
+        # Where a call's time goes, for the speed work: reading the pages here, then the engine (its own request
+        # preparation and generation together, which it does not report apart).
+        log.info("vLLM call of %d request(s): %.1f s reading pages, %.1f s in the engine",
+                 len(messages_list), decoded - started, finished - decoded)
 
         results: list[Generation | Exception] = []
         for index, config in enumerate(configs):

@@ -26,6 +26,8 @@ dependencies = [
 # right groups per pod, in the right order - see scripts/setup_pod.sh.
 data = [
     "azure-storage-blob>=12.19,<13", "pypdf>=4.0",
+    # The Blob client's transport (artifact_registry.blob_client._pooled_transport).
+    "requests>=2.31,<3",
     # One pillow for every environment: it encodes and resizes the page images
     # the model trains on (rendered in the OCR environment) and is served.
     "pillow>=11,<12",

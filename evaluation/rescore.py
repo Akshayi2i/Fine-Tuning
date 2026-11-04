@@ -365,6 +365,10 @@ def _rescore(
                            "(changed in place since)")
 
     triples, settings = _readings(documents, rows)
+    # A mark made after these answers were stored (freeze_eval_set.mark_templates) still splits them.
+    seen = {doc.source_id: doc.template_seen_in_train for doc in documents}
+    for _gold, _answer, metadata in triples:
+        metadata["template_seen_in_train"] = seen.get(metadata.get("source_id"))
     corpus_version = str(header.get("corpus_version") or stored.get("corpus_version") or "")
     report = build_report(version, triples, corpus_version=corpus_version)
     body = report.as_dict()

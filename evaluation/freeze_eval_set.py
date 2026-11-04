@@ -128,6 +128,42 @@ def frozen_manifest(client: BlobClient, *, tenant_id: str | None = None) -> dict
     return client.read_json(key) if client.exists(key) else {}
 
 
+#: A test document whose carrier's template the model trained on: at least this share of its pages' text is on
+#: training documents' pages. The share the near-copy report starts at (data_pipeline.near_copies).
+TEMPLATE_SEEN_SHARE = 0.5
+
+
+def _train_page_keys(client: BlobClient, corpus_manifest: dict[str, Any], tenant_id: str | None) -> set[str] | None:
+    """Every page of the corpus's training documents, by its text; ``None`` when the manifest names no training set."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from evaluation.metrics.near_copy import _page_keys
+
+    train = (corpus_manifest.get("source_ids_by_split") or {}).get("train")
+    if not train:
+        return None
+    keys: list[str] = []
+    for doc_type in corpus_manifest.get("doc_types") or ("policy",):
+        for source_id in train:
+            keys += [key for key in client.list(paths.processed_dir(doc_type, source_id, tenant_id))
+                     if key.endswith(".md")]
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        texts = list(pool.map(client.read_text, keys))
+    return _page_keys(dict(enumerate(texts)))
+
+
+def template_seen(page_texts: dict[Any, str], train_keys: set[str] | None) -> dict[str, Any]:
+    """Whether the model trained on this document's template: what a frozen document's metadata records, so the gate
+    reports the documents apart (``run_eval.subset_of``). Empty when it cannot be told."""
+    from evaluation.metrics.near_copy import _page_keys
+
+    pages = _page_keys(page_texts)
+    if train_keys is None or not pages:
+        return {}
+    share = len(pages & train_keys) / len(pages)
+    return {"template_seen_in_train": share >= TEMPLATE_SEEN_SHARE, "pages_shared_with_train": round(share, 4)}
+
+
 def _small_types(per_type: dict[str, int], *, real: bool) -> dict[str, int]:
     """The types under :data:`MIN_FROZEN_DOCS_PER_TYPE`, said in the log. Never a refusal: whatever the split puts in
     test is the exam (user, 2026-11-04). What is refused is a type with nothing in the test split, since nothing of it
@@ -239,6 +275,7 @@ def freeze_eval_set(
     split = corpus_manifest.get("split_assignment") or {}
     held_out_ids = set(split.get("held_out_source_ids") or [])
     frozen_held_out: list[str] = []
+    train_keys = _train_page_keys(client, corpus_manifest, tenant_id)
 
     by_type: dict[str, int] = {}
     by_line: dict[str, int] = {}
@@ -252,6 +289,7 @@ def freeze_eval_set(
             raise FreezeError(f"{source_id} records no pages; it cannot be evaluated")
 
         base = f"{root}/{source_id}"
+        page_texts: dict[int, str] = {}
         for page in range(1, page_count + 1):
             client.write_bytes(
                 f"{base}/page_{page}.png",
@@ -259,7 +297,8 @@ def freeze_eval_set(
             )
             md = paths.processed_page(doc_type, source_id, page, "md", tenant_id)
             if client.exists(md):
-                client.write_text(f"{base}/page_{page}.md", client.read_text(md))
+                page_texts[page] = client.read_text(md)
+                client.write_text(f"{base}/page_{page}.md", page_texts[page])
         client.write_json(f"{base}/metadata.json", {
             "doc_type": doc_type,
             "acord_form": metadata.get("acord_form"),
@@ -278,6 +317,8 @@ def freeze_eval_set(
             # SPEC_09 amendment item 4): held out by the split, or marked so by the
             # delivery. Evaluation reports these apart.
             "held_out_carrier": held_out_carrier(source_id, metadata, held_out_ids),
+            # Whether the model trained on its template: scores are reported apart by it (user, 2026-11-04).
+            **template_seen(page_texts, train_keys),
             # Who reviewed the gold and when, what drafted it, and a twin's seed:
             # the gate scores a frozen gold only with a review record here.
             **review_record(metadata),
@@ -380,6 +421,31 @@ def with_delivered_carriers(
         carriers = ({known} if isinstance(known, str) else set(known or ())) | {carrier}
         lines[line] = carrier if len(carriers) == 1 else sorted(carriers)
     return {doc_type: dict(sorted(lines.items())) for doc_type, lines in sorted(merged.items())}
+
+
+def mark_templates(client: BlobClient, *, tenant_id: str | None = None) -> dict[str, Any]:
+    """Mark, in an existing frozen set, which documents' templates the model trained on. Returns the marks.
+
+    For a set frozen before the mark was recorded. Only the marks change, never the documents, labels or pages, so the
+    yardstick stays the one every version was scored on.
+    """
+    root = paths.golden_eval_set_dir(tenant_id)
+    manifest = frozen_manifest(client, tenant_id=tenant_id)
+    if not manifest:
+        raise FreezeError(f"no frozen eval set at {root}/ to mark")
+    corpus = manifest.get("frozen_from_corpus")
+    train_keys = _train_page_keys(client, client.read_json(paths.corpus_manifest(corpus, tenant_id)), tenant_id)
+    if train_keys is None:
+        raise FreezeError(f"the manifest of corpus {corpus} names no training documents, so nothing can be marked")
+    marks: dict[str, Any] = {}
+    for source_id in manifest.get("source_ids") or []:
+        keys = [key for key in client.list(f"{root}/{source_id}/") if key.endswith(".md")]
+        mark = template_seen({key: client.read_text(key) for key in keys}, train_keys)
+        key = f"{root}/{source_id}/metadata.json"
+        client.write_json(key, {**client.read_json(key), **mark})
+        marks[source_id] = mark
+    log.info("marked the templates of %d frozen document(s) in %s", len(marks), root)
+    return marks
 
 
 def mark_held_out(client: BlobClient, *, tenant_id: str | None = None) -> list[str]:

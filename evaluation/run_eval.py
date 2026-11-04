@@ -534,6 +534,8 @@ class EvalReport:
             ("noisy_ocr", "ocr_arbitration_accuracy"),
             # Reported, never gated (gating.GATING_METRICS leaves it out).
             ("held_out_carrier", "held_out_carrier_match"),
+            ("template_seen", "template_seen_match"),
+            ("template_unseen", "template_unseen_match"),
         ):
             scores: list[tuple[float, int]] = [
                 (value, s.documents)
@@ -727,6 +729,11 @@ def subset_of(document: dict[str, Any]) -> list[str]:
     # Its subset report carries accuracy per line.
     if document.get("held_out_carrier"):
         subsets.append("held_out_carrier")
+    # Reported, not expected: a template the model trained on, or never saw (user, 2026-11-04). Production gets both.
+    if document.get("template_seen_in_train") is True:
+        subsets.append("template_seen")
+    elif document.get("template_seen_in_train") is False:
+        subsets.append("template_unseen")
     return subsets
 
 
