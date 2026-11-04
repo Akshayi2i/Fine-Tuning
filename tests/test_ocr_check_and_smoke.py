@@ -339,3 +339,23 @@ def test_the_smoke_preflight_skips_the_corpus_build_only_when_finetune_builds_it
     alone = commands(batch_dir=tmp, subset_dir=tmp, tenant="smoke", version="v0", check_out=tmp,
                      steps=["preflight"])
     assert "--skip-corpus" not in alone["preflight"]
+
+
+def test_the_check_after_ocr_reports_rows_read_from_an_application_on_a_scan_and_still_passes_it(tmp_path):
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    label = {"forms_and_endorsements": [{"form_number": env("CG 00 01 form", page=2)}],
+             "policy": {"policy_number": env("POL-12345")}}
+    client.write_json(paths.golden_label("policy", "policy_0001"), label)
+    client.write_json(paths.label_metadata("policy", "policy_0001"), {"lob": "gl"})
+    client.write_json(paths.ocr_meta("policy", "policy_0001"), {"page_count": 2})
+    client.write_text(paths.processed_page("policy", "policy_0001", 1, "md"), "POL-12345")
+    client.write_text(paths.processed_page("policy", "policy_0001", 2, "md"), "# APPLICANT INFORMATION\nCG 00 01 form")
+
+    report = run_check(client, "policy")
+    assert report.documents_with_application_pages == 1
+    assert [row["source_id"] for row in report.application_rows] == ["policy_0001"]
+    assert "(page 2)" in report.application_rows[0]["problem"]
+
+    written = write_report(report, tmp_path)
+    assert written["application_rows"] == report.application_rows and written["failing_documents"] == []
+    assert "Application pages: 1 document(s)" in (tmp_path / "report.md").read_text(encoding="utf-8")

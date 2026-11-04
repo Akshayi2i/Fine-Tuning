@@ -479,7 +479,7 @@ def label_rules_apply(doc_type: str | None, lob: Any) -> bool:
     corrects a gold on (``prepare_bundles.corrected_gold``) and serving holds an
     answer to them on (``serving.conventions.conform``); the importers' check,
     the corpus build, the gate and the harness read a gold under them there and
-    nowhere else. A self-contained line (auto, wc, umbrella) keeps an edition
+    nowhere else. A self-contained line keeps an edition
     in its form number - nothing ever moved it, in its golds or in its answers -
     so asking it of that line's golds asked what no step on the line produces.
     """

@@ -50,6 +50,7 @@ import random
 import re
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cache, lru_cache
 from pathlib import Path
@@ -128,6 +129,9 @@ class DocumentAudit:
     template_id: str | None = None
     #: The label's part in label_consistency; None without a readable label.
     labels: LabelFacts | None = None
+    #: Pages that read as an application form, and the form or coverage rows citing only those.
+    application_pages: list[int] = field(default_factory=list)
+    application_rows: int = 0
 
     @property
     def digital(self) -> bool:
@@ -175,6 +179,62 @@ def iter_envelopes(node: Any, path: str = ""):
     elif isinstance(node, list):
         for index, value in enumerate(node):
             yield from iter_envelopes(value, f"{path}[{index}]")
+
+
+# --------------------------------------------------------------------------
+# Application pages: never a source for forms or coverages (labelling rule 5)
+# --------------------------------------------------------------------------
+
+#: What an application form prints and a policy's own wording does not. Read on the real PDFs: the word alone also
+#: matches "application of limits", a fraud warning and "applicant for employment", and "Applicant Name" or
+#: "Applicant's Signature" sit on election forms attached to the policy, which are forms a gold rightly lists.
+_APPLICATION_PHRASE = re.compile(r"\bapplication id\b|\bapplicant information\b|\bapplication agreement\b", re.IGNORECASE)
+#: A heading of capitals naming an application: "PREMIUM CREDIT APPLICATION", "APPLICATION FOR INSURANCE". Not a line
+#: that starts as a sentence does: a fraud notice prints "IN AN APPLICATION FOR INSURANCE IS GUILTY OF A CRIME" in capitals.
+_APPLICATION_HEADING = re.compile(
+    r"^(?:(?!(?:ADDENDUM|IN|AN|A|THE|ANY|OF|AND|OR|TO|YOUR|THIS|SUCH)\b)[A-Z][A-Z &/,-]* )?APPLICATION(?: FOR [A-Z &/,-]+)?$")
+#: More words than this is running text, whatever its capitals.
+_APPLICATION_HEADING_WORDS = 6
+#: Pages between two application pages this close are read as the same application, whatever they print themselves.
+APPLICATION_SPAN_PAGES = 5
+#: The rows the rule is about.
+_FORM_OR_COVERAGE = re.compile(r"(?:^|\.)(?:forms_and_endorsements\[\d+\]\.form_number|coverages\[\d+\]\.coverage_name)$")
+
+
+def application_pages(page_texts: Sequence[str]) -> set[int]:
+    """The pages (from 1) that read as an application form. A page with no text is not judged."""
+    signals = []
+    for number, text in enumerate(page_texts, start=1):
+        lines = (" ".join(line.lstrip("# ").split()) for line in (text or "").splitlines())
+        if any(_APPLICATION_PHRASE.search(line)
+               or (_APPLICATION_HEADING.match(line) and len(line.split()) <= _APPLICATION_HEADING_WORDS) for line in lines):
+            signals.append(number)
+    pages = set(signals)
+    for first, second in zip(signals, signals[1:], strict=False):
+        if second - first <= APPLICATION_SPAN_PAGES:
+            pages.update(range(first, second))
+    return pages
+
+
+def rows_only_on_application_pages(label: Any, pages: set[int]) -> list[tuple[str, list[int]]]:
+    """``(path, cited pages)`` of each form or coverage row citing only ``pages``. One that also cites another page
+    is not counted: a value cites every page that prints it, and it has a source besides the application."""
+    if not pages or not isinstance(label, dict):
+        return []
+    found = []
+    for path, envelope in iter_envelopes(label):
+        if _FORM_OR_COVERAGE.search(path):
+            refs = [ref for ref in _refs(envelope) if isinstance(ref, int)]
+            if refs and set(refs) <= pages:
+                found.append((path, refs))
+    return found
+
+
+def application_note(rows: list[tuple[str, list[int]]]) -> str:
+    """What a person is told about such rows."""
+    shown = ", ".join(f"{path} (page {','.join(map(str, refs))})" for path, refs in rows[:8])
+    return (f"{len(rows)} form or coverage row(s) cite only pages that read as an application, which is never a source "
+            f"for them: {shown}. Read the page: the test goes by the page's wording, so it can be wrong")
 
 
 # --------------------------------------------------------------------------
@@ -362,6 +422,12 @@ def audit_document(folder: Path, report: AuditReport, checksums: dict[str, str])
     _check_formats(name, envelopes, report)
     # ---- 5. label consistency: compared across the folder (label_consistency)
     audit.labels = label_facts(label, lob)
+    # ---- 6. application pages: a warning, since the test goes by a page's wording
+    audit.application_pages = sorted(application_pages(page_texts))
+    rows = rows_only_on_application_pages(label, set(audit.application_pages))
+    audit.application_rows = len(rows)
+    if rows:
+        warn("application_pages", application_note(rows))
     return audit
 
 
@@ -962,6 +1028,12 @@ def summary(report: AuditReport) -> dict[str, Any]:
         "label_consistency": {kind: sum(1 for f in consistency if f.kind == kind) for kind in CONSISTENCY_KINDS},
         "label_consistency_fields": {kind: sorted({f.path for f in consistency if f.kind == kind})
                                      for kind in CONSISTENCY_KINDS},
+        "application_pages": {
+            "documents": sum(1 for d in docs if d.application_pages),
+            "pages": sum(len(d.application_pages) for d in docs),
+            "rows_citing_only_them": sum(d.application_rows for d in docs),
+            "pages_not_judged_no_text": sum(d.pages - d.text_pages for d in docs),
+        },
         "documents_per_line": dict(sorted(lines.items())),
         "lines_too_small_to_measure": sorted(
             line for line, n in lines.items() if n < MIN_DOCS_TO_MEASURE_LINE),
@@ -1044,6 +1116,15 @@ def render(report: AuditReport, facts: dict[str, Any]) -> str:
     for kind in CONSISTENCY_KINDS:
         named = fields[kind]
         lines.append(f"- {counted[kind]} {len(named)} field(s)" + (f": {', '.join(named)}" if named else ""))
+    applications = facts["application_pages"]
+    lines += [
+        "",
+        f"## Application pages: {applications['rows_citing_only_them']} form or coverage row(s) cite only them",
+        "An application is never a source for forms or coverages. The test goes by a page's wording: each row is listed "
+        "in warnings.csv for a person to read; nothing here blocks.",
+        f"- pages that read as an application: {applications['pages']} in {applications['documents']} document(s)",
+        f"- pages with no text, not judged here: {applications['pages_not_judged_no_text']} (the check after OCR covers them)",
+    ]
     lines += ["", "## Totals", "| Line | Documents |", "|---|---|"]
     lines += [f"| {k} | {v} |" for k, v in facts["documents_per_line"].items()]
     lines += [

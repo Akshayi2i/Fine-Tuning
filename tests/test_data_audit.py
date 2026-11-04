@@ -8,7 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from data_pipeline.audit import appears, audit_folder, main, normalise, summary
+from data_pipeline.audit import (
+    appears,
+    application_pages,
+    audit_folder,
+    main,
+    normalise,
+    rows_only_on_application_pages,
+    summary,
+)
 
 pymupdf = pytest.importorskip("pymupdf")
 
@@ -285,3 +293,70 @@ def test_the_command_refuses_a_line_with_no_schema(tmp_path, capsys):
 def test_the_audit_output_is_never_committed():
     ignore = (Path(__file__).resolve().parent.parent / ".gitignore").read_text(encoding="utf-8")
     assert "data/audit_report/" in ignore
+
+
+# --------------------------------------------------------------------------
+# Application pages: never a source for forms or coverages
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("line", [
+    "General Liability Application ID: 3293395", "APPLICANT INFORMATION", "Applicant Information", "APPLICATION AGREEMENT",
+    "WORKERS COMPENSATION PREMIUM CREDIT APPLICATION", "APPLICATION FOR INSURANCE", "APPLICATION", "# APPLICATION AGREEMENT",
+])
+def test_a_page_with_an_applications_wording_reads_as_one(line):
+    assert application_pages(["declarations", f"top\n{line}\nbottom"]) == {2}
+
+
+@pytest.mark.parametrize("line", [
+    "Application of Other Exclusions", "(9) Application of Coverage", "dispersal or application of radioactive material,",
+    "When the property is subject to the Anti-arson", "Application", "Employee or applicant for employment",
+    "Applicant Name (Print)", "Policyholder/Applicant's Signature", "ADDENDUM TO THE APPLICATION",
+    "ADDENDUM TO THE DECLARATIONS AND APPLICATION -", "A. \u201cApplication\u201d means:",
+    "application for insurance by the insured. This", "IN AN APPLICATION FOR INSURANCE IS GUILTY OF A CRIME AND MAY BE SUBJECT",
+    "APPLICATION FOR INSURANCE IS GUILTY OF A CRIME AND MAY BE SUBJECT", "IN THE APPLICATION",
+])
+def test_policy_wording_and_forms_attached_to_a_policy_do_not(line):
+    """Each is a line that really sits on a policy page or an attached form in the cycle 1 PDFs."""
+    assert application_pages([f"top\n{line}\nbottom"]) == set()
+
+
+def test_pages_between_two_application_pages_close_together_are_the_same_application():
+    pages = ["x"] * 12
+    pages[1], pages[5] = "APPLICANT INFORMATION", "APPLICATION AGREEMENT"
+    assert application_pages(pages) == {2, 3, 4, 5, 6}
+    pages[5], pages[10] = "x", "APPLICATION AGREEMENT"                     # 9 pages apart: not read as one
+    assert application_pages(pages) == {2, 11}
+
+
+def _row(field_name, value, *pages):
+    return {field_name: {"raw": value, "parsed": value, "confidence": {"score": 1.0, "source": "vlm"},
+                         "page_ref": list(pages), "flagged": False}}
+
+
+def test_only_a_form_or_coverage_row_citing_nothing_else_is_counted():
+    label = {"forms_and_endorsements": [_row("form_number", "ONLY", 5), _row("form_number", "BOTH", 2, 5),
+                                        _row("form_number", "ELSE", 2)],
+             "coverages": [_row("coverage_name", "Fire", 5, 6)],
+             "named_insured": _row("primary_name", "On the application too", 5)}
+    assert rows_only_on_application_pages(label, {5, 6}) == [
+        ("forms_and_endorsements[0].form_number", [5]), ("coverages[0].coverage_name", [5, 6])]
+    assert rows_only_on_application_pages(label, set()) == []
+
+
+def test_the_audit_warns_and_never_blocks_on_a_row_read_from_an_application(tmp_path):
+    golden = copy.deepcopy(GOLDEN)
+    golden["forms_and_endorsements"] = [_row("form_number", "CG 00 01", 2)]
+    _document(tmp_path, "from_application", golden=golden,
+              pages=[PAGE_1, ["APPLICANT INFORMATION", "Form CG 00 01 requested"]])
+    report = audit_folder(tmp_path)
+    found = [f for f in report.findings if f.check == "application_pages"]
+    assert [f.severity for f in found] == ["warning"]
+    assert "forms_and_endorsements[0].form_number (page 2)" in found[0].detail
+    assert "CG 00 01" not in found[0].detail                                # the path and page, no value
+    assert report.documents[0].application_pages == [2]
+    assert summary(report)["application_pages"]["rows_citing_only_them"] == 1
+
+
+def test_a_clean_document_reports_no_application_rows_and_counts_pages_it_could_not_read(tmp_path):
+    _document(tmp_path, "good", pages=[PAGE_1, []])
+    facts = summary(audit_folder(tmp_path))["application_pages"]
+    assert facts == {"documents": 0, "pages": 0, "rows_citing_only_them": 0, "pages_not_judged_no_text": 1}

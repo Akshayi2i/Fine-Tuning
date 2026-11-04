@@ -49,7 +49,17 @@ from typing import Any
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
-from data_pipeline.audit import MIN_CHECKABLE_CHARS, _appears, _Page, _refs, iter_envelopes, normalise
+from data_pipeline.audit import (
+    MIN_CHECKABLE_CHARS,
+    _appears,
+    _Page,
+    _refs,
+    application_note,
+    application_pages,
+    iter_envelopes,
+    normalise,
+    rows_only_on_application_pages,
+)
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +115,9 @@ class OcrCheckReport:
     documents: int = 0
     skipped: Counter = field(default_factory=Counter)
     details: list[DocumentFacts] = field(default_factory=list)
+    #: Labelling rule 5 on the OCR text, which reaches the scans the audit cannot read. Reported, never failed on.
+    documents_with_application_pages: int = 0
+    application_rows: list[dict[str, str]] = field(default_factory=list)
 
     def rate(self, rows: list[Row]) -> float | None:
         """Share of checkable values found on a page they cite."""
@@ -223,6 +236,11 @@ def run_check(client: BlobClient, doc_type: str, *, tenant_id: str | None = None
         report.rows += rows
         report.details.append(document_facts(source_id, rows, texts, kind=kind, line=line,
                                              document_kind=metadata.get("document_kind")))
+        on_application = application_pages(texts)
+        report.documents_with_application_pages += bool(on_application)
+        only = rows_only_on_application_pages(label, on_application)
+        if only:
+            report.application_rows.append({"source_id": source_id, "problem": application_note(only)})
         report.documents += 1
         if (index + 1) % 100 == 0:
             log.info("checked %d documents", index + 1)
@@ -282,6 +300,8 @@ def write_report(report: OcrCheckReport, out: Path, max_gap: float = DEFAULT_MAX
         "failing_documents": [{"source_id": sid, "problem": what}
                               for sid, what in document_problems(report.details, floors)],
         "blank_pages": sum(d.blank_pages for d in report.details),
+        "documents_with_application_pages": report.documents_with_application_pages,
+        "application_rows": report.application_rows,
         "passed": passed,
         "verdict": reason,
     }
@@ -306,7 +326,10 @@ def write_report(report: OcrCheckReport, out: Path, max_gap: float = DEFAULT_MAX
         lines.append(f"| {group} | {facts['values']} | {facts['found_rate']} |")
     lines += ["", "| Line | Values | Found on its page |", "|---|---|---|"]
     lines += [f"| {k} | {v['values']} | {v['found_rate']} |" for k, v in summary["by_line"].items()]
-    lines += ["", "Worst documents: summary.json `worst_documents`; every value: value_checks.csv.",
+    lines += ["", f"Application pages: {report.documents_with_application_pages} document(s) hold some; "
+              f"{len(report.application_rows)} of them have form or coverage rows citing only those pages "
+              "(summary.json `application_rows`, for a person to read; this does not fail the check).",
+              "", "Worst documents: summary.json `worst_documents`; every value: value_checks.csv.",
               "", "> The CSV quotes label values (personal data). Keep it on the pod's volume."]
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return summary
