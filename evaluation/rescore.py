@@ -377,6 +377,9 @@ def _rescore(
     body["invention_coverage"] = {"borrowed_from": TEXT_DONOR_MODE, **report.invention_coverage()}
     body["eval_set"] = eval_set_record(client, tenant_id, documents)
     body.update(golden_eval.real_only_section(version, triples, corpus_version=corpus_version))
+    from evaluation.metrics.near_copy import consistency_section
+
+    body.update(consistency_section(documents, triples, body))
     # Against the release promoted when it was scored: not recomputed.
     body["field_delta_vs_promoted"] = None
     body["answers_stored"] = copy.deepcopy(record)

@@ -1052,7 +1052,7 @@ def render(report: AuditReport, facts: dict[str, Any]) -> str:
          else f"- split at this volume: {facts['split_ratio']}"),
         "- expected test documents: "
         f"{facts['expected_test_documents']} "
-        f"({'enough' if facts['test_meets_freeze_minimum'] else 'BELOW'} the 150 needed to freeze)",
+        f"({'a full-size set' if facts['test_meets_freeze_minimum'] else 'a small set, so wide intervals'})",
         f"- lines too small to measure (<5): {facts['lines_too_small_to_measure'] or 'none'}",
         f"- page counts: {facts['page_count_spread']}",
         "",

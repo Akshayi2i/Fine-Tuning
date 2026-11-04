@@ -54,6 +54,8 @@ class FreezeError(RuntimeError):
 #: near 80% is known to about ±3 points (one standard error: sqrt(0.8·0.2/150));
 #: below it the gate cannot tell a regression of a few points from noise, and the
 #: set cannot grow once frozen.
+#: Below this a report says its scores have wide intervals. Nothing is refused or capped for it: whatever the split
+#: puts in test is the exam (user, 2026-11-04).
 MIN_FROZEN_DOCS_PER_TYPE = 150
 
 
@@ -126,18 +128,17 @@ def frozen_manifest(client: BlobClient, *, tenant_id: str | None = None) -> dict
     return client.read_json(key) if client.exists(key) else {}
 
 
-def _refuse_small(per_type: dict[str, int], allow_small: bool, *, real: bool) -> dict[str, int]:
-    """The types under :data:`MIN_FROZEN_DOCS_PER_TYPE`; refused unless ``allow_small``.
-    ``real``: ``per_type`` counts real documents only."""
+def _small_types(per_type: dict[str, int], *, real: bool) -> dict[str, int]:
+    """The types under :data:`MIN_FROZEN_DOCS_PER_TYPE`, said in the log. Never a refusal: whatever the split puts in
+    test is the exam (user, 2026-11-04). What is refused is a type with nothing in the test split, since nothing of it
+    would be frozen. ``real``: ``per_type`` counts real documents only."""
     small = {t: n for t, n in sorted(per_type.items()) if n < MIN_FROZEN_DOCS_PER_TYPE}
-    if small and not allow_small:
-        counted = "real document(s)" if real else "document(s)"
-        raise FreezeError(
-            f"the test split would freeze only {small} {counted} for these types, under "
-            f"the {MIN_FROZEN_DOCS_PER_TYPE} real documents a permanent eval set needs (synthetic "
-            "twins do not count). The set cannot grow once frozen, so freeze from a build holding most of the "
-            "labeled documents. To freeze a smaller set anyway (a pilot), pass --allow-small."
-        )
+    counted = "real document(s)" if real else "document(s)"
+    empty = {t: n for t, n in sorted(per_type.items()) if not n}
+    if empty or not per_type:
+        raise FreezeError(f"the test split holds no {counted} for {empty}, so there is nothing to freeze for them")
+    if small:
+        log.info("freezing %s %s for these types: a small set, so its scores have wide intervals", small, counted)
     return small
 
 
@@ -216,14 +217,14 @@ def freeze_eval_set(
     per_type: dict[str, int] = {t: 0 for t in corpus_manifest.get("doc_types") or ()}
     for doc_type in documents.values():
         per_type[doc_type] = per_type.get(doc_type, 0) + 1
-    _refuse_small(per_type, allow_small, real=False)
+    _small_types(per_type, real=False)
     loaded = {source_id: load_golden_label(source_id, doc_type, client, tenant_id)
               for source_id, doc_type in sorted(documents.items())}
     real_per_type = dict.fromkeys(per_type, 0)
     for source_id, doc_type in documents.items():
         if not (loaded[source_id][1] or {}).get("synthetic", False):
             real_per_type[doc_type] += 1
-    small = _refuse_small(real_per_type, allow_small, real=True)
+    small = _small_types(real_per_type, real=True)
     unreviewed = [(source_id, problem) for source_id, (label, metadata) in loaded.items()
                   if (problem := review_problem(label, metadata))]
     if unreviewed:

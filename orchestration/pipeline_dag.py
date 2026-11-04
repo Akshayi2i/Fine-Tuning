@@ -3009,9 +3009,8 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
                 "line to the runs before it (decision 2026-10-23). "
                 f"Re-run training for this version rather than gating blind ({exc})."
             ) from exc
-    # The set the candidate was scored on. Fewer real documents than the
-    # minimum caps the release at interim, with a warning (eval_set_size). A
-    # count nothing records is not shown to be large enough.
+    # The set the candidate was scored on, recorded and warned about when small (eval_set_size). It caps nothing:
+    # whatever the split puts in test is the exam (user, 2026-11-04).
     eval_set = frozen_manifest(ctx.client, tenant_id=ctx.tenant_id)
     scored_on, counted_from = eval_set_size(ctx, eval_set, warnings=pairing)
     small = not scored_on or any(n < MIN_FROZEN_DOCS_PER_TYPE for n in scored_on.values())
@@ -3118,9 +3117,7 @@ def stage_evaluation_gate(ctx: StageContext) -> StageResult:
             "real_documents_by_doc_type": eval_set.get("real_documents_by_doc_type"),
             "frozen_from_corpus": eval_set.get("frozen_from_corpus"),
             "frozen_at": eval_set.get("frozen_at"),
-            # What decided the interim cap: the real documents per type the
-            # candidate was scored on, where that count was read, and the
-            # minimum it was held to.
+            # The real documents per type the candidate was scored on, and where that count was read.
             "scored_documents_by_doc_type": scored_on,
             "scored_documents_counted_from": counted_from,
             "minimum_per_doc_type": MIN_FROZEN_DOCS_PER_TYPE,
@@ -3640,9 +3637,8 @@ def assert_not_released(ctx: StageContext) -> None:
 
 def _freeze_command(ctx: StageContext) -> str:
     corpus = ctx.corpus_version or ctx.corpus or "<corpus>"
-    return (f"python -m orchestration.run freeze-eval-set --corpus {corpus} --allow-small   "
-            "(--allow-small only for a pilot under 150 documents per type; then add "
-            "`freeze-eval-set --mark-reviewed`)")
+    return (f"python -m orchestration.run freeze-eval-set --corpus {corpus}   "
+            "(then `freeze-eval-set --mark-reviewed`)")
 
 
 def _corpus_exists(ctx: StageContext) -> bool:

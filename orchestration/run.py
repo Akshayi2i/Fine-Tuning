@@ -446,7 +446,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the tenant whose corpus is frozen into golden-eval-set/{tenant}/")
     freeze.add_argument(
         "--allow-small", dest="allow_small", action="store_true",
-        help="freeze even when a document type has fewer than 150 test documents (a pilot)",
+        help="accepted so older commands still run; a test split of any size freezes",
     )
     freeze.add_argument(
         "--mark-held-out", dest="mark_held_out", action="store_true",

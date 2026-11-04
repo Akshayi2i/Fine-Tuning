@@ -143,7 +143,6 @@ def test_the_tier_thresholds_are_named_constants():
     assert gating.PRODUCTION_LOWER_BOUND == 0.90
     assert gating.CONFIRMED_LOWER_BOUND == 0.92
     assert gating.TIER_CONFIDENCE == 0.95
-    assert gating.PRODUCTION_MIN_REAL_DOCUMENTS == 150
     assert bootstrap.RESAMPLES == 10_000 and isinstance(bootstrap.SEED, int)
 
 

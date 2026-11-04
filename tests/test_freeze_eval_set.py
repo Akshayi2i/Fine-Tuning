@@ -137,13 +137,11 @@ def test_a_rebuild_after_freezing_trains_on_none_of_the_eval_set(client, control
     assert not client.read_text(paths.corpus_eval_split("v2", "test", None)).strip()
 
 
-def test_a_pilot_sized_set_is_not_frozen_by_accident(client, controller):
-    ctx = _built_corpus(client, controller)
-    if not _test_ids(client, ctx):
-        pytest.skip("the fixture corpus drew no test document")
-    with pytest.raises(FreezeError, match="allow-small"):
-        freeze_eval_set(client, ctx.corpus)
-    assert not is_frozen(client)
+def test_a_test_split_of_any_size_freezes_with_no_flag(client):
+    """Whatever the split puts in test is the exam (user, 2026-11-04): no minimum, and --allow-small is not asked."""
+    _seed_test_split(client, "t", "v1", {"policy_0001": {}})
+    assert freeze_eval_set(client, "v1", tenant_id="t")["small_set_accepted"] is True
+    assert client.list(paths.golden_eval_set_dir("t"))
 
 
 # --------------------------------------------------------------------------
@@ -212,19 +210,19 @@ def test_the_manifest_counts_real_documents_and_real_policies_per_line(client):
     assert manifest["real_policies_by_line"] == {"homeowners": 1}
 
 
-def test_synthetic_twins_do_not_count_toward_the_freeze_minimum(client, monkeypatch):
-    """Decision 2026-10-22, as the gate's minimum: three test documents, two of
-    them twins of one seed, are one real document."""
-    import evaluation.freeze_eval_set as F
-
-    monkeypatch.setattr(F, "MIN_FROZEN_DOCS_PER_TYPE", 2)
+def test_synthetic_twins_do_not_count_as_real_documents(client):
+    """Decision 2026-10-22: three test documents, two of them twins of one seed, are one real document. A test split
+    of twins alone holds no real document, so there is nothing to freeze for it."""
     twin = {"synthetic": True, "review_inherited_from": "homeowners/seed_1"}
     _seed_test_split(client, "t", "v1", {"policy_0001": {}, "policy_0002": {}, "policy_0003": {}},
                      metadata={"policy_0002": twin, "policy_0003": twin})
-    with pytest.raises(FreezeError, match=r"only \{'policy': 1\} real document"):
-        freeze_eval_set(client, "v1", tenant_id="t")
-    assert not client.list(paths.golden_eval_set_dir("t"))
-    assert freeze_eval_set(client, "v1", tenant_id="t", allow_small=True)["small_set_accepted"] is True
+    assert freeze_eval_set(client, "v1", tenant_id="t")["small_set_accepted"] is True
+
+    _seed_test_split(client, "u", "v1", {"policy_0002": {}, "policy_0003": {}},
+                     metadata={"policy_0002": twin, "policy_0003": twin})
+    with pytest.raises(FreezeError, match=r"holds no real document"):
+        freeze_eval_set(client, "v1", tenant_id="u")
+    assert not client.list(paths.golden_eval_set_dir("u"))
 
 
 def test_a_set_frozen_before_the_rule_is_refused_until_its_records_are_copied_in(client):

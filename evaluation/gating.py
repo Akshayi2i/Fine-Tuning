@@ -878,9 +878,8 @@ def promotion_gate(
 
     if small_eval_set:
         result.warnings.append(
-            "this release was scored on fewer eval documents of a type than a frozen set's "
-            "minimum (a set frozen with freeze-eval-set --allow-small): its intervals are wide, "
-            "so a pass is capped at interim until it is scored on a full-size set."
+            "this release was scored on a small eval set: its intervals are wide, so read its scores "
+            "with that in mind. Nothing is capped or refused for it."
 
         )
     result.passed = not result.blocking_reasons
@@ -915,11 +914,6 @@ CONFIRMED_LOWER_BOUND = 0.92
 
 #: The bound's confidence: one-sided 95%.
 TIER_CONFIDENCE = 0.95
-
-#: Real documents a production release must be scored on: the frozen set's
-#: production minimum (``freeze_eval_set.MIN_FROZEN_DOCS_PER_TYPE``, arch v2.1
-#: §15.4). The bound's documents are held to it too.
-PRODUCTION_MIN_REAL_DOCUMENTS = 150
 
 #: The candidate's per-document served_field_match: ``(scores, weights)``, or
 #: the scores alone (each document counting once).
@@ -961,7 +955,6 @@ class TierEvidence:
             "production_point_bar": PRODUCTION_FIELD_MATCH,
             "production_bound_bar": PRODUCTION_LOWER_BOUND,
             "confirmed_bound_bar": CONFIRMED_LOWER_BOUND,
-            "minimum_real_documents": PRODUCTION_MIN_REAL_DOCUMENTS,
             "not_production_because": list(self.reasons),
         }
 
@@ -997,10 +990,7 @@ def tier_evidence(
 ) -> TierEvidence:
     """The tier of a release, and what it rests on (decision 2026-10-26).
 
-    PRODUCTION needs all of: the gate passed; at least
-    :data:`PRODUCTION_MIN_REAL_DOCUMENTS` real documents (an eval set below the
-    frozen minimum, ``small_eval_set``, is not, and neither is a bound over
-    fewer); served_field_match >= :data:`PRODUCTION_FIELD_MATCH`; and its
+    PRODUCTION needs all of: the gate passed; served_field_match >= :data:`PRODUCTION_FIELD_MATCH`; and its
     one-sided :data:`TIER_CONFIDENCE` lower bound, a document-level bootstrap
     over the real documents (``evaluation.bootstrap.mean_lower_bound``,
     10,000 resamples, seeded), >= :data:`PRODUCTION_LOWER_BOUND`. A passed
@@ -1030,14 +1020,8 @@ def tier_evidence(
         reasons.append(
             f"no per-document {SERVED_FIELD_MATCH} scores to bound it (the candidate's eval report "
             "holds none), so how sure the pass is cannot be shown")
-    if small_eval_set:
-        reasons.append(
-            f"scored on fewer real documents of a type than the frozen set's minimum "
-            f"({PRODUCTION_MIN_REAL_DOCUMENTS})")
-    if scores and len(scores) < PRODUCTION_MIN_REAL_DOCUMENTS:
-        reasons.append(
-            f"the bound rests on {len(scores)} real document(s) read image_only, fewer than "
-            f"{PRODUCTION_MIN_REAL_DOCUMENTS}")
+    # How many documents were scored caps no tier: whatever the split puts in test is the exam (user, 2026-11-04).
+    # A small set shows in the lower bound, which a few documents leave wide, and in ``documents`` below.
     if point is not None and round(point, 6) < PRODUCTION_FIELD_MATCH:
         reasons.append(f"{SERVED_FIELD_MATCH} {point:.4f} is below {PRODUCTION_FIELD_MATCH}")
     if bound is not None and round(bound, 6) < PRODUCTION_LOWER_BOUND:

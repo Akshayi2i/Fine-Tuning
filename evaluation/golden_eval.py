@@ -837,7 +837,7 @@ def _freeze_hint(client: BlobClient, corpus_version: str, tenant_id: str | None)
     except Exception:  # noqa: BLE001 - a hint must not hide the error it follows
         return ""
     return (f". The set is not frozen yet: run `python -m orchestration.run freeze-eval-set --corpus "
-            f"{corpus_version}` once (add --allow-small for a pilot under 150 documents per type), then "
+            f"{corpus_version}` once then "
             "`freeze-eval-set --mark-reviewed`, and gate again")
 
 
@@ -976,6 +976,10 @@ def evaluate_version(
 
     body["eval_set"] = eval_set_record(client, tenant_id, documents)
     body.update(real_only_section(version, triples, corpus_version=corpus_version))
+    # Near-identical PDFs stay in the exam: do they get the same answer, and the score with each policy counted once.
+    from evaluation.metrics.near_copy import consistency_section
+
+    body.update(consistency_section(documents, triples, body))
     body["windowing_ceiling"] = windowing_ceiling(documents)
     # Each field's accuracy against the promoted release's report (reported,
     # never gated): where this release gained and lost.

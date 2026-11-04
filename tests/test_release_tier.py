@@ -43,16 +43,15 @@ def test_field_match_084_is_blocked_with_no_tier():
     assert not result.passed and result.tier is None
 
 
-def test_a_small_eval_set_caps_a_production_score_at_interim_with_a_warning():
-    """An eval set frozen with --allow-small says too little to call a release
-    production, whatever it scores."""
+def test_a_small_eval_set_caps_nothing_and_is_said_in_a_warning():
+    """Whatever the split puts in test is the exam (user, 2026-11-04): the size is told, never held against the tier."""
     result = promotion_gate(_metrics(0.95), None, small_eval_set=True, served_documents=_served(0.95))
-    assert result.passed and result.tier == "interim"
-    assert any("allow-small" in w for w in result.warnings)
+    assert result.passed and result.tier == "production"
+    assert any("small eval set" in w for w in result.warnings)
     assert "WARNING" in result.report()
     assert result.as_dict()["warnings"] == result.warnings
     assert release_tier({"served_field_match": 0.95}, small_eval_set=True,
-                        served_documents=_served(0.95)) == "interim"
+                        served_documents=_served(0.95)) == "production"
 
 
 def test_the_production_bar_is_092_and_a_missing_value_is_interim():
@@ -68,15 +67,14 @@ def test_the_release_bundle_records_the_tier():
     assert "tier" in fields and fields["tier"].default is None
 
 
-def test_the_tier_minimum_is_the_frozen_set_minimum():
-    from evaluation.freeze_eval_set import MIN_FROZEN_DOCS_PER_TYPE
-    from evaluation.gating import PRODUCTION_MIN_REAL_DOCUMENTS
-
-    assert PRODUCTION_MIN_REAL_DOCUMENTS == MIN_FROZEN_DOCS_PER_TYPE == 150
-
-
-@pytest.mark.parametrize("n", [149, 1])
-def test_a_bound_over_fewer_than_150_real_documents_is_interim(n):
+@pytest.mark.parametrize("n", [149, 2])
+def test_the_number_of_real_documents_is_recorded_and_caps_no_tier(n):
     evidence = promotion_gate(_metrics(0.97), None, served_documents=_served(0.97, n)).tier_evidence
-    assert evidence.tier == "interim"
-    assert any("fewer than 150" in r for r in evidence.reasons), evidence.reasons
+    assert evidence.tier == "production" and evidence.documents == n
+    assert not evidence.reasons
+
+
+def test_one_document_cannot_bound_a_mean_so_the_measurement_leaves_it_interim():
+    """Not a size rule: the bootstrap has nothing to resample, so the lower bound is 0.0 (bootstrap.mean_lower_bound)."""
+    evidence = promotion_gate(_metrics(0.97), None, served_documents=_served(0.97, 1)).tier_evidence
+    assert evidence.tier == "interim" and "lower bound 0.0000" in evidence.reasons[0]

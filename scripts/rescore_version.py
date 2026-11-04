@@ -66,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
     print(comparison(stored.get("gate_metrics") or stored.get("gate_metrics_partial") or {},
                      report.get("gate_metrics") or {}, PILOT_FLOORS))
     print(f"\nForm rows aligned: {report.get('form_editions_aligned') or {}}")
+    print(f"Score with each policy counted once: {report.get('per_policy_field_normalized_match') or {}}")
+    print(f"Near-identical PDFs, how often the two answers agree: {report.get('near_copy_agreement') or {}}")
     print(f"Report written to {args.out}")
     return 0
 
