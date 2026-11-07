@@ -299,6 +299,12 @@ def corpus_manifest(version: str, tenant_id: str | None = None) -> str:
     return _join(corpus_dir(version, tenant_id), "manifest.json")
 
 
+def corpus_data_health(version: str, tenant_id: str | None = None) -> str:
+    """The data health report of a corpus build (``data_pipeline.data_health``): written before the
+    corpus, so a build stopped for a missing document still leaves it."""
+    return _join(corpus_dir(version, tenant_id), "data_health.json")
+
+
 # --------------------------------------------------------------------------
 # Shared: models, adapters, registry — no tenant data
 # --------------------------------------------------------------------------

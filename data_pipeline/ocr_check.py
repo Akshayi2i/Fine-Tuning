@@ -49,6 +49,7 @@ from typing import Any
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
+from common.ocr_text import clean_page_text
 from data_pipeline.audit import (
     MIN_CHECKABLE_CHARS,
     _appears,
@@ -228,7 +229,7 @@ def run_check(client: BlobClient, doc_type: str, *, tenant_id: str | None = None
         texts = []
         for page in range(1, page_count + 1):
             key = paths.processed_page(doc_type, source_id, page, "md", tenant_id)
-            texts.append(client.read_text(key) if client.exists(key) else "")
+            texts.append(clean_page_text(client.read_text(key)) if client.exists(key) else "")
         lob = metadata.get("lob")
         kind = "synthetic" if metadata.get("synthetic") else "real"
         line = "+".join(lob) if isinstance(lob, list) else str(lob or "-")

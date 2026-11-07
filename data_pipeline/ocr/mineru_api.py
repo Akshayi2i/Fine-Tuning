@@ -45,6 +45,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
 
+from common.ocr_text import clean_page_text
 from common.transport import RedirectRefusedError, open_url
 from data_pipeline.ocr.run_mineru import _PAGE_FOOT, _PAGE_HEAD
 
@@ -111,7 +112,9 @@ def pages_from_structured_content(content: dict[str, Any], page_count: int | Non
             else:
                 parts.append(text)
             target = head if kind in _PAGE_HEAD else foot if kind in _PAGE_FOOT else body
-            target[index] += [part for part in parts if part]
+            # A picture inside a table's HTML comes as <img src="data:..."> - thousands of characters that
+            # print nothing (common.ocr_text). Serving reads this text directly, so it is cleaned here.
+            target[index] += [part for part in (clean_page_text(part).strip() for part in parts) if part]
     return ["\n\n".join(head[i] + body[i] + foot[i]) for i in range(count)]
 
 

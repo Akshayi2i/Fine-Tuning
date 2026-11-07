@@ -483,6 +483,10 @@ class BlobClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(self.read_bytes(key))
 
+    def md5(self, key: str) -> bytes | None:
+        """The MD5 recorded with ``key``'s blob (one properties call), or None when it records none."""
+        return self._retry(self._backend.md5, self._container_for(key), key)
+
     def holds(self, local: str | Path, key: str) -> bool:
         """Whether ``key`` already holds exactly the bytes of ``local``: by the
         MD5 recorded with the blob. A blob that records none does not count."""

@@ -61,6 +61,7 @@ from typing import Any
 
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
+from common.ocr_text import clean_page_text
 
 log = logging.getLogger(__name__)
 
@@ -159,7 +160,8 @@ def load_golden_set(
             if match.group(2) == "png":
                 images[page] = key
             else:
-                texts[page] = client.read_text(key)
+                # A set frozen before pictures were taken out of page text is read clean (common.ocr_text).
+                texts[page] = clean_page_text(client.read_text(key))
         if not images:
             raise GoldenEvalError(f"{source_id} has no page images")
         if sorted(images) != list(range(1, len(images) + 1)):

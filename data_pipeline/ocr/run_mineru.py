@@ -33,6 +33,7 @@ from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient, for_ocr
 from common.config import resolution_cap_px
 from common.constants import ACTIVE_DOC_TYPES
+from common.ocr_text import clean_page_text
 from data_pipeline.ocr.mineru_version import Device, current_environment, get_mineru_version
 
 log = logging.getLogger(__name__)
@@ -308,7 +309,8 @@ def pages_from_content_list(blocks: Iterable[dict[str, Any]], page_count: int) -
         else:
             parts.append(str(block.get("text") or "").strip())
         target = head if kind in _PAGE_HEAD else foot if kind in _PAGE_FOOT else body
-        target[index] += [part for part in parts if part]
+        # A picture inside a table's HTML is not text either (common.ocr_text).
+        target[index] += [part for part in (clean_page_text(part).strip() for part in parts) if part]
     return ["\n\n".join(head[i] + body[i] + foot[i]) for i in range(page_count)]
 
 
@@ -468,7 +470,8 @@ def process_document(
         )
         client.write_text(
             paths.processed_page(doc_type, source_id, page.page_number, "md", tenant_id),
-            page.markdown,
+            # Whatever the engine: a picture's markup is never stored as page text (common.ocr_text).
+            clean_page_text(page.markdown),
         )
 
     ocr_meta = {

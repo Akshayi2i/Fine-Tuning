@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from calibration.fit_calibration import CalibrationParams
+from common.ocr_text import clean_page_text
 from serving.pipeline import NO_FULL_TEXT_FLAG, ExtractionRequest, ExtractionResult, extract
 
 log = logging.getLogger(__name__)
@@ -399,7 +400,7 @@ def document_request(
     if mode != "image_only":
         for page in range(1, pages + 1):
             key = paths.processed_page(doc_type, source_id, page, "md", tenant_id)
-            texts[page] = client.read_text(key) if client.exists(key) else ""
+            texts[page] = clean_page_text(client.read_text(key)) if client.exists(key) else ""
 
     metadata: dict[str, Any] = {}
     label_meta_key = paths.label_metadata(doc_type, source_id, tenant_id)

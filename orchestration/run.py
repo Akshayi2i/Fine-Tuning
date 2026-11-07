@@ -97,6 +97,7 @@ def build_context(args: argparse.Namespace, *, client: BlobClient | None = None,
         # to Blob is a second copy, not a move.
         "keep_staging": not getattr(args, "clear_staging", False),
         "preflight": not getattr(args, "skip_preflight", False),
+        "accept_set_aside": accepted_set_aside(getattr(args, "accept_set_aside", "")),
         "from_blob": getattr(args, "from_blob", False),
         "fixes_defect": fixes_defect_for(getattr(args, "fixes_defect", None)),
         "gate_override": gate_override_from(args),
@@ -286,6 +287,15 @@ def _add_finetune_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--skip-preflight", dest="skip_preflight", action="store_true",
                         help="do not check the pod (GPU free, packages, base model, config, disk, clean tree) "
                              "before the run starts")
+    parser.add_argument("--accept-set-aside", dest="accept_set_aside", default="",
+                        help="comma-separated document ids agreed to stay out of the corpus. Any other labelled "
+                             "document that would not reach it stops the dataset build, which names each one "
+                             "(data_pipeline.data_health)")
+
+
+def accepted_set_aside(given: str | None) -> frozenset[str]:
+    """``--accept-set-aside a,b`` as a set of ids; blank parts are dropped."""
+    return frozenset(part.strip() for part in str(given or "").split(",") if part.strip())
 
 
 def _add_package_flags(parser: argparse.ArgumentParser, *, version_required: bool = True) -> None:

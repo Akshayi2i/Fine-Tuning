@@ -41,6 +41,7 @@ from typing import Any
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
 from common.lob import merge_line
+from common.ocr_text import clean_page_text
 
 log = logging.getLogger(__name__)
 
@@ -297,7 +298,8 @@ def freeze_eval_set(
             )
             md = paths.processed_page(doc_type, source_id, page, "md", tenant_id)
             if client.exists(md):
-                page_texts[page] = client.read_text(md)
+                # Frozen without pictures (common.ocr_text): the gate reads what serving reads.
+                page_texts[page] = clean_page_text(client.read_text(md))
                 client.write_text(f"{base}/page_{page}.md", page_texts[page])
         client.write_json(f"{base}/metadata.json", {
             "doc_type": doc_type,

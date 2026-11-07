@@ -187,6 +187,14 @@ class StageContext:
     #: completion check and the stage (``run_mineru.find_unprocessed``); cleared
     #: once the stage has written new ones.
     ocr_meta_cache: dict[str, Any] = field(default_factory=dict)
+    #: Labelled documents the dataset build could not load, with why (no OCR, render only, no pages):
+    #: reported by the data health check and, like a document set aside, they stop the build.
+    documents_not_loaded: list[tuple[str, str]] = field(default_factory=list)
+    #: Pages whose stored OCR text held picture markup, taken out when it was read (common.ocr_text).
+    ocr_pictures: list[dict[str, Any]] = field(default_factory=list)
+    #: Documents the person has agreed may stay out of the corpus (``--accept-set-aside``). Any other
+    #: document that would not reach it stops the dataset build (data_pipeline.data_health).
+    accept_set_aside: frozenset[str] = frozenset()
 
     # -- fitted during the run ---------------------------------------------
     calibrators: dict[str, Any] = field(default_factory=dict)
@@ -585,6 +593,9 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
 
     every_page = ocr_every_page()
     other_setting: list[str] = []
+    # This load's own: preflight and the build each load, and a second load must not count twice.
+    ctx.documents_not_loaded = []
+    ctx.ocr_pictures = []
     for doc_type in ctx.doc_types:
         for source_id in list_labeled_source_ids(ctx.client, doc_type, ctx.tenant_id):
             label, metadata = load_golden_label(source_id, doc_type, ctx.client, ctx.tenant_id)
@@ -595,6 +606,7 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
             meta_key = paths.ocr_meta(doc_type, source_id, ctx.tenant_id)
             if not ctx.client.exists(meta_key):
                 log.warning("%s is labeled but not OCR'd — skipping; re-run stage 2", source_id)
+                ctx.documents_not_loaded.append((source_id, "labelled but never OCR'd: run stage 2"))
                 continue
             ocr_meta = ctx.client.read_json(meta_key)
             if ocr_meta.get("render_only"):
@@ -605,6 +617,8 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
                     "%s was rendered but never OCR'd (render_only) — skipping; run OCR (stage 2) "
                     "to train on it", source_id,
                 )
+                ctx.documents_not_loaded.append(
+                    (source_id, "rendered for labelling but never OCR'd (render_only): run stage 2"))
                 continue
             # No default. Assuming one page made a document whose meta lost its
             # count train on page 1 alone, against a label for every page.
@@ -613,6 +627,7 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
                 log.warning(
                     "%s records no pages in its OCR meta — skipping; re-run stage 2", source_id
                 )
+                ctx.documents_not_loaded.append((source_id, "its OCR record names no pages: run stage 2 again"))
                 continue
 
             version = str(ocr_meta.get("mineru_version") or "unknown")
@@ -669,8 +684,21 @@ def load_labeled_documents(ctx: StageContext) -> list[Any]:
             "and re-import."
         )
     assert_one_mineru_version(read_by)
-    for document, texts in zip(documents, read_page_texts(ctx.client, page_keys), strict=True):
-        document.ocr_pages = texts
+    from common.ocr_text import strip_pictures
+
+    # Read as stored, then cleaned here so the data health report can say which pages held pictures:
+    # text OCR'd before pictures were taken out (common.ocr_text) trains clean without a new OCR run.
+    raw_texts = read_page_texts(ctx.client, page_keys, clean=False)
+    for document, texts in zip(documents, raw_texts, strict=True):
+        cleaned = []
+        for page, text in enumerate(texts, start=1):
+            stripped = strip_pictures(text)
+            if stripped.pictures:
+                ctx.ocr_pictures.append({"source_id": document.source_id, "page": page,
+                                         "pictures": stripped.pictures,
+                                         "characters_removed": stripped.characters_removed})
+            cleaned.append(stripped.text)
+        document.ocr_pages = cleaned
     ctx.ocr_readings = readings
     ctx.grouping = assign_document_groups(ctx, documents)
     return documents
@@ -682,10 +710,13 @@ PAGE_READ_WORKERS = 16
 
 
 def read_page_texts(client: BlobClient, keys_per_document: Sequence[Sequence[str]],
-                    workers: int = PAGE_READ_WORKERS) -> list[list[str]]:
+                    workers: int = PAGE_READ_WORKERS, *, clean: bool = True) -> list[list[str]]:
     """Every document's page texts, in its page order: ``keys_per_document``
     read through a pool of ``workers`` threads. The same texts in the same
-    order as reading them one by one; the first read that fails raises."""
+    order as reading them one by one; the first read that fails raises.
+
+    ``clean``: without picture markup (``common.ocr_text``), as every reader of page
+    text takes it; False returns the text as stored."""
     from concurrent.futures import ThreadPoolExecutor
 
     flat = [key for keys in keys_per_document for key in keys]
@@ -694,6 +725,10 @@ def read_page_texts(client: BlobClient, keys_per_document: Sequence[Sequence[str
     else:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="page-text") as pool:
             texts = list(pool.map(client.read_text, flat))
+    if clean:
+        from common.ocr_text import clean_page_text
+
+        texts = [clean_page_text(text) for text in texts]
     out, at = [], 0
     for keys in keys_per_document:
         out.append(texts[at:at + len(keys)])
@@ -1057,6 +1092,10 @@ class CorpusPlan:
     frozen: bool
     delivered: bool
     modes: Any = None
+    #: Left out by design, and reported (data_pipeline.data_health): documents in the frozen eval set
+    #: or its families, and synthetic twins over the per-seed cap.
+    excluded_eval: list[str] = field(default_factory=list)
+    twins_left_out: list[str] = field(default_factory=list)
 
 
 def plan_corpus(ctx: StageContext) -> CorpusPlan:
@@ -1082,6 +1121,7 @@ def plan_corpus(ctx: StageContext) -> CorpusPlan:
     # tenant's frozen set changes nothing here: this tenant still draws its own
     # test split until it freezes its own.
     frozen = is_frozen(ctx.client, tenant_id=ctx.tenant_id)
+    excluded: list[str] = []
     # Before the exclusion below: with a delivered split, "the family of an eval
     # document" is its source document's twins, not every document on its form.
     delivered = use_delivered_families(documents)
@@ -1134,7 +1174,9 @@ def plan_corpus(ctx: StageContext) -> CorpusPlan:
     # twin draws nothing and the mix check measures what trains.
     from data_pipeline.dataset_builder.split_groups import cap_twins
 
+    before_cap = {d.source_id for d in documents}
     documents = cap_twins(documents, assignment, seed=ctx.seed)
+    twins_left_out = sorted(before_cap - {d.source_id for d in documents})
     # The global input-mode mix unless the training config sets its own
     # (training.data_mix); recorded on the corpus manifest, so a run that
     # wants another mix is refused rather than mislabelled.
@@ -1142,7 +1184,8 @@ def plan_corpus(ctx: StageContext) -> CorpusPlan:
     modes = sample_modes(train_source_ids(documents, assignment), seed=ctx.seed, mix=mix)
     assert_mix_is_close(modes, mix=mix)
     built = build_corpus(documents, assignment, seed=ctx.seed, mode_assignment=modes)
-    return CorpusPlan(documents, by_type, assignment, built, frozen, delivered, modes)
+    return CorpusPlan(documents, by_type, assignment, built, frozen, delivered, modes,
+                      excluded_eval=sorted(map(str, excluded)), twins_left_out=twins_left_out)
 
 
 def modality_mix_of(ctx: StageContext) -> dict[str, float]:
@@ -1178,6 +1221,15 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
     documents, by_type, assignment, built, frozen, modes = (
         plan.documents, plan.by_type, plan.assignment, plan.built, plan.frozen, plan.modes
     )
+    # Before anything is written: every labelled document reaches the corpus, or the person has agreed it
+    # need not (--accept-set-aside). Cycle 1 lost 8 of 84 under the 25% guard below and trained anyway.
+    from data_pipeline.data_health import assess_plan, stop_message
+
+    health = assess_plan(ctx, plan)
+    ctx.client.write_json(paths.corpus_data_health(ctx.corpus, ctx.tenant_id), health.as_dict())
+    log.info("%s", health.render())
+    if typo := health.accepted_but_not_missing(ctx.accept_set_aside):
+        log.warning("--accept-set-aside names document(s) that are not missing: %s", typo)
     # Refused before anything is written. An epoch file of zero rows trains
     # nothing, and the run would still record a corpus version as built.
     needed = ("train", "val") if frozen else ("train", "val", "test")
@@ -1207,6 +1259,12 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
             f"corpus {ctx.corpus} set aside {set_aside} of {len(documents)} document(s) "
             f"({share:.0%}, more than {FAIL_REJECTED_SHARE:.0%}): {why} Nothing was written."
         )
+    # Under that share too: each labelled document that would not reach the corpus stops the build, named,
+    # unless the person agreed to it (--accept-set-aside). Cycle 1 lost 8 of 84 below 25% and trained anyway.
+    if stopped := stop_message(health, ctx.accept_set_aside):
+        if not ctx.dry_run:
+            raise PipelineError(f"corpus {ctx.corpus}: {stopped}")
+        log.warning("corpus %s (dry run, not stopped): %s", ctx.corpus, stopped)
 
     # Written where training reads them: one file per epoch, one per eval split,
     # all doc types together — one adapter trains on every type (§8.1).
@@ -1272,6 +1330,11 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
     # below the 25% guard, and the reason was in a run report on the pod and nowhere else.
     manifest["documents_set_aside"] = dict(built.set_aside)
     manifest["set_aside"] = [{"source_id": source_id, "reason": reason} for source_id, reason in built.skipped]
+    # The data health report's summary (in full in data_health.json beside it), and the documents the person
+    # agreed may stay out (--accept-set-aside): without that agreement the build would have stopped.
+    manifest["data_health"] = health.as_dict()["summary"]
+    manifest["not_loaded"] = [{"source_id": s, "reason": r} for s, r in health.not_loaded]
+    manifest["set_aside_accepted"] = sorted({s for s, _r in health.missing} & set(ctx.accept_set_aside))
     ctx.client.write_json(paths.corpus_manifest(ctx.corpus, ctx.tenant_id), manifest)
     for source_id, reason in built.skipped:
         log.warning("corpus %s: %s was set aside: %s", ctx.corpus, source_id, reason)
@@ -1299,6 +1362,7 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
             "documents_kept": len(kept),
             "documents_set_aside": dict(built.set_aside),
             "set_aside_examples": built.skipped[:20],
+            "data_health": health.as_dict()["summary"],
         },
     )
 

@@ -37,6 +37,7 @@ from typing import Any, Literal
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
 from common.constants import ACTIVE_DOC_TYPES
+from common.ocr_text import clean_page_text
 
 log = logging.getLogger(__name__)
 
@@ -175,9 +176,9 @@ def pre_annotate(
             for page in range(1, page_count + 1)
         ],
         page_texts={} if render_only else {
-            page: client.read_text(
+            page: clean_page_text(client.read_text(
                 paths.processed_page(doc_type, source_id, page, "md", tenant_id)
-            )
+            ))
             for page in range(1, page_count + 1)
         },
         ocr_meta=ocr_meta,

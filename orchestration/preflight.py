@@ -349,9 +349,21 @@ def check_corpus(ctx, results: list[Check]) -> dict[str, Any]:
              "frozen_eval_set": plan.frozen, "set_aside_reasons": dict(skipped.most_common(10)), "cap_report": cap}
     detail = (f"{documents} documents, {kept} kept; rows train {rows['train']}, val {rows['val']}, "
               f"test {rows['test']}; set aside {set_aside} ({share:.1%})")
+    from data_pipeline.data_health import assess_plan
+
+    health = assess_plan(ctx, plan)
+    facts["data_health"] = health.as_dict()["summary"]
+    left = health.unaccepted(getattr(ctx, "accept_set_aside", ()))
     if empty:
         results.append(Check("corpus", "FAIL", f"{detail}; no {'/'.join(empty)} rows",
                              "see set_aside_reasons in the preflight report"))
+    elif left:
+        # The dataset build stops on these too (data_pipeline.data_health): found here, before the pod is paid for.
+        results.append(Check("corpus", "FAIL",
+                             f"{detail}; {len(left)} labelled document(s) would not reach the corpus: "
+                             + "; ".join(f"{s}: {r[:120]}" for s, r in left[:5]),
+                             "fix each, or agree to train without them: --accept-set-aside "
+                             + ",".join(s for s, _r in left)))
     elif share > FAIL_REJECTED_SHARE:
         results.append(Check("corpus", "FAIL", detail,
                              "too many documents over the sequence caps: raise max_seq_len/caps in "

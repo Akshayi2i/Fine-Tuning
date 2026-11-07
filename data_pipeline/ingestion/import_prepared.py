@@ -43,6 +43,7 @@ from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
 from common.constants import ACTIVE_DOC_TYPES
 from common.ids import next_source_id
+from common.ocr_text import clean_page_text
 from common.schemas import SchemaError, iter_validation_errors
 from data_pipeline.ingestion.import_labeled_pdfs import import_history, twin_index
 
@@ -246,7 +247,7 @@ def import_document(
     for page, markdown in enumerate(doc.markdown, start=1):
         client.write_text(
             paths.processed_page(doc_type, source_id, page, "md", tenant_id),
-            markdown.read_text(encoding="utf-8"),
+            clean_page_text(markdown.read_text(encoding="utf-8")),
         )
 
     client.write_json(paths.ocr_meta(doc_type, source_id, tenant_id), {

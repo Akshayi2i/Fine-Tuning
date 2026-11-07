@@ -66,11 +66,25 @@ def _plan(documents, kept, rows, frozen=False):
     (100, 99, {"train": [1], "val": [1], "test": []}, "FAIL"),      # no test rows
 ])
 def test_the_corpus_verdict(monkeypatch, documents, kept, rows, status):
+    """The share tiers, once the person has agreed to the documents set aside (--accept-set-aside)."""
     monkeypatch.setattr("orchestration.pipeline_dag.plan_corpus", lambda ctx: _plan(documents, kept, rows))
     results = []
-    facts = P.check_corpus(SimpleNamespace(), results)
+    agreed = frozenset(f"d{i}" for i in range(kept, documents))
+    facts = P.check_corpus(SimpleNamespace(accept_set_aside=agreed), results)
     assert results[-1].status == status
     assert facts["documents"] == documents and facts["kept"] == kept
+
+
+def test_one_document_set_aside_without_agreement_fails_and_names_it(monkeypatch):
+    """Cycle 1 lost 8 of 84 under the 25% share and trained anyway: one is enough, named, with the way out."""
+    monkeypatch.setattr("orchestration.pipeline_dag.plan_corpus",
+                        lambda ctx: _plan(100, 99, {"train": [1], "val": [1], "test": [1]}))
+    results = []
+    facts = P.check_corpus(SimpleNamespace(), results)
+    assert results[-1].status == "FAIL"
+    assert "d99: over budget" in results[-1].detail
+    assert "--accept-set-aside d99" in results[-1].fix
+    assert facts["data_health"]["documents_missing_not_accepted"] == 1
 
 
 def test_once_frozen_the_corpus_needs_no_test_rows(monkeypatch):
