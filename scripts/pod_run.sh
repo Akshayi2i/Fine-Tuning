@@ -198,14 +198,19 @@ cmd_start() {
     # A run stopped by a signal says so, in the log and as its exit: a closed session (HUP), Ctrl-C (INT), a kill
     # (TERM, QUIT). A run that vanished on 2026-11-07 left an empty log and no exit, and the cause stayed unknown.
     # Only SIGKILL, or the tmux server dying with it, still leaves nothing - and status then says no exit was recorded.
-    printf 'on_signal() { echo "=== %s stopped by signal $1 at $(date -u +%%FT%%TZ) ===" | tee -a %q; [ -n "$watcher" ] && kill "$watcher" 2>/dev/null; echo "signal $1" > %q; exit $((128 + $2)); }\n' \
+    # The command runs in the background and the runner waits on it, so a signal is acted on at once: bash runs a
+    # trap only between commands, and a foreground job made it wait for the whole run, then write the signal over
+    # the run's real exit. The signal goes on to the run (all of it is this shell's process group) - except INT:
+    # Ctrl-C in the session already reached every process, and a second one would cut the run's own clean-up short.
+    printf 'on_signal() { trap "" HUP INT QUIT TERM; echo "=== %s stopped by signal $1 at $(date -u +%%FT%%TZ) ===" | tee -a %q; [ "$1" = INT ] || kill -s "$1" 0 2>/dev/null; [ -n "$job" ] && wait "$job" 2>/dev/null; [ -n "$watcher" ] && kill "$watcher" 2>/dev/null; echo "signal $1" > %q; exit $((128 + $2)); }\n' \
       "$name" "$log" "$exit_file"
+    echo 'job='
     echo "trap 'on_signal HUP 1' HUP; trap 'on_signal INT 2' INT; trap 'on_signal QUIT 3' QUIT; trap 'on_signal TERM 15' TERM"
     echo 'attempt=1'
     echo 'while :; do'
     # Where this attempt's output starts in the log, to read only that for a stall.
     printf '  offset=$(stat -c %%s %q 2>/dev/null || echo 0)\n' "$log"
-    printf '  '
+    printf '  ( '
     if [ "$1" = "--" ]; then
       shift
       [ $# -ge 1 ] || die "start $name -- needs a command"
@@ -214,8 +219,9 @@ cmd_start() {
       printf 'python -m orchestration.run'
     fi
     printf ' %q' "$@"
-    printf ' 2>&1 | tee -a %q\n' "$log"
-    echo '  status=${PIPESTATUS[0]}'
+    printf ' 2>&1 | tee -a %q; exit "${PIPESTATUS[0]}" ) </dev/null &\n' "$log"
+    echo '  job=$!'
+    echo '  wait "$job"; status=$?; job='
     # The two lines a stalled process leaves: inference_core.stall_guard's own, and faulthandler's backstop.
     printf '  if [ "$status" != 0 ] && [ "$attempt" -le %d ] && tail -c +$((offset + 1)) %q | grep -aqE %q; then\n' \
       "$retries" "$log" '^(STALL-GUARD:|Timeout \()'
@@ -282,7 +288,9 @@ cmd_list() {
   local found=0 f name
   for f in "$LOG_DIR"/*.log; do
     found=1; name="$(basename "$f" .log)"
-    if [ -f "$(exit_file_of "$name")" ]; then
+    if [ -f "$(exit_file_of "$name")" ] && grep -q '^signal' "$(exit_file_of "$name")"; then
+      printf '  %-30s STOPPED by %s - resume it with --from-stage\n' "$name" "$(cat "$(exit_file_of "$name")")"
+    elif [ -f "$(exit_file_of "$name")" ]; then
       printf '  %-30s finished, exit %s\n' "$name" "$(cat "$(exit_file_of "$name")")"
     elif command -v tmux >/dev/null 2>&1 && running "$name"; then
       printf '  %-30s running\n' "$name"

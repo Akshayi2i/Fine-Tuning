@@ -163,7 +163,8 @@ def test_the_same_page_image_read_into_different_text_is_found(client):
         SimpleNamespace(source_id="policy_0066", image_paths=["p/b1.png", "p/b2.png"], ocr_pages=["Tota1 Amount", "x"]),
         SimpleNamespace(source_id="policy_0067", image_paths=["p/c1.png"], ocr_pages=["Total  Amount"]),
     ]
-    groups = same_image_different_text(client, documents, workers=2)
+    groups, unread = same_image_different_text(client, documents, workers=2)
+    assert unread == []
     # Page 2 differs only in case: the same text, as near_copy compares it. Page 1 has two texts in three pages.
     assert len(groups) == 1
     assert groups[0]["distinct_texts"] == 2
@@ -212,6 +213,9 @@ def test_the_build_stops_on_a_set_aside_document_and_writes_nothing_but_the_repo
         pipeline_dag.stage_dataset_build(ctx)
     assert "policy_0099: policy_0099: 3 of 225 row(s) exceed their task budget" in str(stopped.value)
     assert "--accept-set-aside policy_0099" in str(stopped.value)
+    # It says what was written: the report, and no corpus file.
+    assert "The corpus was not built; only its data health report was written" in str(stopped.value)
+    assert "Nothing was written" not in str(stopped.value)
     assert not client.exists(paths.corpus_manifest(ctx.corpus, None))
     report = client.read_json(paths.corpus_data_health(ctx.corpus, None))
     assert report["set_aside"][0]["source_id"] == "policy_0099"

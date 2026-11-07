@@ -1229,16 +1229,19 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
     documents, by_type, assignment, built, frozen, modes = (
         plan.documents, plan.by_type, plan.assignment, plan.built, plan.frozen, plan.modes
     )
-    # Before anything is written: every labelled document reaches the corpus, or the person has agreed it
+    # Before any corpus file is written: every labelled document reaches the corpus, or the person has agreed it
     # need not (--accept-set-aside). Cycle 1 lost 8 of 84 under the 25% guard below and trained anyway.
     from data_pipeline.data_health import assess_plan, stop_message
 
     health = assess_plan(ctx, plan)
-    ctx.client.write_json(paths.corpus_data_health(ctx.corpus, ctx.tenant_id), health.as_dict())
+    health_key = paths.corpus_data_health(ctx.corpus, ctx.tenant_id)
+    ctx.client.write_json(health_key, health.as_dict())
+    # Every refusal below leaves only that report, which says why; no corpus file, no manifest.
+    not_built = f"The corpus was not built; only its data health report was written ({health_key})."
     log.info("%s", health.render())
     if typo := health.accepted_but_not_missing(ctx.accept_set_aside):
         log.warning("--accept-set-aside names document(s) that are not missing: %s", typo)
-    # Refused before anything is written. An epoch file of zero rows trains
+    # Refused before any corpus file is written. An epoch file of zero rows trains
     # nothing, and the run would still record a corpus version as built.
     needed = ("train", "val") if frozen else ("train", "val", "test")
     missing = [s for s in needed if not built.rows_by_split.get(s)]
@@ -1251,7 +1254,7 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
         raise PipelineError(
             f"corpus {ctx.corpus} has no {'/'.join(missing)} rows from {len(documents)} loaded "
             f"document(s) ({why}). Training needs all three: train to learn from, val to select "
-            "a checkpoint and fit calibration, test for the gate. Nothing was written."
+            f"a checkpoint and fit calibration, test for the gate. {not_built}"
         )
     # Preflight's corpus guard, held here too: the one-command chain runs
     # `preflight --skip-corpus` so the corpus is built once, in this stage, and a
@@ -1265,13 +1268,13 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
         why = built.cap_report.warning() or "see the build log for rejections"
         raise PipelineError(
             f"corpus {ctx.corpus} set aside {set_aside} of {len(documents)} document(s) "
-            f"({share:.0%}, more than {FAIL_REJECTED_SHARE:.0%}): {why} Nothing was written."
+            f"({share:.0%}, more than {FAIL_REJECTED_SHARE:.0%}): {why} {not_built}"
         )
     # Under that share too: each labelled document that would not reach the corpus stops the build, named,
     # unless the person agreed to it (--accept-set-aside). Cycle 1 lost 8 of 84 below 25% and trained anyway.
     if stopped := stop_message(health, ctx.accept_set_aside):
         if not ctx.dry_run:
-            raise PipelineError(f"corpus {ctx.corpus}: {stopped}")
+            raise PipelineError(f"corpus {ctx.corpus}: {stopped} {not_built}")
         log.warning("corpus %s (dry run, not stopped): %s", ctx.corpus, stopped)
 
     # Written where training reads them: one file per epoch, one per eval split,

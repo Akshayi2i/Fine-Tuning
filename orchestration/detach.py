@@ -135,6 +135,8 @@ def detach_module_if_needed(module: str, argv: Sequence[str] | None, hint: str |
     """:func:`detach_if_needed` for ``python -m <module> <argv>``."""
     import sys
 
+    if not should_detach():  # nothing moves, so no interpreter is chosen (and none is announced)
+        return False
     args = list(argv) if argv is not None else sys.argv[1:]
     return detach_if_needed([detached_python(), "-m", module, *args], hint or module.rsplit(".", 1)[-1])
 
@@ -143,5 +145,7 @@ def detach_script_if_needed(script: str | Path, argv: Sequence[str] | None, hint
     """:func:`detach_if_needed` for ``python <script> <argv>``."""
     import sys
 
+    if not should_detach():
+        return False
     args = list(argv) if argv is not None else sys.argv[1:]
     return detach_if_needed([detached_python(), str(script), *args], hint)

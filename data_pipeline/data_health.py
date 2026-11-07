@@ -24,7 +24,6 @@ This report is made by the dataset build (stage 4) before anything is written, a
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import re
@@ -92,6 +91,8 @@ class DataHealth:
     untaught: dict[str, dict[str, int]] = field(default_factory=dict)
     #: None when the image check was not run.
     same_image_different_text: list[dict[str, Any]] | None = None
+    #: Page image keys the image check could not read (left out of it, not fatal).
+    images_not_read: list[str] = field(default_factory=list)
     accepted: list[str] = field(default_factory=list)
 
     @property
@@ -125,6 +126,7 @@ class DataHealth:
             "gold_values_taught_elsewhere": sum(c.get("away from home", 0) for c in self.untaught.values()),
             "same_image_different_text_groups": (None if self.same_image_different_text is None
                                                  else len(self.same_image_different_text)),
+            "page_images_not_read": len(self.images_not_read),
         }
         return body
 
@@ -179,6 +181,9 @@ class DataHealth:
             groups = self.same_image_different_text
             pages = sum(len(g["pages"]) for g in groups)
             out.append(f"  same page image read into different text: {len(groups)} image(s), {pages} page(s)")
+            if self.images_not_read:
+                out.append(f"    {len(self.images_not_read)} page image(s) could not be read and are not in this "
+                           f"check (first: {self.images_not_read[0]})")
             for group in groups[:SHOWN]:
                 shown = ", ".join(f"{p['source_id']} p{p['page']}" for p in group["pages"][:6])
                 out.append(f"    {group['distinct_texts']} different texts: {shown}")
@@ -261,7 +266,7 @@ def stop_message(health: DataHealth, accepted: Iterable[str] = ()) -> str | None
     if not left:
         return None
     lines = [f"{len(left)} labelled document(s) would not reach the corpus, and training would run without "
-             "them. Nothing was written."]
+             "them. The corpus was not built."]
     lines += [f"  {source_id}: {_short(why)}" for source_id, why in left[:SHOWN]]
     if len(left) > SHOWN:
         lines.append(f"  ... and {len(left) - SHOWN} more (data_health.json beside the corpus)")
@@ -276,28 +281,27 @@ def _normalized(text: str) -> str:
 
 
 def same_image_different_text(client: Any, documents: Sequence[Any],
-                              workers: int = IMAGE_WORKERS) -> list[dict[str, Any]]:
+                              workers: int = IMAGE_WORKERS) -> tuple[list[dict[str, Any]], list[str]]:
     """Page images that are byte-identical but whose OCR text differs, across ``documents``
-    (each with ``source_id``, ``image_paths`` and ``ocr_pages``).
+    (each with ``source_id``, ``image_paths`` and ``ocr_pages``), and the image keys that could not be read.
 
-    By the MD5 stored with each image (``BlobClient.md5``, one properties call a page), or the
-    image's own bytes when none is stored.
+    Hashed as near-copy pairing hashes them (``near_copy.page_image_digests``: the MD5 stored with each image,
+    one properties call a page, or the image's own bytes when none is stored). A page that cannot be read is
+    left out and named, rather than stopping the whole report.
     """
-    from concurrent.futures import ThreadPoolExecutor
+    from evaluation.metrics.near_copy import page_image_digests
 
     pages = [(document.source_id, number, key, text)
              for document in documents
              for number, (key, text) in enumerate(zip(document.image_paths, document.ocr_pages, strict=False),
                                                   start=1)]
-
-    def digest(key: str) -> str:
-        recorded = client.md5(key)
-        return recorded.hex() if recorded else hashlib.md5(client.read_bytes(key)).hexdigest()
-
-    with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="image-md5") as pool:
-        digests = list(pool.map(digest, [key for _s, _n, key, _t in pages]))
+    digests = page_image_digests(client, [key for _s, _n, key, _t in pages], workers=workers)
     by_image: dict[str, list[tuple[str, int, str]]] = defaultdict(list)
-    for (source_id, number, _key, text), image in zip(pages, digests, strict=True):
+    unread: list[str] = []
+    for (source_id, number, key, text), image in zip(pages, digests, strict=True):
+        if image is None:
+            unread.append(key)
+            continue
         by_image[image].append((source_id, number, _normalized(text)))
     groups = []
     for image, members in by_image.items():
@@ -306,7 +310,7 @@ def same_image_different_text(client: Any, documents: Sequence[Any],
             groups.append({"image_md5": image, "distinct_texts": len(texts),
                            "pages": [{"source_id": s, "page": n} for s, n, _t in members]})
     groups.sort(key=lambda g: (-len(g["pages"]), g["image_md5"]))
-    return groups
+    return groups, unread
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI over plan_corpus and assess
@@ -342,7 +346,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
     plan = plan_corpus(ctx)
     health = assess_plan(ctx, plan)
     if args.images:
-        health.same_image_different_text = same_image_different_text(ctx.client, plan.documents)
+        health.same_image_different_text, health.images_not_read = same_image_different_text(
+            ctx.client, plan.documents)
     print(health.render())
     if typo := health.accepted_but_not_missing(ctx.accept_set_aside):
         print(f"\n--accept-set-aside names document(s) that are not missing: {typo}")

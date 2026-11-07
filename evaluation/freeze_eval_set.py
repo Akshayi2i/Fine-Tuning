@@ -135,7 +135,8 @@ TEMPLATE_SEEN_SHARE = 0.5
 
 
 def _train_page_keys(client: BlobClient, corpus_manifest: dict[str, Any], tenant_id: str | None) -> set[str] | None:
-    """Every page of the corpus's training documents, by its text; ``None`` when the manifest names no training set."""
+    """Every page of the corpus's training documents, by its text without pictures (as a frozen page is stored and
+    compared); ``None`` when the manifest names no training set."""
     from concurrent.futures import ThreadPoolExecutor
 
     from evaluation.metrics.near_copy import _page_keys
@@ -149,7 +150,7 @@ def _train_page_keys(client: BlobClient, corpus_manifest: dict[str, Any], tenant
             keys += [key for key in client.list(paths.processed_dir(doc_type, source_id, tenant_id))
                      if key.endswith(".md")]
     with ThreadPoolExecutor(max_workers=16) as pool:
-        texts = list(pool.map(client.read_text, keys))
+        texts = [clean_page_text(text) for text in pool.map(client.read_text, keys)]
     return _page_keys(dict(enumerate(texts)))
 
 
@@ -442,7 +443,7 @@ def mark_templates(client: BlobClient, *, tenant_id: str | None = None) -> dict[
     marks: dict[str, Any] = {}
     for source_id in manifest.get("source_ids") or []:
         keys = [key for key in client.list(f"{root}/{source_id}/") if key.endswith(".md")]
-        mark = template_seen({key: client.read_text(key) for key in keys}, train_keys)
+        mark = template_seen({key: clean_page_text(client.read_text(key)) for key in keys}, train_keys)
         key = f"{root}/{source_id}/metadata.json"
         client.write_json(key, {**client.read_json(key), **mark})
         marks[source_id] = mark

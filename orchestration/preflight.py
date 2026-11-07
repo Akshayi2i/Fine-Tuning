@@ -414,6 +414,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
     parser.add_argument("--ocr-check", type=Path, default=WORKSPACE / "ocr_check",
                         help="the post-OCR check's output folder")
     parser.add_argument("--skip-corpus", action="store_true", help="skip the in-memory corpus build")
+    parser.add_argument("--accept-set-aside", dest="accept_set_aside", default="",
+                        help="comma-separated ids agreed to stay out of the corpus (as finetune takes it)")
     parser.add_argument("--out", type=Path, default=WORKSPACE / "logs" / "preflight.json")
     args = parser.parse_args(argv)
     if args.min_labels_per_type is None:

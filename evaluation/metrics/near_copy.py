@@ -47,35 +47,76 @@ def _page_keys(page_texts: Mapping[Any, str]) -> set[str]:
     return keys
 
 
-def page_image_keys(client: Any, documents: Sequence[Any], workers: int = 16) -> dict[str, set[str]] | None:
-    """Each document's distinct page images, as the MD5 stored with each image (``BlobClient.md5``), or of its bytes
-    when none is stored. None when a document has no image keys or the store cannot be asked.
+def page_image_digests(client: Any, keys: Sequence[str], *, local: Mapping[str, str] | None = None,
+                       workers: int = 16) -> list[str | None]:
+    """The MD5 of each page image in ``keys``, in order: of the copy on disk when ``local`` (``{key: path}``) has
+    one, else the MD5 stored with the image (``BlobClient.md5``), else of its bytes. None for a page that could not
+    be read. The one page-image hash: near-copy pairing and the data health report must agree on "the same image".
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+
+    on_disk = local or {}
+
+    def digest(key: str) -> str | None:
+        try:
+            path = on_disk.get(key)
+            if path and Path(path).is_file():
+                return hashlib.md5(Path(path).read_bytes()).hexdigest()
+            if client is None:
+                return None
+            recorded = client.md5(key)
+            return recorded.hex() if recorded else hashlib.md5(client.read_bytes(key)).hexdigest()
+        except Exception as exc:  # noqa: BLE001 - one unreadable page is reported by the caller, not fatal
+            log.debug("page image %s could not be read (%s: %s)", key, type(exc).__name__, exc)
+            return None
+
+    if not keys:
+        return []
+    with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="page-image") as pool:
+        return list(pool.map(digest, keys))
+
+
+def _enough_text(document: Any) -> list[bool] | None:
+    """Per page image, whether its page has text enough to tell documents apart (as :func:`_page_keys` filters);
+    None when the pages and the texts do not line up one to one."""
+    texts = getattr(document, "page_texts", None) or {}
+    if len(texts) != len(document.image_keys):
+        return None
+    return [len(re.sub(r"\s+", "", str(texts[page] or ""))) >= _MIN_PAGE_CHARACTERS for page in sorted(texts)]
+
+
+def page_image_keys(client: Any, documents: Sequence[Any], workers: int = 16,
+                    local: Mapping[str, str] | None = None) -> dict[str, set[str]] | None:
+    """Each document's distinct page images, by :func:`page_image_digests` (``local``: the copies the gate already
+    downloaded, so no storage call is made for them). A page with too little text to tell documents apart (a
+    blank page, a page number) is left out, as in the text comparison. None when a document has no image keys or
+    a page image could not be read: the comparison then falls back to page text.
 
     Pages, not their OCR text, decide a near copy: 0065 and 0066 of the frozen set share 71 of 73 byte-identical page
     images, yet OCR read 18 of those 71 into different text, and by text the pair (54 of 73) was never measured
     (2026-11-07).
     """
-    import hashlib
-    from concurrent.futures import ThreadPoolExecutor
-
-    if client is None or not documents or any(not getattr(d, "image_keys", None) for d in documents):
+    if not documents or any(not getattr(d, "image_keys", None) for d in documents):
         return None
-
-    def digest(key: str) -> str:
-        recorded = client.md5(key)
-        return recorded.hex() if recorded else hashlib.md5(client.read_bytes(key)).hexdigest()
-
+    if client is None and not local:
+        return None
     keys = [(document.source_id, key) for document in documents for key in document.image_keys]
-    try:
-        with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="page-image") as pool:
-            digests = list(pool.map(digest, [key for _source, key in keys]))
-    except Exception as exc:  # noqa: BLE001 - the text comparison still runs; said in the log and the report
-        log.warning("page images could not be compared (%s: %s); near copies are found by page text",
-                    type(exc).__name__, exc)
+    digests = page_image_digests(client, [key for _source, key in keys], local=local, workers=workers)
+    unread = [key for (_source, key), image in zip(keys, digests, strict=True) if image is None]
+    if unread:
+        log.warning("%d page image(s) could not be read (first: %s); near copies are found by page text",
+                    len(unread), unread[0])
         return None
+    keep = {document.source_id: _enough_text(document) for document in documents}
     out: dict[str, set[str]] = {document.source_id: set() for document in documents}
+    position: dict[str, int] = defaultdict(int)
     for (source_id, _key), image in zip(keys, digests, strict=True):
-        out[source_id].add(image)
+        index = position[source_id]
+        position[source_id] += 1
+        wanted = keep[source_id]
+        if wanted is None or wanted[index]:
+            out[source_id].add(image)
     return out
 
 
@@ -193,12 +234,13 @@ def per_policy_scores(per_document: Mapping[str, float], documents: Sequence[Any
 
 
 def consistency_section(documents: Sequence[Any], triples: Sequence[Any], body: Mapping[str, Any],
-                        client: Any = None) -> dict[str, Any]:
+                        client: Any = None, local: Mapping[str, str] | None = None) -> dict[str, Any]:
     """What a report carries: both checks. Reported, never gated, so a failure here never costs a gate its hours: it
-    is logged, and the report says the check did not run. With ``client``, near copies are found by page image."""
+    is logged, and the report says the check did not run. With ``client`` or ``local`` (the page images already on
+    disk, ``{key: path}``), near copies are found by page image."""
     scores = (body.get("per_document") or {}).get("field_normalized_match") or {}
     try:
-        page_keys = page_image_keys(client, documents)
+        page_keys = page_image_keys(client, documents, local=local)
         return {"near_copy_agreement": near_copy_agreement(documents, triples, page_keys),
                 "per_policy_field_normalized_match": per_policy_scores(scores, documents)}
     except Exception as exc:  # noqa: BLE001 - reported only; the gate's own result stands

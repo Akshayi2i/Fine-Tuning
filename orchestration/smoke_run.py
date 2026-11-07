@@ -186,14 +186,19 @@ def stage_subset(folders: list[Path], out: Path) -> int:
 
 
 def commands(*, batch_dir: Path, subset_dir: Path, tenant: str, version: str,
-             check_out: Path, steps: tuple[str, ...] | list[str] = STEPS) -> dict[str, list[str]]:
+             check_out: Path, steps: tuple[str, ...] | list[str] = STEPS,
+             accept_set_aside: str = "") -> dict[str, list[str]]:
     """The command each step runs, with the interpreter of its environment.
 
     When ``finetune`` runs too, preflight skips its in-memory corpus build:
     finetune builds the same corpus and refuses the same >25% set-aside before
     anything trains, so the corpus is built once. A preflight run on its own
     keeps the build - there it is the point.
+
+    ``accept_set_aside`` (comma-separated ids) goes to both preflight and finetune: the documents the person agreed
+    may stay out of the corpus, without which either one stops on them.
     """
+    accepted = ["--accept-set-aside", accept_set_aside] if accept_set_aside else []
     py = sys.executable
     # Through the served MinerU when MINERU_URL names one - the OCR pin the corpus
     # build and promotion hold every reading to (configs/shared/ocr.yaml) - from
@@ -217,10 +222,10 @@ def commands(*, batch_dir: Path, subset_dir: Path, tenant: str, version: str,
         "preflight": [py, "-m", "orchestration.preflight", "--tenant", tenant,
                       "--corpus-version", version, "--version", version, "--ocr-check", str(check_out),
                       "--out", str(check_out / "preflight.json"), "--min-labels-per-type", "1",
-                      *(["--skip-corpus"] if "finetune" in steps else [])],
+                      *(["--skip-corpus"] if "finetune" in steps else []), *accepted],
         "finetune": [py, "-m", "orchestration.run", "finetune", "--skip-ingest",
                      "--corpus-version", version, "--version", version, "--tenant", tenant,
-                     "--min-labels-per-type", "1"],
+                     "--min-labels-per-type", "1", *accepted],
     }
 
 
@@ -295,6 +300,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--full-selection", action="store_true",
                         help="run checkpoint selection whole (finalists, repeat reads): slower")
     parser.add_argument("--steps", default=",".join(STEPS), help=f"comma-separated, from {STEPS}")
+    parser.add_argument("--accept-set-aside", dest="accept_set_aside", default="",
+                        help="comma-separated ids agreed to stay out of the corpus (passed to preflight and finetune)")
     args = parser.parse_args(argv)
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
     unknown = [s for s in steps if s not in STEPS]
@@ -346,7 +353,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
 
     def build() -> dict[str, list[str]]:
         return commands(batch_dir=batch_dir, subset_dir=subset_dir, tenant=args.tenant,
-                        version=args.version, check_out=check_out, steps=steps)
+                        version=args.version, check_out=check_out, steps=steps,
+                        accept_set_aside=args.accept_set_aside)
 
     for step in build():
         if step not in steps:

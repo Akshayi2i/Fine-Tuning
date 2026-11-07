@@ -239,6 +239,8 @@ class GoldenTriples(list):
         super().__init__(triples)
         self.infrastructure_failures: list[dict[str, Any]] = []
         self.retried: list[dict[str, Any]] = []
+        #: ``{page image key: path on disk}`` of the pages read, for checks that compare the images themselves.
+        self.local_images: dict[str, str] = {}
 
 
 @dataclass
@@ -353,6 +355,7 @@ def evaluate(
     ], workers)
 
     triples = GoldenTriples()
+    triples.local_images = dict(local)
     again: list[tuple[Any, Any, Any, dict[str, Any]]] = []
     unchecked = [r.unchecked for r in readings if r.unchecked]
     unscored = [r.unscored for r in readings if r.unscored]
@@ -985,7 +988,8 @@ def evaluate_version(
     # Near-identical PDFs stay in the exam: do they get the same answer, and the score with each policy counted once.
     from evaluation.metrics.near_copy import consistency_section
 
-    body.update(consistency_section(documents, triples, body, client))
+    body.update(consistency_section(documents, triples, body, client,
+                                    local=getattr(triples, "local_images", None)))
     body["windowing_ceiling"] = windowing_ceiling(documents)
     # Each field's accuracy against the promoted release's report (reported,
     # never gated): where this release gained and lost.

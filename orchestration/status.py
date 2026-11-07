@@ -52,6 +52,8 @@ class Status:
     name: str
     state: str                        # RUNNING / SILENT / FINISHED / STOPPED
     exit_code: int | None = None
+    #: The signal that stopped the run ("HUP", "TERM", ...), as pod_run.sh records it in the exit file.
+    stopped_by: str = ""
     quiet_seconds: float = 0.0
     last_line: str = ""
     progress: Progress | None = None
@@ -125,19 +127,28 @@ def read_status(name: str, folder: Path, *, now: float | None = None) -> Status:
     lines = _tail_lines(log) if log.is_file() else []
     quiet = now - log.stat().st_mtime if log.is_file() else 0.0
     exit_code = None
+    stopped_by = ""
     if exit_file.is_file():
-        try:
-            exit_code = int(exit_file.read_text(encoding="utf-8").strip())
-        except ValueError:
-            exit_code = -1
-    if exit_code is not None:
+        recorded = exit_file.read_text(encoding="utf-8").strip()
+        if recorded.startswith("signal"):
+            # pod_run.sh's trap: "signal HUP" when the session closed, "signal TERM" on a kill.
+            stopped_by = recorded.removeprefix("signal").strip() or "?"
+        else:
+            try:
+                exit_code = int(recorded)
+            except ValueError:
+                exit_code = -1
+    if stopped_by:
+        state = "STOPPED"
+    elif exit_code is not None:
         state = "FINISHED"
     elif quiet > SILENT_MINUTES * 60:
         state = "SILENT"
     else:
         state = "RUNNING"
     last = next((line for line in reversed(lines) if line.strip()), "")
-    status = Status(name=name, state=state, exit_code=exit_code, quiet_seconds=quiet, last_line=last[:300],
+    status = Status(name=name, state=state, exit_code=exit_code, stopped_by=stopped_by, quiet_seconds=quiet,
+                    last_line=last[:300],
                     progress=find_progress(lines))
     report = newest_report(folder, name)
     if report is not None:
@@ -172,7 +183,10 @@ def _duration(seconds: float) -> str:
 def render(status: Status) -> str:
     out = [f"run '{status.name}': {status.state}" + (f" (exit {status.exit_code})" if status.exit_code is not None
                                                   else "")]
-    if status.state == "SILENT":
+    if status.state == "STOPPED":
+        out[0] = f"run '{status.name}': STOPPED by signal {status.stopped_by}"
+        out.append("  it did not finish; resume it with --from-stage")
+    elif status.state == "SILENT":
         out.append(f"  the log has been quiet for {_duration(status.quiet_seconds)}: it may be stuck. "
                    "Check the last line below and `nvidia-smi`; resume with --from-stage if it is.")
     elif status.state == "RUNNING":
