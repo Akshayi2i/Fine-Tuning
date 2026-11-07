@@ -44,3 +44,14 @@ def test_a_silent_log_and_an_unreported_exit_are_told_by_the_launcher():
     assert "POD_RUN_STALE_MINUTES" in SCRIPT and "may be stuck" in SCRIPT
     assert "orchestration.notify --text" in SCRIPT
     assert "FIDEON_RUN_NAME" in SCRIPT and ".notified" in SCRIPT   # the pipeline's own message is not repeated
+
+
+def test_a_run_stopped_by_a_signal_says_so_in_its_log_and_exit():
+    """A run vanished on 2026-11-07 with an empty log and no exit; the cause stayed unknown. A hang-up, Ctrl-C or
+    kill now writes a line to the log and 'signal X' as the exit, and status reports it as stopped."""
+    assert "on_signal() {" in SCRIPT and 'echo "signal $1" >' in SCRIPT
+    for signal, number in (("HUP", 1), ("INT", 2), ("QUIT", 3), ("TERM", 15)):
+        assert f"trap 'on_signal {signal} {number}' {signal}" in SCRIPT
+    # Set before the command runs, so a signal at any point of it is caught.
+    assert SCRIPT.index("trap 'on_signal HUP 1' HUP") < SCRIPT.index("echo 'attempt=1'")
+    assert "STOPPED by" in SCRIPT and "grep -q '^signal'" in SCRIPT

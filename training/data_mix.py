@@ -30,7 +30,7 @@ The input-mode mix is a separate setting: :data:`common.constants.MODALITY_MIX`
 is the global default (50% OCR text and images, 20% corrupted OCR and images,
 30% images only - the ``standard`` format profile), and the training config may
 override it with ``modality_mix:``. The ``fast`` profile, shipped since
-2026-10-26, does: 25% / 5% / 70% images only (``format_profiles.fast`` in
+2026-10-26, does: 40% / 10% / 50% images only since 2026-11-07, 25% / 5% / 70% before (``format_profiles.fast`` in
 configs/training/unified.yaml). Modes are drawn when the corpus is built, so the
 corpus records the mix it was drawn with and a run that wants another is refused
 (:func:`assert_corpus_mix`).

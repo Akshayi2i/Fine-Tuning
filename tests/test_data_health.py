@@ -248,3 +248,109 @@ def test_accept_set_aside_reads_a_comma_separated_list():
 
     assert accepted_set_aside(" policy_0001, ,policy_0002 ") == frozenset({"policy_0001", "policy_0002"})
     assert accepted_set_aside(None) == frozenset() and accepted_set_aside("") == frozenset()
+
+
+# -- gold values no training row teaches -----------------------------------------
+
+
+def test_values_no_window_teaches_are_counted_once_by_kind():
+    from data_pipeline.data_health import untaught_values
+
+    notes = {"policy_0001": [
+        "window ocr_plus_image: unread coverages[3].limits[0].amount",
+        "window image_only: unread coverages[3].limits[0].amount",          # the same value, another mode
+        "window ocr_plus_image: unplaced forms[2].form_number",
+        "window image_only: orphaned locations[1].address",
+        "window ocr_plus_image: away from home coverages[5]",
+        "window ocr_plus_image: something else entirely",
+    ]}
+    assert untaught_values(notes) == {"policy_0001": {"away from home": 1, "orphaned": 1, "unplaced": 1, "unread": 1}}
+
+    built = _built(["policy_0001"], [])
+    built.window_notes = notes
+    health = assess([_document("policy_0001", ["a"])], built)
+    summary = health.as_dict()["summary"]
+    assert summary["gold_values_never_taught"] == 3            # away from home is taught elsewhere
+    assert summary["gold_values_taught_elsewhere"] == 1
+    assert summary["documents_with_values_never_taught"] == 1
+    assert "gold values no training row teaches: 3 in 1 document(s)" in health.render()
+
+
+# -- planning as if the eval set were not frozen ------------------------------------
+
+
+def test_the_dataset_build_refuses_to_plan_as_unfrozen(client, controller):
+    from orchestration import pipeline_dag
+
+    seed_corpus(client)
+    ctx = make_context(client, controller, plan_unfrozen=True)
+    with pytest.raises(PipelineError, match="read-only data health report"):
+        pipeline_dag.stage_dataset_build(ctx)
+
+
+def test_planning_as_unfrozen_keeps_a_delivered_test_document_in_test(client, controller, monkeypatch):
+    """Cycle 1's policy_0048 was delivered as test and missed the freeze: the report checks it where it belongs."""
+    from evaluation import freeze_eval_set
+    from orchestration import pipeline_dag
+
+    seed_corpus(client)
+    monkeypatch.setattr(freeze_eval_set, "is_frozen", lambda *a, **k: True)
+    monkeypatch.setattr(pipeline_dag, "exclude_eval_families", lambda client, docs, tenant_id=None: (docs, []))
+    monkeypatch.setattr(freeze_eval_set, "frozen_manifest", lambda *a, **k: {})
+    assert pipeline_dag.plan_corpus(make_context(client, controller)).frozen is True
+    assert pipeline_dag.plan_corpus(make_context(client, controller, plan_unfrozen=True)).frozen is False
+
+
+# -- the Python a detached job runs with -------------------------------------------
+
+
+def test_a_job_started_without_a_venv_runs_with_the_training_venv(monkeypatch, tmp_path):
+    import sys
+
+    from orchestration import detach
+
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("")
+    monkeypatch.setattr(detach, "TRAINING_VENV", tmp_path / "venv")
+    monkeypatch.setattr(sys, "prefix", sys.base_prefix)                  # the system Python, no venv
+    assert detach.detached_python() == str(venv_python)
+
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "some-venv"))     # a venv is active: its own Python
+    assert detach.detached_python() == sys.executable
+
+
+def test_without_a_training_venv_the_caller_s_python_is_kept(monkeypatch, tmp_path):
+    import sys
+
+    from orchestration import detach
+
+    monkeypatch.setattr(detach, "TRAINING_VENV", tmp_path / "missing")
+    monkeypatch.setattr(sys, "prefix", sys.base_prefix)
+    assert detach.detached_python() == sys.executable
+
+
+# -- near copies are found by page image -------------------------------------------
+
+
+def test_near_copies_pair_by_page_image_when_their_ocr_text_differs(client):
+    """0065 and 0066: 71 of 73 page images byte-identical, OCR text different on 18 of them, so by text they were
+    never paired and the consistency test measured nothing (pod, 2026-11-07)."""
+    from evaluation.metrics.near_copy import near_copy_pairs, page_image_keys
+
+    a_keys, b_keys, a_text, b_text = [], [], {}, {}
+    for page in range(1, 11):
+        client.write_bytes(f"g/a/page_{page}.png", f"page {page}".encode())
+        client.write_bytes(f"g/b/page_{page}.png", f"page {page}".encode() if page <= 9 else b"other")
+        a_keys.append(f"g/a/page_{page}.png")
+        b_keys.append(f"g/b/page_{page}.png")
+        a_text[page] = f"Commercial General Liability coverage part page {page} " * 2
+        # OCR read three identical pages differently.
+        b_text[page] = a_text[page] if page > 3 else f"Commerc1al Genera1 Liabi1ity coverage part page {page} " * 2
+    documents = [SimpleNamespace(source_id="policy_0065", image_keys=a_keys, page_texts=a_text),
+                 SimpleNamespace(source_id="policy_0066", image_keys=b_keys, page_texts=b_text)]
+
+    assert near_copy_pairs(documents) == []                                      # by text: 7 of 10, not paired
+    [pair] = near_copy_pairs(documents, page_keys=page_image_keys(client, documents))
+    assert (pair.a, pair.b, pair.share) == ("policy_0065", "policy_0066", 0.9)    # by image: 9 of 10
+    assert page_image_keys(None, documents) is None

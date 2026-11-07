@@ -642,7 +642,7 @@ def test_the_fast_profile_trains_and_selects_on_more_image_only(monkeypatch):
 
     _profile(monkeypatch, "fast")
     fast_config = config.training_config(ADAPTER.training_config)
-    assert configured_modality_mix() == {"ocr_plus_image": 0.25, "noisy_ocr_image": 0.05, "image_only": 0.7}
+    assert configured_modality_mix() == {"ocr_plus_image": 0.4, "noisy_ocr_image": 0.1, "image_only": 0.5}
     assert configured_modality_mix() != standard_mix
     assert fast_config["evaluation"]["selection_document_modes"] == ["ocr_plus_image", "image_only"]
     # Everything else is the standard config.

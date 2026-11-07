@@ -82,7 +82,7 @@ def test_no_family_fills_the_sample_past_the_cap():
 def test_the_fast_profile_s_training_mix_weights_image_only():
     from training.data_mix import configured_modality_mix
 
-    shares = configured_modality_mix()                                   # fast: image_only 0.7
+    shares = configured_modality_mix()                                   # fast: image_only 0.5
     options = sample_options({"validation_sample_mode_shares": "training"})
     assert options.mode_shares == shares
     sample = validation_sample(_rows(), 400, options)

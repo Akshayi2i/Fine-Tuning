@@ -109,12 +109,34 @@ def detach_if_needed(command: Sequence[str], hint: str) -> bool:
     return True
 
 
+#: The pod's training virtualenv (scripts/pod_bootstrap.sh); FIDEON_WORKSPACE moves it with the volume.
+TRAINING_VENV = Path(os.environ.get("FIDEON_WORKSPACE") or str(WORKSPACE)) / "venv"
+
+
+def detached_python() -> str:
+    """The Python a detached job runs with: the caller's when it is a virtualenv's, else the training venv's.
+
+    A shell with no venv active ran ``python`` as the pod's system Python, which has none of this repo's
+    packages: ``data_health`` died at once on ``No module named 'pydantic'`` (2026-11-07). pod_run.sh falls
+    back to the training venv only for a command that names no interpreter, and this one names it.
+    """
+    import sys
+
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        return sys.executable
+    venv_python = TRAINING_VENV / "bin" / "python"
+    if venv_python.is_file():
+        log.warning("no virtualenv is active; the job runs with the training venv's %s", venv_python)
+        return str(venv_python)
+    return sys.executable
+
+
 def detach_module_if_needed(module: str, argv: Sequence[str] | None, hint: str | None = None) -> bool:
     """:func:`detach_if_needed` for ``python -m <module> <argv>``."""
     import sys
 
     args = list(argv) if argv is not None else sys.argv[1:]
-    return detach_if_needed([sys.executable, "-m", module, *args], hint or module.rsplit(".", 1)[-1])
+    return detach_if_needed([detached_python(), "-m", module, *args], hint or module.rsplit(".", 1)[-1])
 
 
 def detach_script_if_needed(script: str | Path, argv: Sequence[str] | None, hint: str) -> bool:
@@ -122,4 +144,4 @@ def detach_script_if_needed(script: str | Path, argv: Sequence[str] | None, hint
     import sys
 
     args = list(argv) if argv is not None else sys.argv[1:]
-    return detach_if_needed([sys.executable, str(script), *args], hint)
+    return detach_if_needed([detached_python(), str(script), *args], hint)

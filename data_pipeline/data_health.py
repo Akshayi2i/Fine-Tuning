@@ -45,6 +45,34 @@ SHOWN = 20
 IMAGE_WORKERS = 16
 
 
+#: What ``build_jsonl`` notes about a gold value no window teaches where it is printed, and whether it is lost.
+#: ``away from home``: a row taught on the pages printing its name or figures, left out of a caption-only page.
+UNTAUGHT_KINDS: dict[str, tuple[str, bool]] = {
+    "unread": ("printed on a page no window of its group reads", True),
+    "unplaced": ("no page recorded for it", True),
+    "orphaned": ("a row fragment its window cannot tie to its row", True),
+    "away from home": ("taught on the pages that print it, not on a caption-only page", False),
+}
+_NOTE = re.compile(r"^window [^:]+: (unread|unplaced|orphaned|away from home) (.+)$")
+
+
+def untaught_values(window_notes: dict[str, Sequence[str]] | None) -> dict[str, dict[str, int]]:
+    """Per document, how many distinct gold values each kind of window note names (modes counted once)."""
+    out: dict[str, dict[str, int]] = {}
+    for source_id, notes in (window_notes or {}).items():
+        seen: dict[str, set[str]] = defaultdict(set)
+        for note in notes:
+            if match := _NOTE.match(str(note)):
+                seen[match.group(1)].add(match.group(2))
+        if seen:
+            out[source_id] = {kind: len(paths) for kind, paths in sorted(seen.items())}
+    return out
+
+
+def _lost(counts: dict[str, int]) -> int:
+    return sum(n for kind, n in counts.items() if UNTAUGHT_KINDS.get(kind, ("", True))[1])
+
+
 @dataclass
 class DataHealth:
     """What the corpus would hold, and what it would not, before it is written."""
@@ -59,6 +87,9 @@ class DataHealth:
     blank_pages: dict[str, list[int]] = field(default_factory=dict)
     largest_pages: list[dict[str, Any]] = field(default_factory=list)
     cap_report: dict[str, Any] = field(default_factory=dict)
+    #: Per document, gold values by why no training row teaches them (``build_jsonl`` window notes, one value
+    #: counted once across reading modes): see :data:`UNTAUGHT_KINDS`.
+    untaught: dict[str, dict[str, int]] = field(default_factory=dict)
     #: None when the image check was not run.
     same_image_different_text: list[dict[str, Any]] | None = None
     accepted: list[str] = field(default_factory=list)
@@ -89,6 +120,9 @@ class DataHealth:
             "characters_removed": sum(p["characters_removed"] for p in self.picture_pages),
             "documents_with_blank_pages": len(self.blank_pages),
             "blank_pages": sum(len(pages) for pages in self.blank_pages.values()),
+            "gold_values_never_taught": sum(_lost(c) for c in self.untaught.values()),
+            "documents_with_values_never_taught": sum(1 for c in self.untaught.values() if _lost(c)),
+            "gold_values_taught_elsewhere": sum(c.get("away from home", 0) for c in self.untaught.values()),
             "same_image_different_text_groups": (None if self.same_image_different_text is None
                                                  else len(self.same_image_different_text)),
         }
@@ -125,6 +159,16 @@ class DataHealth:
             out.append("  largest pages (characters, after pictures are taken out):")
             for page in self.largest_pages:
                 out.append(f"    {page['source_id']} page {page['page']}: {page['characters']:,}")
+        lost = summary["gold_values_never_taught"]
+        out.append(f"  gold values no training row teaches: {lost} in "
+                   f"{summary['documents_with_values_never_taught']} document(s) "
+                   f"(and {summary['gold_values_taught_elsewhere']} taught on other pages, not lost)")
+        for kind, (meaning, is_lost) in UNTAUGHT_KINDS.items():
+            if is_lost and (n := sum(c.get(kind, 0) for c in self.untaught.values())):
+                out.append(f"    {kind}: {n} - {meaning}")
+        for source_id, counts in sorted(self.untaught.items(), key=lambda kv: -_lost(kv[1]))[:SHOWN]:
+            if _lost(counts):
+                out.append(f"    {source_id}: {_lost(counts)} ({', '.join(f'{k} {n}' for k, n in counts.items())})")
         rejected = self.cap_report.get("documents_rejected") if isinstance(self.cap_report, dict) else None
         if rejected:
             out.append(f"  documents with a row over its token budget: {rejected} (largest rows by task: "
@@ -193,6 +237,7 @@ def assess(
         blank_pages=blank,
         largest_pages=[{"source_id": s, "page": p, "characters": n} for n, s, p in sizes[:largest]],
         cap_report=cap,
+        untaught=untaught_values(getattr(built, "window_notes", None)),
         accepted=sorted(set(accepted)),
     )
 
@@ -275,6 +320,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
                              "(one storage call per page)")
     parser.add_argument("--accept-set-aside", dest="accept_set_aside", default="",
                         help="comma-separated ids agreed to stay out of the corpus")
+    parser.add_argument("--as-unfrozen", dest="as_unfrozen", action="store_true",
+                        help="plan the delivered split as if the eval set were not frozen, so a document delivered "
+                             "as test that missed the freeze is checked too (read-only: nothing is written)")
     parser.add_argument("--out", default=None, help="write the full report here as JSON")
     args = parser.parse_args(argv)
     # It reads every page of every labelled document, and with --images asks storage about each page image:
@@ -290,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
     from orchestration.run import accepted_set_aside, build_context
 
     ctx = build_context(argparse.Namespace(tenant=args.tenant, dry_run=False),
-                        accept_set_aside=accepted_set_aside(args.accept_set_aside))
+                        accept_set_aside=accepted_set_aside(args.accept_set_aside), plan_unfrozen=args.as_unfrozen)
     plan = plan_corpus(ctx)
     health = assess_plan(ctx, plan)
     if args.images:

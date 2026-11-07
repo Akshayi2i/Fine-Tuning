@@ -383,7 +383,7 @@ def _rescore(
     body.update(golden_eval.real_only_section(version, triples, corpus_version=corpus_version))
     from evaluation.metrics.near_copy import consistency_section
 
-    body.update(consistency_section(documents, triples, body))
+    body.update(consistency_section(documents, triples, body, client))
     # Against the release promoted when it was scored: not recomputed.
     body["field_delta_vs_promoted"] = None
     body["answers_stored"] = copy.deepcopy(record)

@@ -195,6 +195,12 @@ cmd_start() {
     echo '  ) &'
     echo '  watcher=$!'
     echo 'fi'
+    # A run stopped by a signal says so, in the log and as its exit: a closed session (HUP), Ctrl-C (INT), a kill
+    # (TERM, QUIT). A run that vanished on 2026-11-07 left an empty log and no exit, and the cause stayed unknown.
+    # Only SIGKILL, or the tmux server dying with it, still leaves nothing - and status then says no exit was recorded.
+    printf 'on_signal() { echo "=== %s stopped by signal $1 at $(date -u +%%FT%%TZ) ===" | tee -a %q; [ -n "$watcher" ] && kill "$watcher" 2>/dev/null; echo "signal $1" > %q; exit $((128 + $2)); }\n' \
+      "$name" "$log" "$exit_file"
+    echo "trap 'on_signal HUP 1' HUP; trap 'on_signal INT 2' INT; trap 'on_signal QUIT 3' QUIT; trap 'on_signal TERM 15' TERM"
     echo 'attempt=1'
     echo 'while :; do'
     # Where this attempt's output starts in the log, to read only that for a stall.
@@ -249,7 +255,9 @@ cmd_status() {
   if [ $# -eq 0 ]; then cmd_list; return; fi
   local name="$1" log exit_file
   log="$(log_of "$name")"; exit_file="$(exit_file_of "$name")"
-  if [ -f "$exit_file" ]; then
+  if [ -f "$exit_file" ] && grep -q '^signal' "$exit_file"; then
+    echo "run '$name': STOPPED by $(cat "$exit_file") - resume it with --from-stage"
+  elif [ -f "$exit_file" ]; then
     echo "run '$name': FINISHED, exit $(cat "$exit_file")"
   elif command -v tmux >/dev/null 2>&1 && running "$name"; then
     echo "run '$name': RUNNING"

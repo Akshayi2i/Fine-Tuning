@@ -195,6 +195,9 @@ class StageContext:
     #: Documents the person has agreed may stay out of the corpus (``--accept-set-aside``). Any other
     #: document that would not reach it stops the dataset build (data_pipeline.data_health).
     accept_set_aside: frozenset[str] = frozenset()
+    #: Plan the corpus as if no eval set were frozen. Only the read-only data health report sets it
+    #: (``data_pipeline.data_health --as-unfrozen``); the dataset build refuses to run with it.
+    plan_unfrozen: bool = False
 
     # -- fitted during the run ---------------------------------------------
     calibrators: dict[str, Any] = field(default_factory=dict)
@@ -1120,7 +1123,9 @@ def plan_corpus(ctx: StageContext) -> CorpusPlan:
     # document's answers — and the rest split into train and val only. Another
     # tenant's frozen set changes nothing here: this tenant still draws its own
     # test split until it freezes its own.
-    frozen = is_frozen(ctx.client, tenant_id=ctx.tenant_id)
+    # A read-only health report may plan the delivered split as if nothing were frozen (plan_unfrozen): a
+    # document delivered as test that missed the freeze (cycle 1's policy_0048) is then checked where it belongs.
+    frozen = is_frozen(ctx.client, tenant_id=ctx.tenant_id) and not ctx.plan_unfrozen
     excluded: list[str] = []
     # Before the exclusion below: with a delivered split, "the family of an eval
     # document" is its source document's twins, not every document on its form.
@@ -1217,6 +1222,9 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
     from data_pipeline.corpus_manifest import build_manifest
     from data_pipeline.dataset_builder.build_jsonl import train_rows_by_epoch, write_jsonl
 
+    if ctx.plan_unfrozen:
+        raise PipelineError("plan_unfrozen is for the read-only data health report: a corpus built as if the "
+                            "eval set were not frozen would put test documents beside a frozen yardstick")
     plan = plan_corpus(ctx)
     documents, by_type, assignment, built, frozen, modes = (
         plan.documents, plan.by_type, plan.assignment, plan.built, plan.frozen, plan.modes

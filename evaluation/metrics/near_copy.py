@@ -47,9 +47,45 @@ def _page_keys(page_texts: Mapping[Any, str]) -> set[str]:
     return keys
 
 
-def near_copy_pairs(documents: Sequence[Any], share: float = NEAR_COPY_SHARE) -> list[NearCopyPair]:
-    """The pairs of ``documents`` (each with ``source_id`` and ``page_texts``) sharing ``share`` of their page text."""
-    pages = {document.source_id: _page_keys(document.page_texts) for document in documents}
+def page_image_keys(client: Any, documents: Sequence[Any], workers: int = 16) -> dict[str, set[str]] | None:
+    """Each document's distinct page images, as the MD5 stored with each image (``BlobClient.md5``), or of its bytes
+    when none is stored. None when a document has no image keys or the store cannot be asked.
+
+    Pages, not their OCR text, decide a near copy: 0065 and 0066 of the frozen set share 71 of 73 byte-identical page
+    images, yet OCR read 18 of those 71 into different text, and by text the pair (54 of 73) was never measured
+    (2026-11-07).
+    """
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    if client is None or not documents or any(not getattr(d, "image_keys", None) for d in documents):
+        return None
+
+    def digest(key: str) -> str:
+        recorded = client.md5(key)
+        return recorded.hex() if recorded else hashlib.md5(client.read_bytes(key)).hexdigest()
+
+    keys = [(document.source_id, key) for document in documents for key in document.image_keys]
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="page-image") as pool:
+            digests = list(pool.map(digest, [key for _source, key in keys]))
+    except Exception as exc:  # noqa: BLE001 - the text comparison still runs; said in the log and the report
+        log.warning("page images could not be compared (%s: %s); near copies are found by page text",
+                    type(exc).__name__, exc)
+        return None
+    out: dict[str, set[str]] = {document.source_id: set() for document in documents}
+    for (source_id, _key), image in zip(keys, digests, strict=True):
+        out[source_id].add(image)
+    return out
+
+
+def near_copy_pairs(documents: Sequence[Any], share: float = NEAR_COPY_SHARE,
+                    page_keys: Mapping[str, set[str]] | None = None) -> list[NearCopyPair]:
+    """The pairs of ``documents`` (each with ``source_id`` and ``page_texts``) sharing ``share`` of their pages:
+    by ``page_keys`` when given (:func:`page_image_keys`), else by page text."""
+    pages = ({document.source_id: set(page_keys.get(document.source_id, ())) for document in documents}
+             if page_keys is not None else
+             {document.source_id: _page_keys(document.page_texts) for document in documents})
     out = []
     for a, b in combinations(sorted(pages), 2):
         smaller = min(len(pages[a]), len(pages[b]))
@@ -108,14 +144,15 @@ def _agreement(first: Any, second: Any, differ: set[str], metadata: Mapping[str,
     return (sum(shares) / len(shares), sum(counts) / len(counts)) if counts else None
 
 
-def near_copy_agreement(documents: Sequence[Any], triples: Sequence[tuple[Any, Any, Mapping[str, Any]]]) -> dict[str, Any]:
+def near_copy_agreement(documents: Sequence[Any], triples: Sequence[tuple[Any, Any, Mapping[str, Any]]],
+                        page_keys: Mapping[str, set[str]] | None = None) -> dict[str, Any]:
     """Each near-identical pair's agreement by reading mode, and over all of them (weighted by fields compared)."""
     readings: dict[tuple[Any, Any], tuple[Any, Any, Mapping[str, Any]]] = {}
     for gold, answer, metadata in triples:
         readings[(metadata.get("source_id"), metadata.get("modality_mode"))] = (gold, answer, metadata)
     pairs = []
     weighted = total = 0.0
-    for pair in near_copy_pairs(documents):
+    for pair in near_copy_pairs(documents, page_keys=page_keys):
         by_mode: dict[str, dict[str, float]] = {}
         modes = {mode for source, mode in readings if source == pair.a} & {mode for source, mode in readings if source == pair.b}
         for mode in sorted(modes, key=str):
@@ -130,7 +167,8 @@ def near_copy_agreement(documents: Sequence[Any], triples: Sequence[tuple[Any, A
             total += compared
         pairs.append({"a": pair.a, "b": pair.b, "pages_shared": pair.share, "by_mode": by_mode})
     return {"pairs": pairs, "agreement": round(weighted / total, 4) if total else None,
-            "share_needed_to_pair": NEAR_COPY_SHARE}
+            "share_needed_to_pair": NEAR_COPY_SHARE,
+            "paired_by": "page image" if page_keys is not None else "page text"}
 
 
 def per_policy_scores(per_document: Mapping[str, float], documents: Sequence[Any]) -> dict[str, Any]:
@@ -154,12 +192,14 @@ def per_policy_scores(per_document: Mapping[str, float], documents: Sequence[Any
     }
 
 
-def consistency_section(documents: Sequence[Any], triples: Sequence[Any], body: Mapping[str, Any]) -> dict[str, Any]:
+def consistency_section(documents: Sequence[Any], triples: Sequence[Any], body: Mapping[str, Any],
+                        client: Any = None) -> dict[str, Any]:
     """What a report carries: both checks. Reported, never gated, so a failure here never costs a gate its hours: it
-    is logged, and the report says the check did not run."""
+    is logged, and the report says the check did not run. With ``client``, near copies are found by page image."""
     scores = (body.get("per_document") or {}).get("field_normalized_match") or {}
     try:
-        return {"near_copy_agreement": near_copy_agreement(documents, triples),
+        page_keys = page_image_keys(client, documents)
+        return {"near_copy_agreement": near_copy_agreement(documents, triples, page_keys),
                 "per_policy_field_normalized_match": per_policy_scores(scores, documents)}
     except Exception as exc:  # noqa: BLE001 - reported only; the gate's own result stands
         log.warning("the near-copy consistency check did not run (%s: %s)", type(exc).__name__, exc)

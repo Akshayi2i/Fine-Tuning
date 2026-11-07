@@ -985,7 +985,7 @@ def evaluate_version(
     # Near-identical PDFs stay in the exam: do they get the same answer, and the score with each policy counted once.
     from evaluation.metrics.near_copy import consistency_section
 
-    body.update(consistency_section(documents, triples, body))
+    body.update(consistency_section(documents, triples, body, client))
     body["windowing_ceiling"] = windowing_ceiling(documents)
     # Each field's accuracy against the promoted release's report (reported,
     # never gated): where this release gained and lost.

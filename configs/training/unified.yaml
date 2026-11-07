@@ -238,7 +238,7 @@ evaluation:
   #       long policy does not fill the sample. null: no cap.
   #   validation_sample_mode_shares  null: each mode in its share of the split (a
   #       third each). `training`: the training mix (modality_mix) - under the
-  #       fast profile image_only 0.7, the mode production reads; set it under
+  #       fast profile image_only 0.5, the mode production reads; set it under
   #       format_profiles.fast.evaluation to leave standard as it is. Or a
   #       mapping, e.g. {ocr_plus_image: 0.25, noisy_ocr_image: 0.05,
   #       image_only: 0.7}. A mode with no rows gives its share to the others.
@@ -426,7 +426,8 @@ hard_examples:
 # The input-mode mix is common.constants.MODALITY_MIX (50% OCR text and images,
 # 20% corrupted OCR and images, 30% images only: the standard profile) unless
 # set here or by the active format profile. The fast profile, shipped since
-# 2026-10-26, sets 25% / 5% / 70% images only (format_profiles.fast below):
+# 2026-10-26, set 25% / 5% / 70% images only, and 40% / 10% / 50% since 2026-11-07 (format_profiles.fast
+# below):
 #
 #   modality_mix: {ocr_plus_image: 0.5, noisy_ocr_image: 0.2, image_only: 0.3}
 #
@@ -445,11 +446,12 @@ format_profiles:
     # selection borrows to count image_only inventions. noisy_ocr_image only
     # protects the OCR paths, so it keeps a token share.
     #   standard  0.5  / 0.2  / 0.3
-    #   fast      0.25 / 0.05 / 0.7
-    # Check before the corpus build: if image_only reads the pod run's scans
-    # more than ~2-3 points below ocr_plus_image, go back to 0.4 / 0.1 / 0.5
-    # and reconsider fields first.
-    modality_mix: {ocr_plus_image: 0.25, noisy_ocr_image: 0.05, image_only: 0.7}
+    #   fast      0.4  / 0.1  / 0.5   (0.25 / 0.05 / 0.7 until 2026-11-07)
+    # The guard set on 2026-10-26 - if image_only reads the pod run's scans
+    # more than ~2-3 points below ocr_plus_image, go back to 0.4 / 0.1 / 0.5 -
+    # was met by v3 (rescored 2026-11-07, all 8 test documents scans):
+    # image_only 0.5522, ocr_plus_image 0.5966, 4.4 points.
+    modality_mix: {ocr_plus_image: 0.4, noisy_ocr_image: 0.1, image_only: 0.5}
     evaluation:
       # The finalists' whole-document pass reads image_only too: most of the
       # train rows are in it, and a checkpoint is chosen on what it trains for.
