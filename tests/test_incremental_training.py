@@ -1092,6 +1092,7 @@ def test_a_staged_version_loads_its_adapter_from_the_volume(client, tmp_path, mo
     for step in (100, 200):
         (run / f"checkpoint-{step}").mkdir(parents=True)
         (run / f"checkpoint-{step}" / "adapter_config.json").write_text('{"r": 64}', encoding="utf-8")
+        (run / f"checkpoint-{step}" / "adapter_model.safetensors").write_bytes(b"weights")
 
     model = load_model("v3", client, backend_impl=EchoBackend())
     assert [Path(p) for p in prepared] == [run / "checkpoint-200"]

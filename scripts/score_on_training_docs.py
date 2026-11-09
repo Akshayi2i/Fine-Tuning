@@ -56,6 +56,37 @@ def comparison(own: dict[str, Any], selection: dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def errors_path(out: Path) -> Path:
+    """The whole-document report beside ``out``: every failing field, as ``show_eval_errors.py --file`` reads it."""
+    return out.with_name(out.stem + ".errors.json")
+
+
+def write_details(out: Path, generations: list[Any], reports: dict[str, Any]) -> list[Path]:
+    """Beside ``out``: the failing fields of the whole documents (``.errors.json``, what ships) and of the windows
+    (``.window_errors.json``), and every row's answer with its gold (``.answers.jsonl``), so a question about the
+    run is answered from these files, not another GPU run (2026-11-09: only the totals were kept)."""
+    written: list[Path] = []
+    for name, suffix in (("documents", ".errors.json"), ("windows", ".window_errors.json")):
+        report = reports.get(name)
+        if report is None:
+            continue
+        path = out.with_name(out.stem + suffix)
+        path.write_text(json.dumps({"model_version": report.model_version,
+                                    "subsets": [subset.as_dict() for subset in report.subsets]},
+                                   indent=1, default=str), encoding="utf-8")
+        written.append(path)
+    path = out.with_name(out.stem + ".answers.jsonl")
+    with path.open("w", encoding="utf-8") as handle:
+        for generation in generations:
+            row = {k: v for k, v in generation.row.items() if k not in ("messages", "images")}
+            handle.write(json.dumps({"row": row, "error": generation.error, "failure_kind": generation.failure_kind,
+                                     "answer": generation.extraction, "gold": generation.golden},
+                                    ensure_ascii=False, default=str))
+            handle.write("\n")
+    written.append(path)
+    return written
+
+
 def selected_metrics(report: dict[str, Any]) -> dict[str, Any]:
     """The selected checkpoint's metrics in a selection report, its whole-document scores over its sample's."""
     wanted = report.get("selected")
@@ -108,13 +139,18 @@ def main(argv: list[str] | None = None) -> int:
     # Given to load_model, which refuses a folder holding no adapter: the bare base must not answer in its name.
     model = load_model("base", client, adapter=args.adapter)
     generations = generate_validation(rows, model, adapter=model.default_adapter)
-    own =score_generations(generations, model_version=f"{args.version}-on-its-training-documents")
+    reports: dict[str, Any] = {}
+    own = score_generations(generations, model_version=f"{args.version}-on-its-training-documents",
+                            reports=reports)
     key = paths.checkpoint_selection(args.version, scope=ADAPTER.name)
     selection = selected_metrics(client.read_json(key)) if client.exists(key) else {}
     print(comparison(own, selection))
     if args.out:
         Path(args.out).write_text(json.dumps({"documents": sorted(chosen), "rows": len(rows), "trained": own,
                                               "selection": selection}, indent=1, default=str), encoding="utf-8")
+        for path in write_details(Path(args.out), generations, reports):
+            print(f"written: {path}")
+        print(f"where it went wrong: python scripts/show_eval_errors.py --file {errors_path(Path(args.out))}")
     return 0
 
 

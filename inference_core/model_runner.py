@@ -927,6 +927,19 @@ def without_adapter(model: LoadedModel) -> LoadedModel:
 ADAPTER_CACHE = Path("/workspace/adapters") if Path("/workspace").is_dir() else Path.home() / ".cache" / "fideon-adapters"
 
 
+#: The files a saved PEFT LoRA adapter keeps its weights in, either of which vLLM loads.
+ADAPTER_WEIGHT_FILES = ("adapter_model.safetensors", "adapter_model.bin")
+
+
+def adapter_weights(folder: Path) -> Path | None:
+    """The adapter weights file in ``folder``, when one is there and not empty."""
+    for name in ADAPTER_WEIGHT_FILES:
+        path = folder / name
+        if path.is_file() and path.stat().st_size > 0:
+            return path
+    return None
+
+
 def prepare_adapter(adapter: str, client: BlobClient, config: RunnerConfig) -> str:
     """A local LoRA adapter directory the engine can load, checked.
 
@@ -941,7 +954,8 @@ def prepare_adapter(adapter: str, client: BlobClient, config: RunnerConfig) -> s
     local = Path(adapter)
     if not local.is_dir():
         target = ADAPTER_CACHE / re.sub(r"[^A-Za-z0-9._-]+", "_", adapter.strip("/"))
-        if not (target / "adapter_config.json").is_file():
+        # Copied again unless the weights are there too: a copy cut short leaves the config, and was reused.
+        if not ((target / "adapter_config.json").is_file() and adapter_weights(target)):
             copied = client.download_dir(adapter, target)
             log.info("copied adapter %s (%d file(s)) to %s", adapter, copied, target)
         local = target
@@ -950,6 +964,15 @@ def prepare_adapter(adapter: str, client: BlobClient, config: RunnerConfig) -> s
         raise ModelRunnerError(
             f"{adapter} holds no adapter_config.json, so it is not a LoRA adapter. Point --adapter at "
             "a checkpoint folder (.../checkpoint-N) or the run's adapter folder."
+        )
+    if not adapter_weights(local):
+        # 2026-11-09: a pod checkpoint held its config and a half-copied adapter_model.safetensors.part; the engine
+        # started, and every row failed alone with "doesn't contain tensors", ten minutes in.
+        partial = sorted(path.name for path in local.glob("*.part"))
+        raise ModelRunnerError(
+            f"{adapter} holds adapter_config.json but no adapter weights ({' or '.join(ADAPTER_WEIGHT_FILES)})"
+            + (f"; only {', '.join(partial)}, a copy that never finished" if partial else "")
+            + ". Copy the adapter again, or point --adapter at its Blob prefix."
         )
     rank = int(json.loads(config_file.read_text(encoding="utf-8")).get("r") or 0)
     if rank > config.max_lora_rank:

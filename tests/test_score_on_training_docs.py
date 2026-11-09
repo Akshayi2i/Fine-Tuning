@@ -87,6 +87,7 @@ def _adapter(tmp_path):
     adapter = tmp_path / "adapter"
     adapter.mkdir()
     (adapter / "adapter_config.json").write_text(json.dumps({"r": 8}), encoding="utf-8")
+    (adapter / "adapter_model.safetensors").write_bytes(b"weights")
     return adapter
 
 

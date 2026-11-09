@@ -163,6 +163,7 @@ def _staged_run(client, tmp_path, monkeypatch) -> Path:
     for step in (100, 200):
         (run / f"checkpoint-{step}").mkdir(parents=True)
         (run / f"checkpoint-{step}" / "adapter_config.json").write_text('{"r": 64}', encoding="utf-8")
+        (run / f"checkpoint-{step}" / "adapter_model.safetensors").write_bytes(b"weights")
     return run
 
 

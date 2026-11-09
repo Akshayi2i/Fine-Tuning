@@ -326,7 +326,9 @@ cmd_stop() {
   running "$1" || die "no session for run '$1'"
   if [ ! -f "$(exit_file_of "$1")" ]; then
     read -r -p "run '$1' is still RUNNING. Kill it? Type the run name to confirm: " answer
-    [ "$answer" = "$1" ] || die "not confirmed; the run keeps going"
+    # Spaces and carriage returns a paste brings are not part of the name (2026-11-09: a typed name was refused).
+    answer="${answer//[[:space:]]/}"
+    [ "$answer" = "$1" ] || die "not confirmed (typed '$answer'); the run keeps going"
   fi
   tmux kill-session -t "=$(session_of "$1")"
   echo "session for '$1' closed"

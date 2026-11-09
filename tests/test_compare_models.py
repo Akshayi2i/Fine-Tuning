@@ -108,6 +108,7 @@ def _adapter(tmp_path: Path) -> Path:
     folder = tmp_path / "run" / "checkpoint-10"
     folder.mkdir(parents=True)
     (folder / "adapter_config.json").write_text(json.dumps({"r": 64}), encoding="utf-8")
+    (folder / "adapter_model.safetensors").write_bytes(b"weights")
     return folder
 
 

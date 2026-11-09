@@ -431,7 +431,7 @@ def _finish(entry: ValidationGeneration, result: Any) -> None:
 
 def score_generations(
     generations: Sequence[ValidationGeneration], *, model_version: str = "validation",
-    repeat: Sequence[ValidationGeneration] | None = None,
+    repeat: Sequence[ValidationGeneration] | None = None, reports: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The gate's metrics over these generations — the one definition of correct.
 
@@ -455,6 +455,10 @@ def score_generations(
     ocr_plus_image rows among ``generations`` (``run_eval.build_report``,
     decision 2026-10-26). What that could not cover is counted beside the rate
     (:func:`_invention_coverage`), never read as nothing invented.
+
+    Given ``reports``, the reports the metrics come from are put in it - ``windows``, and ``documents`` where
+    policies were read in windows - with every failing field (``error_records``), for
+    ``scripts/show_eval_errors.py`` to read.
     """
     from evaluation.run_eval import REPEAT_ANSWER, build_report
 
@@ -467,6 +471,8 @@ def score_generations(
         rows = [(gold, answer, {**metadata, REPEAT_ANSWER: again.extraction or {}} if again is not None else metadata)
                 for (gold, answer, metadata), again in zip(rows, paired, strict=True)]
     report = build_report(model_version, rows)
+    if reports is not None:
+        reports["windows"] = report
     metrics = {**report.gate_metrics(), **_invention_coverage(report), **_generation_outcomes(generations)}
     if any(_is_window(g) for g in generations):
         documents = merged_documents(generations)
@@ -476,6 +482,8 @@ def score_generations(
             documents = _with_document_repeat(documents, merged_documents(
                 [again for again in paired if again is not None]))
         whole_report = build_report(model_version, documents)
+        if reports is not None:
+            reports["documents"] = whole_report
         whole = {**whole_report.gate_metrics(), **_invention_coverage(whole_report)}
         metrics.update({f"document_{name}": value for name, value in whole.items()
                         if isinstance(value, (int, float)) and not isinstance(value, bool)})
