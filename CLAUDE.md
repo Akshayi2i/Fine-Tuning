@@ -32,3 +32,13 @@ The user requires well-proven, fact-based answers (2026-11-03, after a diagnosis
 - **Test before saying it works.** "Fixed" or "works" means it was run, and say on what (a unit test, the real data, a pod). Say plainly what has not been run.
 - **Check the requirement too, not only the facts.** A requirement read wrongly gives a wrong answer however well it is proven. When what the user wants is unclear, ask or restate it before building on it; do not assume. When the user corrects the requirement, their reading stands, and earlier advice built on the wrong one is withdrawn out loud.
 - **A number, a cause or an explanation from memory or an earlier summary is not proof.** Check it again against the code or the data before repeating it.
+
+## Explain in simple terms, always
+
+The user asked for every technical explanation in simple terms (2026-11-10, after a plan full of tool names and jargon; earlier the same day: "I am not getting what we're doing?").
+
+- **Lead with what it means for the user:** what is wrong, what we do about it, and what they need to do or decide - in plain words, before any detail.
+- **Short sentences, one idea each.** Use an everyday example when it makes a point clearer.
+- **No jargon without its plain meaning.** Explain a technical word in a few plain words the first time, or leave it out. Tool names, flags, metric names and file paths come after the plain explanation, never instead of it.
+- **Commands go last,** after the user knows why they are running them.
+- **Simple is not vague:** the rules above still hold - facts only, with their proof, and "I don't know" when it is not known.
