@@ -597,6 +597,9 @@ def _window_rows(build: _WindowBuild, plan: PolicyWindowPlan, part: str = "") ->
     # its group, as serving does (PolicyWindow.leads), so a split
     # declarations window's lead piece wins there too.
     row["window_leads"] = plan.leads
+    # The document's declarations page: which half of this window leads when selection reads it again in halves
+    # (validation_generation._read_failed_windows_in_halves), as serving decides it (serving.pipeline._halves).
+    row["declarations_page"] = build.declarations_page
     if part:
         row["window_half"] = part
         build.counts["halves.rows"] += 1

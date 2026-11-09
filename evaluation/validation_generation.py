@@ -56,6 +56,12 @@ class ValidationGeneration:
     #: The model's whole answer when it could not be read as JSON (an answer cut off at the token limit): what it
     #: was writing when it ran on. None for an answer that parsed, and for a request that failed.
     unparsed_text: str | None = None
+    #: The answer was cut off: at the token limit, or stopped for repeating itself. Serving reads such a window
+    #: again as two halves (``serving.pipeline._halves``); :func:`generate_validation` does too.
+    cut_off: bool = False
+    #: A failed window read again as two halves, in page order (each may hold halves of its own): what the
+    #: document merge takes in its place (:func:`merged_windows`), as serving merges them. Empty otherwise.
+    halves: list[ValidationGeneration] = field(default_factory=list)
     #: ``"setup"`` when nothing usable came back (the row could not be prepared,
     #: the request failed); ``"output"`` when the model answered with something
     #: that is not a JSON object - a wrong answer, scored as one.
@@ -247,8 +253,6 @@ def generate_validation(
         raise ValueError(f"shard is {shard!r}; expected (k, n) with 0 <= k < n")
     import time
 
-    from common.schemas import resolved_schema, with_page_bounds
-    from inference_core.input_builder import page_total, shown_pages
     from inference_core.model_runner import generate, generate_batch
 
     if constrain is None:
@@ -258,6 +262,8 @@ def generate_validation(
 
     out: list[ValidationGeneration] = []
     pending: list[tuple[ValidationGeneration, list[dict[str, Any]], dict[str, Any] | None, int]] = []
+    #: Each row's prompt, for a failed window read again in halves.
+    prompts: dict[int, list[dict[str, Any]]] = {}
     for row in rows:
         entry = ValidationGeneration(row=row, golden={})
         out.append(entry)
@@ -266,27 +272,11 @@ def generate_validation(
             # row with no form (no schema to select), used to raise out of the
             # loop and abort every other row's scoring with it.
             messages, entry.golden = split_prompt(row)
-            # Page references bounded to the pages the row shows (with_page_bounds),
-            # as serving bounds them.
-            schema = (
-                with_page_bounds(
-                    resolved_schema(
-                        row["doc_type"], row.get("acord_form"), row.get("lob"), row.get("sections")
-                    ),
-                    page_total(messages),
-                    pages=shown_pages(messages),
-                )
-                if constrain else None
-            )
-            if schema is not None and _compact(row):
-                # Decoded as it was trained: the fast format's adapter never
-                # learned the full envelope the grammar would otherwise force.
-                from common.canonical import compact_schema
-
-                schema = compact_schema(schema)
+            schema = _decoding_schema(row, messages, constrain)
         except Exception as exc:  # noqa: BLE001 - one bad row must not lose the rest
             _record_failure(entry, exc, "setup")
             continue
+        prompts[id(entry)] = messages
         # The row's own answer budget: a longer answer is a loop, not an answer.
         pending.append((entry, messages, schema, answer_cap(row.get("task"), row.get("doc_type")),
                         _answer_length(row)))
@@ -355,12 +345,141 @@ def generate_validation(
         slowest = max(slowest, time.monotonic() - began)
         log.info("validation generation: %d/%d row(s) in %.0f s%s%s", done, mine, time.monotonic() - began,
                  f" ({adapter})" if adapter else "", f" [shard {shard[0] + 1}/{shard[1]}]" if shard else "")
+    halves = _read_failed_windows_in_halves(out, prompts, model, adapter=adapter, constrain=constrain,
+                                            batch_rows=size)
     if stats is not None:
         stats.update(rows=len(out), generated=mine, batch_rows=size, calls=calls,
-                     seconds=round(time.monotonic() - started, 1), slowest_call_seconds=round(slowest, 1))
+                     seconds=round(time.monotonic() - started, 1), slowest_call_seconds=round(slowest, 1),
+                     halves_read=halves)
         if shard is not None:
             stats["shard"] = f"{shard[0] + 1}/{shard[1]}"
     return out
+
+
+def _decoding_schema(row: Mapping[str, Any], messages: list[dict[str, Any]], constrain: bool) -> dict[str, Any] | None:
+    """The schema a row is decoded under, or None unconstrained: its slice, with page references bounded to the
+    pages its prompt shows (``with_page_bounds``), as serving bounds them; compact for a fast-format row."""
+    if not constrain:
+        return None
+    from common.schemas import resolved_schema, with_page_bounds
+    from inference_core.input_builder import page_total, shown_pages
+
+    schema = with_page_bounds(
+        resolved_schema(row["doc_type"], row.get("acord_form"), row.get("lob"), row.get("sections")),
+        page_total(messages), pages=shown_pages(messages))
+    if _compact(row):
+        # Decoded as it was trained: the fast format's adapter never
+        # learned the full envelope the grammar would otherwise force.
+        from common.canonical import compact_schema
+
+        schema = compact_schema(schema)
+    return schema
+
+
+_PAGE_MARKER = re.compile(r"<page (\d+) of \d+>")
+
+
+def messages_for_pages(messages: list[dict[str, Any]], pages: Sequence[int]) -> list[dict[str, Any]] | None:
+    """A window's prompt holding only ``pages``: its page blocks (each image, then the text that starts with that
+    page's ``<page i of N>`` marker) for those pages, everything else as it is - the system message, the group's
+    instruction after the pages. What serving sends for one half of the window (``input_builder.build_messages``
+    names no page outside those blocks). None when the prompt is not laid out page by page."""
+    wanted = {int(p) for p in pages}
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") != "user" or not isinstance(content, list):
+            out.append(message)
+            continue
+        kept: list[Any] = []
+        image: Any = None
+        seen: set[int] = set()
+        for part in content:
+            kind = part.get("type") if isinstance(part, dict) else None
+            if kind in ("image", "image_url"):
+                if image is not None:
+                    return None
+                image = part
+                continue
+            match = _PAGE_MARKER.match((part.get("text") or "") if isinstance(part, dict) else "")
+            if match:
+                if image is None:
+                    return None
+                page = int(match.group(1))
+                seen.add(page)
+                if page in wanted:
+                    kept += [image, part]
+                image = None
+            else:
+                if image is not None:
+                    return None
+                kept.append(part)
+        if image is not None or not wanted <= seen:
+            return None
+        out.append({**message, "content": kept})
+    return out
+
+
+def _to_read_in_halves(entry: ValidationGeneration) -> bool:
+    """A window serving would read again in halves: its answer cut off or unusable, over more than one page."""
+    return (_is_window(entry) and (entry.cut_off or entry.failure_kind == "output")
+            and len(entry.row.get("window_pages") or []) > 1)
+
+
+def _read_failed_windows_in_halves(
+    entries: Sequence[ValidationGeneration], prompts: Mapping[int, list[dict[str, Any]]], model: Any, *,
+    adapter: str | None, constrain: bool, batch_rows: int,
+) -> int:
+    """Read each failed window again as two halves, and a failed half again, down to single pages - as serving
+    retries a window whose answer was cut off or unusable (``serving.pipeline._halves``, the same split). The
+    halves go on the window (``ValidationGeneration.halves``) for the document merge; the window's own score is
+    left as it was. Returns how many halves were read.
+
+    Until 2026-11-10 selection scored such a window as empty while the gate, reading through serving, recovered
+    it: v3 looped on 5 of 242 windows of its own training documents, and those windows held about half the
+    values it missed."""
+    from common.config import answer_cap
+    from inference_core.model_runner import generate_batch
+    from serving.pipeline import _halves, _Planned
+
+    level = [(entry, prompts[id(entry)]) for entry in entries if id(entry) in prompts and _to_read_in_halves(entry)]
+    read = 0
+    while level:
+        requests: list[tuple[ValidationGeneration, list[dict[str, Any]], dict[str, Any] | None, int]] = []
+        for entry, messages in level:
+            row = entry.row
+            pieces = _halves(_Planned(row["sections"], [int(p) for p in row["window_pages"]],
+                                      bool(row.get("window_leads"))), row.get("declarations_page"))
+            parts = [(piece, messages_for_pages(messages, piece.pages)) for piece in pieces]
+            if any(half_messages is None for _piece, half_messages in parts):
+                log.warning("validation generation: %s window over pages %s is not laid out page by page; "
+                            "not read again in halves", row.get("source_id"), row.get("window_pages"))
+                continue
+            parent = str(row.get("window_half") or "")
+            for index, (piece, half_messages) in enumerate(parts):
+                half_row = {**row, "messages": half_messages, "window_pages": list(piece.pages),
+                            "window_leads": piece.leads,
+                            "window_half": f"{parent}.{index}" if parent else str(index)}
+                half = ValidationGeneration(row=half_row, golden={})
+                entry.halves.append(half)
+                try:
+                    schema = _decoding_schema(half_row, half_messages, constrain)
+                except Exception as exc:  # noqa: BLE001 - as a whole row's setup
+                    _record_failure(half, exc, "setup")
+                    continue
+                requests.append((half, half_messages, schema, answer_cap(row.get("task"), row.get("doc_type"))))
+        level = []
+        for first in range(0, len(requests), max(1, batch_rows)):
+            chunk = requests[first:first + max(1, batch_rows)]
+            results = generate_batch(model, [(m, s, cap) for _h, m, s, cap in chunk], adapter=adapter)
+            for (half, half_messages, _schema, _cap), result in zip(chunk, results, strict=True):
+                _finish(half, result)
+                read += 1
+                if _to_read_in_halves(half):
+                    level.append((half, half_messages))
+        if requests:
+            log.info("validation generation: %d half-window(s) read for windows that failed", len(requests))
+    return read
 
 
 #: What vLLM raises when its frontend and engine caches of processed page images disagree.
@@ -416,6 +535,7 @@ def _finish(entry: ValidationGeneration, result: Any) -> None:
             extraction = with_output_dates(extraction)
     except Exception as exc:  # noqa: BLE001 - one bad row must not lose the rest
         truncated = bool(getattr(result, "truncated", lambda: False)())
+        entry.cut_off = truncated
         text = getattr(result, "text", "") or ""
         # How generation ended and what it ended on: the parse error alone cannot
         # tell a model looping to the limit from a decode that stopped mid-value.
@@ -429,6 +549,8 @@ def _finish(entry: ValidationGeneration, result: Any) -> None:
         entry.unparsed_text = text
         return
     entry.extraction = extraction
+    # An answer cut off that still parses is incomplete: serving refuses it and reads the window in halves.
+    entry.cut_off = bool(getattr(result, "truncated", lambda: False)())
     # The span objects kept whole (r_written, the top-2 margin), the logprobs beside them.
     entry.spans = {path: span for path, span in spans.items() if span.mapped}
     entry.logprobs_by_path = {path: span.token_logprobs for path, span in entry.spans.items()}
@@ -640,27 +762,49 @@ def generation_record(generation: ValidationGeneration) -> dict[str, Any]:
             "extraction": generation.extraction, "logprobs_by_path": generation.logprobs_by_path,
             "span_details": {path: [getattr(span, "field_path", path), getattr(span, "top2_margin", None)]
                              for path, span in generation.spans.items()},
-            "error": generation.error, "failure_kind": generation.failure_kind}
+            "error": generation.error, "failure_kind": generation.failure_kind,
+            **({"cut_off": True} if generation.cut_off else {}),
+            **({"halves": [_half_record(half) for half in generation.halves]} if generation.halves else {})}
 
 
-def restored_generation(row: dict[str, Any], record: Mapping[str, Any]) -> ValidationGeneration:
+#: What a half's row holds that its window's does not: its pages, its lead, its place among the halves.
+_HALF_ROW_KEYS = ("window_pages", "window_leads", "window_half")
+
+
+def _half_record(half: ValidationGeneration) -> dict[str, Any]:
+    """A half as saved inside its window's record: its own row fields and what came back."""
+    record = generation_record(half)
+    record.pop("key", None)
+    record.pop("digest", None)
+    return {**{k: half.row[k] for k in _HALF_ROW_KEYS if k in half.row}, **record}
+
+
+def restored_generation(row: dict[str, Any], record: Mapping[str, Any], *, half: bool = False) -> ValidationGeneration:
     """A saved generation back on its row: what :func:`generate_validation`
     returned for it, the golden label read off the row again, and its spans
     rebuilt from their logprobs and details - all calibration reads of them."""
     from inference_core.span_map import FieldSpan
 
-    try:
-        golden = split_prompt(row)[1]
-    except Exception:  # noqa: BLE001 - as generate_validation: a row with no label scores as none
-        golden = {}
+    if half:
+        golden: dict[str, Any] = {}        # a half's score is its window's; it only answers in the merge
+    else:
+        try:
+            golden = split_prompt(row)[1]
+        except Exception:  # noqa: BLE001 - as generate_validation: a row with no label scores as none
+            golden = {}
     logprobs = {path: list(values) for path, values in (record.get("logprobs_by_path") or {}).items()}
     spans = {path: FieldSpan(field_path=str(written), value=None, char_start=-1, char_end=-1,
                              token_logprobs=logprobs.get(path, []), mapped=True,
                              top2_margin=float(margin) if isinstance(margin, (int, float)) else None)
              for path, (written, margin) in (record.get("span_details") or {}).items()}
+    # The halves a failed window was read again in travel inside its record (a sharded pass hands its answers
+    # over as records), on their window's row with their own pages.
+    halves = [restored_generation({**row, **{k: saved[k] for k in _HALF_ROW_KEYS if k in saved}}, saved, half=True)
+              for saved in record.get("halves") or []]
     return ValidationGeneration(row=row, golden=golden, extraction=record.get("extraction"),
                                 logprobs_by_path=logprobs, spans=spans,
-                                error=record.get("error"), failure_kind=record.get("failure_kind"))
+                                error=record.get("error"), failure_kind=record.get("failure_kind"),
+                                cut_off=bool(record.get("cut_off")), halves=halves)
 
 
 def write_generations(path: Any, header: Mapping[str, Any], generations: Sequence[ValidationGeneration]) -> None:
@@ -721,6 +865,13 @@ class MergedDocument:
     members: list[ValidationGeneration]
 
 
+def _as_read(generation: ValidationGeneration) -> list[ValidationGeneration]:
+    """The readings that answer for a window: its halves' (their halves', in turn), else the window's own."""
+    if not generation.halves:
+        return [generation]
+    return [read for half in generation.halves for read in _as_read(half)]
+
+
 def merged_windows(generations: Sequence[ValidationGeneration]) -> list[MergedDocument]:
     """Each policy document read in windows, per reading mode, merged."""
     from common.schema_sections import group_names
@@ -750,8 +901,9 @@ def merged_windows(generations: Sequence[ValidationGeneration]) -> list[MergedDo
                                 leads=bool(g.row.get("window_leads")))
 
         gold = merge_policy_windows([window(g, g.golden, None) for g in members], lob=lob)
+        # A window read again in halves answers by its halves, as serving merges them.
         answer = merge_policy_windows(
-            [window(g, g.extraction, g.span_view()) for g in members], lob=lob)
+            [window(read, read.extraction, read.span_view()) for g in members for read in _as_read(g)], lob=lob)
         pages: dict[int, str] = {}
         for generation in members:
             pages.update(generation.ocr_pages or {})
