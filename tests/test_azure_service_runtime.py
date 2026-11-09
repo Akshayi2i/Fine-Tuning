@@ -136,7 +136,14 @@ def test_one_backend_per_served_name_with_the_configured_server(monkeypatch):
     class FakeBackend(EchoBackend):
         def __init__(self, url, token, model=None, **options):
             super().__init__("{}")
+            self.base_url, self.model = url, model
             made.append((url, token, model, options["images"], options["max_concurrency"]))
+
+        def server_setting_problems(self):
+            probed.append(self.model)
+            return []
+
+    probed: list = []
 
     monkeypatch.setattr(openai_backend, "OpenAIChatBackend", FakeBackend)
     models = openai_models(settings(model_url="https://pod-8000.proxy.runpod.net", model_token="t",
@@ -145,6 +152,7 @@ def test_one_backend_per_served_name_with_the_configured_server(monkeypatch):
     assert first is again and first.tag == "policy-v3" and base.tag == "base"
     assert made == [("https://pod-8000.proxy.runpod.net", "t", "policy-v3", "inline", 64),
                     ("https://pod-8000.proxy.runpod.net", "t", "qwen3-vl-8b", "inline", 64)]
+    assert len(probed) == 1      # the server's settings are checked once, whichever name is made first
 
 
 def test_the_release_calibrators_reach_extract_once_read_fields_passes_them_on(tmp_path, monkeypatch):

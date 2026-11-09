@@ -58,11 +58,13 @@ import base64
 import http.client
 import json
 import logging
+import math
 import re
 import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -71,8 +73,8 @@ from inference_core.model_runner import (
     PINNED_SAMPLING,
     STOPPED_REPEATING,
     STREAM_CUT,
-    Generation,
     TRANSPORT_STATUSES,
+    Generation,
     ModelBackend,
     ModelRunnerError,
     ModelTransportError,
@@ -90,6 +92,15 @@ IMAGE_TRANSPORTS = ("inline", "link", "file")
 
 #: An answer is checked for a loop each time it has grown by this many characters.
 REPEAT_CHECK_CHARS = 1000
+
+#: Whitespace the server-settings probe pushes up (``OpenAIChatBackend.server_setting_problems``): those that
+#: are one token in the served model's vocabulary.
+_WHITESPACE_PROBES = (" ", "\n", "  ", "\n\n", "\t", "    ", " \n")
+#: Words the logprobs probe pushes up as a reply to "OK": the first that is one token is used.
+_MARKER_PROBES = (" banana", "banana", " zebra", "zebra", " purple", "purple")
+#: A token pushed up by +100 that scores above this was scored after the bias: processed log-probabilities. Its raw
+#: score as the reply to "Reply with the word OK." is far below.
+PROCESSED_LOGPROB_FLOOR = -0.05
 
 
 def image_data_url(image: Any, *, gray: bool = True) -> str:
@@ -370,6 +381,74 @@ class OpenAIChatBackend(ModelBackend):
                 "base reads every page wrongly and still writes valid JSON. Serve it on the pinned base "
                 "(configs/base_model.yaml)."
             )
+
+    def _single_tokens(self, texts: Sequence[str]) -> list[int]:
+        """The token ids of those ``texts`` that are one token each (vLLM's ``/tokenize``)."""
+        ids: list[int] = []
+        for text in texts:
+            body = json.dumps({"model": self.model, "prompt": text, "add_special_tokens": False}).encode("utf-8")
+            tokens = self._request("/tokenize", body, timeout=30).get("tokens") or []
+            if len(tokens) == 1:
+                ids.append(int(tokens[0]))
+        return ids
+
+    def _probe(self, body: dict[str, Any]) -> dict[str, Any]:
+        request = {"model": self.model, "temperature": 0.0, "stream": False, **body}
+        answer = self._request("/v1/chat/completions", json.dumps(request).encode("utf-8"), timeout=60)
+        return (answer.get("choices") or [{}])[0]
+
+    def server_setting_problems(self) -> list[str]:
+        """What this server is started with that the trained model and its calibration were not, as reasons;
+        empty when it matches. Two settings only the server sets (``configs/inference/vllm_serving.yaml``):
+
+        * ``disable_any_whitespace`` (``--structured-outputs-config``): vLLM 0.11's xgrammar takes it from the
+          server's config alone, never from the request (``backend_xgrammar.py``). Probed by asking for an empty
+          object with every whitespace token pushed up (``logit_bias``): with the rule the grammar still allows
+          only ``{}``; without it, the push puts whitespace in the answer.
+        * ``--logprobs-mode raw_logprobs``, vLLM's default: the calibration was fitted on raw log-probabilities.
+          Probed with one unlikely token pushed up: a raw log-probability stays low (the bias is applied after
+          it is taken), a processed one comes out near 0, and a logit is no log-probability at all.
+
+        Raises :class:`ModelRunnerError` when the server cannot be asked (no ``/tokenize``, an error).
+        """
+        problems: list[str] = []
+        whitespace = self._single_tokens(_WHITESPACE_PROBES)
+        if not whitespace:
+            raise ModelRunnerError("no whitespace token could be found to probe the server's whitespace rule")
+        empty = self._probe({
+            "messages": [{"role": "user", "content": "Reply with an empty JSON object."}],
+            "max_tokens": 8, "logit_bias": {str(token): 100 for token in whitespace},
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": "probe", "schema": {"type": "object", "properties": {}, "additionalProperties": False}}},
+        })
+        text = str((empty.get("message") or {}).get("content") or "")
+        if text != "{}":
+            problems.append(
+                f"the server lets structured answers carry whitespace (asked for an empty object with whitespace "
+                f"pushed up, it wrote {text[:40]!r}, not '{{}}'): start it with --structured-outputs-config "
+                "'{\"backend\": \"xgrammar\", \"disable_any_whitespace\": true}'")
+        marker = self._single_tokens(_MARKER_PROBES)[:1]
+        if not marker:
+            raise ModelRunnerError("no one-token word could be found to probe the server's logprobs mode")
+        scored = self._probe({
+            "messages": [{"role": "user", "content": "Reply with the word OK."}],
+            "max_tokens": 1, "logprobs": True, "top_logprobs": 2, "logit_bias": {str(marker[0]): 100},
+        })
+        content = ((scored.get("logprobs") or {}).get("content") or [{}])[0]
+        if "logprob" not in content:
+            raise ModelRunnerError("the server returned no logprobs to the probe")
+        written = float(content["logprob"])
+        alternatives = [float(item["logprob"]) for item in content.get("top_logprobs") or [] if "logprob" in item]
+        total = sum(math.exp(min(value, 50.0)) for value in alternatives)
+        if written > 1e-6 or any(value > 1e-6 for value in alternatives) or total > 1.0 + 1e-3:
+            problems.append(f"the server returns logits, not log-probabilities (the probe's token scored {written:.3g}): "
+                            "start it with --logprobs-mode raw_logprobs")
+        elif written > PROCESSED_LOGPROB_FLOOR:
+            problems.append(
+                f"the server returns processed log-probabilities (a token pushed up by logit_bias scored "
+                f"{written:.3g}, its raw score is far lower): start it with --logprobs-mode raw_logprobs, which "
+                "the calibration was fitted on")
+        return problems
 
     def payload(self, messages: list[dict[str, Any]], config: RunnerConfig) -> dict[str, Any]:
         from common.config import pixel_budget

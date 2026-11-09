@@ -212,10 +212,32 @@ def openai_models(settings: Any, links: Any = None) -> Callable[[str], Any]:
             backend = OpenAIChatBackend(settings.model_url, settings.model_token, model=name,
                                         max_concurrency=settings.max_concurrency, images=settings.images,
                                         links=links)
+            if not made:  # the settings are the server's, one check for every name it serves
+                check_server_settings(backend)
             made[name] = served_model(backend, "base" if name == settings.base_model_name else name)
         return made[name]
 
     return model
+
+
+def check_server_settings(backend: Any) -> None:
+    """Refuse a model server started otherwise than the release was trained and calibrated for: whitespace allowed
+    in structured answers, or logprobs other than raw (``OpenAIChatBackend.server_setting_problems``). The gate
+    reads with its own engine, which sets both itself; only production's server could differ, and nothing checked
+    it (2026-11-09). A server that cannot be probed is warned about, as an unlistable one is
+    (``OpenAIChatBackend._check_served``)."""
+    from inference_core.model_runner import ModelRunnerError
+
+    try:
+        problems = backend.server_setting_problems()
+    except ModelRunnerError as exc:
+        log.warning("the model server's settings could not be checked, so whitespace in answers and its logprobs "
+                    "mode are not known to match the release (%s)", exc)
+        return
+    if problems:
+        raise ColdStartError(f"the model server at {backend.base_url} is not started as the release was trained "
+                             "and calibrated for: " + "; ".join(problems))
+    log.info("model server settings checked: no whitespace in structured answers, raw logprobs")
 
 
 def served_reader(settings: Any) -> Any:
