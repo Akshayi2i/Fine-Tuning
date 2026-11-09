@@ -102,6 +102,8 @@ QUICK = {
     "scripts/check_env_file.py",
     # Reads a stored eval report and the frozen set's page text and prints a table: no model, no GPU.
     "scripts/check_invented_values.py",
+    # Reads a run's saved report, rows and page text and sorts its failing fields by cause: seconds, no model, no GPU.
+    "scripts/sort_error_causes.py",
     # Read stored records and the frozen set from Blob and print tables: no model, no GPU.
     "scripts/sort_gate_errors.py", "scripts/show_eval_set.py", "scripts/rescore_version.py", "scripts/label_conventions.py", "scripts/missed_form_check.py",
     # Reads the log folder and prints what a run is doing: a second, nothing is started or touched.
