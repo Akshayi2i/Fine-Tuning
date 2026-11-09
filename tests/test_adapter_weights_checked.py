@@ -80,3 +80,42 @@ def test_the_training_documents_score_keeps_its_errors_and_answers(tmp_path):
     records, _metrics = collect(windows)
     assert records and all(record["source_id"] == "policy_0003" for record in records)
     assert errors_path(out).name == "v3_on_training_docs.errors.json"
+
+
+def _cut_off(text: str):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(text=text, tokens=[0] * 12288, token_logprobs=[], finish_reason="length",
+                           truncated=lambda: True)
+
+
+def test_an_answer_cut_off_at_the_limit_keeps_its_whole_text():
+    """2026-11-09: cut-off answers ran to 29,000+ characters against golds of 199-16,503, and only their last 60
+    characters were kept - not enough to tell a loop from a long list of real values."""
+    from evaluation.validation_generation import ValidationGeneration, _finish
+
+    text = '{"additional_fields": [' + ", ".join(['{"label": "Debris Removal Limit", "value": {"v": "1"}}'] * 50)
+    entry = ValidationGeneration(row={"source_id": "policy_0003"}, golden={})
+    _finish(entry, _cut_off(text))
+    assert entry.error and "token limit" in entry.error and entry.failure_kind == "output"
+    assert entry.unparsed_text == text and not entry.extraction      # scored as an empty answer
+
+
+def test_the_repeat_count_tells_a_loop_from_a_long_list(tmp_path):
+    from evaluation.validation_generation import ValidationGeneration
+    from scripts.score_on_training_docs import runaway, write_details
+
+    loop = '{"additional_fields": [' + ", ".join(['{"label": "SF-2 (Cancellation)"}'] * 40)
+    listing = '{"additional_fields": [' + ", ".join(f'{{"label": "Limit {i}"}}' for i in range(40))
+    rows = [ValidationGeneration(row={"source_id": source, "task": "policy_schedule", "window_pages": [1, 2]},
+                                 golden={"coverages": []}, error="stopped at the token limit", unparsed_text=text)
+            for source, text in (("policy_0018", loop), ("policy_0003", listing))]
+    lines = runaway([*rows, ValidationGeneration(row={"source_id": "policy_0008"}, golden={}, extraction={})])
+    assert len(lines) == 2
+    assert "policy_0018" in lines[0] and "40 additional_fields label(s), 1 different" in lines[0]
+    assert "40 additional_fields label(s), 40 different" in lines[1]
+
+    out = tmp_path / "result.json"
+    write_details(out, rows, {})
+    saved = [json.loads(line) for line in out.with_name("result.answers.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [entry["unparsed_text"] for entry in saved] == [loop, listing]

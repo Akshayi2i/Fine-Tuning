@@ -53,6 +53,9 @@ class ValidationGeneration:
     #: logprobs are known; the readers then fall back to those.
     spans: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    #: The model's whole answer when it could not be read as JSON (an answer cut off at the token limit): what it
+    #: was writing when it ran on. None for an answer that parsed, and for a request that failed.
+    unparsed_text: str | None = None
     #: ``"setup"`` when nothing usable came back (the row could not be prepared,
     #: the request failed); ``"output"`` when the model answered with something
     #: that is not a JSON object - a wrong answer, scored as one.
@@ -422,6 +425,8 @@ def _finish(entry: ValidationGeneration, result: Any) -> None:
         _record_failure(entry, exc, "output",
                         "stopped at the token limit before the JSON closed - " if truncated else "",
                         evidence)
+        # Kept whole: the last 60 characters could not tell a loop from a long list of real values (2026-11-09).
+        entry.unparsed_text = text
         return
     entry.extraction = extraction
     # The span objects kept whole (r_written, the top-2 margin), the logprobs beside them.

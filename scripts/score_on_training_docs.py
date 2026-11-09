@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -56,6 +57,27 @@ def comparison(own: dict[str, Any], selection: dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+#: A label of an ``additional_fields`` entry in a written answer, either format.
+_LABEL = re.compile(r'"label":\s*"((?:[^"\\]|\\.)*)"')
+
+
+def runaway(generations: list[Any]) -> list[str]:
+    """One line per answer that could not be read (cut off at the token limit): its window, its length, and how
+    many ``additional_fields`` labels it wrote against how many differ - a loop writes the same ones again, a long
+    list of real values does not (2026-11-09: such answers ran to 29,000+ characters against golds of 199-16,503)."""
+    lines = []
+    for generation in generations:
+        text = getattr(generation, "unparsed_text", None)
+        if not text:
+            continue
+        labels = _LABEL.findall(text)
+        row = generation.row
+        lines.append(f"  {row.get('source_id')} {row.get('task')} pages {row.get('window_pages')}: {len(text):,} chars "
+                     f"against a gold of {len(json.dumps(generation.golden, ensure_ascii=False)):,}; "
+                     f"{len(labels)} additional_fields label(s), {len(set(labels))} different")
+    return lines
+
+
 def errors_path(out: Path) -> Path:
     """The whole-document report beside ``out``: every failing field, as ``show_eval_errors.py --file`` reads it."""
     return out.with_name(out.stem + ".errors.json")
@@ -80,7 +102,8 @@ def write_details(out: Path, generations: list[Any], reports: dict[str, Any]) ->
         for generation in generations:
             row = {k: v for k, v in generation.row.items() if k not in ("messages", "images")}
             handle.write(json.dumps({"row": row, "error": generation.error, "failure_kind": generation.failure_kind,
-                                     "answer": generation.extraction, "gold": generation.golden},
+                                     "answer": generation.extraction, "gold": generation.golden,
+                                     "unparsed_text": getattr(generation, "unparsed_text", None)},
                                     ensure_ascii=False, default=str))
             handle.write("\n")
     written.append(path)
@@ -145,6 +168,9 @@ def main(argv: list[str] | None = None) -> int:
     key = paths.checkpoint_selection(args.version, scope=ADAPTER.name)
     selection = selected_metrics(client.read_json(key)) if client.exists(key) else {}
     print(comparison(own, selection))
+    if lines := runaway(generations):
+        print("answers cut off at the token limit (the whole text is in the .answers.jsonl file):")
+        print("\n".join(lines))
     if args.out:
         Path(args.out).write_text(json.dumps({"documents": sorted(chosen), "rows": len(rows), "trained": own,
                                               "selection": selection}, indent=1, default=str), encoding="utf-8")
