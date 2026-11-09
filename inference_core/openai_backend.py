@@ -176,6 +176,40 @@ def repeating_tail(text: str, *, min_chars: int = 3000, min_repeats: int = 6,
     return None
 
 
+#: The keys that name a row: a loop writes the same row again under one of them.
+LOOP_IDENTIFIER_KEYS = ("form_number", "coverage_name", "label", "name", "vin")
+#: A key's value as written, in either answer form: ``"key":"X"`` or ``"key":{"r":"X"`` (``"v"``, ``"raw"``,
+#: ``"parsed"`` too).
+_KEY_VALUE = re.compile('"(' + "|".join(LOOP_IDENTIFIER_KEYS) + ')"'
+                        + r':\s*(?:\{\s*"(?:r|v|raw|parsed)":\s*)?"((?:[^"\\]|\\.)*)"')
+
+
+def repeating_row(text: str, *, tail_chars: int = 8000, min_count: int = 20,
+                  share: float = 0.8) -> tuple[str, str] | None:
+    """``(key, value)`` when the end of ``text`` writes one row again and again with other fields changing, or None.
+
+    :func:`repeating_tail` needs the end to repeat exactly; a loop that writes the same form number with a new title
+    each time never does (2026-11-09, policy_0071: "APDEC 0919" 166 times, 64 different titles, to the token
+    limit). Here the end counts as a loop when, in its last ``tail_chars`` characters, one value of a row-naming key
+    (:data:`LOOP_IDENTIFIER_KEYS`) is written at least ``min_count`` times and is at least ``share`` of that key's
+    values there. A real list names its rows apart - another form, another coverage at another location - so no
+    one name holds most of a long stretch of it; none of the 168 cycle-1 golds, in either form, trips this at any
+    1,000-character step (checked 2026-11-10).
+    """
+    tail = text[-tail_chars:]
+    values: dict[str, list[str]] = {}
+    for key, value in _KEY_VALUE.findall(tail):
+        values.setdefault(key, []).append(value)
+    for key, written in values.items():
+        if len(written) < min_count:
+            continue
+        top = max(set(written), key=written.count)
+        count = written.count(top)
+        if count >= min_count and count >= share * len(written):
+            return key, top
+    return None
+
+
 def _error_body(exc: Any) -> str:
     """A server's error answer, short and on one line. A proxy's HTML error page
     (RunPod's "Waiting for service to respond") is reduced to its title: whole,
@@ -230,12 +264,18 @@ def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) ->
             finish_reason = choice.get("finish_reason") or finish_reason
         if stop_repeats and length - checked_at >= REPEAT_CHECK_CHARS:
             checked_at = length
-            period = repeating_tail("".join(content))
-            if period is not None:
+            text = "".join(content)
+            period = repeating_tail(text)
+            row = None if period is not None else repeating_row(text)
+            if period is not None or row is not None:
                 # Leaving the stream closes the connection, and the server
                 # drops the request: its slot goes to the windows still waiting.
-                log.warning("an answer repeated a %d-character passage after %d characters; stopped",
-                            period, length)
+                if period is not None:
+                    log.warning("an answer repeated a %d-character passage after %d characters; stopped",
+                                period, length)
+                else:
+                    log.warning("an answer wrote %s %r again and again after %d characters; stopped",
+                                row[0], row[1], length)
                 finish_reason = STOPPED_REPEATING
                 break
     if finish_reason is None:
