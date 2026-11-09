@@ -261,17 +261,44 @@ def test_field_descriptions_reach_the_model(doc_type, acord_form):
 
 @pytest.mark.xfail(
     strict=True,
+    # Only a missing description counts as the expected failure. Until 2026-11-08 this test called the check
+    # with three arguments when it took two: every line failed on that TypeError and nothing was checked.
+    raises=schemas.SchemaError,
     reason=(
-        "The client's canonical schemas carry 5 descriptions across 532 fields, so the prompt's "
-        "own instruction — 'Each field's description in the schema is its definition' — is true "
-        "of almost none of them. Closed by the descriptions sidecar "
-        "(schemas/descriptions/{lob}.json, merged at render time, their files never edited). "
-        "strict=True so this FAILS once the sidecar lands, forcing the marker off."
+        "Every field inside the client's canonical blocks has a description, and each reaches the prompt; "
+        "only some top-level blocks themselves have none (billing, policy, premium, locations, "
+        "forms_and_endorsements, interested_parties, and the line's own lists): gl 233 of 241 described, "
+        "boppr 230 of 237, wc 245 of 253, bopgl 230 of 237 (2026-11-09). Their files are the client's and "
+        "are not edited here. strict=True, so this fails once a line is fully described, forcing the mark off."
     ),
 )
-@pytest.mark.parametrize("lob", schemas.SNAPSHOT_LINES)
+@pytest.mark.parametrize("lob", ("gl", "boppr", "wc", "bopgl", *schemas.SNAPSHOT_LINES))
 def test_every_canonical_field_has_a_description(lob):
     schemas.assert_all_fields_described("policy", None, lob)
+
+
+@pytest.mark.parametrize("lob", ("gl", "boppr", "wc", "bopgl"))
+def test_only_top_level_blocks_lack_a_description_on_the_lines_trained(lob):
+    """The lines cycle 1 trained on: every field the model fills is described; what is not is a block's name."""
+    schema = schemas.resolved_schema("policy", None, lob)
+    fields = list(schemas.iter_described_fields(schema, defs=schema["$defs"]))
+    missing = [path for path, description in fields if not (description or "").strip()]
+    assert len(fields) > 200 and missing
+    assert all("." not in path and "[]" not in path for path in missing), missing
+
+
+@pytest.mark.parametrize("lob", ("gl", "boppr", "wc", "bopgl"))
+def test_every_field_description_reaches_the_fast_window_prompts(lob):
+    """What the model reads under the fast format: the shared instruction plus each group's own block."""
+    from common.schema_sections import groups_for
+
+    schema = schemas.resolved_schema("policy", None, lob)
+    groups = groups_for(lob)
+    text = prompts.render_system_prompt("policy", "image_only", lob=lob, sections=groups[0]) + "\n".join(
+        prompts.render_group_block("policy", None, lob, group) or "" for group in groups)
+    unseen = [path for path, description in schemas.iter_described_fields(schema, defs=schema["$defs"])
+              if description and "." in path and description.strip()[:40] not in text]
+    assert not unseen, f"field descriptions missing from the prompt: {unseen}"
 
 
 @pytest.mark.parametrize("modality_mode", MODALITY_MODES)

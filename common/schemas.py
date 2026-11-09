@@ -1074,20 +1074,25 @@ def _iter_described_through_refs(
                     item, f"{path}[].", defs, reached | ({item_ref.split("/")[-1]} if item_ref else set()))
 
 
-def assert_all_fields_described(doc_type: str, acord_form: str | None = None) -> None:
+def assert_all_fields_described(doc_type: str, acord_form: str | None = None, lob: str | None = None) -> None:
     """Fail loudly if any field lacks a ``description``.
 
     Descriptions are prompt text, so a missing one silently removes the model's
     only semantic anchor for that field (arch §0c). This is a IMPL-01 acceptance
     criterion, enforced here so it is checkable rather than aspirational.
+
+    A common-model schema keeps its fields behind ``$defs`` references; they are
+    followed, or only its top-level blocks are seen (until 2026-11-09 this read
+    gl as 17 fields, 0 described, where it has 241, 233 described).
     """
+    schema = resolved_schema(doc_type, acord_form, lob)
     missing = [
         path
-        for path, desc in iter_described_fields(resolved_schema(doc_type, acord_form))
+        for path, desc in iter_described_fields(schema, defs=schema.get("$defs"))
         if not (desc or "").strip()
     ]
     if missing:
-        label = f"{doc_type}" + (f"/{acord_form}" if acord_form else "")
+        label = f"{doc_type}" + (f"/{acord_form}" if acord_form else "") + (f"/{lob}" if lob else "")
         raise SchemaError(
             f"{label}: {len(missing)} field(s) have no description, so the model gets no "
             f"semantic anchor for them (arch §0c): {', '.join(sorted(missing))}"
