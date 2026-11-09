@@ -55,6 +55,7 @@ from data_pipeline.dataset_builder.policy_windows import (
     PolicyWindowPlan,
     TargetReport,
     multi_window_sections,
+    orphans_taught_nowhere,
     pages_to_read,
     places_by_search,
     plan_windows,
@@ -399,6 +400,8 @@ def _policy_window_rows(
     # Rows left out of a window that shows only their caption, away from the
     # pages that print their name or figures: taught on those, so said.
     notes += [f"window {mode}: away from home {path}" for path in sorted(set(report.away))]
+    # An orphan's values checked against every kept window of the document: those no window teaches are lost.
+    notes += [f"window {mode}: orphan taught nowhere {path}" for path in orphans_taught_nowhere(report)]
     if report.dangling:
         # A common-model row's link to a row another window reads: left out of
         # the window that cannot see the row it names, by design. Counted, not
@@ -415,12 +418,17 @@ def _policy_window_rows(
             f"{len(checked.repaged)} moved to the page(s) that print them, "
             f"{checked.unverifiable} unverifiable (no OCR text)"
         )
-    if notes:
+    lost = Counter(kind for kind in (_lost_kind(note) for note in notes) if kind)
+    if lost:
+        # Only values no training row teaches: an orphaned fragment whose values another window teaches, and a row
+        # taught on its home pages, are not lost (2026-11-09: both were counted here, and called unreadable).
         log.warning(
-            "%s (%s): %d gold value(s) no window can carry - printed on pages no window of "
-            "their group reads, or with no page recorded. Serving cannot reach them either.",
-            document.source_id, mode, len(notes),
+            "%s (%s): %d gold value(s) no training row teaches - %d printed on pages no window of their group "
+            "reads, %d with no page recorded, %d in row pieces no window ties to their row",
+            document.source_id, mode, sum(lost.values()), lost["unread"], lost["unplaced"],
+            lost["orphan taught nowhere"],
         )
+    if notes:
         details.extend(notes)
     return rows
 
@@ -595,10 +603,20 @@ def _window_rows(build: _WindowBuild, plan: PolicyWindowPlan, part: str = "") ->
     return [row]
 
 
+#: The window notes that name a gold value no training row teaches.
+LOST_KINDS = ("unread", "unplaced", "orphan taught nowhere")
+
+
+def _lost_kind(note: str) -> str | None:
+    """Which of :data:`LOST_KINDS` a window note names, or None."""
+    _window, _, rest = note.partition(": ")
+    return next((kind for kind in LOST_KINDS if rest.startswith(kind + " ")), None)
+
+
 def _merge_report(into: TargetReport, report: TargetReport) -> None:
     """A kept window's notes added to its document's: a window read as halves
     reports what its halves left out, not what it did."""
-    for name in ("unplaced", "unread", "orphaned", "inferred", "dangling", "away"):
+    for name in ("unplaced", "unread", "orphaned", "inferred", "dangling", "away", "taught", "orphaned_values"):
         getattr(into, name).extend(getattr(report, name))
 
 

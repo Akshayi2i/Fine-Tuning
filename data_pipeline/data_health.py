@@ -46,13 +46,18 @@ IMAGE_WORKERS = 16
 
 #: What ``build_jsonl`` notes about a gold value no window teaches where it is printed, and whether it is lost.
 #: ``away from home``: a row taught on the pages printing its name or figures, left out of a caption-only page.
+#: ``orphaned`` counts row pieces, the rest values. An orphaned piece is lost only where no other window teaches its
+#: values (``orphan taught nowhere``, policy_windows.orphans_taught_nowhere): until 2026-11-09 every piece was
+#: counted as lost, and the build's warning called them unreadable.
 UNTAUGHT_KINDS: dict[str, tuple[str, bool]] = {
     "unread": ("printed on a page no window of its group reads", True),
     "unplaced": ("no page recorded for it", True),
-    "orphaned": ("a row fragment its window cannot tie to its row", True),
+    "orphan taught nowhere": ("in a row piece no window ties to its row, and taught by no other window", True),
+    "orphaned": ("row pieces left out of a window that cannot tie them to their row; their values are checked "
+                 "against the other windows", False),
     "away from home": ("taught on the pages that print it, not on a caption-only page", False),
 }
-_NOTE = re.compile(r"^window [^:]+: (unread|unplaced|orphaned|away from home) (.+)$")
+_NOTE = re.compile(r"^window [^:]+: (unread|unplaced|orphan taught nowhere|orphaned|away from home) (.+)$")
 
 
 def untaught_values(window_notes: dict[str, Sequence[str]] | None) -> dict[str, dict[str, int]]:
@@ -124,6 +129,7 @@ class DataHealth:
             "gold_values_never_taught": sum(_lost(c) for c in self.untaught.values()),
             "documents_with_values_never_taught": sum(1 for c in self.untaught.values() if _lost(c)),
             "gold_values_taught_elsewhere": sum(c.get("away from home", 0) for c in self.untaught.values()),
+            "orphaned_row_pieces": sum(c.get("orphaned", 0) for c in self.untaught.values()),
             "same_image_different_text_groups": (None if self.same_image_different_text is None
                                                  else len(self.same_image_different_text)),
             "page_images_not_read": len(self.images_not_read),
@@ -164,7 +170,9 @@ class DataHealth:
         lost = summary["gold_values_never_taught"]
         out.append(f"  gold values no training row teaches: {lost} in "
                    f"{summary['documents_with_values_never_taught']} document(s) "
-                   f"(and {summary['gold_values_taught_elsewhere']} taught on other pages, not lost)")
+                   f"(not lost: {summary['gold_values_taught_elsewhere']} taught on their home pages; "
+                   f"{summary['orphaned_row_pieces']} orphaned row pieces, their values checked against the other "
+                   f"windows)")
         for kind, (meaning, is_lost) in UNTAUGHT_KINDS.items():
             if is_lost and (n := sum(c.get(kind, 0) for c in self.untaught.values())):
                 out.append(f"    {kind}: {n} - {meaning}")

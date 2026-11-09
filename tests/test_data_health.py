@@ -264,18 +264,23 @@ def test_values_no_window_teaches_are_counted_once_by_kind():
         "window ocr_plus_image: unread coverages[3].limits[0].amount",
         "window image_only: unread coverages[3].limits[0].amount",          # the same value, another mode
         "window ocr_plus_image: unplaced forms[2].form_number",
-        "window image_only: orphaned locations[1].address",
+        "window image_only: orphaned locations[1]",
+        "window image_only: orphaned locations[2]",
+        "window image_only: orphan taught nowhere locations[2].address",
         "window ocr_plus_image: away from home coverages[5]",
         "window ocr_plus_image: something else entirely",
     ]}
-    assert untaught_values(notes) == {"policy_0001": {"away from home": 1, "orphaned": 1, "unplaced": 1, "unread": 1}}
+    assert untaught_values(notes) == {"policy_0001": {"away from home": 1, "orphan taught nowhere": 1,
+                                                      "orphaned": 2, "unplaced": 1, "unread": 1}}
 
     built = _built(["policy_0001"], [])
     built.window_notes = notes
     health = assess([_document("policy_0001", ["a"])], built)
     summary = health.as_dict()["summary"]
-    assert summary["gold_values_never_taught"] == 3            # away from home is taught elsewhere
-    assert summary["gold_values_taught_elsewhere"] == 1
+    # Lost: the unread and unplaced values, and the one orphan value no other window teaches. Not lost: a row
+    # taught on its home pages, and an orphaned piece as such (2026-11-09: every piece was counted as lost).
+    assert summary["gold_values_never_taught"] == 3
+    assert summary["gold_values_taught_elsewhere"] == 1 and summary["orphaned_row_pieces"] == 2
     assert summary["documents_with_values_never_taught"] == 1
     assert "gold values no training row teaches: 3 in 1 document(s)" in health.render()
 

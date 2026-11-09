@@ -157,6 +157,23 @@ class TargetReport:
     #: pages - where their name or a figure of theirs is printed - and only a
     #: caption or a word the policy wording prints too (:data:`HOME_FIELDS`).
     away: list[str] = field(default_factory=list)
+    #: Every gold value path this window's target keeps (``coverages[3].limit``), in label indices: what the
+    #: window teaches. Merged only for windows that are kept (``build_jsonl._merge_report``), so across a
+    #: document it is what any window teaches - what an orphan's values are checked against.
+    taught: list[str] = field(default_factory=list)
+    #: The gold value paths each orphaned fragment held: lost only when no other window teaches them
+    #: (:func:`orphans_taught_nowhere`).
+    orphaned_values: list[str] = field(default_factory=list)
+
+
+def orphans_taught_nowhere(report: TargetReport) -> list[str]:
+    """The values of orphaned row fragments that no window of the document teaches, from a document's merged
+    report. On a common-model line a fragment is orphaned only when its values are printed on another page too,
+    but that page's window may leave its row out as well; this says which values that leaves taught nowhere
+    (2026-11-09: data_health counted every orphan as lost). A value a later step drops from a kept window's
+    target (a reference to another group's table) still counts as taught."""
+    taught = set(report.taught)
+    return sorted({path for path in report.orphaned_values if path not in taught})
 
 
 def pages_to_read(
@@ -846,7 +863,10 @@ def _within(
     if is_field_value(node):
         if node.get("raw") is None and node.get("parsed") is None:
             return None
-        return _on_pages(node, path, pages, plan, report)
+        shown = _on_pages(node, path, pages, plan, report)
+        if shown is not None and report is not None:
+            report.taught.append(path)       # taken back below if its row is left out
+        return shown
     if isinstance(node, dict):
         kept = {}
         for key, value in node.items():
@@ -876,6 +896,7 @@ def _within(
         home_fields = HOME_FIELDS.get(path) if common_model and not plan.single else None
         rows = []
         for i, item in enumerate(node):
+            start = len(report.taught) if report is not None else 0
             row = _within(item, f"{path}[{i}]", pages, plan, report,
                           lob=lob, common_model=common_model, printed_pages=printed_pages)
             if row in (None, {}, []):
@@ -890,6 +911,7 @@ def _within(
             if home and not home & pages:
                 if report is not None:
                     report.away.append(f"{plan.group}:{path}[{i}]")
+                    del report.taught[start:]
                 continue
             # A fragment that kept none of its row's identifiers in this window
             # is an orphan: labels record a short value such as a premium of
@@ -917,6 +939,8 @@ def _within(
             if keys and _identified(item, keys) and not _identified(row, keys) and not spared:
                 if report is not None:
                     report.orphaned.append(f"{plan.group}:{path}[{i}]")
+                    report.orphaned_values.extend(report.taught[start:])
+                    del report.taught[start:]
                 continue
             rows.append(row)
         return rows
