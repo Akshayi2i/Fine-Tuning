@@ -93,15 +93,48 @@ def _lookable(pattern: str, value: Any) -> bool:
     return not (isinstance(value, str) and _CODE_SHAPE.match(value))
 
 
+#: A value of digits and separators only: a date, an edition, a number written with slashes or dashes.
+_DIGITS_ONLY = re.compile(r"^[\d\s/.\-]+$")
+
+
 def _same(a: Any, b: Any) -> bool:
-    """One value written two ways: the same number, or the same words once case and punctuation are gone."""
+    """One value written two ways: the same number, the same digits once slashes and dashes are gone (an edition
+    "09/02" and "0902"), or the same words once case and punctuation are gone."""
     from common.grounding import normalise
 
     try:
         return float(str(a).replace(",", "").replace("$", "")) == float(str(b).replace(",", "").replace("$", ""))
     except ValueError:
         pass
+    if _DIGITS_ONLY.match(str(a)) and _DIGITS_ONLY.match(str(b)):
+        digits_a, digits_b = re.sub(r"\D", "", str(a)), re.sub(r"\D", "", str(b))
+        if len(digits_a) >= 3 and digits_a == digits_b:
+            return True
     return bool(normalise(a)) and normalise(a) == normalise(b)
+
+
+def _as_number(value: Any) -> float | None:
+    try:
+        return float(str(value).replace(",", "").replace("$", ""))
+    except ValueError:
+        return None
+
+
+def _distinctive(pattern: str | None, value: Any, gold: list, answer: list) -> bool:
+    """Whether finding ``value`` elsewhere says where it went: a name or phrase, or a figure that occurs once on each
+    side (in ``pattern``'s field, or anywhere when ``pattern`` is None). A code, a choice from a list ("other") or a
+    figure many rows share ("1,000,000", "1") is found in some other row whatever happened to this one."""
+    from common.grounding import normalise
+
+    if not _lookable(pattern or "", value):
+        return False
+    if _as_number(value) is None:
+        return len(normalise(value)) >= 6
+
+    def once(leaves: list) -> bool:
+        return sum(1 for p, v, _r in leaves if (pattern is None or p == pattern) and _same(v, value)) == 1
+
+    return once(gold) and once(answer)
 
 
 def _leaves(node: Any, path: str = "") -> list[tuple[str, Any, list[int]]]:
@@ -160,6 +193,13 @@ def _holds(row: dict[str, Any], value: Any) -> bool:
     return any(_same(leaf, value) for _p, leaf, _r in _leaves(row))
 
 
+def _only_row(rows: list[dict[str, Any]], values: list[Any]) -> dict[str, Any] | None:
+    """The one row holding any of ``values``, or None when none does or several do: a value many rows share
+    ("other", "1,000,000") does not say which row it came from."""
+    holding = [row for row in rows if any(_holds(row, v) for v in values)]
+    return holding[0] if len(holding) == 1 else None
+
+
 def _identity(row: dict[str, Any], section: str) -> tuple[Any, Any]:
     if section == FORMS:
         return _value(row.get("form_number")), None
@@ -213,11 +253,12 @@ def sort_record(record: dict[str, Any], doc: Document | None) -> tuple[str, str]
 def _invented(pattern: str, section: str | None, got: list[Any], doc: Document) -> tuple[str, str]:
     for value in got:
         for gold_pattern, gold_value, _refs in doc.gold_leaves:
-            if _same(value, gold_value):
+            if _same(value, gold_value) and _distinctive(gold_pattern if gold_pattern == pattern else None, value,
+                                                          doc.gold_leaves, doc.answer_leaves):
                 return ((ALIGNMENT, "the gold holds this value in this field, written another way")
                         if gold_pattern == pattern else
                         (PLACEMENT, f"the gold holds this value in {gold_pattern}"))
-    row = next((r for r in doc.rows(doc.answer, section) if any(_holds(r, v) for v in got)), None)
+    row = _only_row(doc.rows(doc.answer, section), got)
     if row is not None:
         if _twin(row, doc.rows(doc.gold, section), section) is not None:
             return ALIGNMENT, "the gold holds this row under another name, code or edition"
@@ -243,11 +284,12 @@ def _invented(pattern: str, section: str | None, got: list[Any], doc: Document) 
 def _omission(pattern: str, section: str | None, expected: list[Any], doc: Document) -> tuple[str, str]:
     for value in expected:
         for answer_pattern, answer_value, _refs in doc.answer_leaves:
-            if _same(value, answer_value):
+            if _same(value, answer_value) and _distinctive(answer_pattern if answer_pattern == pattern else None,
+                                                            value, doc.gold_leaves, doc.answer_leaves):
                 return ((ALIGNMENT, "the answer holds this value in this field, in a row the scorer did not pair")
                         if answer_pattern == pattern else
                         (PLACEMENT, f"the answer holds this value in {answer_pattern}"))
-    row = next((r for r in doc.rows(doc.gold, section) if any(_holds(r, v) for v in expected)), None)
+    row = _only_row(doc.rows(doc.gold, section), expected)
     if row is not None:
         twin = _twin(row, doc.rows(doc.answer, section), section)
         if twin is not None and any(_holds(twin, v) for v in expected):
@@ -274,7 +316,8 @@ def _wrong_value(pattern: str, section: str | None, expected: list[Any], got: li
         return ALIGNMENT, "the same value written another way"
     if pattern.endswith("form_number") and any(edition_twin(g, expected) for g in got):
         return ALIGNMENT, "the same form, its edition inside the number on one side"
-    if any(_same(g, value) for g in got for p, value, _r in doc.gold_leaves if p != pattern):
+    if any(_same(g, value) and _distinctive(None, g, doc.gold_leaves, doc.answer_leaves)
+           for g in got for p, value, _r in doc.gold_leaves if p != pattern):
         return MODEL, "put another field's value here"
     gold_printed = [doc.printed(e) for e in expected if _lookable(pattern, e)]
     answer_printed = [doc.printed(g) for g in got if _lookable(pattern, g)]

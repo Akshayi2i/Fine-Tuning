@@ -154,3 +154,38 @@ def test_window_rows_are_merged_per_document_and_mode_and_cut_off_pages_are_kept
     assert doc.cut_pages == {3}
     assert doc.gold["policy"]["policy_number"]["parsed"] == "BP-1001"
     assert 2 in doc.application and 1 not in doc.application
+
+
+# -- flaws found on the pod run, 2026-11-10 --------------------------------------------------------------------
+
+
+def test_an_edition_written_with_or_without_its_slash_is_the_same_value_not_a_gold_error():
+    """24 fields were sorted as 'gold printed nowhere': gold 09/02, answer 0902 - one edition written two ways."""
+    gold = {"forms_and_endorsements": [{"form_number": _env("SP 30 30", 1), "edition_date": _env("09/02", 1)}]}
+    cause, _why = sort_record(_record("schema_reasoning", "forms_and_endorsements[0].edition_date", "09/02", "0902"),
+                              _doc(gold, {}))
+    assert cause == ALIGNMENT
+
+
+def test_a_common_choice_found_in_another_row_says_nothing_about_this_one():
+    """119 fields were sorted as alignment because 'other' or '1,000,000' was somewhere else in the answer."""
+    gold = {"coverages": [_coverage("Business Personal Property", "BOPGL_BPP", ("other", 110000.0))]}
+    answer = {"coverages": [_coverage("Building", "BOPGL_BUILDING", ("other", 250000.0))]}
+    cause, _why = sort_record(_record("omission", "coverages[0].limits[0].limit_type", "other", None),
+                              _doc(gold, answer))
+    assert cause != ALIGNMENT
+
+
+def test_a_small_number_found_in_another_field_is_not_placement():
+    """A gold building number 1 against an answer's location number 1 proves nothing."""
+    gold = {"buildings": [{"building_number": _env(1, 1)}]}
+    answer = {"locations": [{"location_number": _env(1, 1)}, {"location_number": _env(1, 1)}]}
+    cause, _why = sort_record(_record("omission", "buildings[0].building_number", 1, None), _doc(gold, answer))
+    assert cause != PLACEMENT
+
+
+def test_a_distinctive_value_in_another_field_is_still_placement():
+    gold = {"policy": {"policy_number": _env("BP-1001", 1)}}
+    answer = {"additional_fields": [{"label": "Policy No", "value": _env("BP-1001", 1)}]}
+    cause, _why = sort_record(_record("omission", "policy.policy_number", "BP-1001", None), _doc(gold, answer))
+    assert cause == PLACEMENT
