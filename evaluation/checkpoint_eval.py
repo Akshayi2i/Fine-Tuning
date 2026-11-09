@@ -672,10 +672,19 @@ def generation_cost(scorer: Any) -> dict[str, Any]:
         return {}
     # A pass read twice for run-to-run agreement carries its second reading.
     readings = [reading for p in passes for reading in (p, p.get("repeat") or {})]
+    halves: dict[str, int] = {}
+    for p in passes:
+        read = int(p.get("halves_read", 0)) + int((p.get("repeat") or {}).get("halves_read", 0))
+        if read:
+            halves[str(p.get("checkpoint"))] = halves.get(str(p.get("checkpoint")), 0) + read
     return {
         "passes": passes,
         "rows": sum(int(r.get("generated", 0)) for r in readings),
         "seconds": round(sum(float(r.get("seconds", 0.0)) for r in readings), 1),
+        # Half-windows read for windows whose answer failed (a loop, the token limit), per checkpoint: how often
+        # a checkpoint looped, which its score alone does not show.
+        "halves_read": sum(halves.values()),
+        "halves_read_by_checkpoint": halves,
     }
 
 

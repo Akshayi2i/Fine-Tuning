@@ -184,7 +184,7 @@ _KEY_VALUE = re.compile('"(' + "|".join(LOOP_IDENTIFIER_KEYS) + ')"'
                         + r':\s*(?:\{\s*"(?:r|v|raw|parsed)":\s*)?"((?:[^"\\]|\\.)*)"')
 
 
-def repeating_row(text: str, *, tail_chars: int = 8000, min_count: int = 20,
+def repeating_row(text: str, *, tail_chars: int = 12000, min_count: int = 40,
                   share: float = 0.8) -> tuple[str, str] | None:
     """``(key, value)`` when the end of ``text`` writes one row again and again with other fields changing, or None.
 
@@ -195,6 +195,10 @@ def repeating_row(text: str, *, tail_chars: int = 8000, min_count: int = 20,
     values there. A real list names its rows apart - another form, another coverage at another location - so no
     one name holds most of a long stretch of it; none of the 168 cycle-1 golds, in either form, trips this at any
     1,000-character step (checked 2026-11-10).
+
+    The bar is 40, not lower: a window this stops is read again in halves, but a single page cannot be, and serving
+    then drops it (``serving.pipeline``), so a real page that names one party or one coverage many times - the same
+    mortgagee on 25 locations - must not look like a loop. The loops it was made for wrote the row 111 and 166 times.
     """
     tail = text[-tail_chars:]
     values: dict[str, list[str]] = {}
@@ -274,8 +278,9 @@ def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) ->
                     log.warning("an answer repeated a %d-character passage after %d characters; stopped",
                                 period, length)
                 else:
-                    log.warning("an answer wrote %s %r again and again after %d characters; stopped",
-                                row[0], row[1], length)
+                    # The field, not its value: a repeated name may be an insured's or a lender's.
+                    log.warning("an answer wrote the same %s again and again after %d characters; stopped",
+                                row[0], length)
                 finish_reason = STOPPED_REPEATING
                 break
     if finish_reason is None:

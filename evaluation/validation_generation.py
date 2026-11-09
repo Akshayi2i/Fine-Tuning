@@ -388,9 +388,12 @@ def messages_for_pages(messages: list[dict[str, Any]], pages: Sequence[int]) -> 
     out: list[dict[str, Any]] = []
     for message in messages:
         content = message.get("content")
-        if message.get("role") != "user" or not isinstance(content, list):
+        if message.get("role") != "user":
             out.append(message)
             continue
+        if not isinstance(content, list):
+            # Pages in one string: no block to leave out, and passing it whole would read every page as a "half".
+            return None
         kept: list[Any] = []
         image: Any = None
         seen: set[int] = set()
@@ -421,9 +424,27 @@ def messages_for_pages(messages: list[dict[str, Any]], pages: Sequence[int]) -> 
 
 
 def _to_read_in_halves(entry: ValidationGeneration) -> bool:
-    """A window serving would read again in halves: its answer cut off or unusable, over more than one page."""
-    return (_is_window(entry) and (entry.cut_off or entry.failure_kind == "output")
+    """A window serving would read again in halves (``serving.pipeline``, which retries any failed window over more
+    than one page): its answer cut off, unusable (not JSON, or a section in the wrong shape), or its request failed.
+    Only rows that were generated are given here - a row that could not be set up has no prompt to split."""
+    return (_is_window(entry) and (entry.cut_off or entry.failure_kind in ("output", "setup"))
             and len(entry.row.get("window_pages") or []) > 1)
+
+
+def _wrong_section_shape(row: Mapping[str, Any], extraction: Mapping[str, Any]) -> str | None:
+    """Why serving would refuse a window's answer for a section given in another JSON type than its schema's
+    (``serving.pipeline._check_section_shapes``), or None. Structured decoding cannot write one; an unconstrained
+    read can, and serving then reads the window again in halves."""
+    from types import SimpleNamespace
+
+    from serving.pipeline import PipelineError, _check_section_shapes, _section_shapes
+
+    route = SimpleNamespace(schema_doc_type=row.get("doc_type"), schema_acord_form=row.get("acord_form"))
+    try:
+        _check_section_shapes(dict(extraction), _section_shapes(route, row.get("lob"), row.get("sections")), route)
+    except PipelineError as exc:
+        return str(exc)
+    return None
 
 
 def _read_failed_windows_in_halves(
@@ -439,7 +460,6 @@ def _read_failed_windows_in_halves(
     it: v3 looped on 5 of 242 windows of its own training documents, and those windows held about half the
     values it missed."""
     from common.config import answer_cap
-    from inference_core.model_runner import generate_batch
     from serving.pipeline import _halves, _Planned
 
     level = [(entry, prompts[id(entry)]) for entry in entries if id(entry) in prompts and _to_read_in_halves(entry)]
@@ -471,7 +491,7 @@ def _read_failed_windows_in_halves(
         level = []
         for first in range(0, len(requests), max(1, batch_rows)):
             chunk = requests[first:first + max(1, batch_rows)]
-            results = generate_batch(model, [(m, s, cap) for _h, m, s, cap in chunk], adapter=adapter)
+            results = _call_with_retry(model, [(m, s, cap) for _h, m, s, cap in chunk], adapter)
             for (half, half_messages, _schema, _cap), result in zip(chunk, results, strict=True):
                 _finish(half, result)
                 read += 1
@@ -480,6 +500,28 @@ def _read_failed_windows_in_halves(
         if requests:
             log.info("validation generation: %d half-window(s) read for windows that failed", len(requests))
     return read
+
+
+def _call_with_retry(model: Any, requests: list[tuple[Any, Any, int]], adapter: str | None) -> list[Any]:
+    """Results for ``requests`` (messages, schema, answer cap), in order: one batched call, and a call whose every
+    request failed together (one unreadable page image refuses the batch) read again half by half until the bad one
+    is alone - as :func:`generate_validation` retries its own calls."""
+    from inference_core.model_runner import generate, generate_batch
+
+    if len(requests) == 1:
+        messages, schema, cap = requests[0]
+        try:
+            return [generate(model, messages, adapter=adapter, json_schema=schema, max_new_tokens=cap)]
+        except Exception as exc:  # noqa: BLE001 - the one bad request is recorded, not raised
+            return [exc]
+    results = generate_batch(model, list(requests), adapter=adapter)
+    if not all(isinstance(r, Exception) for r in results):
+        return results
+    log.warning("validation generation: %d half-window request(s) failed together (%s: %s); retrying in halves",
+                len(requests), type(results[0]).__name__, str(results[0])[:300])
+    _stop_if_image_cache_out_of_step(results)
+    middle = len(requests) // 2
+    return _call_with_retry(model, requests[:middle], adapter) + _call_with_retry(model, requests[middle:], adapter)
 
 
 #: What vLLM raises when its frontend and engine caches of processed page images disagree.
@@ -547,6 +589,9 @@ def _finish(entry: ValidationGeneration, result: Any) -> None:
                         evidence)
         # Kept whole: the last 60 characters could not tell a loop from a long list of real values (2026-11-09).
         entry.unparsed_text = text
+        return
+    if _is_window(entry) and (wrong := _wrong_section_shape(entry.row, extraction)):
+        _record_failure(entry, ValueError(wrong), "output")
         return
     entry.extraction = extraction
     # An answer cut off that still parses is incomplete: serving refuses it and reads the window in halves.

@@ -97,3 +97,74 @@ def test_the_document_merge_takes_the_halves_answers_in_the_windows_place():
     (without,) = merged_windows([ValidationGeneration(row=row, golden=window.golden, extraction={},
                                                       failure_kind="output", cut_off=True)])
     assert not (without.answer.get("policy") or {}).get("policy_number")
+
+
+# -- review 2026-11-10 ------------------------------------------------------------------------------------------
+
+
+def test_a_prompt_whose_pages_are_one_string_is_not_split_into_itself():
+    """Finding 4: passed through whole, a "half" would read every page again."""
+    messages = [{"role": "system", "content": "rules"},
+                {"role": "user", "content": "<page 1 of 2>\n\ntext\n\n<page 2 of 2>\n\ntext"}]
+    assert messages_for_pages(messages, [1]) is None
+
+
+class _FailsTheRequestOfTheWholeWindow(_LoopsOnTheWholeWindow):
+    """The four-page window's request fails outright; its halves answer."""
+
+    def generate(self, messages, config, adapter=None):
+        if len(shown_pages(messages)) > 2:
+            self.calls.append(sorted(shown_pages(messages)))
+            raise RuntimeError("the engine refused the request")
+        return super().generate(messages, config, adapter)
+
+
+def test_a_window_whose_request_failed_is_read_again_in_halves_as_serving_does():
+    """Finding 3: serving reads any failed window again in halves, a failed request included."""
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    model = load_model("base", client, backend_impl=_FailsTheRequestOfTheWholeWindow())
+    (window,) = generate_validation([_row()], model)
+    assert window.failure_kind == "setup" and [h.row["window_pages"] for h in window.halves] == [[1, 2], [3, 4]]
+
+
+def test_an_answer_with_a_section_in_the_wrong_shape_is_unusable_and_read_again():
+    """Finding 3: serving refuses a section given in another JSON type than its schema's."""
+    from evaluation.validation_generation import _wrong_section_shape
+
+    row = _row()
+    assert _wrong_section_shape(row, {"policy": "WC-1"})
+    assert _wrong_section_shape(row, {"policy": {}}) is None
+
+
+def test_a_batch_of_halves_that_fails_together_is_retried_one_by_one(monkeypatch):
+    """Finding 6: one bad page image refuses a whole batched call; the halves loop now retries it as the main loop."""
+    from evaluation import validation_generation
+    from inference_core import model_runner
+
+    calls = []
+
+    def generate_batch(model, requests, adapter=None):
+        calls.append(len(requests))
+        return [RuntimeError("one image could not be read")] * len(requests)
+
+    def generate(model, messages, adapter=None, json_schema=None, max_new_tokens=None):
+        calls.append(1)
+        return Generation(text="{}", tokens=["{}"], token_logprobs=[-0.01])
+
+    monkeypatch.setattr(model_runner, "generate_batch", generate_batch)
+    monkeypatch.setattr(model_runner, "generate", generate)
+    results = validation_generation._call_with_retry(object(), [([], None, 10)] * 4, None)
+    assert [type(r).__name__ for r in results] == ["Generation"] * 4 and calls == [4, 2, 1, 1, 2, 1, 1]
+
+
+def test_the_selection_report_shows_how_many_halves_each_checkpoint_needed():
+    """Finding 7: how often a checkpoint looped, which its score alone does not show."""
+    from types import SimpleNamespace
+
+    from evaluation.checkpoint_eval import generation_cost
+
+    scorer = SimpleNamespace(passes=[
+        {"checkpoint": "ck-1", "generated": 10, "seconds": 5, "halves_read": 4, "repeat": {"halves_read": 2}},
+        {"checkpoint": "ck-2", "generated": 10, "seconds": 5, "halves_read": 0}])
+    cost = generation_cost(scorer)
+    assert cost["halves_read"] == 6 and cost["halves_read_by_checkpoint"] == {"ck-1": 6}

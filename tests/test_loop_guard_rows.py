@@ -54,3 +54,22 @@ def test_a_streamed_answer_writing_one_row_again_is_stopped_early():
     result = _read_stream(lines + [b"data: [DONE]"], started=time.perf_counter())
     assert result["finish_reason"] == STOPPED_REPEATING
     assert len(result["text"]) < len(_forms_loop(400)) / 2                # long before it would end
+
+
+def test_a_real_page_naming_one_party_many_times_is_not_a_loop():
+    """Review 2026-11-10 (finding 1): a single page cannot be read again in halves, so serving drops a window the
+    guard stops there. The same mortgagee on 39 locations, the same coverage on each, must not look like a loop."""
+    rows = [json.dumps({"name": {"v": "Wells Fargo Bank, N.A.", "p": [4]}, "loan_number": {"v": f"L-{n}", "p": [4]},
+                        "applies_to": [f"loc_{n}"]}, separators=(",", ":")) for n in range(1, 40)]
+    assert repeating_row('{"interested_parties":[' + ",".join(rows)) is None
+
+
+def test_the_stop_is_logged_by_field_not_by_the_value_it_repeated(caplog):
+    """Review 2026-11-10 (finding 8): a repeated name may be an insured's or a lender's."""
+    import logging
+
+    pieces = [_forms_loop(400)[i:i + 50] for i in range(0, len(_forms_loop(400)), 50)]
+    lines = [f"data: {json.dumps({'choices': [{'delta': {'content': piece}}]})}".encode() for piece in pieces]
+    with caplog.at_level(logging.WARNING):
+        _read_stream(lines + [b"data: [DONE]"], started=time.perf_counter())
+    assert "form_number" in caplog.text and "APDEC" not in caplog.text
