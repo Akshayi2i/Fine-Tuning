@@ -92,3 +92,26 @@ def test_a_document_is_shown_side_by_side_with_the_text_around_each_extra_value(
     text = show_document("p1", rows, golds, pages)
     assert "the gold lists 1 row(s)" in text and "gold: IL 00 17 11 98" in text
     assert "CG 00 01 04 13   [p. 2]" in text and "Commercial General Liability Coverage Form" in text
+
+
+def test_the_printed_values_the_gold_lacks_are_written_as_a_review_list(tmp_path):
+    """2026-11-10: 77 of 102 values v3 was marked as inventing were printed; a labeller needs them listed."""
+    import csv
+
+    report = {"policy": {"all": {"error_records": [
+        _r("p1", "coverages[0].coverage_name", "Damages to premises rented to you"),
+        _r("p1", "coverages[4].coverage_name", "Damages to premises rented to you"),      # another reading, same value
+        _r("p1", "coverages[1].form_refs", ["SL 30 32 06 21"]),
+        _r("p1", "coverages[2].coverage_name", "Hired Auto Liability"),                  # printed nowhere: not listed
+    ]}}}
+    (tmp_path / "report.json").write_text(json.dumps(report), encoding="utf-8")
+    (tmp_path / "pages.json").write_text(json.dumps(PAGES), encoding="utf-8")
+    out = tmp_path / "review.csv"
+    assert main(["--file", str(tmp_path / "report.json"), "--pages", str(tmp_path / "pages.json"), "--json",
+                 "--review-csv", str(out)]) == 0
+    with out.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(r["field"], r["value"], r["pages"], r["readings"]) for r in rows] == [
+        ("coverages[].coverage_name", "Damages to premises rented to you", "2", "2"),
+        ("coverages[].form_refs", "SL 30 32 06 21", "1", "1")]
+    assert "Forms: CG 00 01 04 13, SL 30 32 06 21" in rows[1]["around"]

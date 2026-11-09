@@ -14,6 +14,11 @@ serving check uses (``common.grounding``), and splits them:
 
     python scripts/check_invented_values.py --version v3        # reads Blob (needs the AZURE_* settings)
     python scripts/check_invented_values.py --file report.json --pages pages.json
+    python -m scripts.check_invented_values --file report.json --pages pages.json --review-csv review.csv
+
+``--review-csv`` writes the **printed** ones as a list for whoever fixes the labels: per document, field and value,
+the pages that print it and the text around it - a value the gold missed, or a row the gold lists another way. A
+review file holds label values: keep it out of git, as golds and audit files are.
 """
 
 from __future__ import annotations
@@ -203,6 +208,38 @@ def show_document(source_id: str, classified: list[dict[str, Any]], golds: dict[
     return "\n".join(out)
 
 
+REVIEW_COLUMNS = ("source_id", "field", "value", "pages", "around", "readings")
+
+
+def review_rows(classified: list[dict[str, Any]], pages_by_document: dict[str, dict[Any, str]]) -> list[dict[str, Any]]:
+    """The printed values the gold lacks, one row per document, field and value, for a label review
+    (2026-11-10: 77 of 102 values v3 was marked as inventing on its own training documents were printed)."""
+    rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for record in classified:
+        if record.get("verdict") != "printed":
+            continue
+        source = str(record.get("source_id", ""))
+        field = field_pattern(str(record.get("field_path", "")))
+        for value in _values(record.get("got")):
+            key = (source, field, str(value))
+            if key in rows:
+                rows[key]["readings"] += 1
+                continue
+            found, around = _snippet(value, pages_by_document.get(source, {}))
+            rows[key] = {"source_id": source, "field": field, "value": str(value),
+                         "pages": " ".join(str(p) for p in found), "around": around, "readings": 1}
+    return sorted(rows.values(), key=lambda r: (r["source_id"], r["field"], r["value"]))
+
+
+def write_review(path: str, rows: list[dict[str, Any]]) -> None:
+    import csv
+
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=REVIEW_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _golds_and_pages(tenant: str | None) -> tuple[dict[str, dict[Any, str]], dict[str, dict[str, Any]]]:
     from artifact_registry.blob_client import BlobClient
     from evaluation.golden_eval import load_golden_set
@@ -223,6 +260,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pages", help="with --file: JSON {source_id: {page: text}} instead of reading Blob")
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--review-csv", dest="review_csv", default=None,
+                        help="also write the printed values the gold lacks to this CSV, for a label review "
+                             "(keep it out of git)")
     parser.add_argument("--show", metavar="SOURCE_ID", default=None,
                         help="one document side by side: the gold's rows, and what the document prints that "
                              "the gold does not hold, with the text around each")
@@ -241,6 +281,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         pages, golds = _golds_and_pages(args.tenant)
     classified = classify(invented(records), pages)
+    if args.review_csv:
+        rows = review_rows(classified, pages)
+        write_review(args.review_csv, rows)
+        print(f"{len(rows)} printed value(s) the gold lacks written to {args.review_csv}", file=sys.stderr)
     if args.show:
         print(show_document(args.show, classified, golds, pages))
         return 0

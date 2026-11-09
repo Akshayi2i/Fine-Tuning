@@ -18,7 +18,8 @@ This report is made by the dataset build (stage 4) before anything is written, a
 * the largest pages by characters, to see one that is out of line;
 * rows over their token budget (the build's cap report);
 * with ``--images`` (standalone only: one storage call per page), the same page image read into
-  different OCR text - the same picture should give the same text.
+  different OCR text - the same picture should give the same text; and, for each page with no text, how much
+  of its image is print (:func:`blank_page_ink`), to tell a blank page from one the OCR could not read.
 """
 
 from __future__ import annotations
@@ -73,6 +74,21 @@ def untaught_values(window_notes: dict[str, Sequence[str]] | None) -> dict[str, 
     return out
 
 
+def lost_values(window_notes: dict[str, Sequence[str]] | None) -> dict[str, list[dict[str, str]]]:
+    """Per document, each gold value no training row teaches, by path and why (the lost kinds of
+    :data:`UNTAUGHT_KINDS`, modes counted once): the values to fix, not only their number (2026-11-10)."""
+    out: dict[str, list[dict[str, str]]] = {}
+    for source_id, notes in (window_notes or {}).items():
+        seen: dict[str, str] = {}
+        for note in notes:
+            match = _NOTE.match(str(note))
+            if match and UNTAUGHT_KINDS[match.group(1)][1]:
+                seen.setdefault(match.group(2), match.group(1))
+        if seen:
+            out[source_id] = [{"path": path, "why": why} for path, why in sorted(seen.items())]
+    return out
+
+
 def _lost(counts: dict[str, int]) -> int:
     return sum(n for kind, n in counts.items() if UNTAUGHT_KINDS.get(kind, ("", True))[1])
 
@@ -94,10 +110,14 @@ class DataHealth:
     #: Per document, gold values by why no training row teaches them (``build_jsonl`` window notes, one value
     #: counted once across reading modes): see :data:`UNTAUGHT_KINDS`.
     untaught: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: Per document, the gold values no training row teaches, by path and why (:func:`lost_values`).
+    lost: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     #: None when the image check was not run.
     same_image_different_text: list[dict[str, Any]] | None = None
     #: Page image keys the image check could not read (left out of it, not fatal).
     images_not_read: list[str] = field(default_factory=list)
+    #: With ``--images``: each page with no text and the share of its image that is print (:func:`blank_page_ink`).
+    blank_page_ink: list[dict[str, Any]] | None = None
     accepted: list[str] = field(default_factory=list)
 
     @property
@@ -133,6 +153,8 @@ class DataHealth:
             "same_image_different_text_groups": (None if self.same_image_different_text is None
                                                  else len(self.same_image_different_text)),
             "page_images_not_read": len(self.images_not_read),
+            "pages_with_no_text_but_print": (None if self.blank_page_ink is None else
+                                             sum(1 for p in self.blank_page_ink if p.get("has_print"))),
         }
         return body
 
@@ -163,6 +185,12 @@ class DataHealth:
                    "document(s)")
         for source_id, pages in sorted(self.blank_pages.items(), key=lambda kv: -len(kv[1]))[:SHOWN]:
             out.append(f"    {source_id}: {len(pages)} page(s): {_pages(pages)}")
+        if self.blank_page_ink is not None:
+            printed = [p for p in self.blank_page_ink if p.get("has_print")]
+            out.append(f"  of those, image with print on it (>= {PRINT_INK_PERCENT}% dark pixels): {len(printed)} - "
+                       "the OCR read no text from a page that has some")
+            for page in sorted(printed, key=lambda p: -p["ink_percent"])[:SHOWN]:
+                out.append(f"    {page['source_id']} page {page['page']}: {page['ink_percent']}% dark")
         if self.largest_pages:
             out.append("  largest pages (characters, after pictures are taken out):")
             for page in self.largest_pages:
@@ -179,6 +207,8 @@ class DataHealth:
         for source_id, counts in sorted(self.untaught.items(), key=lambda kv: -_lost(kv[1]))[:SHOWN]:
             if _lost(counts):
                 out.append(f"    {source_id}: {_lost(counts)} ({', '.join(f'{k} {n}' for k, n in counts.items())})")
+                for value in self.lost.get(source_id, [])[:SHOWN]:
+                    out.append(f"      {value['path']}  ({value['why']})")
         rejected = self.cap_report.get("documents_rejected") if isinstance(self.cap_report, dict) else None
         if rejected:
             out.append(f"  documents with a row over its token budget: {rejected} (largest rows by task: "
@@ -251,6 +281,7 @@ def assess(
         largest_pages=[{"source_id": s, "page": p, "characters": n} for n, s, p in sizes[:largest]],
         cap_report=cap,
         untaught=untaught_values(getattr(built, "window_notes", None)),
+        lost=lost_values(getattr(built, "window_notes", None)),
         accepted=sorted(set(accepted)),
     )
 
@@ -321,6 +352,54 @@ def same_image_different_text(client: Any, documents: Sequence[Any],
     return groups, unread
 
 
+#: The share of dark pixels from which a page image with no OCR text counts as having print on it. An assumption,
+#: not measured: a scanned blank page carries some speckle, so the measured share is reported beside it.
+PRINT_INK_PERCENT = 1.0
+
+
+def ink_percent(image_bytes: bytes) -> float:
+    """The share of a page image's pixels that are dark (below mid-gray), in percent, to two decimals."""
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        gray = image.convert("L")
+        histogram = gray.histogram()
+    total = sum(histogram) or 1
+    return round(100.0 * sum(histogram[:128]) / total, 2)
+
+
+def blank_page_ink(client: Any, documents: Sequence[Any], blank_pages: dict[str, list[int]],
+                   workers: int = IMAGE_WORKERS) -> tuple[list[dict[str, Any]], list[str]]:
+    """For each page with no OCR text, the share of its image that is print, and the image keys that could not be
+    read: a blank page has next to none; a page the OCR could not read has some (2026-11-09: 40 pages in 10
+    documents had no text, and nothing said which were blank)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    keys = {document.source_id: list(document.image_paths) for document in documents}
+    pages = [(source_id, page, keys[source_id][page - 1])
+             for source_id, numbers in blank_pages.items() if source_id in keys
+             for page in numbers if 0 < page <= len(keys[source_id])]
+
+    def measure(key: str) -> float | None:
+        try:
+            return ink_percent(client.read_bytes(key))
+        except Exception:  # noqa: BLE001 - an unreadable page is named, not fatal
+            return None
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        shares = list(pool.map(measure, [key for _s, _p, key in pages]))
+    out, unread = [], []
+    for (source_id, page, key), share in zip(pages, shares, strict=True):
+        if share is None:
+            unread.append(key)
+            continue
+        out.append({"source_id": source_id, "page": page, "ink_percent": share,
+                    "has_print": share >= PRINT_INK_PERCENT})
+    return out, unread
+
+
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI over plan_corpus and assess
     parser = argparse.ArgumentParser(
         prog="python -m data_pipeline.data_health",
@@ -356,6 +435,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI o
     if args.images:
         health.same_image_different_text, health.images_not_read = same_image_different_text(
             ctx.client, plan.documents)
+        health.blank_page_ink, unread = blank_page_ink(ctx.client, plan.documents, health.blank_pages)
+        health.images_not_read += unread
     print(health.render())
     if typo := health.accepted_but_not_missing(ctx.accept_set_aside):
         print(f"\n--accept-set-aside names document(s) that are not missing: {typo}")

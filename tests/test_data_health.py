@@ -363,3 +363,50 @@ def test_near_copies_pair_by_page_image_when_their_ocr_text_differs(client):
     [pair] = near_copy_pairs(documents, page_keys=page_image_keys(client, documents))
     assert (pair.a, pair.b, pair.share) == ("policy_0065", "policy_0066", 0.9)    # by image: 9 of 10
     assert page_image_keys(None, documents) is None
+
+
+# -- the values no row teaches are named, and a page with no text is told blank or not (2026-11-10) -------------
+
+
+def test_each_value_no_row_teaches_is_named_with_why():
+    from data_pipeline.data_health import lost_values
+
+    notes = {"policy_0053": [
+        "window ocr_plus_image: orphan taught nowhere coverages[3].limits[0].amount",
+        "window image_only: orphan taught nowhere coverages[3].limits[0].amount",       # the same value again
+        "window ocr_plus_image: unread forms_and_endorsements[2].title",
+        "window ocr_plus_image: orphaned arrays:coverages[3]",                          # a piece: not lost as such
+        "window ocr_plus_image: away from home coverages[5]",                           # taught on its home pages
+    ]}
+    assert lost_values(notes) == {"policy_0053": [
+        {"path": "coverages[3].limits[0].amount", "why": "orphan taught nowhere"},
+        {"path": "forms_and_endorsements[2].title", "why": "unread"}]}
+    built = _built(["policy_0053"], [])
+    built.window_notes = notes
+    rendered = assess([_document("policy_0053", ["a"])], built).render()
+    assert "coverages[3].limits[0].amount  (orphan taught nowhere)" in rendered
+
+
+def _png(dark_share: float) -> bytes:
+    import io
+
+    from PIL import Image
+
+    image = Image.new("L", (100, 100), 255)
+    for i in range(int(dark_share * 10000)):
+        image.putpixel((i % 100, i // 100), 0)
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+def test_a_page_with_no_text_is_told_blank_or_printed_by_its_image(client):
+    from data_pipeline.data_health import blank_page_ink
+
+    client.write_bytes("p/blank.png", _png(0.001))
+    client.write_bytes("p/printed.png", _png(0.08))
+    documents = [SimpleNamespace(source_id="policy_0020", image_paths=["p/text.png", "p/blank.png", "p/printed.png",
+                                                                        "p/gone.png"])]
+    pages, unread = blank_page_ink(client, documents, {"policy_0020": [2, 3, 4]}, workers=2)
+    assert [(p["page"], p["has_print"]) for p in pages] == [(2, False), (3, True)]
+    assert pages[1]["ink_percent"] == 8.0 and unread == ["p/gone.png"]
