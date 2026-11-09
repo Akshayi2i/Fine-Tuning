@@ -195,31 +195,38 @@ cmd_start() {
     echo '  ) &'
     echo '  watcher=$!'
     echo 'fi'
-    # A run stopped by a signal says so, in the log and as its exit: a closed session (HUP), Ctrl-C (INT), a kill
-    # (TERM, QUIT). A run that vanished on 2026-11-07 left an empty log and no exit, and the cause stayed unknown.
-    # Only SIGKILL, or the tmux server dying with it, still leaves nothing - and status then says no exit was recorded.
+    # A run stopped by a signal says so, in the log and as its exit: a closed session or `stop` (HUP), a kill (TERM).
+    # A run that vanished on 2026-11-07 left an empty log and no exit, and the cause stayed unknown. Only SIGKILL, or
+    # the tmux server dying with it, still leaves nothing - and status then says no exit was recorded.
     # The command runs in the background and the runner waits on it, so a signal is acted on at once: bash runs a
     # trap only between commands, and a foreground job made it wait for the whole run, then write the signal over
-    # the run's real exit. The signal goes on to the run (all of it is this shell's process group) - except INT:
-    # Ctrl-C in the session already reached every process, and a second one would cut the run's own clean-up short.
-    printf 'on_signal() { trap "" HUP INT QUIT TERM; echo "=== %s stopped by signal $1 at $(date -u +%%FT%%TZ) ===" | tee -a %q; [ "$1" = INT ] || kill -s "$1" 0 2>/dev/null; [ -n "$job" ] && wait "$job" 2>/dev/null; [ -n "$watcher" ] && kill "$watcher" 2>/dev/null; echo "signal $1" > %q; exit $((128 + $2)); }\n' \
+    # the run's real exit. The signal goes on to the whole run (its own process group, below).
+    # Keys typed in an attached session never stop a run (user, 2026-11-09, after a Ctrl-C stopped data_health):
+    # the runner ignores Ctrl-C, Ctrl-\ and Ctrl-Z, and the run is started in a session of its own (setsid), so the
+    # terminal's signals cannot reach it at all - ignoring them is not enough, since a program can set its own
+    # handler (vLLM's engine core does, for SIGINT: vllm/v1/engine/core.py). Only `stop` (or a kill) ends a run.
+    printf 'on_signal() { trap "" HUP INT QUIT TERM; echo "=== %s stopped by signal $1 at $(date -u +%%FT%%TZ) ===" | tee -a %q; if [ -n "$job" ]; then if [ -n "$own_session" ]; then kill -s "$1" -- "-$job" 2>/dev/null || kill -s "$1" "$job" 2>/dev/null; else kill -s "$1" 0 2>/dev/null; fi; wait "$job" 2>/dev/null; fi; [ -n "$watcher" ] && kill "$watcher" 2>/dev/null; echo "signal $1" > %q; exit $((128 + $2)); }\n' \
       "$name" "$log" "$exit_file"
     echo 'job='
-    echo "trap 'on_signal HUP 1' HUP; trap 'on_signal INT 2' INT; trap 'on_signal QUIT 3' QUIT; trap 'on_signal TERM 15' TERM"
+    echo "trap 'on_signal HUP 1' HUP; trap 'on_signal TERM 15' TERM; trap '' INT QUIT TSTP"
+    echo 'own_session="setsid -w"'
+    echo 'if ! command -v setsid >/dev/null 2>&1; then own_session=; echo "=== setsid not found: keys typed in this session can reach the run ==="; fi'
+    local job_command
+    if [ "$1" = "--" ]; then
+      shift
+      [ $# -ge 1 ] || die "start $name -- needs a command"
+      job_command="$(printf '%q' "$1")"; shift
+    else
+      job_command='python -m orchestration.run'
+    fi
+    if [ $# -gt 0 ]; then job_command+="$(printf ' %q' "$@")"; fi
+    job_command+=" 2>&1 | tee -a $(printf '%q' "$log"); exit \"\${PIPESTATUS[0]}\""
+    printf 'job_command=%q\n' "$job_command"
     echo 'attempt=1'
     echo 'while :; do'
     # Where this attempt's output starts in the log, to read only that for a stall.
     printf '  offset=$(stat -c %%s %q 2>/dev/null || echo 0)\n' "$log"
-    printf '  ( '
-    if [ "$1" = "--" ]; then
-      shift
-      [ $# -ge 1 ] || die "start $name -- needs a command"
-      printf '%q' "$1"; shift
-    else
-      printf 'python -m orchestration.run'
-    fi
-    printf ' %q' "$@"
-    printf ' 2>&1 | tee -a %q; exit "${PIPESTATUS[0]}" ) </dev/null &\n' "$log"
+    echo '  $own_session bash -c "$job_command" </dev/null &'
     echo '  job=$!'
     echo '  wait "$job"; status=$?; job='
     # The two lines a stalled process leaves: inference_core.stall_guard's own, and faulthandler's backstop.
@@ -237,6 +244,7 @@ cmd_start() {
     printf 'echo "$status" > %q\n' "$exit_file"
     printf 'echo "=== %s finished $(date -u +%%FT%%TZ), exit $status ==="\n' "$name"
     # Keep the session open after the run, so its last screen can still be read.
+    echo 'trap - INT QUIT TSTP'
     echo 'exec bash'
   } > "$runner"
   chmod +x "$runner"

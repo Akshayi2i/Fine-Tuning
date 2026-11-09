@@ -25,7 +25,7 @@ def test_each_run_records_the_callers_path_and_venv():
     assert "printf 'export PATH=%q\\n' \"$PATH\"" in POD_RUN
     assert "export VIRTUAL_ENV=%q" in POD_RUN
     # recorded before the command line is written
-    assert POD_RUN.index("export PATH=%q") < POD_RUN.index("printf 'python -m orchestration.run'")
+    assert POD_RUN.index("export PATH=%q") < POD_RUN.index("job_command='python -m orchestration.run'")
 
 
 def test_swift_is_found_next_to_this_python_even_off_path(tmp_path, monkeypatch):

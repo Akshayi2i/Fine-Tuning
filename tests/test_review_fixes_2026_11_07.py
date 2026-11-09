@@ -123,6 +123,35 @@ for i in $(seq 1 30); do [ -f "$S/logs/sig.exit" ] && break; sleep 0.2; done
     assert not (tmp_path / "late").exists(), "the job kept running after the runner stopped"
 
 
+@pytest.mark.skipif(_git_bash() is None, reason="needs bash")
+def test_ctrl_c_in_the_session_does_not_stop_the_run(tmp_path):
+    """A Ctrl-C typed in an attached session stopped data_health on 2026-11-09; keys never stop a run now. The
+    terminal sends INT to the session's foreground process group: here, to the runner's whole group. (The run's own
+    session, setsid, is not on this laptop: on the pod it keeps even a program with its own INT handler out of reach.)"""
+    (tmp_path / "repo" / "scripts").mkdir(parents=True)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "logs").mkdir()
+    shutil.copy(Path(__file__).resolve().parent.parent / "scripts" / "pod_run.sh", tmp_path / "repo" / "scripts")
+    (tmp_path / "bin" / "tmux").write_bytes(b'#!/usr/bin/env bash\ncase "$1" in has-session) exit 1 ;; *) exit 0 ;; esac\n')
+    (tmp_path / "drive.sh").write_bytes(b"""#!/usr/bin/env bash
+S="$(pwd)"; export PATH="$S/bin:$PATH" FIDEON_LOG_DIR="$S/logs"
+chmod +x "$S/bin/tmux"
+bash "$S/repo/scripts/pod_run.sh" start keys -- bash -c "sleep 3; touch $S/done" >/dev/null || exit 9
+set -m
+bash "$S/logs/keys.run.sh" </dev/null >"$S/pane.out" 2>&1 &
+runner=$!
+sleep 1
+kill -s INT -- -$runner; kill -s QUIT -- -$runner
+for i in $(seq 1 50); do [ -f "$S/logs/keys.exit" ] && break; sleep 0.2; done
+kill -s HUP $runner 2>/dev/null
+exit 0
+""")
+    subprocess.run([_git_bash(), "drive.sh"], cwd=tmp_path, check=True, timeout=60)
+    assert (tmp_path / "logs" / "keys.exit").read_text().strip() == "0"
+    assert (tmp_path / "done").exists(), "the run was cut short"
+    assert "stopped by signal" not in (tmp_path / "logs" / "keys.log").read_text()
+
+
 # 5. near copies by image leave out pages with no text to tell them apart ------------
 
 

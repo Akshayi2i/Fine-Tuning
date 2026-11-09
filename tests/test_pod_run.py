@@ -50,8 +50,11 @@ def test_a_run_stopped_by_a_signal_says_so_in_its_log_and_exit():
     """A run vanished on 2026-11-07 with an empty log and no exit; the cause stayed unknown. A hang-up, Ctrl-C or
     kill now writes a line to the log and 'signal X' as the exit, and status reports it as stopped."""
     assert "on_signal() {" in SCRIPT and 'echo "signal $1" >' in SCRIPT
-    for signal, number in (("HUP", 1), ("INT", 2), ("QUIT", 3), ("TERM", 15)):
+    for signal, number in (("HUP", 1), ("TERM", 15)):
         assert f"trap 'on_signal {signal} {number}' {signal}" in SCRIPT
+    # Keys typed in an attached session never stop a run (user, 2026-11-09): ignored, and the run in its own session.
+    assert "trap '' INT QUIT TSTP" in SCRIPT and 'own_session="setsid -w"' in SCRIPT
+    assert '$own_session bash -c "$job_command" </dev/null &' in SCRIPT
     # Set before the command runs, so a signal at any point of it is caught.
     assert SCRIPT.index("trap 'on_signal HUP 1' HUP") < SCRIPT.index("echo 'attempt=1'")
     assert "STOPPED by" in SCRIPT and "grep -q '^signal'" in SCRIPT
