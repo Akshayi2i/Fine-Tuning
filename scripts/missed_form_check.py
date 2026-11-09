@@ -31,10 +31,11 @@ from typing import Any
 EDGE_LINES = 4
 #: Letters then digits, in groups: ``CG 00 01 04 13``, ``IL00171198``, ``SSI SF 00 03 0123``, ``PGL 00200 0422``.
 _CANDIDATE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2,8}(?:[ -][A-Z]{1,10}){0,3}(?:[ -]?[A-Z]{0,4}\d[A-Z0-9]*){1,5}(?![A-Za-z0-9])")
-#: A state and a ZIP code, which have a form number's shape.
-_STATE_ZIP = re.compile(r"^[A-Z]{2} \d{5}(?:-?\d{4})?$")
+#: An address ending in its state and ZIP code, which has a form number's shape: "NY 10918", "CHESTER NY 10918-1059",
+#: "NORTH CAROLINA 27534" (words, then a ZIP).
+_STATE_ZIP = re.compile(r"(?:^|\s)[A-Z]{2} \d{5}(?:-?\d{4})?$|^[A-Z]+(?: [A-Z]+)* \d{5}(?:-\d{4})?$")
 #: Words a form number does not start with, though the shape allows it: running text in capitals.
-_NOT_A_FORM = re.compile(r"^(?:PAGE|PAGES|POLICY|NO|NUMBER|DATE|FORM|ITEM|UNIT|SUITE|STE|BOX|PO|APT|ZIP|AND|THE|OF|TO|FOR|ID)\b")
+_NOT_A_FORM = re.compile(r"^(?:PAGE|PAGES|POLICY|NO|NUMBER|DATE|FORM|ITEM|UNIT|SUITE|STE|BOX|PO|APT|ZIP|AND|THE|OF|TO|FOR|ID|FAX|PHONE|TEL)\b")
 
 
 def compact(value: Any) -> str:
@@ -46,7 +47,7 @@ def candidates(text: str) -> list[str]:
     found = []
     for match in _CANDIDATE.finditer(text or ""):
         value = " ".join(match.group(0).split())
-        if sum(c.isdigit() for c in value) >= 4 and not _STATE_ZIP.match(value) and not _NOT_A_FORM.match(value):
+        if sum(c.isdigit() for c in value) >= 4 and not _STATE_ZIP.search(value) and not _NOT_A_FORM.match(value):
             found.append(value)
     return found
 
