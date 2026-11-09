@@ -57,3 +57,13 @@ def test_the_script_reads_a_downloaded_report(tmp_path, capsys):
     assert "3 failing field(s) in all" in capsys.readouterr().out
     assert main(["--file", str(path), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["invented"][0]["source_id"] == "policy_0065"
+
+
+def test_a_document_in_several_subsets_is_counted_once():
+    """2026-11-09: an image-only scanned long policy is in four subsets, each with a copy of its failing fields, and
+    every copy was counted - its errors four times, an OCR document's three times."""
+    record = {"source_id": "policy_0003", "field_path": "coverages[0].coverage_name", "error_class": "omission"}
+    report = {"subsets": [{"subset": name, "error_records": [dict(record)]}
+                          for name in ("full", "image_only", "scanned", "long_policy")]}
+    records, _metrics = collect(report)
+    assert records == [record]

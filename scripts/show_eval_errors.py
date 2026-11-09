@@ -34,14 +34,19 @@ INVENTED_SHOWN = 25
 
 def collect(obj: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """``(error_records, metrics)`` found anywhere in a report: the records of every part, and the first
-    value of each metric of interest."""
+    value of each metric of interest.
+
+    A document is scored in every subset it belongs to (``run_eval.subset_of``: full, image_only, scanned,
+    long_policy...), each with its own copy of the document's failing fields. Only a subset report's ``full`` set
+    is counted, once per doc type: until 2026-11-09 every copy was, and an image-only scanned long policy's errors
+    were counted four times, an OCR one's three times."""
     records: list[dict[str, Any]] = []
     metrics: dict[str, Any] = {}
 
     def walk(node: Any) -> None:
         if isinstance(node, dict):
             found = node.get("error_records")
-            if isinstance(found, list):
+            if isinstance(found, list) and node.get("subset", "full") == "full":
                 records.extend(r for r in found if isinstance(r, dict))
             body = node.get("metrics")
             if isinstance(body, dict):
