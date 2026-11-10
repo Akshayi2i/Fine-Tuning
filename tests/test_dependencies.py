@@ -27,6 +27,9 @@ DISTRIBUTION = {
 TRANSITIVE = {"huggingface_hub": "transformers", "pymupdf": "pymupdf"}
 #: Installed outside pip's extras, by scripts/setup_pod.sh.
 SETUP_SCRIPT = {"flash-attn"}
+#: Our own modules imported by their bare name where they are copied beside the importer: the vLLM site
+#: hook falls back to ``import vllm_patches`` on a serving pod without the repository.
+COPIED_BESIDE = {"vllm_patches"}
 
 
 def _declared() -> set[str]:
@@ -37,7 +40,7 @@ def _declared() -> set[str]:
 
 
 def _imports() -> set[str]:
-    local = {p.name for p in ROOT.iterdir() if p.is_dir()} | {p.stem for p in ROOT.glob("*.py")}
+    local = {p.name for p in ROOT.iterdir() if p.is_dir()} | {p.stem for p in ROOT.glob("*.py")} | COPIED_BESIDE
     found: set[str] = set()
     for path in ROOT.rglob("*.py"):
         if any(part.startswith(".") or part in ("venv", "build") for part in path.parts):

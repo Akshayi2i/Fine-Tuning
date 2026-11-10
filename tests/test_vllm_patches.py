@@ -323,3 +323,53 @@ def test_the_shipped_config_generates_with_the_prefix_cache():
     from inference_core.runner_config import load_runner_config
 
     assert load_runner_config().repeatable is False
+
+
+# -- a served vLLM: the fix applied as each process starts (2026-11-10 review, finding 1) ------------------------
+
+
+def test_a_served_vllm_is_patched_without_forcing_its_engine_into_one_process(monkeypatch):
+    import os
+
+    cls = _fake_vllm(monkeypatch)
+    assert vllm_patches.patch_qwen3_vl_lora("0.11.0", in_process=False) is True
+    assert cls().get_mm_mapping().tower_model == ["visual."]
+    assert vllm_patches.IN_PROCESS_ENV not in os.environ
+
+
+def _run_site(monkeypatch, flag):
+    import runpy
+    from pathlib import Path
+
+    site = Path(vllm_patches.__file__).resolve().parent / "vllm_site" / "sitecustomize.py"
+    monkeypatch.setattr(vllm_patches, "patch_qwen3_vl_lora",
+                        lambda version=None, in_process=True: calls.append(in_process) or True)
+    calls: list = []
+    if flag is None:
+        monkeypatch.delenv("FIDEON_VLLM_PATCH", raising=False)
+    else:
+        monkeypatch.setenv("FIDEON_VLLM_PATCH", flag)
+    runpy.run_path(str(site), run_name="sitecustomize")
+    return calls
+
+
+def test_the_site_hook_applies_the_fix_in_a_process_started_with_the_flag(monkeypatch):
+    assert _run_site(monkeypatch, "1") == [False]          # patched, the engine core left in its own process
+
+
+def test_the_site_hook_does_nothing_without_the_flag(monkeypatch):
+    assert _run_site(monkeypatch, None) == [] and _run_site(monkeypatch, "0") == []
+
+
+def test_the_site_hook_stops_a_process_whose_needed_fix_cannot_be_applied(monkeypatch):
+    """A server that would fail every page image must not start."""
+    import importlib.metadata
+    import runpy
+    from pathlib import Path
+
+    _fake_vllm(monkeypatch, tower="model.something_else.")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.11.0")
+    monkeypatch.setenv("FIDEON_VLLM_PATCH", "1")
+    site = Path(vllm_patches.__file__).resolve().parent / "vllm_site" / "sitecustomize.py"
+    with pytest.raises(vllm_patches.VllmPatchError):
+        runpy.run_path(str(site), run_name="sitecustomize")

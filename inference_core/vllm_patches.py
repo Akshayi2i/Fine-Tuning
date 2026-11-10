@@ -15,6 +15,12 @@ the training environment is pinned against, so the correction is applied here.
 The engine core must run in this process for a patch here to reach it: vLLM V1
 otherwise starts it in a child process, which is spawned (and so re-imports vLLM
 unpatched) whenever CUDA is already initialised in the parent.
+
+A served vLLM (``vllm serve``) runs its engine core in a child process, so there
+the fix is applied in every process instead: ``inference_core/vllm_site`` holds a
+``sitecustomize`` that applies it when Python starts, with ``in_process=False``
+(2026-11-10 review, finding 1: production reads every page image through the
+adapter, and a stock server did not have the fix).
 """
 
 from __future__ import annotations
@@ -45,11 +51,13 @@ def _fixed_qwen3_vl_mapping(self):
     )
 
 
-def patch_qwen3_vl_lora(version: str | None = None) -> bool:
+def patch_qwen3_vl_lora(version: str | None = None, *, in_process: bool = True) -> bool:
     """Point Qwen3-VL's LoRA exclusion at the engine's own module names.
 
     Returns True when the fix was applied, False when this vLLM does not need
     it. Raises when it is needed and the code it corrects is no longer there.
+    ``in_process`` also keeps the engine core in this process (the in-process
+    engine); a served vLLM, patched in each of its processes, leaves it alone.
     """
     if version is None:
         from importlib.metadata import version as installed
@@ -57,8 +65,9 @@ def patch_qwen3_vl_lora(version: str | None = None) -> bool:
         version = installed("vllm")
     if version not in _QWEN3_VL_BROKEN:
         return False
-    # Before vLLM is imported: its settings may be read once, at import.
-    os.environ[IN_PROCESS_ENV] = "0"
+    if in_process:
+        # Before vLLM is imported: its settings may be read once, at import.
+        os.environ[IN_PROCESS_ENV] = "0"
     from vllm.model_executor.models import qwen3_vl
 
     cls = qwen3_vl.Qwen3VLForConditionalGeneration

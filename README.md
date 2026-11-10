@@ -525,6 +525,20 @@ FIDEON_REMOTE_TOKEN=<their token> python -m testing.extract_server --port 8002 \
     --model-url http://localhost:8000 --mineru-url http://localhost:8001 --images file
 ```
 
+**Page images through the adapter on vLLM 0.11.0.** Our own engine applies a fix to vLLM 0.11.0's Qwen3-VL LoRA
+mapping (`inference_core/vllm_patches.py`); without it the first request carrying a page image fails in
+`_lora_shrink`. A stock `vllm serve` does not apply it. The worker's start-up check sends one page image through the
+adapter and refuses a server that cannot read it (`OpenAIChatBackend.server_setting_problems`). If it does, start
+vLLM with the fix applied in each of its processes:
+
+```bash
+PYTHONPATH=/workspace/fine-tuning/inference_core/vllm_site:/workspace/fine-tuning FIDEON_VLLM_PATCH=1 \
+    vllm serve /workspace/models/Qwen3-VL-8B-Instruct ...   # the same flags as above
+```
+
+On a serving pod without the repository, copy `inference_core/vllm_site/sitecustomize.py` and
+`inference_core/vllm_patches.py` into one folder and put that folder alone on `PYTHONPATH`.
+
 On the pod, a value set on the command line, as the token above, beats the one in `.env` for every setting
 `.env`/`.env.example` names, also once the command detaches (`bash scripts/pod_run.sh env` prints what a run
 would get). `--remote-token` works too, but its value then shows in the run script and in `ps`.
