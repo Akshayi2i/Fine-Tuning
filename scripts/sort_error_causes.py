@@ -14,7 +14,8 @@ d) labelling rules - a value the 2026-11-04 rules keep out of a gold: a form or 
 e) gold not printed - the gold value is printed on no page, while the answer's is (a candidate gold error);
 f) model error     - with why: its window was cut off, it missed a printed value, it wrote a value printed nowhere,
                      it put a value in the wrong field, or it wrote another value;
-g) cannot be checked - a code or a yes/no the pages never print as such, in a row that is not a gold gap.
+g) cannot be checked - a value no page search can settle (a yes/no, a code or a choice from a list, a value too
+                     short to look for, or no page text), in a row that is not a gold gap.
 
 The page-text search is ``common.grounding``'s, the one serving and ``check_invented_values`` use. Rows are taken
 from the documents as the scorer merges them (``validation_generation.merged_windows``) and matched by their own
@@ -250,6 +251,21 @@ def sort_record(record: dict[str, Any], doc: Document | None) -> tuple[str, str]
     return _wrong_value(pattern, section, expected, got, doc)
 
 
+def _why_not_looked_up(pattern: str, values: list[Any], doc: Document) -> str:
+    """Why a page search cannot settle these values, in words: a building number "1" is no code (2026-11-10)."""
+    from common.grounding import checkable
+
+    if any(isinstance(value, bool) for value in values):
+        return "a yes/no"
+    if not all(_lookable(pattern, value) for value in values):
+        return "a code or a choice from a list"
+    if not any(page.has_text for page in doc.pages.values()):
+        return "no page text to look in"
+    if not all(checkable(value) for value in values):
+        return "a value too short to look for"
+    return "not found on a page or proved missing"
+
+
 def _invented(pattern: str, section: str | None, got: list[Any], doc: Document) -> tuple[str, str]:
     for value in got:
         for gold_pattern, gold_value, _refs in doc.gold_leaves:
@@ -278,7 +294,7 @@ def _invented(pattern: str, section: str | None, got: list[Any], doc: Document) 
         name = _identity(row, section)[0]
         if name is not None and doc.printed(name):
             return GOLD_GAP, "in a row the document prints and the gold does not hold"
-    return UNCHECKED, "a code or a yes/no, in a row that is not a gold gap"
+    return UNCHECKED, f"{_why_not_looked_up(pattern, got, doc)}, in a row that is not a gold gap"
 
 
 def _omission(pattern: str, section: str | None, expected: list[Any], doc: Document) -> tuple[str, str]:
@@ -305,7 +321,7 @@ def _omission(pattern: str, section: str | None, expected: list[Any], doc: Docum
         return GOLD_NOT_PRINTED, "the gold value is printed on no page"
     if any(p is True for p in printed):
         return MODEL, "missed a printed value"
-    return MODEL, "left out a value that cannot be looked up (a code or a yes/no)"
+    return MODEL, f"left out a value that cannot be looked up: {_why_not_looked_up(pattern, expected, doc)}"
 
 
 def _wrong_value(pattern: str, section: str | None, expected: list[Any], got: list[Any],

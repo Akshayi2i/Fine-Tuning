@@ -189,3 +189,13 @@ def test_a_distinctive_value_in_another_field_is_still_placement():
     answer = {"additional_fields": [{"label": "Policy No", "value": _env("BP-1001", 1)}]}
     cause, _why = sort_record(_record("omission", "policy.policy_number", "BP-1001", None), _doc(gold, answer))
     assert cause == PLACEMENT
+
+
+def test_the_report_says_why_a_value_could_not_be_looked_up():
+    """2026-11-10: a building number "1" was reported as "a code or a yes/no"."""
+    gold = {"buildings": [{"building_number": _env(1, 1)}],
+            "coverages": [_coverage("Business Personal Property", "BOPGL_BPP", ("other", 110000.0))]}
+    _cause, short = sort_record(_record("omission", "buildings[0].building_number", 1, None), _doc(gold, {}))
+    _cause, code = sort_record(_record("omission", "coverages[0].limits[0].limit_type", "other", None), _doc(gold, {}))
+    assert short.endswith("a value too short to look for")
+    assert code.endswith("a code or a choice from a list")
