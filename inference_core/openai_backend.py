@@ -55,6 +55,7 @@ another budget is warned about, not trusted.
 from __future__ import annotations
 
 import base64
+import contextlib
 import http.client
 import json
 import logging
@@ -71,6 +72,7 @@ from pathlib import Path
 from typing import Any
 
 from inference_core.model_runner import (
+    DEADLINE_CUT,
     PINNED_SAMPLING,
     STOPPED_REPEATING,
     STREAM_CUT,
@@ -102,6 +104,12 @@ _MARKER_PROBES = (" banana", "banana", " zebra", "zebra", " purple", "purple")
 #: A token pushed up by +100 that scores above this was scored after the bias: processed log-probabilities. Its raw
 #: score as the reply to "Reply with the word OK." is far below.
 PROCESSED_LOGPROB_FLOOR = -0.05
+
+#: The vLLM training's checkpoint selection and the gate read with (``requirements-serve.lock``); the serving pod
+#: must run the same (``OpenAIChatBackend._version_problem``).
+PINNED_VLLM = "0.11.0"
+#: Two fixed members spaced as ``json.dumps`` spaces every training answer (``OpenAIChatBackend._spacing_problem``).
+_SPACING_ANSWER = json.dumps({"a": "x", "b": 1})
 
 
 def image_data_url(image: Any, *, gray: bool = True) -> str:
@@ -244,7 +252,38 @@ def _error_body(exc: Any) -> str:
     return " ".join(body.split())[:300]
 
 
-def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) -> dict[str, Any]:
+def _stream_lines(response: Any, *, started: float, deadline: float | None, read_timeout: float | None,
+                  expired: list[bool]) -> Any:
+    """``response``'s lines until its end or ``deadline`` seconds after ``started``.
+
+    Before each read the connection's own time limit is set to what is left, so a read cannot outlast the deadline
+    on any system (a socket shut from another thread wakes a blocked read on Linux, not on Windows - checked
+    2026-11-10). Past the deadline ``expired`` holds True and the lines end.
+    """
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    lines = iter(response)
+    while True:
+        left = None if deadline is None else deadline - (time.perf_counter() - started)
+        if left is not None and left <= 0:
+            expired.append(True)
+            return
+        if sock is not None and left is not None:
+            with contextlib.suppress(OSError):
+                sock.settimeout(left if read_timeout is None else min(read_timeout, left))
+        try:
+            raw = next(lines)
+        except StopIteration:
+            return
+        except (TimeoutError, OSError):
+            if deadline is not None and time.perf_counter() - started >= deadline - 0.05:
+                expired.append(True)
+                return
+            raise
+        yield raw
+
+
+def _read_stream(response: Any, *, started: float, stop_repeats: bool = True,
+                 deadline: float | None = None, read_timeout: float | None = None) -> dict[str, Any]:
     """One streamed chat completion (server-sent events), read to its end - or
     to the point its answer was found repeating itself.
 
@@ -261,7 +300,9 @@ def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) ->
     prompt_tokens: int | None = None
     first_token_ms: float | None = None
     length = checked_at = 0
-    for raw in response:
+    expired: list[bool] = []
+    for raw in _stream_lines(response, started=started, deadline=deadline, read_timeout=read_timeout,
+                             expired=expired):
         line = raw.decode("utf-8").strip()
         if not line.startswith("data:"):
             continue
@@ -302,6 +343,12 @@ def _read_stream(response: Any, *, started: float, stop_repeats: bool = True) ->
                                 row[0], length)
                 finish_reason = STOPPED_REPEATING
                 break
+    if expired and finish_reason is None and not done:
+        if not length:
+            raise ModelTransportError(f"no answer within the request's deadline of {deadline:.0f} s")
+        log.warning("an answer ran past the request's deadline of %.0f s after %d characters; counted as cut off",
+                    deadline or 0, length)
+        finish_reason = DEADLINE_CUT
     if finish_reason is None:
         finish_reason = "stop" if done else STREAM_CUT
         if not done:
@@ -328,7 +375,7 @@ class OpenAIChatBackend(ModelBackend):
     def __init__(self, base_url: str, token: str | None = None, model: str | None = None, *,
                  timeout: float = 1800, max_concurrency: int = 96, stream: bool = True,
                  images: str = "inline", stop_repeats: bool = True, links: Any = None,
-                 gray_pages: bool = True) -> None:
+                 gray_pages: bool = True, request_deadline: float | None = None) -> None:
         if images not in IMAGE_TRANSPORTS:
             raise ValueError(f"images must be one of {IMAGE_TRANSPORTS}, got {images!r}")
         if images == "link" and links is None:
@@ -339,6 +386,11 @@ class OpenAIChatBackend(ModelBackend):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        #: Seconds one streamed answer may take in all, not only between two reads (``timeout``): a server that kept
+        #: a connection open and wrote nothing, or a few bytes now and then, held a window - and the worker's one
+        #: fields turn - for good (2026-11-10 review). Past it, an answer begun is cut off (read again in halves) and
+        #: none at all did not reach the model (sent once more). Defaults to ``timeout``.
+        self.request_deadline = request_deadline if request_deadline is not None else timeout
         self.max_concurrency = max_concurrency
         self.stream = stream
         self.images = images
@@ -389,10 +441,16 @@ class OpenAIChatBackend(ModelBackend):
         request = urllib.request.Request(f"{self.base_url}{path}", data=body, headers=headers,
                                          method="POST" if body is not None else "GET")
         started = time.perf_counter()
+        # A stream's wait for its headers is held to the request's deadline too, not only its reads (code review
+        # 2026-11-10: a server or proxy that took the request and never answered held it the whole read timeout).
+        wait = timeout or self.timeout
+        if stream and self.request_deadline:
+            wait = min(wait, self.request_deadline)
         try:
-            with open_url(request, timeout=timeout or self.timeout) as response:
+            with open_url(request, timeout=wait) as response:
                 if stream:
-                    return _read_stream(response, started=started, stop_repeats=self.stop_repeats)
+                    return _read_stream(response, started=started, stop_repeats=self.stop_repeats,
+                                        deadline=self.request_deadline, read_timeout=timeout or self.timeout)
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             kind = ModelTransportError if exc.code in TRANSPORT_STATUSES else ModelRunnerError
@@ -512,6 +570,41 @@ class OpenAIChatBackend(ModelBackend):
                     f"and the model trained for: start it with --max-model-len {required}")
         return None
 
+    def _version_problem(self) -> str | None:
+        """A server that is not the vLLM training and the gate pin (:data:`PINNED_VLLM`). The serving pod runs no code
+        of ours, so nothing else pins its vLLM; another one can tokenise a page, or apply the LoRA, otherwise
+        (2026-11-10 review). vLLM answers ``GET /version`` with ``{"version": ...}``."""
+        try:
+            answer = self._request("/version")
+        except (ModelRunnerError, ValueError) as exc:     # ValueError: a body that is not JSON (a proxy's page)
+            return f"the server's vLLM version could not be read ({exc}); training and the gate use vLLM {PINNED_VLLM}"
+        served = str(answer.get("version") or "") if isinstance(answer, dict) else ""
+        # A local build of the release ("0.11.0+cu128") is the release.
+        if served.split("+", 1)[0] != PINNED_VLLM:
+            return (f"the server runs vLLM {served or 'of no stated version'}, training and the gate vLLM "
+                    f"{PINNED_VLLM}: install vllm=={PINNED_VLLM} on the serving pod")
+        return None
+
+    def _spacing_problem(self) -> str | None:
+        """Structured answers spaced otherwise than the training answers, which ``json.dumps`` writes with ``", "``
+        between members and ``": "`` after a key (``build_jsonl``). That xgrammar with ``disable_any_whitespace``
+        writes the same was a comment only, and the empty-object probe cannot show it (2026-11-10 review). Asked
+        for an object of two fixed members, a server that writes them as training does answers exactly
+        :data:`_SPACING_ANSWER`."""
+        answer = self._probe({
+            "messages": [{"role": "user", "content": "Reply with the JSON object."}],
+            "max_tokens": 16,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "spacing", "schema": {
+                "type": "object", "properties": {"a": {"enum": ["x"]}, "b": {"enum": [1]}},
+                "required": ["a", "b"], "additionalProperties": False}}},
+        })
+        text = str((answer.get("message") or {}).get("content") or "")
+        if text != _SPACING_ANSWER:
+            return (f"the server spaces structured answers otherwise than the training answers (asked for two fixed "
+                    f"members it wrote {text[:40]!r}, training writes {_SPACING_ANSWER!r}): the model would be "
+                    "decoded into a layout it never learned")
+        return None
+
     def server_setting_problems(self) -> list[str]:
         """What this server is started with that the trained model and its calibration were not, as reasons;
         empty when it matches. Two settings only the server sets (``configs/inference/vllm_serving.yaml``):
@@ -527,8 +620,12 @@ class OpenAIChatBackend(ModelBackend):
         Raises :class:`ModelRunnerError` when the server cannot be asked (no ``/tokenize``, an error).
         """
         problems: list[str] = []
+        if version := self._version_problem():
+            problems.append(version)
         if short := self._served_length_problem():
             problems.append(short)
+        if spacing := self._spacing_problem():
+            problems.append(spacing)
         whitespace = self._single_tokens(_WHITESPACE_PROBES)
         if not whitespace:
             raise ModelRunnerError("no whitespace token could be found to probe the server's whitespace rule")

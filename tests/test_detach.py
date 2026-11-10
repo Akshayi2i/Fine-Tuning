@@ -106,6 +106,9 @@ QUICK = {
     "scripts/sort_error_causes.py",
     # Read a run's saved rows, or one corpus file, and print where loops start / how long lists are: no model, no GPU.
     "scripts/loop_report.py", "scripts/answer_list_lengths.py",
+    # Re-score a run's saved answers with one effect switched off / check answers against the decoding schema:
+    # minutes at most, no model, no GPU.
+    "scripts/score_effects.py", "scripts/check_answers_fit_decoder.py",
     # Read stored records and the frozen set from Blob and print tables: no model, no GPU.
     "scripts/sort_gate_errors.py", "scripts/show_eval_set.py", "scripts/rescore_version.py", "scripts/label_conventions.py", "scripts/missed_form_check.py",
     # Reads the log folder and prints what a run is doing: a second, nothing is started or touched.

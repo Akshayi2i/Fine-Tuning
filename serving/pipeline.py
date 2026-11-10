@@ -681,6 +681,9 @@ class _Planned(NamedTuple):
     group: str
     pages: list[int]
     leads: bool = False
+    #: Already sent once more after its request failed to reach the model (:func:`_settle`). A half is a new
+    #: window and has its own one resend (code review 2026-11-10: halves had none).
+    resent: bool = False
 
 
 @dataclass
@@ -721,6 +724,21 @@ def _settle(source_id: str, route_: Route, window: _Planned, result: Any, attemp
     from inference_core.model_runner import ModelTransportError
 
     lost = isinstance(result, ModelTransportError)
+    if lost:
+        # The request never reached the model (refused, cut, unreachable): nothing about the window was wrong, so
+        # smaller windows would not help. Split, a k-page window sent 2k-1 requests to a server that was down before
+        # the document failed (2026-11-10 review). Sent once more as it is; failing again, it is lost, and a lost
+        # window fails the document, which is tried again whole.
+        if not window.resent:
+            log.warning("%s: %s window over pages %s did not reach the model (%s); sending it once more",
+                        source_id, group, pages, result)
+            return _Settled(_window_stat(group, pages, attempt, result, "resent", str(result)),
+                            retry=[window._replace(resent=True)], cause=str(result))
+        log.warning("%s: %s window over pages %s did not reach the model again (%s); not split",
+                    source_id, group, pages, result)
+        where = f"p{pages[0]}" if len(pages) == 1 else f"p{pages[0]}-{pages[-1]}"
+        return _Settled(_window_stat(group, pages, attempt, result, "failed", str(result)),
+                        failed=f"{group}:{where}", cause=str(result), lost=True)
     try:
         if isinstance(result, Exception):
             raise PipelineError(str(result))
@@ -732,8 +750,14 @@ def _settle(source_id: str, route_: Route, window: _Planned, result: Any, attemp
                         source_id, group, pages, exc)
             return _Settled(_window_stat(group, pages, attempt, result, "split", str(exc)),
                             retry=_halves(window, declarations_page), cause=str(exc))
-        log.warning("%s: %s window over page %s failed even alone (%s); dropped and flagged for review",
-                    source_id, group, pages[0], exc)
+        # A page whose answer was still being written at the request's deadline was never read: the server was slow,
+        # not the page unreadable. Lost, so the document is not served with it missing (code review 2026-11-10).
+        from inference_core.model_runner import DEADLINE_CUT
+
+        lost = getattr(result, "finish_reason", None) == DEADLINE_CUT
+        log.warning("%s: %s window over page %s failed even alone (%s); %s", source_id, group, pages[0], exc,
+                    "it ran past the request's deadline, so the document is not served" if lost
+                    else "dropped and flagged for review")
         return _Settled(_window_stat(group, pages, attempt, result, "failed", str(exc)),
                         failed=f"{group}:p{pages[0]}", cause=str(exc), lost=lost)
     outside = _cite_shown_pages(extraction, pages)

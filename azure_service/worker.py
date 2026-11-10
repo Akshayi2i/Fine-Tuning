@@ -85,6 +85,10 @@ class Lease:
         self.message = message
         self.lost = False
         self.lock = threading.Lock()
+        #: While its fields are read (phase 1): when they started and the job's record, for the fields deadline
+        #: (:meth:`Worker.renew_leases`). None once the job is in phase 2.
+        self.fields_since: float | None = None
+        self.record: dict[str, Any] | None = None
 
 
 @dataclass
@@ -159,6 +163,10 @@ class Worker:
             with lease.lock:
                 if lease.lost:
                     continue
+                deadline = self.settings.fields_deadline_s
+                if deadline and lease.fields_since is not None and self.clock() - lease.fields_since > deadline:
+                    self._stop_waiting(job_id, lease, deadline)
+                    continue
                 try:
                     lease.message = self.queue.extend(lease.message, self.settings.visibility_timeout_s)
                 except LeaseLostError:
@@ -166,6 +174,37 @@ class Worker:
                     log.warning("job %s: its lease was lost; another delivery owns it now", job_id)
                 except QueueError as exc:
                     log.warning("job %s: its lease could not be renewed (%s); trying again", job_id, exc)
+
+    def _stop_waiting(self, job_id: str, lease: Lease, deadline: float) -> None:
+        """A job whose fields ran past the deadline (called holding ``lease.lock``): its lease is no longer renewed,
+        so the queue gives it out again when the lease runs out, and its status says why.
+
+        The thread reading it cannot be stopped from here; whatever it writes later is refused, as for any lease
+        lost (:meth:`_assert_current`). Every wait inside it has its own limit now (a model request's deadline,
+        MinerU's per task), so it ends. Before 2026-11-10 the lease was renewed for as long as the worker ran, and a
+        stuck document was never given up.
+        """
+        lease.lost = True
+        reason = (f"its fields ran past {deadline:.0f} s (FIELDS_DEADLINE_S): this delivery stopped waiting; the job "
+                  f"is given out again when its lease runs out")
+        log.error("job %s: %s", job_id, reason)
+        if lease.record is None:
+            return
+        # As _failed: only a running job goes back to queued - one whose fields were served before stays
+        # fields_ready - and nothing is written over a job that ended, or that a later delivery took (a renewal that
+        # failed unnoticed until another replica had it: _assert_current's rule, read here without raising).
+        record = {**lease.record, "error": reason}
+        if record.get("status") == "running":
+            record["status"] = "queued"
+        try:
+            current = self.store.read_status(record["tenant"], record["job_id"])
+            if current is not None and (current.get("status") in FINAL
+                                        or int(current.get("attempts") or 0) > int(record.get("attempts") or 0)):
+                log.info("job %s: ended or taken by a later delivery meanwhile; its status is left as it is", job_id)
+                return
+            self.store.write_status(record)
+        except Exception as exc:  # noqa: BLE001 - the queue still brings the job back
+            log.warning("job %s: its status could not be written (%s)", job_id, type(exc).__name__)
 
     def _release(self, job_id: str, lease: Lease, delay_s: int) -> None:
         """The job back on the queue, visible again after ``delay_s``."""
@@ -265,7 +304,11 @@ class Worker:
                      job_id, message.dequeue_count)
             self._text.put(_Phase2(record, lease))
             return
-        self._read_fields(record, lease)
+        lease.record, lease.fields_since = record, self.clock()
+        try:
+            self._read_fields(record, lease)
+        finally:
+            lease.fields_since = None
 
     def _read_fields(self, record: dict[str, Any], lease: Lease) -> None:
         from serving.doc_type_classifier import StaticClassifier

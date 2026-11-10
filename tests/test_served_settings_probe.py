@@ -23,13 +23,23 @@ class FakeServer(OpenAIChatBackend):
     """The two settings as a vLLM 0.11 server applies them, without a network."""
 
     def __init__(self, *, whitespace_rule: bool = True, logprobs_mode: str = "raw_logprobs",
-                 tokenize: bool = True, max_model_len: int | None = 32768, reads_images: bool = True) -> None:
+                 tokenize: bool = True, max_model_len: int | None = 32768, reads_images: bool = True,
+                 version: str | None = "0.11.0", spacing: str = '{"a": "x", "b": 1}') -> None:
         self.base_url, self.model, self.token, self.timeout = "https://pod-8000.proxy.runpod.net", "policy-v3", None, 30
         self.whitespace_rule, self.logprobs_mode, self.tokenize = whitespace_rule, logprobs_mode, tokenize
         self.max_model_len, self.reads_images = max_model_len, reads_images
+        self.version, self.spacing = version, spacing
         self.asked: list[dict] = []
 
     def _request(self, path, body=None, *, stream=False, timeout=None):
+        if path == "/version":
+            if self.version is None:
+                raise ModelRunnerError("404 from /version: Not Found")
+            if self.version == "html":
+                raise json.JSONDecodeError("Expecting value", "<html>", 0)    # a proxy's page, as _request reads it
+            if self.version == "list":
+                return ["0.11.0"]
+            return {"version": self.version}
         if path == "/v1/models":
             # As vLLM 0.11 lists them: the length on the base model's entry, the adapter naming it as parent.
             return {"data": [{"id": "/workspace/models/Qwen3-VL-8B-Instruct", "max_model_len": self.max_model_len},
@@ -49,6 +59,9 @@ class FakeServer(OpenAIChatBackend):
                                        "token_lora_mapping.size(0) == M")
             assert request["max_tokens"] == 1 and set(request["mm_processor_kwargs"]) == {"min_pixels", "max_pixels"}
             return {"choices": [{"message": {"content": "OK"}}]}
+        if "response_format" in request and "logit_bias" not in request:
+            assert request["response_format"]["json_schema"]["name"] == "spacing"
+            return {"choices": [{"message": {"content": self.spacing}}]}
         if "response_format" in request:
             pushed = request["logit_bias"]
             assert set(pushed) == {str(t) for t in (220, 198, 256, 197)} and set(pushed.values()) == {100}
@@ -69,7 +82,8 @@ class FakeServer(OpenAIChatBackend):
 def test_a_server_started_as_configured_has_no_problems():
     server = FakeServer()
     assert server.server_setting_problems() == []
-    assert [a["path"] for a in server.asked].count("/v1/chat/completions") == 3     # whitespace, logprobs, a page image
+    # spacing, whitespace, logprobs, a page image
+    assert [a["path"] for a in server.asked].count("/v1/chat/completions") == 4
     assert all(a.get("temperature") == 0.0 for a in server.asked if a["path"] != "/tokenize")
 
 
@@ -111,6 +125,39 @@ def test_a_server_with_a_shorter_context_than_training_is_found():
     [problem] = FakeServer(max_model_len=16384).server_setting_problems()
     assert "16384" in problem and "--max-model-len 32768" in problem
     assert FakeServer(max_model_len=None).server_setting_problems() == []      # a server that does not say
+
+
+def test_a_server_running_another_vllm_is_found():
+    """2026-11-10 review: the serving pod runs no code of ours, so nothing pinned its vLLM."""
+    [problem] = FakeServer(version="0.11.1").server_setting_problems()
+    assert "vLLM 0.11.1" in problem and "vllm==0.11.0" in problem
+    [problem] = FakeServer(version=None).server_setting_problems()
+    assert "could not be read" in problem
+
+
+def test_the_version_check_names_an_unreadable_answer_and_takes_a_local_build():
+    """Code review 2026-11-10: a page that is not JSON, or JSON of another shape, crashed the check; a local build
+    tag of the release was refused."""
+    assert FakeServer(version="0.11.0+cu128").server_setting_problems() == []
+    [problem] = FakeServer(version="html").server_setting_problems()
+    assert "could not be read" in problem
+    [problem] = FakeServer(version="list").server_setting_problems()
+    assert "of no stated version" in problem
+
+
+def test_the_pinned_vllm_is_the_one_the_serving_lock_installs():
+    from pathlib import Path
+
+    from inference_core.openai_backend import PINNED_VLLM
+
+    lock = (Path(__file__).resolve().parents[1] / "requirements-serve.lock").read_text(encoding="utf-8")
+    assert f"vllm=={PINNED_VLLM}" in lock
+
+
+def test_structured_answers_spaced_otherwise_than_training_are_found():
+    """Training answers are json.dumps' ", " and ": "; that the server writes the same was only a comment."""
+    [problem] = FakeServer(spacing='{"a":"x","b":1}').server_setting_problems()
+    assert "spaces structured answers otherwise" in problem and '{"a":"x","b":1}' in problem
 
 
 def test_a_server_that_cannot_read_a_page_image_through_the_adapter_is_found():

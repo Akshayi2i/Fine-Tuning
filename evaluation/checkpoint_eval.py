@@ -460,6 +460,37 @@ def _save_cached_pass(path: Path, key: str, metrics: dict[str, float], saved: di
         log.warning("could not save the pass score under %s (a resume will generate it again): %s", path, exc)
 
 
+def _generated_or_reused(rows: list[dict[str, Any]], model: Any, checkpoint: str, stats: dict[str, Any],
+                         answers: dict[str, dict[str, Any]] | None) -> list[Any]:
+    """``rows`` read by ``checkpoint``: the readings ``answers`` already holds for it reused, the rest generated.
+
+    ``answers`` (``{checkpoint: {reading_key: generation}}``) is shared by the sample pass and the finalists'
+    whole pass (:func:`vllm_scorer`): the 400 sample rows are among a finalist's rows, and were generated a second
+    time for it - about 44 minutes of cycle 1's selection (2026-11-10 review). Only the first reading is shared;
+    the run-to-run second reading is always made afresh. ``stats["reused"]`` counts the rows taken.
+    """
+    from evaluation.validation_generation import generate_validation, reading_key
+
+    if answers is None:
+        return generate_validation(rows, model, adapter=checkpoint, stats=stats)
+    known = answers.setdefault(checkpoint, {})
+    keys = [reading_key(row) for row in rows]
+    missing = [row for row, key in zip(rows, keys, strict=True) if key not in known]
+    if missing:
+        fresh = generate_validation(missing, model, adapter=checkpoint, stats=stats)
+        if len(fresh) != len(missing):
+            raise CheckpointEvalError(f"{checkpoint}: {len(missing)} row(s) asked for, {len(fresh)} came back")
+        for row, generation in zip(missing, fresh, strict=True):
+            known[reading_key(row)] = generation
+    else:
+        stats.update(rows=0, generated=0, calls=0, seconds=0.0, halves_read=0)
+    stats["reused"] = len(rows) - len(missing)
+    if stats["reused"]:
+        log.info("%s: %d of %d row(s) reused from its earlier pass, %d generated", checkpoint, stats["reused"],
+                 len(rows), len(missing))
+    return [known[key] for key in keys]
+
+
 def generation_scorer(
     rows: list[dict[str, Any]], model: Any, *, repeat: bool = False, repeat_modes: Sequence[str] | None = None,
     finalists: bool = False, save_dir: Path | None = None, val_path: str | None = None,
@@ -507,7 +538,7 @@ def generation_scorer(
     passes: list[dict[str, Any]] = []
     settings: dict[str, Any] = {"repeat": repeat, "repeat_modes": list(repeat_modes or []),
                                 "finalists": finalists, "save_dir": save_dir, "val_path": val_path,
-                                "cache_dir": cache_dir}
+                                "cache_dir": cache_dir, "answers": None}
     saved: dict[str, dict[str, str]] = {}
 
     def configure(**changes: Any) -> None:
@@ -531,7 +562,7 @@ def generation_scorer(
                     saved[checkpoint] = dict(hit["saved"])
                 return dict(hit["metrics"])
         stats: dict[str, Any] = {}
-        generations = generate_validation(rows, model, adapter=checkpoint, stats=stats)
+        generations = _generated_or_reused(rows, model, checkpoint, stats, settings["answers"])
         # What each pass cost, for the stage result: rows, calls, seconds.
         record = {"checkpoint": checkpoint, **stats}
         passes.append(record)
@@ -556,8 +587,17 @@ def generation_scorer(
             _save_cached_pass(cache_path, key, metrics, saved.get(checkpoint))
         return metrics
 
+    def keep_answers(checkpoints: list[str]) -> None:
+        """Only these checkpoints' readings kept: the rest are freed (code review 2026-11-10: every checkpoint's
+        sample answers, logprobs and spans with them, stayed in memory for the finalists' pass that reuses two)."""
+        store = settings["answers"]
+        if store is not None:
+            for checkpoint in [c for c in store if c not in checkpoints]:
+                del store[checkpoint]
+
     # Called by the checkpoint stage once selection is done, to free the engine.
     score.close = close  # type: ignore[attr-defined]
+    score.keep_answers = keep_answers  # type: ignore[attr-defined]
     score.passes = passes  # type: ignore[attr-defined]
     score.configure = configure  # type: ignore[attr-defined]
     #: {checkpoint: where its finalists' pass was saved} (:func:`saved_pass_paths`).
@@ -829,6 +869,9 @@ def choose_on_documents(
     if full_scorer is None:
         metrics = {c.checkpoint: dict(c.metrics) for c in ranked}
     else:
+        keep = getattr(full_scorer, "keep_answers", None)
+        if callable(keep):
+            keep([c.checkpoint for c in ranked])      # the sample readings of those not in the final, freed
         outcomes = _score_all(full_scorer, [c.checkpoint for c in ranked])
         for candidate in ranked:
             try:
@@ -990,10 +1033,17 @@ def vllm_scorer(
     sample = validation_sample(rows, sample_rows)
     if len(sample) >= len(rows):
         return scorer(sample)
+    # One store of readings for both passes: a finalist's sample rows are not generated twice.
+    answers: dict[str, dict[str, Any]] = {}
     score = generation_scorer(sample, model)
+    full = scorer(rows_in_modes(rows, full_modes))
+    for each in (score, full):
+        configure = getattr(each, "configure", None)
+        if callable(configure):
+            configure(answers=answers)
     if cache_dir is not None:
         score.configure(cache_dir=cache_dir)  # type: ignore[attr-defined]
-    score.full = scorer(rows_in_modes(rows, full_modes))  # type: ignore[attr-defined]
+    score.full = full  # type: ignore[attr-defined]
     return score
 
 

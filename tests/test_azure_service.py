@@ -457,6 +457,89 @@ def test_a_lease_is_renewed_while_the_job_runs(service):
     assert len(service.queue) == 0
 
 
+def test_fields_past_their_deadline_are_given_up_by_this_delivery_and_given_out_again(tmp_path):
+    """2026-11-10 review: the lease was renewed for as long as the worker ran, so a document stuck in its fields was
+    never given up, and it held the worker's one fields thread."""
+    import threading
+
+    service = Service(tmp_path, fields_deadline_s=600)
+    job_id = service.submit()["job_id"]
+    worker = service.worker()
+    entered, release = threading.Event(), threading.Event()
+    real = worker._read_fields
+
+    def stuck(record, lease):
+        entered.set()
+        release.wait(10)
+        real(record, lease)                            # finishes late: everything it writes must be refused
+
+    worker._read_fields = stuck
+    reading = threading.Thread(target=worker.poll_once)
+    reading.start()
+    assert entered.wait(5)
+    service.clock.advance(300)
+    worker.renew_leases()
+    assert service.status(job_id)["error"] is None                   # inside its deadline: renewed, nothing said
+    service.clock.advance(301)
+    worker.renew_leases()                                             # 601 s: past it
+    view = service.status(job_id)
+    assert view["status"] == "queued" and "ran past 600 s" in view["error"]
+    release.set()
+    reading.join(10)
+    assert service.status(job_id)["status"] == "queued"               # the late answer was not written over it
+    service.clock.advance(300)                                        # the lease, no longer renewed, runs out
+    again = service.worker()
+    again.poll_once()
+    again.text_once()
+    view = service.status(job_id)
+    assert view["status"] == "done" and view["attempts"] == 2
+
+
+def test_the_fields_deadline_writes_nothing_over_a_job_another_delivery_finished(tmp_path):
+    """Code review 2026-11-10: the deadline wrote 'queued' with no check, so a job another replica had finished
+    meanwhile (this one's renewals failing unnoticed) showed as queued again."""
+    import threading
+
+    service = Service(tmp_path, fields_deadline_s=600)
+    job_id = service.submit()["job_id"]
+    worker = service.worker()
+    entered, release = threading.Event(), threading.Event()
+
+    def stuck(record, lease):
+        entered.set()
+        release.wait(10)
+
+    worker._read_fields = stuck
+    reading = threading.Thread(target=worker.poll_once)
+    reading.start()
+    assert entered.wait(5)
+    record = service.store.read_status("default", job_id)
+    service.store.write_status({**record, "status": "done", "attempts": 2})     # another replica finished it
+    service.clock.advance(601)
+    worker.renew_leases()
+    release.set()
+    reading.join(10)
+    view = service.store.read_status("default", job_id)
+    assert view["status"] == "done" and not view.get("error")
+
+
+def test_the_fields_deadline_leaves_a_served_job_fields_ready(tmp_path):
+    """Code review 2026-11-10: a redelivered job whose fields were served was set back to 'queued'; as _failed, only a
+    running job goes back to queued."""
+    from azure_service.worker import Lease
+
+    service = Service(tmp_path, fields_deadline_s=600)
+    job_id = service.submit()["job_id"]
+    worker = service.worker()
+    record = {**service.store.read_status("default", job_id), "status": "fields_ready", "attempts": 1}
+    service.store.write_status(record)
+    lease = Lease(service.queue.receive(60))
+    lease.record = record
+    worker._stop_waiting(job_id, lease, 600)
+    view = service.store.read_status("default", job_id)
+    assert lease.lost and view["status"] == "fields_ready" and "ran past 600 s" in view["error"]
+
+
 def test_a_failure_worth_retrying_puts_the_job_back_then_it_succeeds(tmp_path):
     service = Service(tmp_path, reader=FakeReader(fail_reads=1))
     job_id = service.submit()["job_id"]

@@ -1,0 +1,102 @@
+"""scripts/score_effects.py: what each proven scoring effect costs a run, read off its saved answers (2026-11-10)."""
+
+from __future__ import annotations
+
+import json
+
+from evaluation.validation_generation import ValidationGeneration, score_generations
+from inference_core.input_builder import build_training_row
+from scripts.score_effects import answer_lengths, load_generations, measure
+from scripts.score_on_training_docs import answer_record
+
+LOB = "gl"
+#: The page prints the date with a two-digit year and the title with no full stop.
+PAGE = ("DECLARATIONS\nPolicy Number GL-1001\nPolicy Period 08/18/22 to 08/18/23\n"
+        "FORMS SCHEDULE\nCG 00 01 04 13 Commercial General Liability Coverage Form")
+
+
+def _env(value, *pages, raw=None):
+    return {"raw": str(value) if raw is None else raw, "parsed": value, "page_ref": list(pages)}
+
+
+GOLD = {"policy": {"policy_number": _env("GL-1001", 1), "effective_date": _env("08/18/2022", 1, raw="08/18/22")},
+        "forms_and_endorsements": [{"form_number": _env("CG 00 01", 1), "edition_date": _env("04/13", 1),
+                                    "title": _env("Commercial General Liability Coverage Form", 1)}]}
+#: Right on every value; the date's raw is the cleaned value, not what the page prints, and the title ends in a stop.
+ANSWER = {"policy": {"policy_number": _env("GL-1001", 1), "effective_date": _env("08/18/2022", 1)},
+          "forms_and_endorsements": [{"form_number": _env("CG 00 01", 1), "edition_date": _env("04/13", 1),
+                                      "title": _env("Commercial General Liability Coverage Form.", 1)}]}
+
+
+def _window(mode="ocr_plus_image", answer=ANSWER) -> ValidationGeneration:
+    texts = None if mode == "image_only" else [PAGE]
+    row = build_training_row("policy", "policy_0001", ["processed/p/page_1.png"], texts, mode, json.dumps({}),
+                             lob=LOB, sections="forms", split="val", page_numbers=[1], total_pages=1)
+    row.update(window_pages=[1], window_index=0, window_leads=True, task="policy_schedule")
+    return ValidationGeneration(row=row, golden=GOLD, extraction=answer)
+
+
+def _saved(tmp_path, generations) -> list:
+    path = tmp_path / "run.answers.jsonl"
+    path.write_text("".join(json.dumps(answer_record(g), default=str) + "\n" for g in generations), encoding="utf-8")
+    return load_generations(path)
+
+
+def test_a_saved_run_scores_again_exactly_as_it_scored(tmp_path):
+    """The saved file keeps the page text and the halves, so the documents merge and are checked as they were."""
+    half = _window()
+    whole = _window()
+    whole.cut_off, whole.halves = True, [half]
+    original = [whole, _window("image_only")]
+    loaded = _saved(tmp_path, original)
+    assert loaded[0].ocr_pages == {1: PAGE} and loaded[1].ocr_pages is None
+    assert loaded[0].cut_off and len(loaded[0].halves) == 1 and loaded[0].halves[0].ocr_pages == {1: PAGE}
+    assert score_generations(loaded) == score_generations(original)
+
+
+def test_a_file_saved_without_page_text_takes_it_from_the_pages_file(tmp_path):
+    record = answer_record(_window())
+    del record["row"]["ocr_pages"]
+    path = tmp_path / "old.answers.jsonl"
+    path.write_text(json.dumps(record, default=str) + "\n", encoding="utf-8")
+    [loaded] = load_generations(path, {"policy_0001": {"1": PAGE}})
+    assert loaded.ocr_pages == {1: PAGE}
+    # Code review 2026-11-10: with no saved text the window read as having none, so its values were not looked for.
+    assert loaded.page_text and "GL-1001" in loaded.page_text
+
+
+def test_ignoring_punctuation_reaches_every_module_that_imported_the_text_rule():
+    """Code review 2026-11-10: replaced only in common.normalize, rows were still paired on the old rule."""
+    from common import normalize, structural_ids
+    from scripts.score_effects import punctuation_ignored
+
+    original = normalize.normalize_text
+    with punctuation_ignored():
+        assert structural_ids.normalize_text is not original
+        assert structural_ids.normalize_text("Accounts Receivable.") == normalize.normalize_text("ACCOUNTS RECEIVABLE")
+    assert structural_ids.normalize_text is original and normalize.normalize_text is original
+
+
+def test_each_effect_is_measured_on_its_own(tmp_path):
+    report = measure(_saved(tmp_path, [_window()]))
+    as_scored, no_removal, punctuation = (report[k]["document_field_normalized_match"]
+                                         for k in ("as_scored", "page_check_off", "punctuation_ignored"))
+    # A1: the right date is taken out (its raw is not what the page prints); the gold holds it.
+    assert report["page_check"]["taken_out"] >= 1 and report["page_check"]["gold_holds"] >= 1
+    assert any(e["field"] == "policy.effective_date" for e in report["page_check"]["examples"])
+    assert no_removal > as_scored
+    # A2: the title with a full stop counts as right once punctuation is left out of text.
+    assert punctuation > as_scored
+
+
+def test_answer_lengths_are_counted_per_task_with_their_writing_time():
+    class Tokens:
+        @staticmethod
+        def encode(text, add_special_tokens=False):
+            return list(range(len(text) // 2))
+
+    long = _window()
+    long.unparsed_text = "x" * 8000                       # 4,000 tokens: 80 s at 50 tokens/s
+    lengths = answer_lengths([_window(), long], Tokens())["policy_schedule"]
+    assert lengths["chars"]["answers"] == 2 and lengths["chars"]["longest"] == 8000
+    assert lengths["tokens"]["longest"] == 4000 and lengths["longest_seconds"] == 80 and lengths["over_a_minute"] == 1

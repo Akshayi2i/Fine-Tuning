@@ -106,7 +106,7 @@ class Generation:
         — a recall failure that per-field confidence cannot see, because the
         missing rows produced no tokens.
         """
-        return self.finish_reason in ("length", "max_tokens", STOPPED_REPEATING, STREAM_CUT)
+        return self.finish_reason in ("length", "max_tokens", STOPPED_REPEATING, STREAM_CUT, DEADLINE_CUT)
 
 
 #: The finish reason of an answer a backend stopped because its end had become
@@ -120,6 +120,12 @@ STOPPED_REPEATING = "repetition"
 #: closed the connection mid-answer. Its text is the start of an answer, so it
 #: counts as cut off, and the window is read again over fewer pages.
 STREAM_CUT = "stream_cut"
+
+#: The finish reason of a streamed answer still being written when its request's deadline came
+#: (``OpenAIChatBackend(request_deadline=)``): the server was slow, not the answer wrong. Cut off like
+#: :data:`STREAM_CUT` - smaller windows write shorter answers - but a one-page window past it never had its
+#: answer read, so it is lost, not dropped (``serving.pipeline._settle``; code review 2026-11-10).
+DEADLINE_CUT = "deadline"
 
 
 # --------------------------------------------------------------------------

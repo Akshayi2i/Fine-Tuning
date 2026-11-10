@@ -16,7 +16,7 @@ import pytest
 from data_pipeline.ocr import mineru_api
 from data_pipeline.ocr.mineru_api import MinerUApiError, ocr_via_api
 from data_pipeline.ocr.served_ocr import ServedOcr, ServedOcrError
-from inference_core.model_runner import STREAM_CUT, Generation, ModelRunnerError
+from inference_core.model_runner import DEADLINE_CUT, STREAM_CUT, Generation, ModelRunnerError
 from inference_core.runner_config import RunnerConfig
 
 PIN = "4.0.12"
@@ -421,6 +421,72 @@ def test_a_stream_that_breaks_off_counts_as_cut_off_never_as_a_finished_answer(t
         _CutStream.mode = "chunked"
         with pytest.raises(ModelRunnerError, match="broke off.*IncompleteRead"):
             backend.generate(messages, RunnerConfig(max_new_tokens=100))
+    finally:
+        httpd.shutdown()
+
+
+class _Stalled(_CutStream):
+    """A model server that keeps the connection open and stops writing: ``begun`` after the start of an answer,
+    otherwise before any of it."""
+
+    begun = True
+
+    def do_POST(self):  # noqa: N802
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        if _Stalled.begun:
+            piece = json.dumps({"choices": [{"delta": {"content": '{"policy": {"named_insured": "AC'}}]})
+            self.wfile.write(f"data: {piece}\n\n".encode())
+            self.wfile.flush()
+        time.sleep(6)
+
+
+def test_a_request_past_its_deadline_is_ended_not_waited_on(monkeypatch):
+    """2026-11-10 review: only each read had a time limit, so a server that held a connection open and wrote
+    nothing held the window, and the worker's fields turn, for good."""
+    from inference_core.model_runner import ModelTransportError
+    from inference_core.openai_backend import OpenAIChatBackend
+
+    httpd, url = _serve(_Stalled)
+    try:
+        backend = OpenAIChatBackend(url, "tok", timeout=30, request_deadline=1)
+        messages = [{"role": "user", "content": "read it"}]
+        _Stalled.begun = True
+        started = time.perf_counter()
+        cut = backend.generate(messages, RunnerConfig(max_new_tokens=100))
+        assert time.perf_counter() - started < 4                            # not the 6 s the server holds it
+        assert cut.finish_reason == DEADLINE_CUT and cut.truncated() and cut.text.endswith('"AC')  # read in halves
+        _Stalled.begun = False
+        with pytest.raises(ModelTransportError, match="no answer within the request's deadline of 1 s"):
+            backend.generate(messages, RunnerConfig(max_new_tokens=100))   # sent once more, never split
+        assert OpenAIChatBackend(url, "tok", timeout=30).request_deadline == 30   # by default: the read limit
+    finally:
+        httpd.shutdown()
+
+
+class _NoHeaders(_CutStream):
+    """A server, or a proxy in front of one, that takes the request and never starts its answer."""
+
+    def do_POST(self):  # noqa: N802
+        self.rfile.read(int(self.headers["Content-Length"]))
+        time.sleep(6)
+
+
+def test_a_request_whose_answer_never_starts_is_held_to_its_deadline():
+    """Code review 2026-11-10: the deadline began with the stream, so the wait for its headers had only the read
+    limit (1800 s in production)."""
+    from inference_core.model_runner import ModelTransportError
+    from inference_core.openai_backend import OpenAIChatBackend
+
+    httpd, url = _serve(_NoHeaders)
+    try:
+        backend = OpenAIChatBackend(url, "tok", timeout=30, request_deadline=1)
+        started = time.perf_counter()
+        with pytest.raises(ModelTransportError):
+            backend.generate([{"role": "user", "content": "read it"}], RunnerConfig(max_new_tokens=100))
+        assert time.perf_counter() - started < 4
     finally:
         httpd.shutdown()
 

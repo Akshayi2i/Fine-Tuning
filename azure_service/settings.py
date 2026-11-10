@@ -208,6 +208,13 @@ class Settings:
     images: str = "inline"
     page_link_sas: str | None = field(default=None, repr=False)
     max_concurrency: int = 96
+    #: Seconds one model request may take in all (``OpenAIChatBackend.request_deadline``): about twice the longest
+    #: window measured, 279 s (2026-10-28, base model, 221 pages). Past it an answer begun is read again in halves.
+    model_request_deadline_s: float = 600.0
+    #: Seconds a job's fields may take before the worker stops waiting on it: its lease is no longer renewed, so the
+    #: queue gives the job out again (counted against MAX_ATTEMPTS), and the reason is written to its status. About
+    #: twice the slowest fields measured, 795 s (2026-10-28). 0 turns it off.
+    fields_deadline_s: float = 1800.0
     run_pages: int = 20
     text_max_wait_s: float = 600.0
     #: Jobs whose fields are out and whose full text waits: no new job is taken beyond this.
@@ -286,6 +293,8 @@ class Settings:
             images=images or "inline",
             page_link_sas=text("PAGE_LINK_SAS_TOKEN"),
             max_concurrency=int(_number(env, "MAX_CONCURRENCY", 96, minimum=1)),
+            model_request_deadline_s=_number(env, "MODEL_REQUEST_DEADLINE_S", 600.0, minimum=30),
+            fields_deadline_s=_number(env, "FIELDS_DEADLINE_S", 1800.0, minimum=0),
             run_pages=int(_number(env, "RUN_PAGES", 20, minimum=1)),
             text_max_wait_s=_number(env, "TEXT_MAX_WAIT_S", 600.0, minimum=1),
             max_text_backlog=int(_number(env, "MAX_TEXT_BACKLOG", 4, minimum=1)),
@@ -338,6 +347,7 @@ class Settings:
             "tenants": list(self.tenants), "api_keys": len(self.api_keys),
             "max_pdf_mb": self.max_pdf_bytes // 2**20, "max_attempts": self.max_attempts,
             "visibility_timeout_s": self.visibility_timeout_s, "images": self.images,
+            "model_request_deadline_s": self.model_request_deadline_s, "fields_deadline_s": self.fields_deadline_s,
             "base_fallback": self.allow_base_fallback, "keep_files": self.keep_files,
             "webhook_secrets": sorted(self.webhook_secrets) + (["*"] if self.webhook_secret else []),
             "review_retention": {"tenants": list(self.review_retention_tenants), "container": self.review_container,

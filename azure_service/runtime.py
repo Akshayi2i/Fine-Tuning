@@ -211,7 +211,7 @@ def openai_models(settings: Any, links: Any = None) -> Callable[[str], Any]:
         if name not in made:
             backend = OpenAIChatBackend(settings.model_url, settings.model_token, model=name,
                                         max_concurrency=settings.max_concurrency, images=settings.images,
-                                        links=links)
+                                        links=links, request_deadline=settings.model_request_deadline_s)
             if not made:  # the settings are the server's, one check for every name it serves
                 check_server_settings(backend)
             made[name] = served_model(backend, "base" if name == settings.base_model_name else name)

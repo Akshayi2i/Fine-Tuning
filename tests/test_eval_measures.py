@@ -22,6 +22,25 @@ def test_an_error_is_classed_by_what_went_wrong():
     assert classify_error(0, 5, all_expected=gold) == "perception"     # a zero is a value, not "nothing"
 
 
+def test_a_value_the_gold_holds_written_another_way_is_not_called_invented():
+    """2026-11-10 review, proven on the real scorer: exact-text search called a value invented beside the gold's
+    own copy in another case or form, and called a gold-gap value misplaced because the gold cites that number as a
+    page."""
+    gold = {"coverages": [{"coverage_name": _value("BUILDING", [3]),
+                           "limits": [{"description": _value("OFF PREMISES", [3]), "amount": _value(10000.0, [3])}]}],
+            "policy": {"effective_date": _value("08/18/2022", [1, 7])}}
+    assert classify_error(None, "Off Premises", all_expected=gold) == "schema_reasoning"
+    assert classify_error(None, 10000, all_expected=gold) == "schema_reasoning"
+    assert classify_error(None, "$10,000", all_expected=gold) == "schema_reasoning"
+    assert classify_error(None, "2022-08-18", all_expected=gold) == "schema_reasoning"
+    # Only a page number of the gold: not a value it holds.
+    assert classify_error(None, 7, all_expected=gold) == "invented"
+    # The expected value in another case is a near-miss on it, not a value from another field.
+    assert classify_error("ACCOUNTS RECEIVABLE", "Accounts Receivable.", all_expected=gold) == "perception"
+    # A form number stays text: "CG 00 01" is not the amount 1.
+    assert classify_error(None, "CG 00 01", all_expected={"x": _value(1, [1])}) == "invented"
+
+
 def test_invented_values_stay_out_of_the_vision_error_mix():
     errors = [ErrorRecord("d", "a", None, "x", error_class="invented"),
               ErrorRecord("d", "b", "1", "7", error_class="perception")]

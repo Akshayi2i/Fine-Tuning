@@ -37,6 +37,12 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+#: What a run's saved answers keep of a row's prompt in place of it (``scripts.score_on_training_docs.answer_record``):
+#: the page text as the prompt carried it, and the number of page images it showed.
+SAVED_TEXT = "ocr_text"
+SAVED_IMAGES = "images_shown"
+
+
 @dataclass
 class ValidationGeneration:
     """One validation row, generated and parsed."""
@@ -76,7 +82,7 @@ class ValidationGeneration:
             if isinstance(message.get("content"), list)
             for part in message["content"]
             if isinstance(part, dict) and part.get("type") == "image"
-        )
+        ) or (self.row.get(SAVED_IMAGES, 0) if "messages" not in self.row else 0)
         return {
             "source_id": self.row.get("source_id", ""),
             "doc_type": self.row.get("doc_type", "unknown"),
@@ -119,6 +125,13 @@ class ValidationGeneration:
 
         if self.row.get("modality_mode") == "image_only":
             return None
+        if "messages" not in self.row and SAVED_TEXT in self.row:
+            return self.row[SAVED_TEXT]          # read back from a run's saved answers (see ocr_pages)
+        if "messages" not in self.row and self.row.get("ocr_pages"):
+            # Saved without it, its pages given apart (scripts.score_effects --pages): their text, in page order
+            # (code review 2026-11-10: read as no text, its values were not looked for).
+            pages = self.ocr_pages or {}
+            return shown_ocr_text([pages[page] for page in sorted(pages)])
         return shown_ocr_text([
             part.get("text", "")
             for message in self.row.get("messages", [])
@@ -137,6 +150,11 @@ class ValidationGeneration:
 
         if self.row.get("modality_mode") == "image_only":
             return None
+        if "messages" not in self.row and "ocr_pages" in self.row:
+            # A row read back from a run's saved answers (scripts.score_on_training_docs.answer_record), which keeps
+            # the page text and not the prompt.
+            saved = self.row["ocr_pages"] or {}
+            return {int(page): str(text) for page, text in saved.items()} or None
         pages: dict[int, str] = {}
         for message in self.row.get("messages", []):
             if message.get("role") != "user" or not isinstance(message.get("content"), list):

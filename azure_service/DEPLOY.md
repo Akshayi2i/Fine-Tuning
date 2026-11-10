@@ -276,6 +276,7 @@ az containerapp create -g $RG -n extraction-worker --environment $ENV \
 | `ALLOW_BASE_FALLBACK`, `BASE_MODEL_NAME` | worker | false, - | read a line no release covers with the base model (vLLM's `--served-model-name`). Keep it off (decided 2026-10-26): the base model never learned the format or the schema, so a line the release does not cover is refused, never answered unreliably |
 | `MAX_ATTEMPTS` | worker | 3 | deliveries before a job is given up |
 | `VISIBILITY_TIMEOUT_S`, `RETRY_DELAY_S` | worker | 300, 60 | lease length (renewed every third of it); wait before a retry |
+| `MODEL_REQUEST_DEADLINE_S`, `FIELDS_DEADLINE_S` | worker | 600, 1800 | longest one model request may take in all (an answer begun is then read again in halves; none at all is sent once more); longest a job's fields may take before the worker stops renewing its lease, so the job is given out again and its status says why (0: off) |
 | `KEEP_FILES` | worker | false | keep PDFs, checkpoints and page images after a job (debugging only) |
 | `PAGE_IMAGES`, `PAGE_LINK_SAS_TOKEN` | worker | inline | `link`: pages put in Blob, vLLM fetches them by read-only link |
 | `MAX_CONCURRENCY`, `RUN_PAGES`, `TEXT_MAX_WAIT_S`, `MAX_TEXT_BACKLOG` | worker | 96, 20, 600, 4 | windows in flight; MinerU run size; longest wait for a GPU turn; jobs waiting for their full text before no new job is taken |

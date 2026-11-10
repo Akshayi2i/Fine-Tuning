@@ -386,7 +386,7 @@ class _ScriptedBackend(ModelBackend):
         tokens = [text[i:i + 4] for i in range(0, len(text), 4)]
         return Generation(
             text=text, tokens=tokens, token_logprobs=[-0.01] * len(tokens),
-            finish_reason="length" if mode == "truncated" else "stop",
+            finish_reason={"truncated": "length", "deadline": "deadline"}.get(mode, "stop"),
         )
 
 
@@ -439,8 +439,40 @@ def test_a_document_with_a_window_lost_to_the_transport_is_not_served_as_read(cl
     from serving.pipeline import PipelineError
 
     backend = _ScriptedBackend(fail=lambda group, pages: "transport" if group == "arrays" and 12 in pages else None)
-    with pytest.raises(PipelineError, match=r"never reached the model.*arrays:p12.*not served"):
+    with pytest.raises(PipelineError, match=r"never reached the model.*arrays:p11-15.*not served"):
         _serve_with(client, backend)
+    # Sent once more as it was, never split: a smaller window would not reach a server that is down either
+    # (2026-11-10 review: split, a k-page window sent 2k-1 requests before the document failed).
+    assert backend.windows.count(("arrays", [11, 12, 13, 14, 15])) == 2
+    assert not any(group == "arrays" and 12 in pages and len(pages) < 5 for group, pages in backend.windows)
+
+
+def test_a_half_that_fails_to_reach_the_model_once_is_sent_once_more(client):
+    """Code review 2026-11-10: only a first-round window was resent; a half meeting one 502 failed the document."""
+    seen: list[list[int]] = []
+
+    def fail(group, pages):
+        if group != "arrays" or 12 not in pages:
+            return None
+        if len(pages) > 2:
+            return "truncated"                       # the window and its larger half are split
+        seen.append(pages)
+        return "transport" if len(seen) == 1 else None   # the half's first send fails, its resend is answered
+
+    backend = _ScriptedBackend(fail=fail)
+    result = _serve_with(client, backend)
+    assert seen == [[11, 12], [11, 12]] and result.schema_valid
+
+
+def test_a_page_still_being_written_at_the_deadline_fails_the_document(client):
+    """Code review 2026-11-10: an answer past the request's deadline was dropped like an unreadable page, and the
+    document served without it. Split like a cut-off answer, a one-page window past it is lost: not served."""
+    from serving.pipeline import PipelineError
+
+    backend = _ScriptedBackend(fail=lambda group, pages: "deadline" if group == "arrays" and 12 in pages else None)
+    with pytest.raises(PipelineError, match=r"never reached the model.*arrays:p12"):
+        _serve_with(client, backend)
+    assert ("arrays", [12]) in backend.windows                       # split down to the page first
 
 
 def test_a_window_the_server_refused_as_a_bad_request_is_still_flagged_not_refused(client, monkeypatch):

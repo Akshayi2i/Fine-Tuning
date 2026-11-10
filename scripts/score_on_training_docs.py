@@ -100,14 +100,30 @@ def write_details(out: Path, generations: list[Any], reports: dict[str, Any]) ->
     path = out.with_name(out.stem + ".answers.jsonl")
     with path.open("w", encoding="utf-8") as handle:
         for generation in generations:
-            row = {k: v for k, v in generation.row.items() if k not in ("messages", "images")}
-            handle.write(json.dumps({"row": row, "error": generation.error, "failure_kind": generation.failure_kind,
-                                     "answer": generation.extraction, "gold": generation.golden,
-                                     "unparsed_text": getattr(generation, "unparsed_text", None)},
-                                    ensure_ascii=False, default=str))
+            handle.write(json.dumps(answer_record(generation), ensure_ascii=False, default=str))
             handle.write("\n")
     written.append(path)
     return written
+
+
+def answer_record(generation: Any) -> dict[str, Any]:
+    """One row's answer as saved: enough to score it again exactly as the run did (``scripts.score_effects``).
+
+    The page text the prompt carried is kept as ``row["ocr_pages"]`` (the prompt itself is not: it holds the page
+    images) and a window read again in halves keeps its halves (2026-11-10: without them the documents could not be
+    merged again as they were scored).
+    """
+    from evaluation.validation_generation import SAVED_IMAGES, SAVED_TEXT
+
+    row = {k: v for k, v in generation.row.items() if k not in ("messages", "images")}
+    row["ocr_pages"] = generation.ocr_pages
+    row[SAVED_TEXT] = generation.page_text
+    row[SAVED_IMAGES] = generation.metadata["page_count"]
+    return {"row": row, "error": generation.error, "failure_kind": generation.failure_kind,
+            "answer": generation.extraction, "gold": generation.golden,
+            "unparsed_text": getattr(generation, "unparsed_text", None),
+            "cut_off": bool(getattr(generation, "cut_off", False)),
+            "halves": [answer_record(half) for half in getattr(generation, "halves", None) or []]}
 
 
 def selected_metrics(report: dict[str, Any]) -> dict[str, Any]:

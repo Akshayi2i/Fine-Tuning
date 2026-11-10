@@ -26,7 +26,9 @@ on someone remembering.
 
 from __future__ import annotations
 
+import functools
 import logging
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -116,7 +118,8 @@ def classify_error(expected: Any, got: Any, *, all_expected: dict[str, Any] | No
     if got is None or got == "":
         return "omission"
 
-    if all_expected:
+    got_key, expected_key = _value_key(got), _value_key(expected)
+    if all_expected and got_key is not None:
         # The returned value belongs to a DIFFERENT field in the same document:
         # the character was read correctly and placed wrongly, so the ViT is not
         # implicated.
@@ -127,12 +130,12 @@ def classify_error(expected: Any, got: Any, *, all_expected: dict[str, Any] | No
         # was reaching `_near_miss`, where two similar amounts read as a misread
         # character. That is the one classification this gate must not get
         # wrong: it is what decides whether a Foundation retrain is justified.
+        #
+        # Compared as the same value written another way - case, spacing, punctuation, "$10,000" and 10000, a date
+        # in either layout (2026-11-10 review: 'Off Premises' was called invented beside a gold 'OFF PREMISES', and
+        # 10000 beside 10000.0).
         for other_value in _flatten_values(all_expected):
-            if (
-                other_value is not None
-                and str(got).strip() == str(other_value).strip()
-                and str(other_value).strip() != str(expected).strip()
-            ):
+            if _value_key(other_value) == got_key and got_key != expected_key:
                 return "schema_reasoning"
 
     # After the misplacement check: a value the label holds under another field,
@@ -141,22 +144,71 @@ def classify_error(expected: Any, got: Any, *, all_expected: dict[str, Any] | No
     # invented.
     if expected is None or str(expected).strip() == "":
         return "invented"
-    expected_text, got_text = str(expected).strip(), str(got).strip()
+    # Casefolded: a value in another case only ('Accounts Receivable.' for 'ACCOUNTS RECEIVABLE') is a near-miss on
+    # the expected string, not a value from another field.
+    expected_text, got_text = str(expected).strip().casefold(), str(got).strip().casefold()
 
     if _near_miss(expected_text, got_text):
         return "perception"
     return "schema_reasoning"
 
 
+#: Keys of a value envelope that hold no value of the label: where it is printed, how sure, whether flagged. A gold
+#: citing page 4 does not hold the value 4 (2026-11-10 review: a gold-gap value 7 was classed as placed wrong because
+#: the gold cites page 7).
+_NOT_VALUES = frozenset({"page_ref", "p", "confidence", "flagged"})
+
+#: Text that is a number as printed: "$10,000", "(1,200.00)", "1,000". Anything else ("CG 00 01") stays text, since
+#: ``normalize_currency`` keeps every digit of any text.
+_NUMERIC_TEXT = re.compile(r"\(?\s*[$€£]?\s*-?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*\)?")
+
+
+def _value_key(value: Any) -> tuple[str, Any] | None:
+    """What a value is, for asking whether two fields hold the same one: a number as its amount, a date as its day,
+    text with case, spacing and punctuation left out (``common.normalize``). None for nothing.
+
+    Remembered per value: a document's every gold value is asked about once per wrong field, and a date is tried
+    against a dozen layouts (code review 2026-11-10: about 84 µs a value, some 15 s for a large policy's report)."""
+    try:
+        return _cached_value_key(value)
+    except TypeError:                      # not hashable (a list or object answered for a field): worked out each time
+        return _value_key_of(value)
+
+
+@functools.lru_cache(maxsize=65536, typed=True)
+def _cached_value_key(value: Any) -> tuple[str, Any] | None:
+    return _value_key_of(value)
+
+
+def _value_key_of(value: Any) -> tuple[str, Any] | None:
+    from common.normalize import normalize_currency, normalize_date, normalize_identifier
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, (int, float)):
+        return ("number", float(value))
+    text = str(value).strip()
+    if not text:
+        return None
+    if _NUMERIC_TEXT.fullmatch(text) and (amount := normalize_currency(text)) is not None:
+        return ("number", amount)
+    if day := normalize_date(text):
+        return ("date", day)
+    cleaned = normalize_identifier(text)
+    return ("text", cleaned) if cleaned else None
+
+
 def _flatten_values(value: Any) -> list[Any]:
-    """Every scalar in a nested golden record, at any depth.
+    """Every scalar value in a nested golden record, at any depth - not an envelope's pages or confidence.
 
     Lists of objects (``claims``, ``coverages``) are where a document's
     type-compatible near-duplicates actually sit, so a misplacement check that
     reads only the top level misses the cases it exists for.
     """
     if isinstance(value, dict):
-        return [v for item in value.values() for v in _flatten_values(item)]
+        return [v for key, item in value.items() if key not in _NOT_VALUES for v in _flatten_values(item)]
     if isinstance(value, (list, tuple)):
         return [v for item in value for v in _flatten_values(item)]
     return [] if value is None else [value]
