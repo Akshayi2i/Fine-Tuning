@@ -4,11 +4,13 @@ The 2026-11-10 review proved, on the real scorer, that some right answers are co
 each costs on a real run, from its saved answers - the score as the run made it, beside the score with one effect
 switched off:
 
-* **page check** (A1): strict mode takes out a value no page prints, looking only for its ``raw`` text, so a right
-  value whose ``raw`` is written another way than the page prints it ("08/18/2022" for "08/18/22") is taken out.
-  Counted: the values taken out that the gold holds (same field, same value), and the score with nothing taken out.
-* **punctuation** (A2): text is compared with only case and spacing evened out; "Accounts Receivable." fails against
-  "ACCOUNTS RECEIVABLE". Scored again with punctuation, quote and dash styles left out of text.
+* **page check** (A1): strict mode takes out a value no page prints. Until 2026-11-10 only its ``raw`` text was looked
+  for, so a right date written "08/18/2022" where the page prints "08/18/22" was taken out; since then its other
+  printed forms are looked for too (``common.grounding.printed_forms``). Counted: the values still taken out that the
+  gold holds (same field, same value), and the score with nothing taken out.
+* **punctuation** (A2): since 2026-11-10 the scorer compares text with punctuation, quote and dash styles left out
+  (``common.normalize.compare_text``). The run is also scored under the rule before - "Accounts Receivable." wrong
+  against "ACCOUNTS RECEIVABLE" - so both numbers are seen side by side.
 * **windows vs documents** (A3): a coverage written as one row or two fails window by window but not on the whole
   document; checkpoint ranking reads the window number. Both are shown.
 * **answer length** (B1): characters, and tokens with ``--tokenizer``, per task - the floor of production's
@@ -28,9 +30,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import re
 import sys
-import unicodedata
 from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
@@ -40,9 +40,6 @@ from typing import Any
 SHOWN = ("field_normalized_match", "document_field_normalized_match", "document_hallucination_rate")
 #: Tokens a window's answer is written at, per second, on one request (2026-10-28, base model, H200 pod).
 TOKENS_PER_SECOND = 50
-#: Quote and dash styles read as the plain one (A2).
-_STYLES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-"})
-_PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
 
 
 def load_generations(path: Path, pages: dict[str, dict[Any, str]] | None = None) -> list[Any]:
@@ -77,32 +74,19 @@ def page_check_off() -> Iterator[None]:
         printed_values.configured_mode = saved
 
 
-def _punctuation_blind(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = unicodedata.normalize("NFKC", str(value)).translate(_STYLES)
-    return re.sub(r"\s+", " ", _PUNCT.sub(" ", text)).strip().casefold() or None
-
-
 @contextlib.contextmanager
-def punctuation_ignored() -> Iterator[None]:
-    """Text compared with punctuation and quote/dash styles left out, as well as case and spacing.
-
-    Replaced wherever it was imported by name too (``common.structural_ids``, ``serving.policy_merge``, ...): changed
-    in ``common.normalize`` only, rows were still paired on the old one (code review 2026-11-10)."""
-    import evaluation.run_eval  # noqa: F401 - the scorer's modules loaded, so their names are found and replaced
+def punctuation_counted() -> Iterator[None]:
+    """The text rule before 2026-11-10 (decision A2): punctuation and quote/dash styles count, only case and spacing
+    are evened out. The scorer's own comparison (``common.normalize.compare_text``) is the one changed, so the run is
+    shown under both rules, side by side."""
     from common import normalize
 
-    saved = normalize.normalize_text
-    holders = [module for module in list(sys.modules.values())
-               if (getattr(module, "__dict__", None) or {}).get("normalize_text") is saved]
-    for module in holders:
-        module.normalize_text = _punctuation_blind
+    saved = normalize.compare_text
+    normalize.compare_text = normalize.normalize_text
     try:
         yield
     finally:
-        for module in holders:
-            module.normalize_text = saved
+        normalize.compare_text = saved
 
 
 def scores(generations: list[Any]) -> dict[str, Any]:
@@ -198,9 +182,9 @@ def measure(generations: list[Any], tokenizer: Any = None) -> dict[str, Any]:
     as_scored = scores(generations)
     with page_check_off():
         no_removal = scores(generations)
-    with punctuation_ignored():
+    with punctuation_counted():
         punctuation = scores(generations)
-    return {"as_scored": as_scored, "page_check_off": no_removal, "punctuation_ignored": punctuation,
+    return {"as_scored": as_scored, "page_check_off": no_removal, "punctuation_counted": punctuation,
             "page_check": removed_but_in_gold(generations), "answer_lengths": answer_lengths(generations, tokenizer)}
 
 
@@ -214,7 +198,7 @@ def render(report: dict[str, Any], stored: dict[str, Any] | None = None) -> str:
     if stored:
         rows.insert(0, ("the run's own number", stored))
     rows += [("page check takes nothing out (A1)", report["page_check_off"]),
-             ("punctuation ignored in text (A2)", report["punctuation_ignored"])]
+             ("punctuation counted, old rule (A2)", report["punctuation_counted"])]
     for name, values in rows:
         lines.append(f"{name:40} {_cell(values.get(SHOWN[0])):>8} {_cell(values.get(SHOWN[1])):>9} "
                      f"{_cell(values.get(SHOWN[2])):>13}")

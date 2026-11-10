@@ -259,6 +259,8 @@ def _date_forms(text: str) -> tuple[str, ...]:
     else:
         return ()
     month_n, day_n = int(month), int(day)
+    # Not the month as a word ("Aug 18, 2022"): a value with a word of three letters is also found as its words
+    # apart (appears_on), so "Aug", "18" and "2022" anywhere on a page would count as the date printed.
     return tuple(dict.fromkeys((f"{month_n:02d}/{day_n:02d}/{year}", f"{month_n}/{day_n}/{year}",
                                 f"{year}-{month_n:02d}-{day_n:02d}", f"{month_n:02d}/{day_n:02d}/{year[2:]}")))
 
@@ -271,11 +273,23 @@ def printed_forms(envelope: Mapping[str, Any]) -> tuple[Any, ...]:
     ``parsed`` behind a blank ``raw`` is still invented. A date is looked for in
     each form a page prints one (:func:`_date_forms`); a number as the figure; a
     ``bool`` as the reading it is. Empty when the envelope holds nothing to look
-    for - nothing, or a structure."""
+    for - nothing, or a structure.
+
+    With a ``raw``, the same value's other printed forms are looked for too (decision 2026-11-10, A1): a date
+    ``raw`` in each form a page prints a date, and a text ``parsed`` that differs from ``raw`` in its own forms. An
+    answer leaves ``r`` out when its printed form is the value (``canonical.to_compact_answer``), so a model that
+    left it out wrongly had ``raw`` = "08/18/2022" while the page printed "08/18/22", and the right date was taken
+    out. Never a number ``parsed``: a bare 1000 would be found in any year or code a page prints. ``raw`` stays
+    first: it is what is reported for a value printed nowhere."""
     raw = envelope.get("raw")
-    if isinstance(raw, (bool, int, float)) or isinstance(raw, str) and normalise(raw):
-        return (raw,)
     parsed = envelope.get("parsed")
+    if isinstance(raw, (bool, int, float)):
+        return (raw,)
+    if isinstance(raw, str) and normalise(raw):
+        forms: list[Any] = [raw, *_date_forms(raw)]
+        if isinstance(parsed, str) and normalise(parsed) and parsed != raw:
+            forms += [parsed, *_date_forms(parsed)]
+        return tuple(dict.fromkeys(forms))
     if isinstance(parsed, str):
         return (_date_forms(parsed) or (parsed,)) if normalise(parsed) else ()
     return (parsed,) if isinstance(parsed, (bool, int, float)) else ()
@@ -369,6 +383,7 @@ class TolerantPage:
                 self.amounts |= _readings(body[1:])
         self._near: dict[str, set[str]] | None = None
         self._at: dict[str, list[int]] | None = None
+        self._joined: set[str] | None = None
 
     def _near_index(self) -> dict[str, set[str]]:
         if self._near is None:
@@ -412,9 +427,31 @@ class TolerantPage:
         return any(all(self.sequence[start + i] in options[i] for i in range(1, len(words)))
                    for first in options[0] for start in self._at.get(first, ()) if start <= last)
 
+    def joins(self, code: str) -> bool:
+        """Whether ``code`` is printed as 2 to :data:`MAX_CODE_PIECES` words one after another ("SP 30 23")."""
+        if self._joined is None:
+            # From the words as printed, joined, then folded as one word is (``code`` is folded so).
+            plain = self.exact.padded.split()
+            self._joined = {_fold("".join(plain[start:start + size]))
+                            for size in range(2, MAX_CODE_PIECES + 1)
+                            for start in range(len(plain) - size + 1)}
+        return code in self._joined
+
     @property
     def has_text(self) -> bool:
         return bool(self.exact.words)
+
+
+#: A code split by spaces is looked for over at most this many words ("CG 20 10 04 13" is five).
+MAX_CODE_PIECES = 5
+#: A code read with or without its spaces: this long once its spaces are gone, holding a letter and a digit.
+#: Only digits ("10 18") is never joined: two figures side by side in a table are not one number.
+MIN_CODE_CHARS = 5
+
+
+def _is_code(joined: str) -> bool:
+    return (len(joined) >= MIN_CODE_CHARS and any(ch.isdigit() for ch in joined)
+            and any(ch.isalpha() for ch in joined))
 
 
 def tolerant_pages(pages: Mapping[int, str | TolerantPage | None]) -> dict[int, TolerantPage]:
@@ -436,6 +473,14 @@ def _tolerantly_on(raw: Any, page: TolerantPage) -> bool:
         return False
     if f" {' '.join(words)} " in page.padded:
         return True
+    # A code written with its spaces left out, or put in, where the page prints it the other way: "SP3023" for
+    # "SP 30 23", "GL 123 4567" for "GL1234567" (decision 2026-11-10, A1).
+    # Joined before it is folded, as the page's words are: "SP" alone keeps its S, "SP3023" reads "5P3023".
+    plain = [word for token in _tokens(raw) for word in token.split()]
+    if _is_code("".join(plain)):
+        code = _fold("".join(plain))
+        if code in page.words or len(plain) == 1 and page.joins(code):
+            return True
     if len(tokens) == 1:
         return page.in_order(tokens[0])
     # A phrase broken across lines or columns: each token found apart - but

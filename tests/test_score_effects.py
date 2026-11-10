@@ -10,8 +10,9 @@ from scripts.score_effects import answer_lengths, load_generations, measure
 from scripts.score_on_training_docs import answer_record
 
 LOB = "gl"
-#: The page prints the date with a two-digit year and the title with no full stop.
-PAGE = ("DECLARATIONS\nPolicy Number GL-1001\nPolicy Period 08/18/22 to 08/18/23\n"
+#: The page prints the date with a two-digit year and the title with no full stop; its text lacks the policy number
+#: (a line OCR missed).
+PAGE = ("DECLARATIONS\nPolicy Period 08/18/22 to 08/18/23\n"
         "FORMS SCHEDULE\nCG 00 01 04 13 Commercial General Liability Coverage Form")
 
 
@@ -62,31 +63,32 @@ def test_a_file_saved_without_page_text_takes_it_from_the_pages_file(tmp_path):
     [loaded] = load_generations(path, {"policy_0001": {"1": PAGE}})
     assert loaded.ocr_pages == {1: PAGE}
     # Code review 2026-11-10: with no saved text the window read as having none, so its values were not looked for.
-    assert loaded.page_text and "GL-1001" in loaded.page_text
+    assert loaded.page_text and "08/18/22" in loaded.page_text
 
 
-def test_ignoring_punctuation_reaches_every_module_that_imported_the_text_rule():
-    """Code review 2026-11-10: replaced only in common.normalize, rows were still paired on the old rule."""
-    from common import normalize, structural_ids
-    from scripts.score_effects import punctuation_ignored
+def test_the_old_text_rule_is_put_back_only_inside_the_measure():
+    from common import normalize
+    from scripts.score_effects import punctuation_counted
 
-    original = normalize.normalize_text
-    with punctuation_ignored():
-        assert structural_ids.normalize_text is not original
-        assert structural_ids.normalize_text("Accounts Receivable.") == normalize.normalize_text("ACCOUNTS RECEIVABLE")
-    assert structural_ids.normalize_text is original and normalize.normalize_text is original
+    assert normalize.values_match("ACCOUNTS RECEIVABLE", "Accounts Receivable.", field_path="coverage.description")
+    with punctuation_counted():
+        assert not normalize.values_match("ACCOUNTS RECEIVABLE", "Accounts Receivable.",
+                                          field_path="coverage.description")
+    assert normalize.compare_text("Accounts Receivable.") == "accounts receivable"
 
 
 def test_each_effect_is_measured_on_its_own(tmp_path):
     report = measure(_saved(tmp_path, [_window()]))
     as_scored, no_removal, punctuation = (report[k]["document_field_normalized_match"]
-                                         for k in ("as_scored", "page_check_off", "punctuation_ignored"))
-    # A1: the right date is taken out (its raw is not what the page prints); the gold holds it.
+                                         for k in ("as_scored", "page_check_off", "punctuation_counted"))
+    # A1: the policy number, right, is taken out - the page's text lacks it (OCR missed its line); the gold holds
+    # it. The date written "08/18/2022" where the page prints "08/18/22" is kept since the 2026-11-10 decision.
     assert report["page_check"]["taken_out"] >= 1 and report["page_check"]["gold_holds"] >= 1
-    assert any(e["field"] == "policy.effective_date" for e in report["page_check"]["examples"])
+    fields = {e["field"] for e in report["page_check"]["examples"]}
+    assert "policy.policy_number" in fields and "policy.effective_date" not in fields
     assert no_removal > as_scored
-    # A2: the title with a full stop counts as right once punctuation is left out of text.
-    assert punctuation > as_scored
+    # A2: the title with a full stop is right under today's rule, wrong under the rule before 2026-11-10.
+    assert punctuation < as_scored
 
 
 def test_answer_lengths_are_counted_per_task_with_their_writing_time():

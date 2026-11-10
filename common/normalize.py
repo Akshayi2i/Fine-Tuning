@@ -85,6 +85,21 @@ def normalize_text(value: Any) -> str | None:
     return _base(value) or None
 
 
+#: Quote and dash styles read as the plain one: "OWNER’S" is "OWNER'S", "–" is "-".
+_STYLES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-"})
+
+
+def compare_text(value: Any) -> str | None:
+    """Text as the scorer compares it (:func:`values_match`): :func:`normalize_text`, with punctuation and quote and
+    dash styles left out too - "Accounts Receivable." is "ACCOUNTS RECEIVABLE" (decision 2026-11-10, A2: the same
+    words read right were counted wrong). Punctuation becomes a space, never nothing: "1.5" stays apart from "15",
+    "A-1" from "A1". Only the comparison: serving's merge and the row ids keep :func:`normalize_text`."""
+    base = normalize_text(value)
+    if base is None:
+        return None
+    return _WS.sub(" ", _PUNCT.sub(" ", base.translate(_STYLES))).strip() or None
+
+
 def normalize_date(value: Any) -> str | None:
     """Parse a date in any common layout to ``YYYY-MM-DD``.
 
@@ -376,7 +391,7 @@ def values_match(
             # A list of objects (claims, coverages) is row-aligned by the
             # evaluation matcher, not compared as a set here.
             return False
-        return {normalize_text(v) for v in left} == {normalize_text(v) for v in right}
+        return {compare_text(v) for v in left} == {compare_text(v) for v in right}
 
     if expected is None or actual is None:
         return False
@@ -385,12 +400,14 @@ def values_match(
         # 957.0 compared as text under a name the kinds above do not know (a
         # total, a year, a count) failed - a correct value scored as wrong.
         return abs(float(expected) - float(actual)) < 0.005
+    if (kind or (infer_field_kind(field_path) if field_path else "text")) == "text":
+        return compare_text(expected) == compare_text(actual)
     a = normalize_value(expected, field_path, kind)
     b = normalize_value(actual, field_path, kind)
     if a is None or b is None:
         # Unparseable under the chosen normalizer — fall back to text equality
         # rather than silently declaring a match.
-        return normalize_text(expected) == normalize_text(actual)
+        return compare_text(expected) == compare_text(actual)
     if isinstance(a, float) and isinstance(b, float):
         return abs(a - b) < 0.005
     return a == b
