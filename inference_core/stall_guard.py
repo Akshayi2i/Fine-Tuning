@@ -46,6 +46,15 @@ def abort(reason: str) -> None:
         stalled(reason)
     except Exception:  # noqa: BLE001
         pass
+    try:
+        # vLLM's engine core in its own process (serving.engine_in_own_process) would outlive this one and keep the
+        # GPU's memory from the run that resumes it; vLLM 0.11.0 does not end it when its parent goes.
+        import multiprocessing
+
+        for child in multiprocessing.active_children():
+            child.kill()
+    except Exception:  # noqa: BLE001
+        pass
     os._exit(EXIT_CODE)
 
 

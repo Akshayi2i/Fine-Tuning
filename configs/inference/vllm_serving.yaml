@@ -87,6 +87,14 @@ serving:
   # pages, so the cache would have saved only their preparation; without it a page is prepared once per
   # request. Remove the line to get vLLM's own default.
   mm_processor_cache_gb: 0
+  # The in-process engine (selection, gate, test runs) with vLLM's engine core in a process of its own: vLLM
+  # 0.11.0 prepares every request of a call (about 2 s each) before generating any, and with the core in this
+  # process the GPU waited through it - about 200 s of a 96-request call (2026-11-09). In its own process the
+  # core starts on each request as soon as it is prepared. The Qwen3-VL LoRA fix reaches it through
+  # inference_core/vllm_site (inference_core.vllm_patches.patch_for_engine_process). Answers can differ from
+  # the one-process engine only as two runs already do (repeatable: false; near ties). false: back to one
+  # process. Unproven on a pod until a run measures it (2026-11-10).
+  engine_in_own_process: true
   # Seconds one engine call may run before the process stops itself, writing every thread's stack to the
   # log (inference_core.stall_guard); scripts/pod_run.sh resumes a run that stopped this way when started
   # with POD_RUN_RETRY_STALLED. The longest call seen was 489 s (the first, with warm-up) and a looping

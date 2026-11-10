@@ -537,7 +537,14 @@ PYTHONPATH=/workspace/fine-tuning/inference_core/vllm_site:/workspace/fine-tunin
 ```
 
 On a serving pod without the repository, copy `inference_core/vllm_site/sitecustomize.py` and
-`inference_core/vllm_patches.py` into one folder and put that folder alone on `PYTHONPATH`.
+`inference_core/vllm_patches.py` into one folder and put that folder alone on `PYTHONPATH`. A process whose fix
+cannot be applied stops at once (exit status 1, the reason on stderr) instead of starting a server that fails every
+page image.
+
+Our own engine (checkpoint selection, the gate, test runs) uses the same hook: with
+`serving.engine_in_own_process: true` (`configs/inference/vllm_serving.yaml`, the shipped setting) vLLM's engine
+core runs in a process of its own, so the pages of the next requests are prepared while it generates instead of
+before. `false` puts it back in one process.
 
 On the pod, a value set on the command line, as the token above, beats the one in `.env` for every setting
 `.env`/`.env.example` names, also once the command detaches (`bash scripts/pod_run.sh env` prints what a run

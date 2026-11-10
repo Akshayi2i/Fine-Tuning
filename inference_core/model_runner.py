@@ -375,6 +375,7 @@ class VLLMBackend(ModelBackend):
         self.resolved = resolved
         self.config = config
         self._engine = None
+        self._own_process = False
 
     def supports_logprobs(self) -> bool:
         return True
@@ -390,7 +391,17 @@ class VLLMBackend(ModelBackend):
         """
         if self._engine is None:
             return
-        self._engine = None
+        engine, self._engine = self._engine, None
+        if getattr(self, "_own_process", False):
+            # vLLM 0.11.0's LLMEngine has no shutdown of its own; its engine-core client ends the child process,
+            # which holds the GPU memory. Only then: the one-process path is left as it was proven.
+            shutdown = getattr(getattr(getattr(engine, "llm_engine", None), "engine_core", None), "shutdown", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception:  # noqa: BLE001 - best effort; the GC below still runs
+                    log.warning("the vLLM engine core did not shut down cleanly", exc_info=True)
+        del engine
         import gc
 
         try:  # pragma: no cover - needs vLLM and a GPU
@@ -418,10 +429,15 @@ class VLLMBackend(ModelBackend):
         if self._engine is not None:
             return self._engine
 
-        from inference_core.vllm_patches import patch_qwen3_vl_lora
+        from inference_core.vllm_patches import patch_for_engine_process, patch_qwen3_vl_lora
 
-        # Before vLLM is imported (inference_core.vllm_patches).
-        patch_qwen3_vl_lora()
+        # Before vLLM is imported (inference_core.vllm_patches): the engine core in its own process, so requests
+        # are prepared while it generates, or in this one.
+        self._own_process = bool(getattr(config, "engine_in_own_process", False))
+        if self._own_process:
+            patch_for_engine_process()
+        else:
+            patch_qwen3_vl_lora()
         repeatable = repeatable_engine_settings(config)
         from vllm import LLM
 

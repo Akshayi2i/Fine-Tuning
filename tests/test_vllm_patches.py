@@ -39,7 +39,8 @@ def _fake_vllm(monkeypatch, tower="model.visual."):
     modules["vllm.model_executor.models"].qwen3_vl = modules["vllm.model_executor.models.qwen3_vl"]
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.delenv(vllm_patches.IN_PROCESS_ENV, raising=False)
+    monkeypatch.setenv(vllm_patches.IN_PROCESS_ENV, "")      # so the value a test leaves is undone (see _clean_env)
+    monkeypatch.delenv(vllm_patches.IN_PROCESS_ENV)
     return Qwen3VL
 
 
@@ -361,15 +362,159 @@ def test_the_site_hook_does_nothing_without_the_flag(monkeypatch):
     assert _run_site(monkeypatch, None) == [] and _run_site(monkeypatch, "0") == []
 
 
-def test_the_site_hook_stops_a_process_whose_needed_fix_cannot_be_applied(monkeypatch):
-    """A server that would fail every page image must not start."""
-    import importlib.metadata
-    import runpy
+def _python_with_hook(tmp_path, fake_patches: str, code: str, **env):
+    """A real Python process started with the hook on its path and a stand-in ``vllm_patches`` beside it (the
+    serving-pod layout): Python runs ``sitecustomize`` itself, as it does for vLLM's engine core."""
+    import os
+    import shutil
+    import subprocess
     from pathlib import Path
 
-    _fake_vllm(monkeypatch, tower="model.something_else.")
-    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.11.0")
-    monkeypatch.setenv("FIDEON_VLLM_PATCH", "1")
-    site = Path(vllm_patches.__file__).resolve().parent / "vllm_site" / "sitecustomize.py"
-    with pytest.raises(vllm_patches.VllmPatchError):
-        runpy.run_path(str(site), run_name="sitecustomize")
+    shutil.copy(Path(vllm_patches.__file__).resolve().parent / "vllm_site" / "sitecustomize.py", tmp_path)
+    (tmp_path / "vllm_patches.py").write_text(fake_patches, encoding="utf-8")
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("PYTHONPATH", "FIDEON_VLLM_PATCH", "FIDEON_VLLM_PARENT_PID")}
+    return subprocess.run([sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True, timeout=60,
+                          env={**base, "PYTHONPATH": str(tmp_path), **env}, check=False)
+
+
+_FAILING = "def patch_qwen3_vl_lora(version=None, *, in_process=True):\n    raise RuntimeError('not the code it fixes')\n"
+_WORKING = ("import os\ndef patch_qwen3_vl_lora(version=None, *, in_process=True):\n"
+            "    os.environ['PATCHED'] = str(in_process)\n    return True\n")
+
+
+def test_the_site_hook_stops_a_process_whose_needed_fix_cannot_be_applied(tmp_path):
+    """A server or engine that would fail every page image must not start. Python on its own only prints an error
+    raised in sitecustomize and runs on (exit 0, checked 2026-11-10), so the hook ends the process itself."""
+    done = _python_with_hook(tmp_path, _FAILING, "print('started anyway')", FIDEON_VLLM_PATCH="1")
+    assert done.returncode == 1 and "started anyway" not in done.stdout
+    assert "could not be applied" in done.stderr and "not the code it fixes" in done.stderr
+
+
+def test_a_process_started_with_the_hook_is_patched_and_runs(tmp_path):
+    code = "import os; print(os.environ.get('PATCHED'))"
+    done = _python_with_hook(tmp_path, _WORKING, code, FIDEON_VLLM_PATCH="1")
+    assert done.returncode == 0 and done.stdout.strip() == "False"      # patched, its engine core left apart
+    assert _python_with_hook(tmp_path, _WORKING, code).stdout.strip() == "None"
+
+
+def test_only_a_direct_child_of_the_named_process_watches_for_its_parent(tmp_path):
+    import os
+
+    code = "import threading; print(any(t.name == 'fideon-exit-with-parent' for t in threading.enumerate()))"
+    child = _python_with_hook(tmp_path, _WORKING, code, FIDEON_VLLM_PATCH="1",
+                              FIDEON_VLLM_PARENT_PID=str(os.getpid()))
+    assert child.stdout.strip() == "True"
+    other = _python_with_hook(tmp_path, _WORKING, code, FIDEON_VLLM_PATCH="1", FIDEON_VLLM_PARENT_PID="1")
+    assert other.stdout.strip() == "False"       # a grandchild (another parent from its start) is left alone
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows does not re-parent an orphan, so its parent id stays")
+def test_an_engine_core_ends_itself_when_its_parent_is_gone(tmp_path):
+    """vLLM 0.11.0 does not end its engine core when the parent goes (a stall stop, a crash), and a core left
+    behind keeps the GPU's memory from the run that resumes."""
+    import os
+    import time
+    from pathlib import Path
+
+    # The middle process starts a child with the hook, naming itself as the parent, prints the child's id and exits.
+    middle = ("import os, subprocess, sys, time\n"
+              "env = dict(os.environ, FIDEON_VLLM_PATCH='1', FIDEON_VLLM_PARENT_PID=str(os.getpid()))\n"
+              "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], env=env)\n"
+              "print(child.pid, flush=True)\n"
+              "time.sleep(1)\n")
+    pid = int(_python_with_hook(tmp_path, _WORKING, middle).stdout.strip())
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        stat = Path(f"/proc/{pid}/stat")
+        if not stat.exists() or stat.read_text().split()[2] == "Z":     # gone, or ended and not yet reaped
+            return
+        time.sleep(0.5)
+    os.kill(pid, 9)
+    pytest.fail("the child outlived its parent by 20 s")
+
+
+# -- the in-process engine with its engine core in its own process (2026-11-10, speed) --------------------------
+
+
+def _clean_env(monkeypatch):
+    # setenv first: monkeypatch records nothing for a variable absent when it is deleted, so one the code under test
+    # sets afterwards would outlive the test (it did: later tests' processes started with the hook switched on).
+    for name in ("PYTHONPATH", vllm_patches.PATCH_ENV, vllm_patches.PARENT_ENV, vllm_patches.IN_PROCESS_ENV):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
+def test_an_engine_core_in_its_own_process_is_patched_as_it_starts(monkeypatch):
+    import os
+    from pathlib import Path
+
+    cls = _fake_vllm(monkeypatch)
+    _clean_env(monkeypatch)
+    assert vllm_patches.patch_for_engine_process("0.11.0") is True
+    assert cls().get_mm_mapping().tower_model == ["visual."]      # this process too (a forked child inherits it)
+    assert os.environ[vllm_patches.IN_PROCESS_ENV] == "1"
+    assert os.environ[vllm_patches.PATCH_ENV] == "1" and os.environ[vllm_patches.PARENT_ENV] == str(os.getpid())
+    first, root = os.environ["PYTHONPATH"].split(os.pathsep)[:2]
+    assert Path(first) == vllm_patches.SITE_DIR and (Path(root) / "inference_core").is_dir()
+    # A second engine in the same run adds nothing to the path.
+    before = os.environ["PYTHONPATH"]
+    vllm_patches.patch_for_engine_process("0.11.0")
+    assert os.environ["PYTHONPATH"] == before
+    # A real new process finds this hook first (no vLLM loaded: the flag is left out of the probe).
+    assert Path(vllm_patches.site_hook_found()).resolve() == (vllm_patches.SITE_DIR / "sitecustomize.py").resolve()
+
+
+def test_another_sitecustomize_found_first_is_refused(monkeypatch):
+    _fake_vllm(monkeypatch)
+    _clean_env(monkeypatch)
+    monkeypatch.setattr(vllm_patches, "site_hook_found", lambda: "/usr/lib/python3.11/sitecustomize.py")
+    with pytest.raises(vllm_patches.VllmPatchError, match="without the Qwen3-VL LoRA fix"):
+        vllm_patches.patch_for_engine_process("0.11.0")
+
+
+def test_a_vllm_without_the_bug_runs_its_engine_core_apart_with_no_hook(monkeypatch):
+    import os
+
+    _fake_vllm(monkeypatch, tower="visual.")
+    _clean_env(monkeypatch)
+    assert vllm_patches.patch_for_engine_process("0.11.1") is False
+    assert os.environ[vllm_patches.IN_PROCESS_ENV] == "1" and vllm_patches.PATCH_ENV not in os.environ
+
+
+def test_the_shipped_config_runs_the_engine_core_in_its_own_process():
+    from inference_core.runner_config import RunnerConfig, load_runner_config
+
+    assert load_runner_config().engine_in_own_process is True
+    assert RunnerConfig().engine_in_own_process is False
+    # It changes no setting of generation, so results stay comparable across the switch.
+    assert RunnerConfig(engine_in_own_process=True).fingerprint() == RunnerConfig().fingerprint()
+
+
+@pytest.mark.parametrize("own_process", [True, False])
+def test_closing_ends_the_engine_core_process_only_when_it_has_one(own_process):
+    from inference_core.model_runner import VLLMBackend
+    from inference_core.runner_config import RunnerConfig
+
+    stopped = []
+    backend = VLLMBackend({"tag": "v3"}, RunnerConfig())
+    backend._engine = types.SimpleNamespace(llm_engine=types.SimpleNamespace(
+        engine_core=types.SimpleNamespace(shutdown=lambda: stopped.append(True))))
+    backend._own_process = own_process
+    backend.close()
+    assert backend._engine is None and stopped == ([True] if own_process else [])
+
+
+def test_a_stall_stop_ends_the_engine_core_process_too(monkeypatch):
+    import multiprocessing
+
+    from inference_core import stall_guard
+
+    killed, exits = [], []
+    child = types.SimpleNamespace(kill=lambda: killed.append(True))
+    monkeypatch.setattr(multiprocessing, "active_children", lambda: [child])
+    monkeypatch.setattr(stall_guard.faulthandler, "dump_traceback", lambda **k: None)
+    monkeypatch.setattr("orchestration.notify.stalled", lambda reason: None)
+    monkeypatch.setattr(stall_guard.os, "_exit", exits.append)
+    stall_guard.abort("test")
+    assert killed == [True] and exits == [stall_guard.EXIT_CODE]

@@ -102,6 +102,10 @@ RUNTIME_SET_VARS = frozenset({
     # vLLM's own, set by the code for the engine it builds when generation is
     # asked to be repeatable (inference_core.model_runner) - never by a person.
     "VLLM_BATCH_INVARIANT",
+    # Set by the code for the engine core it starts in its own process (inference_core.vllm_patches.
+    # patch_for_engine_process): Python's search path, so the child finds the fix's sitecustomize, and this
+    # process's id, so the child ends itself when this one is gone. A hand-set value would be overwritten.
+    "PYTHONPATH", "FIDEON_VLLM_PARENT_PID",
 })
 
 

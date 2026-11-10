@@ -43,6 +43,11 @@ class RunnerConfig:
     #: (configs/inference/vllm_serving.yaml says why it is off).
     mm_processor_cache_gb: float | None = None
 
+    #: vLLM's engine core in a process of its own, so requests are prepared while it generates
+    #: (configs/inference/vllm_serving.yaml says why). False keeps it in this process. Not part of the
+    #: fingerprint: it changes no setting of generation.
+    engine_in_own_process: bool = False
+
     #: Seconds one engine call may run before the process stops itself with every stack written
     #: out (inference_core.stall_guard); ``None`` turns the guard off. Not part of the fingerprint:
     #: it changes no answer.
@@ -156,6 +161,7 @@ def load_runner_config(backend: Backend | None = None) -> RunnerConfig:
         max_lora_rank=int(serve.get("max_lora_rank", 64)),
         mm_processor_cache_gb=(float(serve["mm_processor_cache_gb"])
                                if serve.get("mm_processor_cache_gb") is not None else None),
+        engine_in_own_process=bool(serve.get("engine_in_own_process", False)),
         call_timeout_seconds=(float(serve["call_timeout_seconds"])
                               if serve.get("call_timeout_seconds") is not None else None),
         # Read, not defaulted: both were in the YAML and reached nothing, so the
