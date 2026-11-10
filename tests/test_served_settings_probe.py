@@ -23,12 +23,17 @@ class FakeServer(OpenAIChatBackend):
     """The two settings as a vLLM 0.11 server applies them, without a network."""
 
     def __init__(self, *, whitespace_rule: bool = True, logprobs_mode: str = "raw_logprobs",
-                 tokenize: bool = True) -> None:
+                 tokenize: bool = True, max_model_len: int | None = 32768, reads_images: bool = True) -> None:
         self.base_url, self.model, self.token, self.timeout = "https://pod-8000.proxy.runpod.net", "policy-v3", None, 30
         self.whitespace_rule, self.logprobs_mode, self.tokenize = whitespace_rule, logprobs_mode, tokenize
+        self.max_model_len, self.reads_images = max_model_len, reads_images
         self.asked: list[dict] = []
 
     def _request(self, path, body=None, *, stream=False, timeout=None):
+        if path == "/v1/models":
+            # As vLLM 0.11 lists them: the length on the base model's entry, the adapter naming it as parent.
+            return {"data": [{"id": "/workspace/models/Qwen3-VL-8B-Instruct", "max_model_len": self.max_model_len},
+                             {"id": "policy-v3", "parent": "/workspace/models/Qwen3-VL-8B-Instruct"}]}
         request = json.loads(body.decode("utf-8"))
         self.asked.append({"path": path, **request})
         if path == "/tokenize":
@@ -36,6 +41,14 @@ class FakeServer(OpenAIChatBackend):
                 raise ModelRunnerError("404 from /tokenize: Not Found")
             token = ONE_TOKEN.get(request["prompt"])
             return {"tokens": [token] if token else [1, 2]}
+        content = request.get("messages", [{}])[0].get("content")
+        if isinstance(content, list) and any(part.get("type") == "image_url" for part in content):
+            if not self.reads_images:
+                # vLLM 0.11.0 serving Qwen3-VL with a LoRA, without inference_core.vllm_patches' fix.
+                raise ModelRunnerError("500 from /v1/chat/completions: AssertionError in _lora_shrink: "
+                                       "token_lora_mapping.size(0) == M")
+            assert request["max_tokens"] == 1 and set(request["mm_processor_kwargs"]) == {"min_pixels", "max_pixels"}
+            return {"choices": [{"message": {"content": "OK"}}]}
         if "response_format" in request:
             pushed = request["logit_bias"]
             assert set(pushed) == {str(t) for t in (220, 198, 256, 197)} and set(pushed.values()) == {100}
@@ -56,7 +69,7 @@ class FakeServer(OpenAIChatBackend):
 def test_a_server_started_as_configured_has_no_problems():
     server = FakeServer()
     assert server.server_setting_problems() == []
-    assert [a["path"] for a in server.asked].count("/v1/chat/completions") == 2
+    assert [a["path"] for a in server.asked].count("/v1/chat/completions") == 3     # whitespace, logprobs, a page image
     assert all(a.get("temperature") == 0.0 for a in server.asked if a["path"] != "/tokenize")
 
 
@@ -91,3 +104,17 @@ def test_a_server_that_cannot_be_probed_is_warned_about_not_refused(caplog):
     with caplog.at_level(logging.WARNING):
         check_server_settings(FakeServer(tokenize=False))
     assert "could not be checked" in caplog.text
+
+
+def test_a_server_with_a_shorter_context_than_training_is_found():
+    """Review 2026-11-10, finding 3: windows are sized, and the model trained, for 32,768 tokens."""
+    [problem] = FakeServer(max_model_len=16384).server_setting_problems()
+    assert "16384" in problem and "--max-model-len 32768" in problem
+    assert FakeServer(max_model_len=None).server_setting_problems() == []      # a server that does not say
+
+
+def test_a_server_that_cannot_read_a_page_image_through_the_adapter_is_found():
+    """Review 2026-11-10, finding 1: a stock vLLM 0.11.0 fails Qwen3-VL's first image request through a LoRA; the
+    text-only probes passed it, and production reads every page image through the adapter."""
+    [problem] = FakeServer(reads_images=False).server_setting_problems()
+    assert "page image" in problem and "vllm_patches" in problem

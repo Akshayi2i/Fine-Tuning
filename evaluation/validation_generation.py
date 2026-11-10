@@ -634,25 +634,29 @@ def score_generations(
     """
     from evaluation.run_eval import REPEAT_ANSWER, build_report
 
-    rows = [(g.golden, g.extraction or {}, g.metadata) for g in generations]
+    # Every answer is scored as production serves it (served_window_answer, served_documents): held to the label
+    # conventions, and a whole document to the printed values too - as the gate scores a release.
+    rows = [(g.golden, served_window_answer(g), g.metadata) for g in generations]
     partial = repeat is not None and len(repeat) != len(generations)
     if repeat is not None and not partial:
-        rows = _with_repeat(rows, [(g.golden, g.extraction or {}, g.metadata) for g in repeat])
+        rows = _with_repeat(rows, [(g.golden, served_window_answer(g), g.metadata) for g in repeat])
     elif partial:
         paired = _paired_repeat(generations, repeat)
-        rows = [(gold, answer, {**metadata, REPEAT_ANSWER: again.extraction or {}} if again is not None else metadata)
+        rows = [(gold, answer, {**metadata, REPEAT_ANSWER: served_window_answer(again)} if again is not None
+                 else metadata)
                 for (gold, answer, metadata), again in zip(rows, paired, strict=True)]
     report = build_report(model_version, rows)
     if reports is not None:
         reports["windows"] = report
     metrics = {**report.gate_metrics(), **_invention_coverage(report), **_generation_outcomes(generations)}
     if any(_is_window(g) for g in generations):
-        documents = merged_documents(generations)
+        donors = text_donors(merged_windows(generations))
+        documents = served_documents(generations, donors=donors)
         if repeat is not None and not partial:
-            documents = _with_repeat(documents, merged_documents(repeat))
+            documents = _with_repeat(documents, served_documents(repeat, donors=donors))
         elif partial:
-            documents = _with_document_repeat(documents, merged_documents(
-                [again for again in paired if again is not None]))
+            documents = _with_document_repeat(documents, served_documents(
+                [again for again in paired if again is not None], donors=donors))
         whole_report = build_report(model_version, documents)
         if reports is not None:
             reports["documents"] = whole_report
@@ -898,6 +902,109 @@ def merged_documents(
     return out
 
 
+def text_donors(documents: Sequence[MergedDocument]) -> dict[Any, dict[int, str]]:
+    """Each document's clean page text, from its ``ocr_plus_image`` readings: what an image-only or noisy
+    reading of it is checked on, as the gate checks them (``golden_eval``; decision 2026-10-26)."""
+    from evaluation.run_eval import TEXT_DONOR_MODE
+
+    donors: dict[Any, dict[int, str]] = {}
+    for document in documents:
+        if document.metadata.get("modality_mode") == TEXT_DONOR_MODE and document.metadata.get("ocr_pages"):
+            donors.setdefault(document.metadata.get("source_id"), {}).update(document.metadata["ocr_pages"])
+    return donors
+
+
+def as_served(document: MergedDocument, donors: Mapping[Any, dict[int, str]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A merged answer as production serves it, and what the scorer must know of how it was checked.
+
+    Held to the label conventions as ``serving.pipeline.extract`` holds a common-model answer
+    (``serving.conventions.conform``: the reading's own page text, none for image_only, as serving holds an
+    answer before the text arrives), then to the printed values on the document's clean text
+    (``serving.printed_values.hold_to_printed``, the configured mode - strict: a value no page prints is taken out
+    before it is scored). The text is an ``ocr_plus_image`` reading's own, any other reading's borrowed from the
+    same document's ``ocr_plus_image`` rows (a noisy reading's text is corrupted on purpose; the gate checks it on
+    the clean text). With no clean text the answer is only conformed and no record is returned: the scorer then
+    checks inventions by its own matcher, as before.
+
+    Until 2026-11-10 only the finalists' gate mirror did this; the sample ranking, the document score and the
+    training-documents score scored the raw answer, and an edition written "0902" failed against "09/02", which
+    production writes.
+    """
+    import copy
+
+    from common.lob import merge_line
+    from common.schemas import is_common_model
+    from evaluation.run_eval import (
+        BORROWED_TEXT,
+        IMAGE_ONLY_MODE,
+        PRINTED_CHECK,
+        PRINTED_TEXT,
+        TEXT_DONOR_MODE,
+        UNREAD_PAGES,
+        cited_pages,
+        page_has_text,
+    )
+    from serving.conventions import conform
+    from serving.printed_values import hold_to_printed
+
+    metadata = document.metadata
+    mode = metadata.get("modality_mode")
+    lob = document.members[0].row.get("lob") if document.members else metadata.get("lob")
+    answer, spans = copy.deepcopy(document.answer), dict(document.spans)
+    if is_common_model("policy", None, lob):
+        conformed = conform(answer, spans, None if mode == IMAGE_ONLY_MODE else metadata.get("ocr_pages"),
+                            native=not metadata.get("is_scanned"))
+        answer, spans = conformed.extraction, conformed.spans
+    own = mode == TEXT_DONOR_MODE
+    source = metadata.get("ocr_pages") if own else donors.get(metadata.get("source_id"))
+    texts = {int(page): str(text or "") for page, text in (source or {}).items()}
+    if not any(page_has_text(text) for text in texts.values()):
+        return answer, {}
+    unread = sorted(page for page in cited_pages(answer) if not page_has_text(texts.get(page)))
+    texts.update({page: "" for page in unread if page not in texts})
+    held = hold_to_printed(answer, spans, texts, lob=merge_line(lob))
+    if held.record is None:
+        return answer, {}
+    checked: dict[str, Any] = {PRINTED_CHECK: held.record, UNREAD_PAGES: unread}
+    if not own:
+        checked[PRINTED_TEXT] = BORROWED_TEXT
+    return held.extraction, checked
+
+
+def served_window_answer(generation: ValidationGeneration) -> dict[str, Any]:
+    """One window's answer held to the label conventions on its own page text (none for image_only), as the
+    merged answer is (:func:`as_served`): what the window-level score and the sample ranking compare."""
+    import copy
+
+    from common.schemas import is_common_model
+    from serving.conventions import conform
+
+    answer = generation.extraction or {}
+    if not (_is_window(generation) and answer and is_common_model("policy", None, generation.row.get("lob"))):
+        return answer
+    conformed = conform(copy.deepcopy(answer), dict(generation.span_view()), generation.ocr_pages,
+                        native=not generation.metadata.get("is_scanned"))
+    return conformed.extraction
+
+
+def served_documents(generations: Sequence[ValidationGeneration], *,
+                     donors: Mapping[Any, dict[int, str]] | None = None,
+                     ) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
+    """:func:`merged_documents` with each merged answer as production serves it (:func:`as_served`).
+
+    ``donors`` is the clean page text to check on; by default these generations' own ``ocr_plus_image``
+    readings. A second reading (run-to-run) is given its first reading's donors, so both answers are held to the
+    same text and agreement is not lowered by one side alone losing values.
+    """
+    documents = merged_windows(generations)
+    donors = text_donors(documents) if donors is None else donors
+    out = [(g.golden, g.extraction or {}, g.metadata) for g in generations if not _is_window(g)]
+    for document in documents:
+        answer, checked = as_served(document, donors)
+        out.append((document.gold, answer, {**document.metadata, **checked}))
+    return out
+
+
 @dataclass
 class MergedDocument:
     """One document's windows merged as serving merges them."""
@@ -1086,29 +1193,15 @@ def gate_mirror(generations: Sequence[ValidationGeneration], *, model_version: s
     (``gate_mirror_unscored_documents``). ``{}`` when no real image_only
     document could be scored: the caller falls back to its own measure.
     """
-    import copy
 
-    from common.lob import merge_line
-    from common.schemas import is_common_model
     from evaluation.run_eval import (
-        BORROWED_TEXT,
         IMAGE_ONLY_MODE,
         PRINTED_CHECK,
-        PRINTED_TEXT,
-        TEXT_DONOR_MODE,
-        UNREAD_PAGES,
         build_report,
-        cited_pages,
-        page_has_text,
     )
-    from serving.conventions import conform
-    from serving.printed_values import hold_to_printed
 
     documents = merged_windows(generations)
-    donors: dict[Any, dict[int, str]] = {}
-    for document in documents:
-        if document.metadata.get("modality_mode") == TEXT_DONOR_MODE and document.metadata.get("ocr_pages"):
-            donors.setdefault(document.metadata.get("source_id"), {}).update(document.metadata["ocr_pages"])
+    donors = text_donors(documents)
     triples: list[tuple[Any, Any, dict[str, Any]]] = []
     synthetic = unscored = 0
     for document in documents:
@@ -1117,24 +1210,11 @@ def gate_mirror(generations: Sequence[ValidationGeneration], *, model_version: s
         if any(member.row.get("synthetic") for member in document.members):
             synthetic += 1
             continue
-        texts = {int(page): str(text or "") for page, text in (donors.get(document.metadata.get("source_id")) or {}).items()}
-        if not any(page_has_text(text) for text in texts.values()):
+        answer, checked = as_served(document, donors)
+        if PRINTED_CHECK not in checked:
             unscored += 1
             continue
-        lob = document.members[0].row.get("lob")
-        answer, spans = copy.deepcopy(document.answer), dict(document.spans)
-        if is_common_model("policy", None, lob):
-            # As serving holds an image_only answer before the text arrives: no page text.
-            conformed = conform(answer, spans, None, native=not document.metadata.get("is_scanned"))
-            answer, spans = conformed.extraction, conformed.spans
-        unread = sorted(page for page in cited_pages(answer) if not page_has_text(texts.get(page)))
-        texts.update({page: "" for page in unread if page not in texts})
-        held = hold_to_printed(answer, spans, texts, lob=merge_line(lob))
-        if held.record is None:
-            unscored += 1
-            continue
-        triples.append((document.gold, held.extraction, {
-            **document.metadata, PRINTED_CHECK: held.record, PRINTED_TEXT: BORROWED_TEXT, UNREAD_PAGES: unread}))
+        triples.append((document.gold, answer, {**document.metadata, **checked}))
     counts = {"gate_mirror_unscored_documents": float(unscored), "gate_mirror_synthetic_documents": float(synthetic)}
     if not triples:
         return {}

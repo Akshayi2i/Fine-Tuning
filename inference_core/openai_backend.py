@@ -66,6 +66,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -174,6 +175,24 @@ def repeating_tail(text: str, *, min_chars: int = 3000, min_repeats: int = 6,
         if tail[period:] == tail[:-period]:
             return period
     return None
+
+
+@cache
+def _probe_page_png() -> str:
+    """A small white grayscale page as base64 PNG, made here: what the image probe sends
+    (``OpenAIChatBackend._image_reading_problem``). The server scales it to the page pixel budget."""
+    import struct
+    import zlib
+
+    width = height = 64
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    rows = b"".join(b"\x00" + b"\xff" * width for _ in range(height))
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+    return base64.b64encode(png).decode("ascii")
 
 
 #: The keys that name a row: a loop writes the same row again under one of them.
@@ -442,6 +461,57 @@ class OpenAIChatBackend(ModelBackend):
         answer = self._request("/v1/chat/completions", json.dumps(request).encode("utf-8"), timeout=60)
         return (answer.get("choices") or [{}])[0]
 
+    def _image_reading_problem(self) -> str | None:
+        """Why the served model cannot read a page image, or None: one small white page sent through the served
+        name - the release's adapter - as a real window sends its pages, asking for one token.
+
+        vLLM 0.11.0 wraps Qwen3-VL's vision tower as LoRA layers and fails the first request that carries an image
+        (``inference_core.vllm_patches``); the in-process engine applies the fix, a stock ``vllm serve`` does not,
+        and production reads every page image through the adapter (``serving.fields_first``). The text-only probes
+        pass such a server (2026-11-10 review, finding 1). Run last, once the server has answered the others, so a
+        failure here is the image, not the server being out of reach.
+        """
+        from common.config import pixel_budget
+
+        min_pixels, max_pixels = pixel_budget()
+        try:
+            self._probe({
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64," + _probe_page_png()}},
+                    {"type": "text", "text": "Reply with the word OK."}]}],
+                "max_tokens": 1, "mm_processor_kwargs": {"min_pixels": min_pixels, "max_pixels": max_pixels},
+            })
+        except ModelRunnerError as exc:
+            return (f"the server cannot read a page image with {self.model!r} ({str(exc)[:200]}): vLLM 0.11.0 fails "
+                    "Qwen3-VL's first image request through a LoRA unless the fix in inference_core.vllm_patches is "
+                    "applied - serve with it applied, or with a vLLM that has the fix")
+        return None
+
+    def _served_length_problem(self) -> str | None:
+        """Why the server's context is shorter than the windows were sized and the model trained for, or None.
+
+        Training's ``max_length`` and every window's budget are ``sequence.max_seq_len`` (32,768); a server
+        started with a shorter ``--max-model-len`` refuses the longest windows, which are then split or dropped
+        (2026-11-10 review). vLLM 0.11 lists ``max_model_len`` on the base model's entry of ``/v1/models``; an
+        adapter's entry names that base as its ``parent`` (``serving_models.show_available_models``). A server
+        that cannot list its models, or does not say, is not refused on this.
+        """
+        from inference_core.runner_config import load_runner_config
+
+        required = int(load_runner_config().max_seq_len)
+        try:
+            served = self._request("/v1/models", timeout=30).get("data") or []
+        except ModelRunnerError as exc:
+            log.warning("could not list what %s serves, so its context length is not checked: %s", self.base_url, exc)
+            return None
+        entry = next((item for item in served if item.get("id") == self.model), None) or {}
+        base = next((item for item in served if item.get("id") == entry.get("parent")), entry)
+        length = base.get("max_model_len")
+        if isinstance(length, int) and length < required:
+            return (f"the server's context is {length} tokens, shorter than the {required} the windows were sized "
+                    f"and the model trained for: start it with --max-model-len {required}")
+        return None
+
     def server_setting_problems(self) -> list[str]:
         """What this server is started with that the trained model and its calibration were not, as reasons;
         empty when it matches. Two settings only the server sets (``configs/inference/vllm_serving.yaml``):
@@ -457,6 +527,8 @@ class OpenAIChatBackend(ModelBackend):
         Raises :class:`ModelRunnerError` when the server cannot be asked (no ``/tokenize``, an error).
         """
         problems: list[str] = []
+        if short := self._served_length_problem():
+            problems.append(short)
         whitespace = self._single_tokens(_WHITESPACE_PROBES)
         if not whitespace:
             raise ModelRunnerError("no whitespace token could be found to probe the server's whitespace rule")
@@ -493,6 +565,8 @@ class OpenAIChatBackend(ModelBackend):
                 f"the server returns processed log-probabilities (a token pushed up by logit_bias scored "
                 f"{written:.3g}, its raw score is far lower): start it with --logprobs-mode raw_logprobs, which "
                 "the calibration was fitted on")
+        if image := self._image_reading_problem():
+            problems.append(image)
         return problems
 
     def payload(self, messages: list[dict[str, Any]], config: RunnerConfig) -> dict[str, Any]:
