@@ -1187,6 +1187,10 @@ def generate(
         result = model.backend.generate(messages, config, adapter=adapter)
     except NotImplementedError:
         raise
+    except ModelRunnerError:
+        # Keep the subclass (e.g. ModelTransportError): a window that never
+        # reached the model must stay distinguishable from one read badly.
+        raise
     except Exception as exc:
         raise ModelRunnerError(f"generation failed for {model.tag}: {exc}") from exc
 
@@ -1288,9 +1292,15 @@ def submit_generation(
             result = done.result()
         except Exception as exc:  # noqa: BLE001 - a failed request is its own result
             result = exc
-        if isinstance(result, Generation) and result.latency_ms is None:
-            result.latency_ms = round((time.perf_counter() - started) * 1000, 1)
-        checked.set_result(_checked(model, result, want_logprobs))
+        try:
+            if isinstance(result, Generation) and result.latency_ms is None:
+                result.latency_ms = round((time.perf_counter() - started) * 1000, 1)
+            checked.set_result(_checked(model, result, want_logprobs))
+        except Exception as exc:  # noqa: BLE001 - the returned future MUST settle, or a reader
+            # (_read_as_answered) waits on it forever: add_done_callback swallows a raise here.
+            checked.set_result(
+                result if isinstance(result, ModelRunnerError)
+                else ModelRunnerError(f"generation result handling failed for {model.tag}: {exc}"))
 
     sent.add_done_callback(finish)
     return checked
