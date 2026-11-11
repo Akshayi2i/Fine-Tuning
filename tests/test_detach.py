@@ -109,6 +109,8 @@ QUICK = {
     # Re-score a run's saved answers with one effect switched off / check answers against the decoding schema:
     # minutes at most, no model, no GPU.
     "scripts/score_effects.py", "scripts/check_answers_fit_decoder.py",
+    # Replay saved answers through the stream's loop tests: seconds, no model, no GPU.
+    "scripts/loop_guard_check.py",
     # Read stored records and the frozen set from Blob and print tables: no model, no GPU.
     "scripts/sort_gate_errors.py", "scripts/show_eval_set.py", "scripts/rescore_version.py", "scripts/label_conventions.py", "scripts/missed_form_check.py",
     # Reads the log folder and prints what a run is doing: a second, nothing is started or touched.

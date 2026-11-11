@@ -117,3 +117,23 @@ def test_the_runs_own_scores_are_read_where_score_on_training_docs_writes_them(t
     assert main(["--answers", str(answers), "--run", str(run)]) == 0
     own = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("the run's own number"))
     assert "0.7871" in own
+
+
+def test_window_fields_failing_on_one_side_only_are_listed(tmp_path):
+    """The run's own failing window fields beside the re-scored ones (pod 2026-11-11: 0.6951 vs 0.6830)."""
+    from evaluation.validation_generation import score_generations
+    from scripts.score_effects import compare_windows
+
+    original = [_window()]
+    reports: dict = {}
+    score_generations(original, reports=reports)
+    saved = tmp_path / "run.window_errors.json"
+    saved.write_text(json.dumps({"subsets": [s.as_dict() for s in reports["windows"].subsets]}, default=str),
+                     encoding="utf-8")
+    loaded = _saved(tmp_path, original)
+    same = compare_windows(loaded, saved)
+    assert same["failing_in_run"] == same["failing_here"] and not same["only_in_run"] and not same["only_here"]
+    loaded[0].extraction["policy"]["policy_number"] = _env("GL-9999", 1)        # one more failure here only
+    differs = compare_windows(loaded, saved)
+    assert [e["field"] for e in differs["only_here"]] == ["policy.policy_number"]
+    assert differs["more_failing_here_by_document"] == {"policy_0001": 1}

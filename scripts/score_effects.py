@@ -178,6 +178,43 @@ def answer_lengths(generations: list[Any], tokenizer: Any = None) -> dict[str, A
     return out
 
 
+def compare_windows(generations: list[Any], saved: Path) -> dict[str, Any]:
+    """The run's own failing window fields (its ``.window_errors.json``) beside those re-scored here: a field failing
+    on one side only shows why the two window scores differ (pod, 2026-11-11: 0.6951 in the run, 0.6830 re-scored,
+    the document scores equal).
+    """
+    from collections import Counter
+
+    from evaluation.validation_generation import score_generations
+
+    def key(record: dict[str, Any]) -> tuple[str, ...]:
+        return (str(record.get("source_id")), str(record.get("modality_mode")), str(record.get("field_path")),
+                json.dumps(record.get("expected"), sort_keys=True, default=str),
+                json.dumps(record.get("got"), sort_keys=True, default=str))
+
+    def full(subsets: list[Any]) -> list[dict[str, Any]]:
+        for subset in subsets:
+            subset = subset if isinstance(subset, dict) else subset.as_dict()
+            if subset.get("subset") == "full":
+                return list(subset.get("error_records") or [])
+        return []
+
+    reports: dict[str, Any] = {}
+    score_generations(generations, reports=reports)
+    here = Counter(key(r) for r in full(reports["windows"].subsets))
+    run = Counter(key(r) for r in full(json.loads(Path(saved).read_text(encoding="utf-8")).get("subsets") or []))
+    only_run, only_here = run - here, here - run
+    by_document = Counter(k[0] for k in only_here.elements()) - Counter(k[0] for k in only_run.elements())
+
+    def shown(counter: Counter) -> list[dict[str, Any]]:
+        return [{"document": k[0], "mode": k[1], "field": k[2], "expected": k[3][:80], "got": k[4][:80], "times": n}
+                for k, n in counter.most_common(12)]
+
+    return {"failing_in_run": sum(run.values()), "failing_here": sum(here.values()),
+            "only_in_run": shown(only_run), "only_here": shown(only_here),
+            "more_failing_here_by_document": dict(by_document.most_common(8))}
+
+
 def measure(generations: list[Any], tokenizer: Any = None) -> dict[str, Any]:
     as_scored = scores(generations)
     with page_check_off():
@@ -225,10 +262,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pages", default=None, help="JSON {source_id: {page: text}}, for a file saved without it")
     parser.add_argument("--run", default=None, help="the run's own .json, to show its stored scores beside")
     parser.add_argument("--tokenizer", default=None, help="the base model folder, to count tokens")
+    parser.add_argument("--compare-windows", default=None,
+                        help="the run's .window_errors.json: list the window fields failing on one side only")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     pages = json.loads(Path(args.pages).read_text(encoding="utf-8")) if args.pages else None
     generations = load_generations(Path(args.answers), pages)
+    if args.compare_windows:
+        print(json.dumps(compare_windows(generations, Path(args.compare_windows)), indent=1, ensure_ascii=False))
+        return 0
     tokenizer = None
     if args.tokenizer:
         from transformers import AutoTokenizer
