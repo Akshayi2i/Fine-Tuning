@@ -238,7 +238,8 @@ def main(argv: list[str] | None = None) -> int:
     stored = None
     if args.run:
         run = json.loads(Path(args.run).read_text(encoding="utf-8"))
-        metrics = run.get("metrics") or run
+        # score_on_training_docs writes the run's own scores under "trained" (beside selection's under "selection").
+        metrics = run.get("trained") or run.get("metrics") or run
         stored = {name: metrics.get(name) for name in SHOWN}
     print(json.dumps(report, indent=1, default=str) if args.json else render(report, stored))
     return 0

@@ -102,3 +102,18 @@ def test_answer_lengths_are_counted_per_task_with_their_writing_time():
     lengths = answer_lengths([_window(), long], Tokens())["policy_schedule"]
     assert lengths["chars"]["answers"] == 2 and lengths["chars"]["longest"] == 8000
     assert lengths["tokens"]["longest"] == 4000 and lengths["longest_seconds"] == 80 and lengths["over_a_minute"] == 1
+
+
+def test_the_runs_own_scores_are_read_where_score_on_training_docs_writes_them(tmp_path, capsys):
+    """Its file holds them under "trained" (beside selection's): read as "metrics", the line showed dashes (pod,
+    2026-11-11)."""
+    from scripts.score_effects import main
+
+    answers = tmp_path / "run.answers.jsonl"
+    answers.write_text(json.dumps(answer_record(_window()), default=str) + "\n", encoding="utf-8")
+    run = tmp_path / "run.json"
+    run.write_text(json.dumps({"trained": {"document_field_normalized_match": 0.7871}, "selection": {}}),
+                   encoding="utf-8")
+    assert main(["--answers", str(answers), "--run", str(run)]) == 0
+    own = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("the run's own number"))
+    assert "0.7871" in own
