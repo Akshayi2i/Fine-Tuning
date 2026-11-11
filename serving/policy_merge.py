@@ -46,6 +46,8 @@ the one numbering function training also uses.
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import logging
 import re
 from collections import Counter
@@ -502,6 +504,11 @@ def merge_policy_windows(
     """
     from common.schema_sections import group_names
     from common.schemas import is_common_model
+
+    # Merged from copies: the merge edits what it merges in place (rows folded into the first window's, page lists
+    # joined, ids namespaced), and scoring merges the same answers twice and saves them after (2026-11-11: a run's
+    # saved answers were the merged-into ones, and its window score could not be re-made from them).
+    windows = [dataclasses.replace(window, extraction=copy.deepcopy(window.extraction)) for window in windows]
 
     # No line is the fallback, which composes the common model too.
     if is_common_model("policy", None, lob):

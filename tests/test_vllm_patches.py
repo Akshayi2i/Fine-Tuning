@@ -144,25 +144,26 @@ def test_a_missing_page_is_an_error_not_a_silent_skip(tmp_path):
             {"type": "image", "image": str(tmp_path / "gone.png")}]}])
 
 
-def test_the_vllm_backend_sends_converted_messages(tmp_path):
+def test_the_vllm_backend_sends_converted_messages(tmp_path, monkeypatch):
     from inference_core import model_runner as M
 
     seen = []
 
-    class Engine:
-        def chat(self, messages, params, lora_request=None):
-            seen.append(messages)
-            return []
+    def watched(engine, requests, params, lora):
+        seen.append(requests)
+        return []
 
+    monkeypatch.setattr(M, "watched_chat", watched)
     backend = M.VLLMBackend.__new__(M.VLLMBackend)
-    backend._load = lambda config: Engine()
+    backend._load = lambda config: object()
     backend._sampling_params = lambda config: None
     backend._lora = lambda adapter: None
     backend._to_generation = lambda output, config, latency: output
     msgs = [{"role": "user", "content": [{"type": "image", "image": str(_page(tmp_path))}]}]
     backend.generate(msgs, config=None)
     backend.generate_batch([msgs], [None])
-    assert seen[0][0]["content"][0]["type"] == "image_pil"
+    # One conversation of one message from generate, one from generate_batch: each request a list of messages.
+    assert seen[0][0][0]["content"][0]["type"] == "image_pil"
     assert seen[1][0][0]["content"][0]["type"] == "image_pil"
 
 

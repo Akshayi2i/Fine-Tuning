@@ -39,16 +39,13 @@ def records(path: Path) -> Iterator[dict[str, Any]]:
 
 def first_stop(text: str, step: int | None = None) -> tuple[int, str] | None:
     """``(characters written, which test)`` where production's stream check would first stop ``text``, or None."""
-    from inference_core.openai_backend import REPEAT_CHECK_CHARS, repeating_row, repeating_tail
+    from inference_core.openai_backend import REPEAT_CHECK_CHARS, repetition
 
     step = step or REPEAT_CHECK_CHARS
     points = list(range(step, len(text), step)) + [len(text)]
     for at in points:
-        prefix = text[:at]
-        if repeating_tail(prefix) is not None:
-            return at, "repeating_tail"
-        if (row := repeating_row(prefix)) is not None:
-            return at, f"repeating_row {row[0]}"
+        if (found := repetition(text[:at])) is not None:
+            return at, f"{found[0]}: {found[1]}"
     return None
 
 

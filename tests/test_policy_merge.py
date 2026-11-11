@@ -220,3 +220,22 @@ def test_the_fallback_joins_a_coverage_with_no_unit_only_when_nothing_differs():
 
     assert [row["premium"]["raw"] for row in rows] == ["100", "250"]
     assert rows[1]["premium"]["page_ref"] == [4, 5]
+
+
+def test_merging_leaves_each_window_answer_as_the_model_wrote_it():
+    """Scoring merges the same answers twice and saves them after (2026-11-11): a merge that folds rows and pages
+    into the first window's answer changed what was saved, and a second merge started from the folded one."""
+    import copy
+
+    first = PolicyWindow("arrays", [140, 141], {"policy": {"policy_number": _fv("HO-1", 140)},
+                                                "locations": [_loc("1", "Toledo", 141)]})
+    second = PolicyWindow("arrays", [141, 142], {"policy": {"policy_number": _fv("HO-1", 142)},
+                                                 "locations": [_loc("1", " TOLEDO ", 141), _loc("2", "Dayton", 142)]})
+    before = copy.deepcopy([first.extraction, second.extraction])
+
+    once = merge_policy_windows([first, second])
+    again = merge_policy_windows([first, second])
+
+    assert [first.extraction, second.extraction] == before
+    assert once.extraction == again.extraction
+    assert once.extraction["policy"]["policy_number"]["page_ref"] == [140, 142]

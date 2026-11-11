@@ -58,12 +58,9 @@ def test_a_corpus_that_kept_everything_says_so(client, controller):
 
 
 def test_a_vllm_call_says_how_long_it_spent_reading_pages_and_in_the_engine(monkeypatch, caplog):
-    class Engine:
-        def chat(self, requests, params, lora_request=None):
-            return [object() for _ in requests]
-
     backend = object.__new__(model_runner.VLLMBackend)
-    monkeypatch.setattr(backend, "_load", lambda _config: Engine(), raising=False)
+    monkeypatch.setattr(backend, "_load", lambda _config: object(), raising=False)
+    monkeypatch.setattr(model_runner, "watched_chat", lambda engine, requests, params, lora: [object() for _ in requests])
     monkeypatch.setattr(backend, "_sampling_params", lambda _config: None, raising=False)
     monkeypatch.setattr(backend, "_lora", lambda _adapter: None, raising=False)
     monkeypatch.setattr(backend, "_to_generation", lambda output, config, latency: "ok", raising=False)

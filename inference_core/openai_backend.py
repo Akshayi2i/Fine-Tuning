@@ -241,6 +241,97 @@ def repeating_row(text: str, *, tail_chars: int = 12000, min_count: int = 40,
     return None
 
 
+#: The fields a row's name is written in: what a loop that walks down a page's list changes while it writes the
+#: rest of the row again.
+ROW_NAME_KEYS = ("coverage_name", "title", "name", "label")
+#: A row's name field and its value, plain or as an envelope (``{"v": "X", "p": [17]}``, no braces inside).
+_ROW_NAME = re.compile('"(?:' + "|".join(ROW_NAME_KEYS) + r')":\s*(?:\{[^{}]*\}|"(?:[^"\\]|\\.)*")')
+#: Where a row of a list starts: an object right after ``[`` or ``,``.
+_ROW_START = re.compile(r"(?<=[\[,])\s*\{")
+
+
+def repeating_body(text: str, *, tail_chars: int = 12000, min_count: int = 40,
+                   share: float = 0.8) -> str | None:
+    """The first 60 characters of a row the end of ``text`` writes again and again with only its name changing,
+    or None.
+
+    Neither :func:`repeating_tail` nor :func:`repeating_row` sees a loop whose rows differ only in their names:
+    2026-11-11, policy_0003 pages 15-20 wrote one coverage (one code, one $25,000 limit cited to page 16) under
+    each form title of pages 17-19 in turn, 31,268 characters to the token limit. Here the end's rows are compared
+    with their names left out: the end counts as a loop when, of the rows in its last ``tail_chars`` characters that
+    name something, one row is written at least ``min_count`` times and is at least ``share`` of them.
+
+    A real list's rows differ beyond their names - another vehicle each applies to, another limit or page - so they
+    do not come out the same with the name left out. Checked 2026-11-11 on every answer key of cycle 1 (100) and
+    cycle 2 (290), in both answer forms, at every 1,000-character step: none trips it (tests pin the bar).
+    """
+    bodies: list[str] = []
+    for row in _whole_rows(text[-tail_chars:]):
+        blanked, named = _ROW_NAME.subn('"":""', row)
+        if named:
+            bodies.append(" ".join(blanked.split()))
+    if len(bodies) < min_count:
+        return None
+    top = max(set(bodies), key=bodies.count)
+    count = bodies.count(top)
+    if count >= min_count and count >= share * len(bodies):
+        return top[:60]
+    return None
+
+
+def _whole_rows(tail: str) -> list[str]:
+    """Every list row (an object right after ``[`` or ``,``) written whole in ``tail``, nested rows included, its
+    nested lists inside it: a coverage with what it applies to after its limits is one row, not cut at its limits.
+    Read from the first row start, so a tail that begins inside a value is not read as structure; a row still being
+    written has no closing brace yet and is left out."""
+    first = _ROW_START.search(tail)
+    if first is None:
+        return []
+    rows: list[str] = []
+    stack: list[int | None] = []          # each open bracket: its row's start, or None if it is no row
+    in_string = escaped = False
+    previous = ""                        # the last character outside a string that is not blank
+    for index in range(first.end() - 1, len(tail)):
+        char = tail[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(index if char == "{" and previous in "[," else None)
+        elif char in "}]":
+            if not stack:
+                continue
+            start = stack.pop()
+            if start is not None and char == "}":
+                rows.append(tail[start:index + 1])
+        if not char.isspace():
+            previous = char
+    return rows
+
+
+def repetition(text: str) -> tuple[str, str] | None:
+    """Whether the answer so far has started repeating itself, as ``(which test, what for the log)``, or None.
+
+    The one place both engines ask - the served model's stream (:func:`_read_stream`) and the in-process vLLM
+    engine (``model_runner.VLLMBackend``) - so a loop is stopped the same way in testing as in production. The log
+    names a field or a period, never a value: a repeated name may be an insured's.
+    """
+    if (period := repeating_tail(text)) is not None:
+        return "repeating_tail", f"repeated a {period}-character passage"
+    if (row := repeating_row(text)) is not None:
+        return "repeating_row", f"wrote the same {row[0]} again and again"
+    if repeating_body(text) is not None:
+        return "repeating_body", "wrote one row again and again under other names"
+    return None
+
+
 def _error_body(exc: Any) -> str:
     """A server's error answer, short and on one line. A proxy's HTML error page
     (RunPod's "Waiting for service to respond") is reduced to its title: whole,
@@ -328,19 +419,10 @@ def _read_stream(response: Any, *, started: float, stop_repeats: bool = True,
             finish_reason = choice.get("finish_reason") or finish_reason
         if stop_repeats and length - checked_at >= REPEAT_CHECK_CHARS:
             checked_at = length
-            text = "".join(content)
-            period = repeating_tail(text)
-            row = None if period is not None else repeating_row(text)
-            if period is not None or row is not None:
+            if (found := repetition("".join(content))) is not None:
                 # Leaving the stream closes the connection, and the server
                 # drops the request: its slot goes to the windows still waiting.
-                if period is not None:
-                    log.warning("an answer repeated a %d-character passage after %d characters; stopped",
-                                period, length)
-                else:
-                    # The field, not its value: a repeated name may be an insured's or a lender's.
-                    log.warning("an answer wrote the same %s again and again after %d characters; stopped",
-                                row[0], length)
+                log.warning("an answer %s after %d characters; stopped", found[1], length)
                 finish_reason = STOPPED_REPEATING
                 break
     if expired and finish_reason is None and not done:

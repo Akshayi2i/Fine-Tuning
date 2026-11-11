@@ -374,6 +374,99 @@ def repeatable_engine_settings(config: RunnerConfig) -> dict[str, Any]:
     return {"enable_prefix_caching": False}
 
 
+class _WrittenSoFar:
+    """One request's answer gathered from vLLM's step-by-step (``DELTA``) outputs: what ``LLM.chat`` returns whole
+    at the end, readable while it is written."""
+
+    def __init__(self) -> None:
+        self.pieces: list[str] = []
+        self.token_ids: list[int] = []
+        self.logprobs: list[Any] = []
+        self.length = self.checked_at = 0
+        self.finish_reason: str | None = None
+        self.prompt_token_ids: list[int] | None = None
+        self.finished = False
+
+    def take(self, output: Any) -> None:
+        if getattr(output, "prompt_token_ids", None) is not None:
+            self.prompt_token_ids = output.prompt_token_ids
+        for completion in (getattr(output, "outputs", None) or [])[:1]:
+            piece = completion.text or ""
+            ids = list(completion.token_ids or [])
+            self.pieces.append(piece)
+            self.length += len(piece)
+            self.token_ids += ids
+            # vLLM 0.11.0 slices a step's logprobs to its new tokens - and hands the whole list back for a step that
+            # wrote none (``logprobs[-0:]``, output_processor._new_completion_output), so those add nothing.
+            if ids and completion.logprobs:
+                self.logprobs += list(completion.logprobs)[-len(ids):]
+            if completion.finish_reason is not None:
+                self.finish_reason = completion.finish_reason
+        if getattr(output, "finished", False):
+            self.finished = True
+
+    @property
+    def text(self) -> str:
+        return "".join(self.pieces)
+
+    def stopped(self) -> None:
+        self.finish_reason, self.finished = STOPPED_REPEATING, True
+
+    def as_output(self) -> Any:
+        """In the shape ``_to_generation`` reads from ``LLM.chat``'s ``RequestOutput``."""
+        from types import SimpleNamespace
+
+        completion = SimpleNamespace(text=self.text, token_ids=self.token_ids, logprobs=self.logprobs or None,
+                                     finish_reason=self.finish_reason)
+        return SimpleNamespace(outputs=[completion], prompt_token_ids=self.prompt_token_ids)
+
+
+def watched_chat(engine: Any, requests: list[Any], params: list[Any], lora_request: Any) -> list[Any]:
+    """``LLM.chat(requests, params, lora_request=...)``, with each answer watched as it is written and stopped once it
+    repeats itself, by the tests the served model's stream is stopped by (``openai_backend.repetition``).
+
+    Why: ``LLM.chat`` returns only finished answers (it sets every request to ``FINAL_ONLY``), so a loop ran to the
+    token limit - about 246 s of one call for an answer nobody keeps (2026-11-09: 5 of 252 readings), while
+    production stops the same answer at 6,000-14,000 characters (``scripts/loop_guard_check``, 2026-11-11). Selection
+    then judged checkpoints on answers ended otherwise than production ends them.
+
+    Done as ``LLM.chat`` does it in vLLM 0.11.0 (``vllm/entrypoints/llm.py``): ``preprocess_chat``, each request
+    added to the engine in order, ``step`` until none is left - with each request's output asked for step by step
+    (``DELTA``), its pieces gathered (:class:`_WrittenSoFar`), and ``abort_request`` for a loop, after which vLLM
+    drops it and ignores what is still on its way (``output_processor.process_outputs``). Left out of ``chat``'s
+    path: the default per-modality adapters, which this engine does not set, and the prompt truncation it does not
+    ask for. Each answer is checked every :data:`~inference_core.openai_backend.REPEAT_CHECK_CHARS` characters, as
+    the stream is. Returns the outputs in the order of ``requests``.
+    """
+    from vllm.sampling_params import RequestOutputKind
+
+    from inference_core.openai_backend import REPEAT_CHECK_CHARS, repetition
+
+    prompts = engine.preprocess_chat(messages=requests)
+    llm = engine.llm_engine
+    order: list[str] = []
+    for prompt, param in zip(prompts, params, strict=True):
+        param.output_kind = RequestOutputKind.DELTA
+        request_id = str(next(engine.request_counter))
+        llm.add_request(request_id, prompt, param, lora_request=lora_request, tokenization_kwargs={})
+        order.append(request_id)
+    answers = {request_id: _WrittenSoFar() for request_id in order}
+    while llm.has_unfinished_requests():
+        for output in llm.step():
+            answer = answers.get(output.request_id)
+            if answer is None or answer.finished:
+                continue
+            answer.take(output)
+            if answer.finished or answer.length - answer.checked_at < REPEAT_CHECK_CHARS:
+                continue
+            answer.checked_at = answer.length
+            if (found := repetition(answer.text)) is not None:
+                llm.abort_request([output.request_id])
+                answer.stopped()
+                log.warning("an answer %s after %d characters; stopped", found[1], answer.length)
+    return [answers[request_id].as_output() for request_id in order]
+
+
 class VLLMBackend(ModelBackend):
     """vLLM — the serving path. Multi-LoRA hot-swap, OpenAI-compatible."""
 
@@ -587,6 +680,10 @@ class VLLMBackend(ModelBackend):
             # reconstructs the text exactly. Left in, every completed answer
             # failed the check below and was scored as empty.
             tokens, logprobs, seconds = tokens[:-1], logprobs[:-1], seconds[:-1]
+        if tokens and completion.finish_reason == STOPPED_REPEATING:
+            # Stopped part-way (watched_chat): the detokenizer may still hold back the last characters it has, so
+            # the text is what the tokens written spell. The answer is cut off and read again in halves either way.
+            text = "".join(tokens)
         if tokens:
             assert_tokens_reconstruct(text, tokens, "vLLM")
 
@@ -609,13 +706,12 @@ class VLLMBackend(ModelBackend):
         params = self._sampling_params(config)
         started = time.perf_counter()
         with stall_guard(getattr(config, "call_timeout_seconds", None), "a vLLM generation call"):
-            outputs = engine.chat(to_vllm_messages(messages), params,
-                                  lora_request=self._lora(adapter))
+            outputs = watched_chat(engine, [to_vllm_messages(messages)], [params], self._lora(adapter))
         latency_ms = (time.perf_counter() - started) * 1000
         return self._to_generation(outputs[0] if outputs else None, config, latency_ms)
 
     def generate_batch(self, messages_list, configs, adapter=None):
-        """All requests in ONE ``engine.chat`` call.
+        """All requests in ONE call of the engine (:func:`watched_chat`, ``LLM.chat`` with each answer watched).
 
         vLLM schedules them together (continuous batching), so a policy's windows
         run concurrently rather than one after another. Each request keeps its
@@ -635,7 +731,7 @@ class VLLMBackend(ModelBackend):
                              f"a vLLM call of {len(messages_list)} request(s)"):
                 requests = [to_vllm_messages(m) for m in messages_list]
                 decoded = time.perf_counter()
-                outputs = engine.chat(requests, params, lora_request=self._lora(adapter))
+                outputs = watched_chat(engine, requests, params, self._lora(adapter))
         except Exception as exc:  # noqa: BLE001 - the whole batch failed; say so per slot
             return [exc for _ in messages_list]
         finished = time.perf_counter()

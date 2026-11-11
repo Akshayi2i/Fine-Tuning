@@ -4910,6 +4910,7 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - **Fields first:** nothing is served when no cited page has text (`fields_verified` false, no `fields_ready`).
 - **Transport:** redirects are refused (`common.transport.open_url`), so a token never follows one; a stream that ends with no finish reason and no `[DONE]` is `stream_cut`, cut off, and its window split; a stream broken mid-chunk is a `ModelRunnerError`. A page link's SAS must be a container or blob SAS (`sr=c`/`sr=b`, `sp=r`): an account SAS is refused. A transparent PNG is sent as it is on disk.
 - A window's truncation message names its finish reason: the token limit, an answer stopped for repeating itself (`repetition`), or a stream that broke off (`stream_cut`).
+- An answer counts as repeating itself (`openai_backend.repetition`, checked every 1,000 characters) when its end repeats one passage exactly, writes one row name again and again, or writes one row again and again under other names (`repeating_body`, 2026-11-11: a coverage written under each form title of a page). The in-process vLLM engine stops it the same way (`model_runner.watched_chat`: `LLM.chat`'s steps run with each answer watched), so selection judges answers ended as production ends them.
 
 ## Changes of 2026-10-24 (architecture v2.7)
 
