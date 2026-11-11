@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -346,6 +347,41 @@ def to_vllm_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if isinstance(message.get("content"), list) else message
         for message in messages
     ]
+
+
+#: One page-reading thread pool for the process, created on first use and reused
+#: by every ``generate_batch`` call, so a hot serving path (a batch per policy
+#: call) does not build and tear down a pool each time. ``ThreadPoolExecutor``
+#: registers an ``atexit`` join, so the idle workers do not block interpreter exit.
+_PAGE_POOL: Any = None
+_PAGE_POOL_LOCK = threading.Lock()
+#: How many requests' pages are decoded at once. Page decode (PIL) releases the
+#: GIL, so threads overlap; capped so a large batch does not oversubscribe cores.
+PAGE_PREP_WORKERS = 8
+
+
+def _page_pool() -> Any:
+    global _PAGE_POOL
+    if _PAGE_POOL is None:
+        with _PAGE_POOL_LOCK:
+            if _PAGE_POOL is None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                _PAGE_POOL = ThreadPoolExecutor(max_workers=PAGE_PREP_WORKERS,
+                                                thread_name_prefix="pageprep")
+    return _PAGE_POOL
+
+
+def read_pages_concurrently(messages_list: list[list[dict[str, Any]]]) -> list[list[dict[str, Any]]]:
+    """``to_vllm_messages`` for a whole batch, built in parallel and returned in
+    the same order. Reading a request's pages opens and decodes its images
+    (``to_vllm_messages`` -> PIL), which releases the GIL, so a batch's requests
+    are prepared on a shared thread pool (:func:`_page_pool`) instead of one after
+    another (the "reading pages" time the call logs). A batch of one is built
+    inline; the result is identical either way, so no output changes."""
+    if len(messages_list) <= 1:
+        return [to_vllm_messages(m) for m in messages_list]
+    return list(_page_pool().map(to_vllm_messages, messages_list))
 
 
 def repeatable_engine_settings(config: RunnerConfig) -> dict[str, Any]:
@@ -729,7 +765,7 @@ class VLLMBackend(ModelBackend):
         try:
             with stall_guard(getattr(configs[0], "call_timeout_seconds", None),
                              f"a vLLM call of {len(messages_list)} request(s)"):
-                requests = [to_vllm_messages(m) for m in messages_list]
+                requests = read_pages_concurrently(messages_list)
                 decoded = time.perf_counter()
                 outputs = watched_chat(engine, requests, params, self._lora(adapter))
         except Exception as exc:  # noqa: BLE001 - the whole batch failed; say so per slot
