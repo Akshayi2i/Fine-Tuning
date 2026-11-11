@@ -62,17 +62,23 @@ def check(path: Path) -> dict[str, Any]:
         row = record.get("row") or {}
         where = {"document": row.get("source_id"), "task": row.get("task"), "mode": row.get("modality_mode"),
                  "pages": row.get("window_pages")}
-        if isinstance(record.get("answer"), dict):
-            good += 1
-            text = json.dumps(to_compact_answer(record["answer"]), ensure_ascii=False)
-            if (stop := first_stop(text)) is not None:
-                stopped_good += 1
-                wrongly.append({**where, "at": stop[0], "length": len(text), "test": stop[1]})
-        elif record.get("unparsed_text"):
-            text = record["unparsed_text"]
+        # A reading that failed is saved with an empty answer ({}) beside its error (validation_generation
+        # _record_failure), so the answer alone does not make it good (2026-11-11: the first pod run counted the 5
+        # cut-off readings as good and showed 0 cut off). An answer that ran to the token limit is cut off even
+        # when what it wrote still parses: serving refuses it and reads the window again in halves.
+        answer = record.get("answer")
+        cut_but_parsed = record.get("cut_off") and isinstance(answer, dict) and not record.get("error")
+        if record.get("unparsed_text") or cut_but_parsed:
+            text = record.get("unparsed_text") or json.dumps(to_compact_answer(answer), ensure_ascii=False)
             stop = first_stop(text)
             cut.append({**where, "length": len(text), "at": stop[0] if stop else None,
                         "test": stop[1] if stop else None})
+        elif isinstance(answer, dict) and not record.get("error"):
+            good += 1
+            text = json.dumps(to_compact_answer(answer), ensure_ascii=False)
+            if (stop := first_stop(text)) is not None:
+                stopped_good += 1
+                wrongly.append({**where, "at": stop[0], "length": len(text), "test": stop[1]})
     return {"good_answers": good, "good_answers_stopped": stopped_good, "wrongly_stopped": wrongly,
             "cut_off_answers": cut}
 

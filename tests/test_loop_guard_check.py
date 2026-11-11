@@ -51,6 +51,26 @@ def test_the_report_counts_good_answers_stopped_and_where_cut_off_ones_would_hav
     assert "real answers wrongly stopped: 0" in capsys.readouterr().out
 
 
+def test_an_answer_that_ran_to_the_limit_but_parses_counts_as_cut_off_not_good(tmp_path):
+    """Serving reads such a window again in halves, so stopping it early loses nothing."""
+    record = {**_record(answer=_forms(400, same=True)), "cut_off": True}
+    report = check(_write(tmp_path, [record]))
+    assert report["good_answers"] == 0 and report["good_answers_stopped"] == 0
+    [cut] = report["cut_off_answers"]
+    assert cut["at"] is not None and cut["at"] < cut["length"]
+
+
+def test_a_failed_reading_saved_with_an_empty_answer_is_not_a_good_answer(tmp_path):
+    """A failed reading keeps {} as its answer beside its error; the unreadable text is the cut-off answer."""
+    loop = json.dumps(_forms(400, same=True))[:-50]
+    failed = {**_record(answer={}, unparsed=loop), "error": "stopped at the token limit", "cut_off": True}
+    request_failed = {**_record(answer={}), "error": "ConnectionError: server gone"}
+    report = check(_write(tmp_path, [failed, request_failed, _record(answer=_forms(3))]))
+    assert report["good_answers"] == 1
+    [cut] = report["cut_off_answers"]
+    assert cut["length"] == len(loop) and cut["at"] is not None
+
+
 def test_a_good_answer_the_stop_would_cut_fails_the_check(tmp_path):
     """A parsed answer that writes one row name over and over (the stop's own test) counts as wrongly stopped."""
     path = _write(tmp_path, [_record(answer=_forms(400, same=True))])
