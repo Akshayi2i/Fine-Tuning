@@ -167,7 +167,7 @@ email-validator==2.3.0
     #   pydantic
 et-xmlfile==2.0.0
     # via openpyxl
-fastapi==0.141.1
+fastapi==0.115.14
     # via
     #   gradio
     #   mlflow-skinny
@@ -769,7 +769,7 @@ sqlalchemy==2.1.1
     #   mlflow
 sqlparse==0.6.0
     # via mlflow-skinny
-starlette==0.52.1
+starlette==0.46.2
     # via
     #   fastapi
     #   gradio

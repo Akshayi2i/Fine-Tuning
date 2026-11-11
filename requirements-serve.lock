@@ -132,7 +132,7 @@ email-validator==2.3.0
     #   -c requirements-train.lock
     #   fastapi
     #   pydantic
-fastapi==0.141.1
+fastapi==0.115.14
     # via
     #   -c requirements-train.lock
     #   vllm
@@ -617,7 +617,7 @@ soxr==1.1.0
     # via
     #   -c requirements-train.lock
     #   mistral-common
-starlette==0.52.1
+starlette==0.46.2
     # via
     #   -c requirements-train.lock
     #   fastapi

@@ -518,9 +518,16 @@ crosses the proxy; page images stay on the pod. Expose the port (8002) in the po
 # pod: vLLM started with these, among its own flags (--allowed-local-media-path only for --images file)
 #   --gpu-memory-utilization 0.80 --max-model-len 32768 --max-num-batched-tokens 16384 \
 #   --structured-outputs-config '{"backend":"xgrammar","disable_any_whitespace":true}' \
-#   --logprobs-mode raw_logprobs --generation-config vllm --allowed-local-media-path /workspace
+#   --logprobs-mode raw_logprobs --generation-config vllm --allowed-local-media-path /workspace \
+#   --mm-processor-cache-gb 0
 #   (--generation-config vllm: the model's generation_config.json must not set the sampling; the routine
 #    sends repetition_penalty 1.0, top_k -1 and no penalties itself, and asks for the top 2 logprobs)
+#   (--mm-processor-cache-gb 0: proven on the pod 2026-11-11 - with vLLM's default cache, ONE request rejected
+#    after its page image was processed (too long with its image tokens) left the cache's two copies apart; the
+#    next request with that page failed in the engine ("Expected a cached item for mm_hash") and from then on the
+#    server answered nothing at all. With 0, the same requests answered 400, 200, 200.)
+#   (fastapi 0.115.x / starlette 0.46.x, as requirements-serve.lock pins: with fastapi 0.141.1 every request
+#    failed with HTTP 500 in vLLM's metrics middleware.)
 FIDEON_REMOTE_TOKEN=<their token> python -m testing.extract_server --port 8002 \
     --model-url http://localhost:8000 --mineru-url http://localhost:8001 --images file
 ```
@@ -533,6 +540,7 @@ vLLM with the fix applied in each of its processes:
 
 ```bash
 PYTHONPATH=/workspace/fine-tuning/inference_core/vllm_site:/workspace/fine-tuning FIDEON_VLLM_PATCH=1 \
+VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1 \
     vllm serve /workspace/models/Qwen3-VL-8B-Instruct ...   # the same flags as above
 ```
 
@@ -543,8 +551,10 @@ page image.
 
 Our own engine (checkpoint selection, the gate, test runs) uses the same hook: with
 `serving.engine_in_own_process: true` (`configs/inference/vllm_serving.yaml`, the shipped setting) vLLM's engine
-core runs in a process of its own, so the pages of the next requests are prepared while it generates instead of
-before. `false` puts it back in one process.
+core runs in a process of its own, so the pages of the next requests are prepared while it generates. Measured on
+the pod 2026-11-11: the same three calls took 934 s against 1,040 s in one process (10.2% less). `false` puts it
+back in one process. Every engine the code builds has vLLM's usage report off (`VLLM_NO_USAGE_STATS=1`); start a
+served vLLM with it too.
 
 On the pod, a value set on the command line, as the token above, beats the one in `.env` for every setting
 `.env`/`.env.example` names, also once the command detaches (`bash scripts/pod_run.sh env` prints what a run

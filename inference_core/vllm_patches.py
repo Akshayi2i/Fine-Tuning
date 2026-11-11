@@ -21,7 +21,7 @@ unpatched) whenever CUDA is already initialised in the parent. Two ways:
   request of a call is prepared;
 * :func:`patch_for_engine_process` lets it run in its own process and has the
   child patched as it starts (``serving.engine_in_own_process: true``, the
-  shipped setting since 2026-11-10) - requests are prepared while it generates.
+  shipped setting since 2026-11-10; 10.2% less on the pod's test 2, 2026-11-11).
 
 A served vLLM (``vllm serve``) runs its engine core in a child process, so there
 the fix is applied in every process instead: ``inference_core/vllm_site`` holds a

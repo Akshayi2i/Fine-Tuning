@@ -71,7 +71,10 @@ train = [
 # the last 0.11 on torch 2.8, the torch the training stack is pinned to.
 # transformers is capped too: vLLM 0.11.0 sets no upper bound, and unpinned the
 # serving pod resolved transformers 5.x while training and calibration ran 4.57.
-serve = ["vllm==0.11.0", "transformers>=4.57,<4.58"]
+# fastapi/starlette capped: with fastapi 0.141.1 every request to `vllm serve` failed (HTTP 500) in vLLM's
+# metrics middleware, prometheus-fastapi-instrumentator 7.1.0 reading `route.path` of fastapi's
+# `_IncludedRouter`; 0.115.14 / 0.46.2 served v3 with every start-up check passing (pod, 2026-11-11).
+serve = ["vllm==0.11.0", "transformers>=4.57,<4.58", "fastapi>=0.115,<0.116", "starlette>=0.40,<0.47"]
 # FP8 / AWQ INT4 export (arch v2.1 13a), in an environment OF ITS OWN: llmcompressor
 # needs datasets>=4 where ms-swift 3 needs <4, and its transformers range excludes
 # the one vLLM 0.11 needs, so it cannot join the train or serve environments.

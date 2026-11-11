@@ -435,8 +435,15 @@ class VLLMBackend(ModelBackend):
         if self._engine is not None:
             return self._engine
 
+        import os
+
         from inference_core.vllm_patches import patch_for_engine_process, patch_qwen3_vl_lora
 
+        # vLLM's usage report off: by default its engine sends hardware and model settings to vLLM's servers from a
+        # thread of its own (seen on the pod 2026-11-11, where it failed reading the CPU). This pipeline reads
+        # customers' policies; nothing of it goes out but what the pipeline sends. Inherited by the engine core.
+        os.environ["VLLM_NO_USAGE_STATS"] = "1"
+        os.environ["DO_NOT_TRACK"] = "1"
         # Before vLLM is imported (inference_core.vllm_patches): the engine core in its own process, so requests
         # are prepared while it generates, or in this one.
         self._own_process = bool(getattr(config, "engine_in_own_process", False))

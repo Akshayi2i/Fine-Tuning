@@ -336,6 +336,17 @@ Deploy a worker image built from the commit the release was packaged from.
   --lora-modules policy-vN=/workspace/adapters/policy-vN`, printed by
   `scripts/served_adapter.py`); MinerU is the pinned version and tier
   (`configs/shared/ocr.yaml`) - the worker refuses text from any other.
+* Three things a stock `vllm serve` 0.11.0 needs, each proven on the pod 2026-11-11:
+  * **The Qwen3-VL LoRA fix.** Without it the server does not start with `--enable-lora`
+    (`_lora_shrink`: `assert token_lora_mapping.size(0) == M`). The site hook applies it
+    (README, `FIDEON_VLLM_PATCH`); serving a merged model instead is the other way - an
+    open decision.
+  * **`--mm-processor-cache-gb 0`.** With the default cache one rejected request left the
+    server answering nothing.
+  * **fastapi 0.115.x / starlette 0.46.x** (`requirements-serve.lock`). With fastapi 0.141.1
+    every request failed with HTTP 500.
+* Start it with `VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1`: by default vLLM sends a usage
+  report (hardware, model settings) to vLLM's servers from the engine.
 
 ## 8. Operating
 

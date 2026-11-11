@@ -106,6 +106,8 @@ RUNTIME_SET_VARS = frozenset({
     # patch_for_engine_process): Python's search path, so the child finds the fix's sitecustomize, and this
     # process's id, so the child ends itself when this one is gone. A hand-set value would be overwritten.
     "PYTHONPATH", "FIDEON_VLLM_PARENT_PID",
+    # vLLM's usage report, switched off by the code for every engine it builds (inference_core.model_runner).
+    "VLLM_NO_USAGE_STATS", "DO_NOT_TRACK",
 })
 
 
