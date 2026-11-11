@@ -117,6 +117,11 @@ Coverage
   coinsurance_percent: percent - Coinsurance percentage that applies to the coverage.
   form_refs: [string] - Form numbers printed with this coverage that grant or modify it. Printed values: each exactly as printed, as a plain string.
   covered_auto_symbols: [text] - ISO covered-auto symbols printed against the coverage (1, 2, 7, 8, 9...). Business auto, garage, truckers and package auto parts.
+  waiting_period: text - Waiting period or time deductible of the coverage, as printed ('72 hours').
+  period_of_restoration: text - Period of restoration or maximum duration of the coverage, as printed ('12 months').
+  extended_period: text - Extended period of indemnity or extended business income days, as printed.
+  qualifier: text - Printed qualifier of the coverage row that has no typed home ('/48 HOURS', 'per day').
+  inflation_guard_percent: percent - Inflation guard percentage that applies to the coverage.
 Deductible - A deductible, inside a coverage or in the top-level deductibles[] when it applies across coverages or perils.
   deductible_type: DeductibleType - Kind of deductible.
   amount: money - Amount of a flat deductible.
@@ -125,6 +130,7 @@ Deductible - A deductible, inside a coverage or in the top-level deductibles[] w
   peril: text - Peril the deductible applies to (wind/hail, hurricane, all other perils).
   applies_to_coverages: [CoverageCode] - coverage_codes it applies to (top-level deductibles only).
   applies_to: [string] - unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).
+  description: text - Printed wording of a deductible that has no amount ('Property Deductible' when the deductible is the policy's other deductible).
 InterestedParty
   role: one of mortgagee|loss_payee|additional_insured|lienholder|certificate_holder|additional_interest|other - Role of the party.
   rank: number - 1 for first mortgagee, 2 for second...
@@ -133,6 +139,8 @@ InterestedParty
   loan_number: text - Loan or account number with the interested party.
   is_payor: yesno - True when this party pays the premium (escrow billing).
   applies_to: [string] - unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).
+  description: text - Printed note about the party's interest or the property it is for ('Escrow Billed', 'Description of Property: ...').
+  party_type: text - The interest or designation as printed beside the party ('Lessor of Premises', 'Vendors', 'Interest Type').
 Location
   unit_id: id - Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.
   location_number: number - Location number as printed on the schedule.
@@ -143,6 +151,7 @@ Location
   insured_interest: text - The insured's interest in the premises: Owner, Deeded owner, Tenant, LLC member...
   distance_to_fire_station: text - Distance to the responding fire station.
   distance_to_hydrant: text - Distance to the nearest fire hydrant.
+  location_label: text - Location number as printed when it is not a plain number ('2-6', '1-0').
 Vehicle
   unit_id: id - Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.
   vehicle_number: number - Vehicle number as printed on the schedule.
@@ -160,6 +169,17 @@ Vehicle
   cost_new: money - Original cost new of the vehicle.
   stated_amount: money - Stated or agreed value of the vehicle.
   symbols: [text] - Rating symbols printed for the vehicle.
+  class_code: text - Rating class code of the vehicle.
+  class_description: text - Rating classification wording of the vehicle ('Not Otherwise Specified').
+  town_code: text - Town or territory code the vehicle is rated in.
+  rating_factors: text - Rating factors printed for the vehicle ('Covered by Workers' Compensation', primary and secondary factors).
+  radius: text - Radius of operation ('Local up to 50 miles').
+  size_class: text - Size class of the vehicle.
+  gross_vehicle_weight: text - Gross vehicle weight or GVW class ('10,000 lbs').
+  seating_capacity: number - Seating capacity.
+  age_group: text - Age group of the vehicle as printed.
+  total_premium: money - Total premium of the vehicle across its coverages.
+  garaging_address: Address - Garaging address of the vehicle, when printed in full on the vehicle row.
 Driver
   unit_id: id - Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.
   driver_number: number - Driver number as printed on the schedule.
@@ -213,6 +233,6 @@ driverstatus: one of rated|excluded|listed|other - Driver status. `raw` is the p
 zip: string - A US ZIP code. `parsed` is 5 digits or ZIP+4 ('12180-1234').
 
 ## Codes
-CoverageCode: PA_ADDITIONAL_DEATH_BENEFITS = ADDITIONAL DEATH BENEFITS; PA_ADDITIONAL_PIP = Additional personal injury protection (APIP); PA_AGGREGATE_DEATH_BENEFITS = AGGREGATE DEATH BENEFITS; PA_AGGREGATE_NO_FAULT_BENEFITS_AVAILABLE = Aggregate no-fault benefits available; PA_AGREED_VALUE = Agreed value (classic auto); PA_ASSURANCE_PLUS = Assurance Plus Package; PA_CUSTOMIZING = CUSTOMIZING; PA_EXCESS_EQUIPMENT = EXCESS EQUIPMENT; PA_EXTENDED_NON_OWNED = EXTENDED NON- OWNED; PA_FULL_GLASS = FULL COVERAGE WINDOW GLASS; PA_NEW_CAR_REPLACEMENT = NEW CAR REPLACEMENT; PA_OEM_PARTS = OEM PARTS; PA_OPTIONAL_BASIC_ECONOMIC_LOSS = Optional basic economic loss (OBEL); PA_OUT_OF_STATE_PERSONAL_INJURY_PROTECTION = OUT OF STATE PERSONAL INJURY PROTECTION (PIP); PA_PERSONAL_ARTICLES = PERSONAL ARTICLES COVERAGE; PA_PET_INJURY = PET INJURY COVERAGE; PA_SPARE_PARTS = Spare parts (classic auto); PA_SUPPLEMENTAL_SPOUSAL_LIABILITY = Supplemental spousal liability; PA_TAPES_DISCS_MEDIA = TAPES/DISCS & MEDIA; PA_TRAVELING_COLLECTOR = Traveling collector endorsement (classic auto); PA_TRIP_INTERRUPTION = TRAVEL - TRIP INTERRUPTION (FAMILY PLUS); PA_UMPD = UNINSURED MOTORISTS PROPERTY DAMAGE; PA_UNLICENSED_HOUSEHOLD_MEMBERS_19 = UNLICENSED HOUSEHOLD MEMBERS < 19; PA_VEHICLE_UNDER_CONSTRUCTION = Vehicle under construction endorsement (classic auto); X_COLLISION = Collision; X_COMPREHENSIVE = Comprehensive / other than collision; X_MED_PAY = Medical payments; X_PIP = Personal injury protection / no-fault; X_RENTAL = Rental reimbursement / transportation expense; X_TOWING = Towing and roadside assistance; X_UIM = Underinsured / supplementary uninsured motorist; X_UM = Uninsured motorist / boater; X_VEHICLE_LIABILITY = Liability (bodily injury and property damage) for an auto, motorcycle, RV or boat
+CoverageCode: PA_ACCIDENTAL_DEATH_BENEFIT = Accidental death benefit (Pennsylvania first party); PA_ADDITIONAL_DEATH_BENEFITS = ADDITIONAL DEATH BENEFITS; PA_ADDITIONAL_PIP = Additional personal injury protection (APIP); PA_AGGREGATE_DEATH_BENEFITS = AGGREGATE DEATH BENEFITS; PA_AGGREGATE_NO_FAULT_BENEFITS_AVAILABLE = Aggregate no-fault benefits available; PA_AGREED_VALUE = Agreed value (classic auto); PA_ASSURANCE_PLUS = Assurance Plus Package; PA_CUSTOMIZING = CUSTOMIZING; PA_EXCESS_EQUIPMENT = EXCESS EQUIPMENT; PA_EXTENDED_NON_OWNED = EXTENDED NON- OWNED; PA_EXTRAORDINARY_MEDICAL_BENEFITS = Extraordinary medical benefits (Pennsylvania first party); PA_FIRST_PARTY_BENEFITS = First party benefits (Pennsylvania); PA_FULL_GLASS = FULL COVERAGE WINDOW GLASS; PA_MEDICAL_EXPENSE_BENEFITS = Medical expense benefits (Pennsylvania first party); PA_NEW_CAR_REPLACEMENT = NEW CAR REPLACEMENT; PA_OEM_PARTS = OEM PARTS; PA_OPTIONAL_BASIC_ECONOMIC_LOSS = Optional basic economic loss (OBEL); PA_OUT_OF_STATE_PERSONAL_INJURY_PROTECTION = OUT OF STATE PERSONAL INJURY PROTECTION (PIP); PA_PERSONAL_ARTICLES = PERSONAL ARTICLES COVERAGE; PA_PET_INJURY = PET INJURY COVERAGE; PA_SPARE_PARTS = Spare parts (classic auto); PA_SUPPLEMENTAL_SPOUSAL_LIABILITY = Supplemental spousal liability; PA_TAPES_DISCS_MEDIA = TAPES/DISCS & MEDIA; PA_TRAVELING_COLLECTOR = Traveling collector endorsement (classic auto); PA_TRIP_INTERRUPTION = TRAVEL - TRIP INTERRUPTION (FAMILY PLUS); PA_UIM_STACKED = Underinsured motorist - stacked (Pennsylvania); PA_UMPD = UNINSURED MOTORISTS PROPERTY DAMAGE; PA_UM_STACKED = Uninsured motorist - stacked (Pennsylvania); PA_UNLICENSED_HOUSEHOLD_MEMBERS_19 = UNLICENSED HOUSEHOLD MEMBERS < 19; PA_VEHICLE_UNDER_CONSTRUCTION = Vehicle under construction endorsement (classic auto); PA_WORK_LOSS_COORDINATION = Work loss coordination (Pennsylvania); X_COLLISION = Collision; X_COMPREHENSIVE = Comprehensive / other than collision; X_MED_PAY = Medical payments; X_PIP = Personal injury protection / no-fault; X_RENTAL = Rental reimbursement / transportation expense; X_TOWING = Towing and roadside assistance; X_UIM = Underinsured / supplementary uninsured motorist; X_UM = Uninsured motorist / boater; X_VEHICLE_LIABILITY = Liability (bodily injury and property damage) for an auto, motorcycle, RV or boat
 DeductibleType: flat | percentage | waiting_period | sir | retention | franchise
-LimitType: per_occurrence | aggregate | products_completed_ops_aggregate | per_person | per_accident | property_damage | combined_single | per_claim | each_employee | policy_limit | per_location | per_item | per_day | per_disablement | sublimit | blanket | scheduled_total | other
+LimitType: per_occurrence | aggregate | products_completed_ops_aggregate | per_person | per_accident | property_damage | combined_single | per_claim | each_employee | policy_limit | per_location | per_item | per_day | per_disablement | sublimit | blanket | scheduled_total | on_premises | off_premises | duration | other

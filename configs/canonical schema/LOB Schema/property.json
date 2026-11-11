@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Fideon canonical schema - property (policy_check)",
-  "description": "SPEC_21 section 4 canonical schema for property, commercial property (L1 code property), composing common_model.json 1.1.0 by $ref: the envelope plus the locations, buildings and rating_modifiers blocks. Built from the single-LOB documents of the source-data prop folder (3 carriers, read in place): the commercial property and businessowners declarations the folder files under property (Leatherstocking's Businessowner's Policy SF-10P and Commercial Fire and Liability forms, Merchants' businessowners declarations), which print the property coverages beside the liability ones, so the line's coverage codes name both. Every field of the pre-SPEC_21 property.json (property.crosswalk.yaml). Package documents (cgl_prop) are not read for this schema. No LOB block.",
+  "description": "SPEC_21 section 4 canonical schema for property, commercial property (L1 code property), composing common_model.json 1.5.0 by $ref: the envelope plus the locations, buildings and rating_modifiers blocks. Built from the single-LOB documents of the source-data prop folder (3 carriers, read in place): the commercial property and businessowners declarations the folder files under property (Leatherstocking's Businessowner's Policy SF-10P and Commercial Fire and Liability forms, Merchants' businessowners declarations), which print the property coverages beside the liability ones, so the line's coverage codes name both. Every field of the pre-SPEC_21 property.json (property.crosswalk.yaml). Package documents (cgl_prop) are not read for this schema. No LOB block.",
   "fideon:doc_type": "policy_check",
   "fideon:lob": "property",
   "fideon:lob_code": "PR",
   "fideon:layout_family": "property_pkg",
-  "fideon:schema_version": "2.0.0",
-  "fideon:common_model_version": "1.1.0",
-  "fideon:status": "SPEC_21 Phase 2 schema (10 October 2026), built from 6 native seed documents of 2 carriers; replaces the pre-SPEC_21 property.json (fideon.canonical.commercial_property 1.5.0). Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off.",
+  "fideon:schema_version": "2.1.0",
+  "fideon:common_model_version": "1.5.0",
+  "fideon:status": "SPEC_21 Phase 2 schema (10 October 2026), built from 6 native seed documents of 2 carriers; replaces the pre-SPEC_21 property.json (fideon.canonical.commercial_property 1.5.0). Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off. 2.1.0 (27 October 2026, additive, commercial-line template audit): new code PR_CONDO_COVERED_PROPERTY; alias `Business Income with Extra Expense` (PR_LOSS_OF_INCOME). Composes common model 1.5.0 (optional fields on existing blocks). Nothing else is removed or renamed. 2.1.0 also adopts the block countersignature (Westchester authorization date) and lists eight further codes (Renovations/Building Improvements and the equipment breakdown coverages).",
   "fideon:built_from": {
     "seed_golds": 6,
     "carriers": [
@@ -26,7 +26,8 @@
   "fideon:blocks_used": [
     "locations",
     "buildings",
-    "rating_modifiers"
+    "rating_modifiers",
+    "countersignature"
   ],
   "fideon:lob_block": "None. Every concept the seeds print has a home in the envelope or a common-model building block (SPEC_21 4.2.4). Liability rows a businessowners or fire-and-liability declarations prints beside its property are coverages of this line under PR_ codes until shared codes exist (CR-PROP-02).",
   "fideon:coverage_codes_file": "property.coverage_codes.yaml",
@@ -37,13 +38,20 @@
     "PR_BPP",
     "PR_BUILDING",
     "PR_BUILDING_EC",
+    "PR_BUILDING_IMPROVEMENTS",
     "PR_COMPUTER_FRAUD",
     "PR_COMPUTER_INTERRUPTION",
     "PR_CONDOMINIUM_LOSS",
+    "PR_CONDO_COVERED_PROPERTY",
     "PR_COUNTERFEIT_MONEY",
     "PR_CRAFTS_PAK_BASIC",
     "PR_CREDIT_CARD_FORGERY",
     "PR_DEBRIS_REMOVAL",
+    "PR_EB_CFC_REFRIGERANTS",
+    "PR_EB_COMPUTER_EQUIPMENT",
+    "PR_EB_DATA_RESTORATION",
+    "PR_EB_HAZARDOUS_SUBSTANCE",
+    "PR_EB_PERISHABLE_GOODS",
     "PR_EMPLOYEE_DISHONESTY",
     "PR_FINE_ARTS",
     "PR_FIRE_LEGAL_LIABILITY",
@@ -217,6 +225,9 @@
     },
     "rating_modifiers": {
       "$ref": "../common/common_model.json#/$defs/rating_modifiers"
+    },
+    "countersignature": {
+      "$ref": "../common/common_model.json#/$defs/countersignature"
     },
     "additional_fields": {
       "$ref": "../common/common_model.json#/$defs/additional_fields"

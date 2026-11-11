@@ -6,10 +6,18 @@
 # carriers: how many of the line's carriers print the coverage. replaces_draft_codes: codes used by the
 # engine-test seed golds for the same coverage; those golds are re-coded at seed review (see CHANGELOG).
 lob: personal_auto
-schema_version: 1.0.0
+schema_version: 1.1.0
 common_model_version: 1.0.0
 code_prefix: PA_
 codes:
+- code: PA_ACCIDENTAL_DEATH_BENEFIT
+  name: Accidental death benefit (Pennsylvania first party)
+  aliases:
+  - Accidental Death
+  default_limit_types:
+  - per_person
+  - other
+  carriers: 1
 - code: PA_ADDITIONAL_DEATH_BENEFITS
   name: ADDITIONAL DEATH BENEFITS
   aliases:
@@ -34,6 +42,8 @@ codes:
   - BROADENED ADDITIONAL PIP
   - INCREASED PIP
   - Apip - Other Expense
+  - Added Personal Injury Protection (APIP)
+  - Additional Personal Injury Protection (APIP)
   default_limit_types:
   - per_occurrence
   - per_person
@@ -94,6 +104,7 @@ codes:
   name: EXCESS EQUIPMENT
   aliases:
   - EXCESS EQUIPMENT
+  - Excess Custom Equipment Coverage
   default_limit_types: []
   carriers: 1
 - code: PA_EXTENDED_NON_OWNED
@@ -102,6 +113,22 @@ codes:
   - EXTENDED NON- OWNED
   default_limit_types: []
   carriers: 1
+- code: PA_EXTRAORDINARY_MEDICAL_BENEFITS
+  name: Extraordinary medical benefits (Pennsylvania first party)
+  aliases:
+  - Extraordinary Medical Benefits
+  default_limit_types:
+  - per_person
+  - other
+  carriers: 1
+- code: PA_FIRST_PARTY_BENEFITS
+  name: First party benefits (Pennsylvania)
+  aliases:
+  - First Party Benefits
+  default_limit_types:
+  - aggregate
+  - other
+  carriers: 1
 - code: PA_FULL_GLASS
   name: FULL COVERAGE WINDOW GLASS
   aliases:
@@ -109,10 +136,19 @@ codes:
   - Full Glass Coverage
   - No deductible for glass
   - FULL GLASS
+  - Full Coverage Window Glass- New York
   default_limit_types: []
   carriers: 3
   replaces_draft_codes:
   - PA_FULL_COVERAGE_WINDOW_GLASS
+- code: PA_MEDICAL_EXPENSE_BENEFITS
+  name: Medical expense benefits (Pennsylvania first party)
+  aliases:
+  - Medical Expenses
+  default_limit_types:
+  - per_person
+  - other
+  carriers: 1
 - code: PA_NEW_CAR_REPLACEMENT
   name: NEW CAR REPLACEMENT
   aliases:
@@ -191,6 +227,8 @@ codes:
   - Supplemental Spousal Liability
   - Including Supplemental Spousal
   - SUPP SPOUSAL LIAB
+  - Supplemental Spousal Coverage Applies
+  - Supplemental Spousal Liability (SSL) Coverage
   default_limit_types: []
   carriers: 7
   note: Shared code proposed (CR-PA-02).
@@ -223,12 +261,30 @@ codes:
   carriers: 1
   replaces_draft_codes:
   - PA_TRAVEL_TRIP_INTERRUPTION
+- code: PA_UIM_STACKED
+  name: Underinsured motorist - stacked (Pennsylvania)
+  aliases:
+  - Underinsured Motorist - Stacked
+  default_limit_types:
+  - per_person
+  - per_accident
+  - combined_single
+  carriers: 1
 - code: PA_UMPD
   name: UNINSURED MOTORISTS PROPERTY DAMAGE
   aliases:
   - UNINSURED MOTORISTS PROPERTY DAMAGE
   default_limit_types:
   - property_damage
+  carriers: 1
+- code: PA_UM_STACKED
+  name: Uninsured motorist - stacked (Pennsylvania)
+  aliases:
+  - Uninsured Motorist - Stacked
+  default_limit_types:
+  - per_person
+  - per_accident
+  - combined_single
   carriers: 1
 - code: PA_UNLICENSED_HOUSEHOLD_MEMBERS_19
   name: UNLICENSED HOUSEHOLD MEMBERS < 19
@@ -243,6 +299,13 @@ codes:
   - Vehicle Under Construction Endorsement
   default_limit_types: []
   carriers: 1
+- code: PA_WORK_LOSS_COORDINATION
+  name: Work loss coordination (Pennsylvania)
+  aliases:
+  - Work Loss Coordination
+  default_limit_types:
+  - other
+  carriers: 1
 - code: X_COLLISION
   name: Collision
   aliases:
@@ -252,6 +315,7 @@ codes:
   - Collision Less Deductible
   - Collision Coverage
   - Collision Coverage (Full Glass applies)
+  - Damage to your auto - Collision loss
   default_limit_types:
   - other
   shared: true
@@ -265,6 +329,7 @@ codes:
   - OTHER THAN COLL
   - OTHER THAN COLLISION LOSS
   - Comprehensive (Full Glass applies)
+  - Damage to your auto - Other than Collision loss (Comprehensive)
   default_limit_types:
   - other
   shared: true
@@ -275,6 +340,7 @@ codes:
   - Medical Payments
   - MEDICAL PAYMENTS
   - Medical Expense Limit
+  - Medical Payments - each person
   default_limit_types:
   - per_occurrence
   - per_person
@@ -293,6 +359,8 @@ codes:
   - Personal Injury Protection/Basic Economic Loss
   - Extended PIP
   - Work Loss Benefit
+  - Basic Personal Injury Protection (PIP)
+  - Personal Injury Protection (PIP)
   default_limit_types:
   - aggregate
   - per_person
@@ -312,6 +380,7 @@ codes:
   - TRANSPORTATION EXP
   - TRAVEL - TRANSPORTATION EXPENSES (FAMILY PLUS)
   - Travel Protection - Transportation Expenses
+  - Rental
   default_limit_types:
   - aggregate
   - per_accident
@@ -349,6 +418,8 @@ codes:
   - Supplementary Uninsured/Underinsured Motorist
   - Uninsured/Underinsured Motorist
   - Supplementary Uninsured Motorist
+  - Supplemental Uninsured Motorists (SUM)
+  - Supplementary Uninsured/Underinsured Motorist (SUM)
   default_limit_types:
   - per_person
   - per_accident
@@ -375,6 +446,8 @@ codes:
   - Property Damage Liability
   - BODILY INJURY SPLIT LIMITS
   - Liability To Others
+  - Liability - Bodily Injury
+  - Liability - Property Damage
   default_limit_types:
   - per_person
   - per_accident

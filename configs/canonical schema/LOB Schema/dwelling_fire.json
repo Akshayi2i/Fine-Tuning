@@ -6,7 +6,7 @@
   "fideon:lob": "dwelling_fire",
   "fideon:lob_code": "DF",
   "fideon:layout_family": "personal_lines",
-  "fideon:schema_version": "1.0.0",
+  "fideon:schema_version": "1.1.0",
   "fideon:common_model_version": "1.1.0",
   "fideon:status": "SPEC_21 Phase 2 schema, built from 16 seed golds of 4 carriers; field list awaiting project-owner approval",
   "fideon:built_from": {
@@ -28,6 +28,7 @@
   "fideon:lob_block": "None. Every concept the seeds print has a home in the envelope or a common-model building block (SPEC_21 4.2.4).",
   "fideon:coverage_codes_file": "dwelling_fire.coverage_codes.yaml",
   "fideon:coverage_codes": [
+    "DF_CONDOMINIUM_SHARED_OWNERSHIP",
     "DF_COV_A",
     "DF_COV_B",
     "DF_COV_C",
@@ -37,11 +38,14 @@
     "DF_EC_PERSONAL_PROPERTY",
     "DF_EC_RESIDENCE",
     "DF_INCIDENTAL_BUSINESS",
+    "DF_LANDLORDS_CONTENTS",
     "DF_TENANT_VANDALISM",
+    "DF_VALUE_PLUS",
     "DF_VMM_LOSS_OF_USE",
     "DF_VMM_OTHER_STRUCTURES",
     "DF_VMM_PERSONAL_PROPERTY",
     "DF_VMM_RESIDENCE",
+    "X_EQUIPMENT_BREAKDOWN",
     "X_LOSS_OF_USE",
     "X_MED_PAY",
     "X_WATER_BACKUP"

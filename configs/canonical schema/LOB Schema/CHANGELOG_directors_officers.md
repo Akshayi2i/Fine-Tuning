@@ -1,5 +1,21 @@
 # Changelog - directors_officers canonical schema
 
+## 2.3.0 - 27 October 2026 (additive; commercial-line template audit)
+
+- Adopts the block `locations` (an RPS proposal prints the insured's physical location); composes common model 1.5.0.
+- Derived files regenerated: prompt schema, sections, manifest, FSM hash fixture.
+
+## 2.2.0 - 26 October 2026 (additive; Hartford Private Choice Premier management liability declarations)
+
+`directors_officers.coverage_codes.yaml` and `directors_officers.json`: 21 new codes, no field change, the common model (1.1.0) is untouched. Entry `hartford/directors_officers.yaml` kept these rows in `additional_fields`.
+
+- `DO_FIDUCIARY` (`aggregate`) and the shared `X_EPL` (employment practices liability; the request named `DO_EPL`, but the common model already shares the concept as `X_EPL`).
+- The features printed NOT COVERED, one code each (`aggregate`): `DO_ENTITY_LIABILITY`, `DO_INVESTIGATION_COSTS`, `DO_LEGAL_SERVICES_WRONGFUL_ACT`, `DO_DATA_PRIVACY_EVENT_EXPENSE`, `DO_THIRD_PARTY_LIABILITY`, `DO_WAGE_HOUR_DEFENSE`, `DO_WORKPLACE_VIOLENCE_EXPENSES`, `DO_TRAINING_COSTS`.
+- The crime coverage part's insuring agreements (`per_occurrence`; the retention of each is `deductibles[]`): `DO_CRIME_EMPLOYEE_THEFT`, `DO_CRIME_FORGERY_ALTERATION`, `DO_CRIME_INSIDE_PREMISES`, `DO_CRIME_OUTSIDE_PREMISES`, `DO_CRIME_COMPUTER_FUNDS_TRANSFER_FRAUD`, `DO_CRIME_MONEY_ORDERS_COUNTERFEIT`, `DO_CRIME_COMPUTER_SYSTEMS_RESTORATION`, `DO_CRIME_IDENTITY_RECOVERY`, `DO_CRIME_DECEPTION_FRAUD`, `DO_CRIME_CLIENTS_PROPERTY_OFF_PREMISES`, `DO_CRIME_INVESTIGATIVE_EXPENSE`.
+- Not done: printed `NOT COVERED` / `N/A` as a value state (an L1 matter).
+
+Prompt schema, section files, hash fixture and fine-tuning parity fixtures regenerated; the fine-tuning repository must regenerate from the same canonical files.
+
 ## 2.1.0 - 14 October 2026 (minor; draft for the project owner's approval)
 
 **Why:** the source-data `epli` folder of ARC Excess & Surplus holds CNA's Investment Management Liability Solutions

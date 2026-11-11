@@ -3,8 +3,8 @@
   "$id": "common_model.json",
   "title": "Fideon canonical common model",
   "description": "SPEC_21 §4.2. The shared envelope and building blocks every policy_check LOB schema composes by $ref ('../common/common_model.json#/$defs/<name>'). This file is a $defs library, not a schema a document is validated against directly. Field names here are fixed: a LOB schema never renames or adds to them; a missing concept is a change request to the common-model owner. Every limit lives in coverages[].limits[].",
-  "fideon:common_model_version": "1.4.0",
-  "fideon:status": "field list approved by the project owner, 3 October 2026; 1.1.0 (8 October 2026) adds change requests CR-GL-02, CR-GL-03, CR-GL-12 and CR-GL-17; 1.2.0 (15 October 2026) adds $defs/ValueState and $defs/AbsenceReason, referenced by no LOB property (SPEC amendment of 15 October 2026, items 1 and 5); 1.3.0 (23 October 2026) adds the shared business-liability coverage codes X_BI_PD_LIABILITY, X_PRODUCTS_COMPLETED_OPS, X_DAMAGE_TO_PREMISES_RENTED, X_PERSONAL_ADVERTISING_INJURY and X_LIQUOR_LIABILITY (CR-GL-03 follow-up, CR-BOPGL-01, CR-BOPPR-01; DECISIONS rows 114 and 115); no field, block or definition changes; 1.4.0 (23 October 2026, DECISIONS row 116) adds the optional fields policy.effective_time, policy.expiration_time, carrier.company_type, document.copy_designation, named_insured.naics_code and named_insured.sic_code (printed by two or more of the gl, wc, bopgl, boppr and health lines)",
+  "fideon:common_model_version": "1.5.0",
+  "fideon:status": "field list approved by the project owner, 3 October 2026; 1.1.0 (8 October 2026) adds change requests CR-GL-02, CR-GL-03, CR-GL-12 and CR-GL-17; 1.2.0 (15 October 2026) adds $defs/ValueState and $defs/AbsenceReason, referenced by no LOB property (SPEC amendment of 15 October 2026, items 1 and 5); 1.3.0 (23 October 2026) adds the shared business-liability coverage codes X_BI_PD_LIABILITY, X_PRODUCTS_COMPLETED_OPS, X_DAMAGE_TO_PREMISES_RENTED, X_PERSONAL_ADVERTISING_INJURY and X_LIQUOR_LIABILITY (CR-GL-03 follow-up, CR-BOPGL-01, CR-BOPPR-01; DECISIONS rows 114 and 115); no field, block or definition changes; 1.4.0 (23 October 2026, DECISIONS row 116) adds the optional fields policy.effective_time, policy.expiration_time, carrier.company_type, document.copy_designation, named_insured.naics_code and named_insured.sic_code (printed by two or more of the gl, wc, bopgl, boppr and health lines); 1.5.0 (27 October 2026, commercial-line template audit) adds optional fields on existing blocks (document quote number and endorsement period, producer field office and commission, premium item rating basis and rate, charge applies_to and included, installment plan, interested party description and type, form sequence and limit, building valuation, cause of loss and description, vehicle rating fields, coverage waiting period and qualifier, rating exposure qualifier, schedule number and change kind, and others) and the block participating_insurers",
   "fideon:envelope_blocks": [
     "document",
     "carrier",
@@ -36,7 +36,8 @@
     "attachment",
     "bond",
     "benefit_plans",
-    "countersignature"
+    "countersignature",
+    "participating_insurers"
   ],
   "fideon:block_naming": "A top-level block is a $def under its own property name (e.g. $defs/vehicles); a LOB schema writes \"vehicles\": {\"$ref\": \"../common/common_model.json#/$defs/vehicles\"}. Capitalised $defs are element and value types.",
   "fideon:minimum_mandatory_fields": [
@@ -1995,9 +1996,12 @@
         "sublimit",
         "blanket",
         "scheduled_total",
+        "on_premises",
+        "off_premises",
+        "duration",
         "other"
       ],
-      "description": "SPEC_21 §4.2.2."
+      "description": "SPEC_21 §4.2.2. 1.5.0 adds on_premises and off_premises (a limit printed per location of the property: 'on / off') and duration (a limit that is a period: days, months, hours)."
     },
     "DeductibleType": {
       "type": "string",
@@ -2048,9 +2052,10 @@
         "statutory",
         "unlimited",
         "not_applicable",
-        "not_stated"
+        "not_stated",
+        "refers_to_other"
       ],
-      "description": "What a printed money, percent or included value says (SPEC amendment of 15 October 2026, item 5): amount (a number), zero (0, None or Nil as a deductible), included, excluded, not_covered (Not Covered / Not Purchased / Declined), see_form (See Form X / Per Endorsement X; the form is the reference), see_schedule (See Schedule / See Attached / As Scheduled), statutory, unlimited, not_applicable (N/A), not_stated (a placeholder: ***, --, -). Carried in the envelope's value_states, keyed by canonical path, never in a FieldValue; fideon/schemas/value_states.py is the only interpreter."
+      "description": "What a printed money, percent or included value says (SPEC amendment of 15 October 2026, item 5): amount (a number), zero (0, None or Nil as a deductible), included, excluded, not_covered (Not Covered / Not Purchased / Declined), see_form (See Form X / Per Endorsement X; the form is the reference), see_schedule (See Schedule / See Attached / As Scheduled), statutory, unlimited, not_applicable (N/A), not_stated (a placeholder: ***, --, -), refers_to_other (a deductible or limit that names another one: Property Deductible; added in 1.5.0). Carried in the envelope's value_states, keyed by canonical path, never in a FieldValue; fideon/schemas/value_states.py is the only interpreter."
     },
     "AbsenceReason": {
       "type": "string",
@@ -2174,6 +2179,10 @@
             "type": "string"
           },
           "description": "unit_ids this element applies to; empty or omitted = the whole policy (or the whole part)."
+        },
+        "description": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Printed wording of a deductible that has no amount ('Property Deductible' when the deductible is the policy's other deductible)."
         }
       },
       "required": [
@@ -2310,6 +2319,29 @@
             "Symbol"
           ],
           "description": "ISO covered-auto symbols printed against the coverage (1, 2, 7, 8, 9...). Business auto, garage, truckers and package auto parts."
+        },
+        "waiting_period": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Waiting period or time deductible of the coverage, as printed ('72 hours')."
+        },
+        "period_of_restoration": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Period of restoration or maximum duration of the coverage, as printed ('12 months')."
+        },
+        "extended_period": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Extended period of indemnity or extended business income days, as printed."
+        },
+        "qualifier": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Printed qualifier of the coverage row that has no typed home ('/48 HOURS', 'per day')."
+        },
+        "inflation_guard_percent": {
+          "$ref": "#/$defs/PercentValue",
+          "fideon:aliases": [
+            "Inflation Guard (%)"
+          ],
+          "description": "Inflation guard percentage that applies to the coverage."
         }
       },
       "required": [
@@ -2437,6 +2469,18 @@
           "fideon:aliases": [
             "Copy"
           ]
+        },
+        "quote_number": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Quote or proposal number, when the document prints one apart from the policy number ('Your Reference Number', 'Quote No.')."
+        },
+        "endorsement_period_start": {
+          "$ref": "#/$defs/DateValue",
+          "description": "Start of the period an endorsement or policy change covers ('Endorsement Period: From ...')."
+        },
+        "endorsement_period_end": {
+          "$ref": "#/$defs/DateValue",
+          "description": "End of the period an endorsement or policy change covers ('Endorsement Period: ... To')."
         }
       }
     },
@@ -2555,6 +2599,10 @@
             "Company Type",
             "Type of Company"
           ]
+        },
+        "claims_notice_recipient": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Department or person claims are noticed to, as printed ('Navigators Pro - Claims Department')."
         }
       }
     },
@@ -2645,6 +2693,18 @@
             "Producer Sub-Code",
             "Sub Code"
           ]
+        },
+        "field_office_name": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Name of the carrier's field office that services the producer ('Field Office Name')."
+        },
+        "field_office_code": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Code of the carrier's field office ('Field Office Code')."
+        },
+        "commission_percent": {
+          "$ref": "#/$defs/PercentValue",
+          "description": "Producer commission as a percentage, when printed."
         }
       }
     },
@@ -3086,6 +3146,14 @@
             "type": "string"
           },
           "description": "unit_ids this element applies to; empty or omitted = the whole policy (or the whole part)."
+        },
+        "description": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Printed note about the party's interest or the property it is for ('Escrow Billed', 'Description of Property: ...')."
+        },
+        "party_type": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "The interest or designation as printed beside the party ('Lessor of Premises', 'Vendors', 'Interest Type')."
         }
       },
       "required": [
@@ -3124,6 +3192,26 @@
         "part": {
           "type": "string",
           "description": "lob_parts[].part_id this element belongs to. Omitted on a single-part policy."
+        },
+        "exposure_basis": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "What the premium line is rated on (payroll, sales, area, units...), as printed."
+        },
+        "exposure_amount": {
+          "$ref": "#/$defs/NumberValue",
+          "description": "Amount of the rating basis the premium line is charged on."
+        },
+        "rate": {
+          "$ref": "#/$defs/NumberValue",
+          "description": "Rate applied to the basis."
+        },
+        "rate_basis": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Unit of the rate (per $100 of payroll, per 1,000 of sales...)."
+        },
+        "code": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Code printed with the premium line (class or charge code)."
         }
       }
     },
@@ -3151,6 +3239,25 @@
             "Fully Earned"
           ],
           "description": "Whether the charge is fully earned (not refunded on cancellation)."
+        },
+        "applies_to": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "unit_ids this charge or credit applies to (Loc 1/Bldg 1); empty or omitted = the whole policy (or the whole part)."
+        },
+        "included": {
+          "$ref": "#/$defs/BoolValue",
+          "description": "True when the charge or credit is printed as 'Included' / 'Incl.' with no amount."
+        },
+        "rate": {
+          "$ref": "#/$defs/NumberValue",
+          "description": "Rate printed on the charge row (an assessment or surcharge rate)."
+        },
+        "code": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Code printed with the charge (assessment or surcharge code such as 9740)."
         }
       }
     },
@@ -3263,6 +3370,17 @@
             "Schedule of Discounts"
           ],
           "description": "Discounts and credits applied."
+        },
+        "total_class": {
+          "$ref": "#/$defs/MoneyValue",
+          "description": "Total class premium (the sum of the classification premiums before the state build-up lines)."
+        },
+        "total_due": {
+          "$ref": "#/$defs/MoneyValue",
+          "fideon:aliases": [
+            "Total Amount Due"
+          ],
+          "description": "Total amount due, when the document prints it apart from the policy total (taxes, fees and installments included)."
         }
       }
     },
@@ -3285,6 +3403,10 @@
         "amount": {
           "$ref": "#/$defs/MoneyValue",
           "description": "Amount of the installment."
+        },
+        "plan": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Payment plan the installment belongs to, as printed ('Four payments with AutoPay')."
         }
       }
     },
@@ -3353,6 +3475,10 @@
             "$ref": "#/$defs/Installment"
           },
           "description": "Scheduled installments."
+        },
+        "bill_to_address": {
+          "$ref": "#/$defs/Address",
+          "description": "Address the bill is sent to, when it differs from the insured's mailing address."
         }
       }
     },
@@ -3418,6 +3544,10 @@
           "minItems": 2,
           "maxItems": 2,
           "description": "First and last PDF page, 1-based."
+        },
+        "sequence": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Sequence or item number printed after the form number ('- 001' in 'WC 00 04 22 C - 001')."
         }
       }
     },
@@ -3518,6 +3648,10 @@
             "Feet From Hydrant"
           ],
           "description": "Distance to the nearest fire hydrant."
+        },
+        "location_label": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Location number as printed when it is not a plain number ('2-6', '1-0')."
         }
       },
       "required": [
@@ -3672,6 +3806,18 @@
             "Heating Updated"
           ],
           "description": "Year the primary heating system was last updated."
+        },
+        "valuation": {
+          "$ref": "#/$defs/ValuationValue",
+          "description": "Valuation basis of the building as printed on the building schedule."
+        },
+        "cause_of_loss": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Causes of loss form or basis for the building ('BP0100 - Standard', 'Special')."
+        },
+        "description": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Printed description of the building ('Main Building')."
         }
       },
       "required": [
@@ -3819,6 +3965,50 @@
             "Sym"
           ],
           "description": "Rating symbols printed for the vehicle."
+        },
+        "class_code": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Rating class code of the vehicle."
+        },
+        "class_description": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Rating classification wording of the vehicle ('Not Otherwise Specified')."
+        },
+        "town_code": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Town or territory code the vehicle is rated in."
+        },
+        "rating_factors": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Rating factors printed for the vehicle ('Covered by Workers' Compensation', primary and secondary factors)."
+        },
+        "radius": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Radius of operation ('Local up to 50 miles')."
+        },
+        "size_class": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Size class of the vehicle."
+        },
+        "gross_vehicle_weight": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Gross vehicle weight or GVW class ('10,000 lbs')."
+        },
+        "seating_capacity": {
+          "$ref": "#/$defs/NumberValue",
+          "description": "Seating capacity."
+        },
+        "age_group": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Age group of the vehicle as printed."
+        },
+        "total_premium": {
+          "$ref": "#/$defs/MoneyValue",
+          "description": "Total premium of the vehicle across its coverages."
+        },
+        "garaging_address": {
+          "$ref": "#/$defs/Address",
+          "description": "Garaging address of the vehicle, when printed in full on the vehicle row."
         }
       },
       "required": [
@@ -4128,6 +4318,10 @@
         "location_ref": {
           "type": "string",
           "description": "unit_id of the locations[] element this belongs to."
+        },
+        "manufacturer": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Manufacturer of the scheduled item (Kubota, Morbark)."
         }
       },
       "required": [
@@ -4211,6 +4405,24 @@
         "part": {
           "type": "string",
           "description": "lob_parts[].part_id this element belongs to. Omitted on a single-part policy."
+        },
+        "exposure_qualifier": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Qualifier printed with the rating basis ('Members of LLC or LLP Payroll', 'Employees Payroll')."
+        },
+        "schedule_number": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Schedule number the classification is printed under (workers' compensation 'Schedule Number 01-31-01')."
+        },
+        "change_kind": {
+          "type": "string",
+          "enum": [
+            "add",
+            "change",
+            "prior",
+            "delete"
+          ],
+          "description": "On a change document: whether the row adds a classification, changes it, restates the prior value or deletes it."
         }
       }
     },
@@ -4595,6 +4807,10 @@
             "Date Countersigned"
           ],
           "description": "Date of the countersignature."
+        },
+        "representative_title": {
+          "$ref": "#/$defs/FieldValue",
+          "description": "Title of the person who signed or countersigned ('President & CEO')."
         }
       }
     },
@@ -4772,6 +4988,53 @@
         "scan_effects": {},
         "synthetic": {},
         "provenance": {}
+      }
+    },
+    "ParticipatingInsurer": {
+      "type": "object",
+      "description": "An insurer that takes part in the policy (quota share, layered or co-insured participation).",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/FieldValue",
+          "fideon:aliases": [
+            "Insurer"
+          ],
+          "description": "Name of the participating insurer."
+        },
+        "policy_number": {
+          "$ref": "#/$defs/FieldValue",
+          "fideon:aliases": [
+            "Policy No."
+          ],
+          "description": "Policy number the participating insurer issued for its share."
+        },
+        "share_percent": {
+          "$ref": "#/$defs/PercentValue",
+          "fideon:aliases": [
+            "Quota Share % of Loss",
+            "Participation"
+          ],
+          "description": "Share of the loss the insurer takes (quota share %, participation)."
+        },
+        "limit": {
+          "$ref": "#/$defs/MoneyValue",
+          "fideon:aliases": [
+            "Quota Share Limit of Liability"
+          ],
+          "description": "Limit of liability of the insurer's share."
+        },
+        "premium": {
+          "$ref": "#/$defs/MoneyValue",
+          "description": "Premium of the insurer's share."
+        }
+      }
+    },
+    "participating_insurers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ParticipatingInsurer"
       }
     }
   }

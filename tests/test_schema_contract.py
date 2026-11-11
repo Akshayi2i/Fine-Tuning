@@ -289,16 +289,30 @@ def test_only_top_level_blocks_lack_a_description_on_the_lines_trained(lob):
 
 @pytest.mark.parametrize("lob", ("gl", "boppr", "wc", "bopgl"))
 def test_every_field_description_reaches_the_fast_window_prompts(lob):
-    """What the model reads under the fast format: the shared instruction plus each group's own block."""
-    from common.schema_sections import groups_for
+    """What the model reads under the fast format: the shared instruction plus each group's own block.
 
-    schema = schemas.resolved_schema("policy", None, lob)
+    Each group is checked against its own slice - the fields that window is asked for. A slice drops a reference
+    field whose tables another group reads (`schema_sections.yaml` `references`: a charge's `applies_to` in the
+    declarations window, which sees no locations), so that field is in no prompt by design (2026-11-12: common
+    model 1.5.0 gave `Charge.applies_to` its own wording; `PremiumItem.applies_to` had passed only because
+    coverages' `applies_to` reads the same)."""
+    from common.schema_sections import groups_for, references
+
     groups = groups_for(lob)
-    text = prompts.render_system_prompt("policy", "image_only", lob=lob, sections=groups[0]) + "\n".join(
-        prompts.render_group_block("policy", None, lob, group) or "" for group in groups)
-    unseen = [path for path, description in schemas.iter_described_fields(schema, defs=schema["$defs"])
-              if description and "." in path and description.strip()[:40] not in text]
+    shared = prompts.render_system_prompt("policy", "image_only", lob=lob, sections=groups[0])
+    unseen, asked = [], set()
+    for group in groups:
+        schema = schemas.resolved_schema("policy", None, lob, group)
+        text = shared + (prompts.render_group_block("policy", None, lob, group) or "")
+        for path, description in schemas.iter_described_fields(schema, defs=schema["$defs"]):
+            asked.add(path)
+            if description and "." in path and description.strip()[:40] not in text:
+                unseen.append(f"{group}: {path}")
     assert not unseen, f"field descriptions missing from the prompt: {unseen}"
+    # Only a reference field may be in no window's slice.
+    whole = schemas.resolved_schema("policy", None, lob)
+    dropped = {path for path, _ in schemas.iter_described_fields(whole, defs=whole["$defs"])} - asked
+    assert all(path.rsplit(".", 1)[-1] in references() for path in dropped), sorted(dropped)
 
 
 @pytest.mark.parametrize("modality_mode", MODALITY_MODES)
@@ -719,7 +733,7 @@ def test_a_canonical_schema_version_comes_from_fideon_source():
     `fideon:source`. A common-model overlay's is the pair: its own and the common
     model's, written onto the bundle. General liability and the fallback are
     overlays since common model 1.1.0; property and the other commercial lines
-    since common model 1.4.0.
+    since common model 1.4.0. Versions as released with common model 1.5.0 (2026-11-12).
 
     `schema_version` is called for every registered schema when a corpus manifest
     is written, so reading the wrong path fails the whole build.
@@ -728,10 +742,10 @@ def test_a_canonical_schema_version_comes_from_fideon_source():
 
     assert schema_version("policy", None, ["equipment_breakdown"]) == "1.5.0"
     assert schema_version("policy", None, ["management_liability"]) == "3.1.0"
-    assert schema_version("policy", None, ["homeowners"]) == f"1.0.0+common.{COMMON_VERSION}"
-    assert schema_version("policy", None, ["gl"]) == f"3.2.0+common.{COMMON_VERSION}"
-    assert schema_version("policy", None, ["property"]) == f"2.0.0+common.{COMMON_VERSION}"
-    assert schema_version("policy") == f"1.4.0+common.{COMMON_VERSION}"
+    assert schema_version("policy", None, ["homeowners"]) == f"1.1.0+common.{COMMON_VERSION}"
+    assert schema_version("policy", None, ["gl"]) == f"3.3.0+common.{COMMON_VERSION}"
+    assert schema_version("policy", None, ["property"]) == f"2.1.0+common.{COMMON_VERSION}"
+    assert schema_version("policy") == f"1.5.0+common.{COMMON_VERSION}"
     # A line with no file of its own reads the fallback's.
     assert schema_version("policy", None, ["a_line_with_no_file"]) == schema_version("policy")
 
@@ -850,9 +864,9 @@ def test_the_corpus_drift_check_reads_the_key_the_manifest_writes():
     from inference_core.input_builder import InputBuilderError, build_messages
 
     built = build_messages("policy", ["p1.png"], ["text"], "ocr_plus_image", lob="homeowners")
-    assert built.schema_version == f"1.0.0+common.{COMMON_VERSION}"
+    assert built.schema_version == f"1.1.0+common.{COMMON_VERSION}"
 
-    built.assert_matches_corpus({"schema_versions": {"policy:homeowners": f"1.0.0+common.{COMMON_VERSION}"}})
+    built.assert_matches_corpus({"schema_versions": {"policy:homeowners": f"1.1.0+common.{COMMON_VERSION}"}})
     with pytest.raises(InputBuilderError, match="drift"):
         built.assert_matches_corpus({"schema_versions": {"policy:homeowners": "0.0.1"}})
     # A pin for a different line says nothing about this row.

@@ -6,10 +6,16 @@
 # carriers: how many of the line's carriers print the coverage. replaces_draft_codes: codes used by the
 # engine-test seed golds for the same coverage; those golds are re-coded at seed review (see CHANGELOG).
 lob: dwelling_fire
-schema_version: 1.0.0
+schema_version: 1.1.0
 common_model_version: 1.0.0
 code_prefix: DF_
 codes:
+- code: DF_CONDOMINIUM_SHARED_OWNERSHIP
+  name: Condominiums and Shared Ownership Housing
+  aliases:
+  - FL-5 Condominiums and Shared Ownership Housing
+  default_limit_types: []
+  carriers: 1
 - code: DF_COV_A
   name: Coverage A - Dwelling / Residence
   aliases:
@@ -28,6 +34,8 @@ codes:
   - Cov B - Related Private Structures
   - Coverage B - Related Private Structures
   - Other Structures
+  - Coverage B - Private Structures
+  - Related Private Structures - Specified
   default_limit_types:
   - per_occurrence
   carriers: 3
@@ -51,6 +59,7 @@ codes:
   - Cov L - Premises Liability
   - Coverage L - Premises Liability
   - Premises Liability
+  - Coverage L - Farm Premises Liability Coverage
   default_limit_types:
   - per_occurrence
   carriers: 3
@@ -87,12 +96,26 @@ codes:
   - FL-16 - Incidental Business Activities
   default_limit_types: []
   carriers: 1
+- code: DF_LANDLORDS_CONTENTS
+  name: Landlords Contents
+  aliases:
+  - FL-130 Landlords Contents
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
 - code: DF_TENANT_VANDALISM
   name: Tenant Vandalism Endorsement
   aliases:
   - FL-VC Tenant Vandalism Endorsement - Related Private Structures
   - FL-VC Tenant Vandalism Endorsement - Residence
   default_limit_types: []
+  carriers: 1
+- code: DF_VALUE_PLUS
+  name: Value Plus Endorsement
+  aliases:
+  - Value Plus Endorsement
+  default_limit_types:
+  - other
   carriers: 1
 - code: DF_VMM_LOSS_OF_USE
   name: Vandalism and malicious mischief - Additional Living Expense / Loss of Rent
@@ -118,6 +141,15 @@ codes:
   - VMM - Residence
   default_limit_types: []
   carriers: 1
+- code: X_EQUIPMENT_BREAKDOWN
+  name: Equipment breakdown
+  aliases:
+  - Equipment Breakdown
+  - FL-345 Equipment Breakdown
+  default_limit_types:
+  - per_occurrence
+  shared: true
+  carriers: 1
 - code: X_LOSS_OF_USE
   name: Loss of use / additional living expense / fair rental value
   aliases:
@@ -125,6 +157,7 @@ codes:
   - Cov D - Addl Living Exp/Loss of Rents
   - Coverage D - Additional Living Expense / Loss of Rent
   - Coverage D ADDL LIVING EXP AND LOSS OF RENT FIRE INCL
+  - 'Coverage D - Additional Living Expense & Loss of Rent'
   default_limit_types:
   - per_occurrence
   shared: true
@@ -151,6 +184,7 @@ codes:
   shared: true
   carriers: 1
 shared_codes_used:
+- X_EQUIPMENT_BREAKDOWN
 - X_LOSS_OF_USE
 - X_MED_PAY
 - X_WATER_BACKUP

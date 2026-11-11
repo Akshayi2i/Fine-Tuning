@@ -5,7 +5,7 @@
 # Each entry names the registry fields that declare it. Applied by tools/registry_migrate.py --lob homeowners.
 lob: homeowners
 from_schema: "1.6.0"
-to_schema: "1.0.0"
+to_schema: "1.1.0"
 paths:
   # plymouth/homeowners.yaml:account_number
   additional_fields.account_number: {overflow: "account_number"}

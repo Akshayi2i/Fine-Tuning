@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Fideon canonical schema - cyber (policy_check)",
-  "description": "SPEC_21 section 4 canonical schema for cyber, cyber and privacy liability (L1 code cyber), composing common_model.json 1.1.0 by $ref: the envelope plus the claims_made_terms and insuring_agreements blocks. Built from the single-LOB cyber declarations of the source-data cyber folder (read in place): At-Bay's cyber insurance policy declarations (filed under AtBay and ARC Excess & Surplus), Coalition's cyber policy declarations and Corvus' smart cyber declarations on Travelers paper. Every field of the pre-SPEC_21 cyber.json (cyber.crosswalk.yaml). No LOB block.",
+  "description": "SPEC_21 section 4 canonical schema for cyber, cyber and privacy liability (L1 code cyber), composing common_model.json 1.5.0 by $ref: the envelope plus the claims_made_terms and insuring_agreements blocks. Built from the single-LOB cyber declarations of the source-data cyber folder (read in place): At-Bay's cyber insurance policy declarations (filed under AtBay and ARC Excess & Surplus), Coalition's cyber policy declarations and Corvus' smart cyber declarations on Travelers paper. Every field of the pre-SPEC_21 cyber.json (cyber.crosswalk.yaml). No LOB block.",
   "fideon:doc_type": "policy_check",
   "fideon:lob": "cyber",
   "fideon:lob_code": "TBD",
   "fideon:layout_family": "exec_specialty",
-  "fideon:schema_version": "2.0.0",
-  "fideon:common_model_version": "1.1.0",
-  "fideon:status": "SPEC_21 Phase 2 schema (11 October 2026), built from the cyber folder's single-LOB declarations; replaces the pre-SPEC_21 cyber.json. Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off.",
+  "fideon:schema_version": "2.2.0",
+  "fideon:common_model_version": "1.5.0",
+  "fideon:status": "SPEC_21 Phase 2 schema (11 October 2026), built from the cyber folder's single-LOB declarations; replaces the pre-SPEC_21 cyber.json. Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off. 2.1.0 (26 October 2026, additive): ten codes and aliases for the insuring clauses of State National's CFC cyber declarations. 2.2.0 (27 October 2026, additive, commercial-line template audit): alias `ALL INSURING CLAUSES COMBINED` (CY_POLICY_AGGREGATE); the block `participating_insurers` is adopted (Coalition Item 7 quota-share table: insurer, policy number, share percent, limit, premium). Composes common model 1.5.0 (optional fields on existing blocks). Nothing else is removed or renamed.",
   "fideon:built_from": {
     "seed_golds": 9,
     "carriers": [
@@ -27,7 +27,8 @@
   },
   "fideon:blocks_used": [
     "claims_made_terms",
-    "insuring_agreements"
+    "insuring_agreements",
+    "participating_insurers"
   ],
   "fideon:lob_block": "None. Each insuring agreement the declarations schedule is a coverage (its sub-limit, its retention, whether it is included); the policy aggregate limit is the CY_POLICY_AGGREGATE coverage; waiting periods and periods of indemnity are deductibles[deductible_type=waiting_period] or additional_fields (SPEC_21 4.2.4).",
   "fideon:coverage_codes_file": "cyber.coverage_codes.yaml",
@@ -53,21 +54,31 @@
     "CY_EVENT_RESPONSE",
     "CY_EVENT_RESPONSE_RECOVERY",
     "CY_EXTORTION",
+    "CY_FORENSIC_COSTS",
     "CY_FUNDS_TRANSFER_LIABILITY",
     "CY_IMPERSONATION_REPAIR",
     "CY_INVOICE_MANIPULATION",
+    "CY_LEGAL_REGULATORY_COSTS",
+    "CY_MANAGEMENT_LIABILITY",
     "CY_MEDIA",
     "CY_MEDIA_EVENT_RESPONSE",
     "CY_NETWORK_SECURITY_LIABILITY",
     "CY_PCI",
+    "CY_PERSONAL_FINANCIAL_ASSETS_THEFT",
     "CY_POLICY_AGGREGATE",
+    "CY_POST_BREACH_REMEDIATION",
     "CY_PRE_CLAIM",
+    "CY_PRIVACY_BREACH_MANAGEMENT",
     "CY_PRIVACY_LIABILITY",
     "CY_PROOF_OF_LOSS",
     "CY_REGULATORY",
     "CY_REPUTATIONAL_HARM",
     "CY_SERVICE_FRAUD",
     "CY_SOCIAL_ENGINEERING",
+    "CY_TECH_EO",
+    "CY_TELEPHONE_HACKING",
+    "CY_THIRD_PARTY_BREACH_MANAGEMENT",
+    "CY_THIRD_PARTY_FUNDS_THEFT",
     "X_TERRORISM"
   ],
   "fideon:mandatory_fields": [
@@ -187,6 +198,9 @@
     },
     "insuring_agreements": {
       "$ref": "../common/common_model.json#/$defs/insuring_agreements"
+    },
+    "participating_insurers": {
+      "$ref": "../common/common_model.json#/$defs/participating_insurers"
     },
     "additional_fields": {
       "$ref": "../common/common_model.json#/$defs/additional_fields"

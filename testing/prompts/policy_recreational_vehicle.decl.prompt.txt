@@ -107,6 +107,9 @@ document - About the document itself.
   print_date: date - Date the document was printed.
   mailing_date: date - Date the document was mailed; it starts notice periods on cancellation and nonrenewal notices.
   copy_designation: text - Which copy of the document this is, where the print says so: 'Agent Copy', 'Insured Copy', 'Mortgagee Copy'.
+  quote_number: text - Quote or proposal number, when the document prints one apart from the policy number ('Your Reference Number', 'Quote No.').
+  endorsement_period_start: date - Start of the period an endorsement or policy change covers ('Endorsement Period: From ...').
+  endorsement_period_end: date - End of the period an endorsement or policy change covers ('Endorsement Period: ... To').
 carrier - The insurer.
   name: text - The writing company.
   naic_code: naic - NAIC company code of the writing company.
@@ -121,6 +124,7 @@ carrier - The insurer.
   admitted_status: admittedstatus - Whether the writing company is admitted or non-admitted in the state.
   financial_rating: text - Financial-strength rating of the writing company as printed, e.g. the A.M. Best rating and size class 'A+ XV'.
   company_type: text - How the writing company describes itself where the declarations print it beside the company name: 'A Stock Company', 'A Mutual Company', 'A Reciprocal Exchange'.
+  claims_notice_recipient: text - Department or person claims are noticed to, as printed ('Navigators Pro - Claims Department').
 producer - The agency or broker of record.
   agency_name: text - Name of the agency or broker of record.
   producer_code: text - Code the carrier assigns to the agency.
@@ -131,6 +135,9 @@ producer - The agency or broker of record.
   email: text - Email address.
   web_address: text - Website of the agency.
   contract_number: text - The agency's contract or sub-code with the carrier.
+  field_office_name: text - Name of the carrier's field office that services the producer ('Field Office Name').
+  field_office_code: text - Code of the carrier's field office ('Field Office Code').
+  commission_percent: percent - Producer commission as a percentage, when printed.
 named_insured - The insured. date_of_birth, gender, marital_status and occupation apply to an individual insured (personal lines insured summaries).
   primary_name: text - First named insured.
   additional_named_insureds: [AdditionalNamedInsured] - Every insured named besides the primary named insured, in printed order.
@@ -174,6 +181,8 @@ premium
   taxes_fees: [Charge] - Taxes and fees charged.
   surcharges: [Charge] - Surcharges applied.
   discounts: [Charge] - Discounts and credits applied.
+  total_class: money - Total class premium (the sum of the classification premiums before the state build-up lines).
+  total_due: money - Total amount due, when the document prints it apart from the policy total (taxes, fees and installments included).
 billing
   payment_plan: text - Payment plan as printed (annual, 2-pay, 12-pay EFT...).
   bill_type: text - As printed: Direct Bill, Agency Bill.
@@ -182,6 +191,7 @@ billing
   amount_due: money - Amount currently due on the bill.
   due_date: date - Date payment is due.
   installments: [Installment] - Scheduled installments.
+  bill_to_address: Address - Address the bill is sent to, when it differs from the insured's mailing address.
 Address - Postal address.
   street: text - Street address line.
   street_2: text - Second address line: suite, unit, attention line.
@@ -208,15 +218,24 @@ PremiumItem - A premium line: per coverage, per unit or per part.
   unit_type: UnitType - What the premium item is charged for.
   coverage_code: CoverageCode - Coverage the premium line is for, when it is for one coverage.
   part: string - lob_parts[].part_id this element belongs to. Omitted on a single-part policy.
+  exposure_basis: text - What the premium line is rated on (payroll, sales, area, units...), as printed.
+  exposure_amount: number - Amount of the rating basis the premium line is charged on.
+  rate: number - Rate applied to the basis.
+  rate_basis: text - Unit of the rate (per $100 of payroll, per 1,000 of sales...).
+  code: text - Code printed with the premium line (class or charge code).
 Charge - A tax, fee, surcharge or discount.
   description: text - Name of the tax, fee, surcharge or discount as printed.
   amount: money - Amount of the tax, fee, surcharge or discount.
   percentage: percent - Rate of the charge or discount as a percentage, when printed.
   fully_earned: yesno - Whether the charge is fully earned (not refunded on cancellation).
+  included: yesno - True when the charge or credit is printed as 'Included' / 'Incl.' with no amount.
+  rate: number - Rate printed on the charge row (an assessment or surcharge rate).
+  code: text - Code printed with the charge (assessment or surcharge code such as 9740).
 Installment
   installment_number: number - Number of the installment in the payment plan.
   due_date: date - Date the installment is due.
   amount: money - Amount of the installment.
+  plan: text - Payment plan the installment belongs to, as printed ('Four payments with AutoPay').
 
 ## Value kinds
 Written as `{"r", "v", "p"}`; what `v` holds:
@@ -225,12 +244,12 @@ date: string - A date. `parsed` is MM/DD/YYYY, or null when the printed wording 
 text: string/number/boolean
 naic: string - An NAIC company code. `parsed` is 5 digits, leading zeros kept.
 admittedstatus: one of admitted|non_admitted|surplus_lines - Admitted status of the writing company. `raw` is the printed wording; `parsed` is the normalised value, or null when the printed wording maps to none of them.
+percent: number - A percentage. `parsed` is a number: 5% -> 5.
 number: number - A count, year or measurement. `parsed` is a number.
 coveragetrigger: one of occurrence|claims_made|claims_made_and_reported|not_applicable - Coverage trigger. `raw` is the printed wording; `parsed` is the normalised value, or null when the printed wording maps to none of them.
 state: string - A US state or territory. `parsed` is the two-letter USPS code ('New York' -> 'NY').
 yesno: boolean - A yes/no fact. `raw` is the printed mark or wording ('X', 'Yes', 'Included').
 money: number - An amount of money. `parsed` is a number, or null when the printed wording is not an amount ('Included', 'Not Covered'); whether the coverage applies is recorded in `included`.
-percent: number - A percentage. `parsed` is a number: 5% -> 5.
 zip: string - A US ZIP code. `parsed` is 5 digits or ZIP+4 ('12180-1234').
 
 ## Codes

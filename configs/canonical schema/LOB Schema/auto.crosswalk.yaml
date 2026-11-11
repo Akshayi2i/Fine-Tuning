@@ -14,7 +14,7 @@
 
 lob: auto
 from_schema: "1.5.0"
-to_schema: "2.0.0"
+to_schema: "2.1.0"
 paths:
   additional_fields[].name: {new: "additional_fields[].label"}
   additional_fields[].value: {new: "additional_fields[].value"}

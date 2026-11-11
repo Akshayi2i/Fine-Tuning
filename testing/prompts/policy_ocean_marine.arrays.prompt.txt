@@ -116,6 +116,11 @@ Coverage
   coinsurance_percent: percent - Coinsurance percentage that applies to the coverage.
   form_refs: [string] - Form numbers printed with this coverage that grant or modify it. Printed values: each exactly as printed, as a plain string.
   covered_auto_symbols: [text] - ISO covered-auto symbols printed against the coverage (1, 2, 7, 8, 9...). Business auto, garage, truckers and package auto parts.
+  waiting_period: text - Waiting period or time deductible of the coverage, as printed ('72 hours').
+  period_of_restoration: text - Period of restoration or maximum duration of the coverage, as printed ('12 months').
+  extended_period: text - Extended period of indemnity or extended business income days, as printed.
+  qualifier: text - Printed qualifier of the coverage row that has no typed home ('/48 HOURS', 'per day').
+  inflation_guard_percent: percent - Inflation guard percentage that applies to the coverage.
 Deductible - A deductible, inside a coverage or in the top-level deductibles[] when it applies across coverages or perils.
   deductible_type: DeductibleType - Kind of deductible.
   amount: money - Amount of a flat deductible.
@@ -124,6 +129,7 @@ Deductible - A deductible, inside a coverage or in the top-level deductibles[] w
   peril: text - Peril the deductible applies to (wind/hail, hurricane, all other perils).
   applies_to_coverages: [CoverageCode] - coverage_codes it applies to (top-level deductibles only).
   applies_to: [string] - unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).
+  description: text - Printed wording of a deductible that has no amount ('Property Deductible' when the deductible is the policy's other deductible).
 InterestedParty
   role: one of mortgagee|loss_payee|additional_insured|lienholder|certificate_holder|additional_interest|other - Role of the party.
   rank: number - 1 for first mortgagee, 2 for second...
@@ -132,6 +138,8 @@ InterestedParty
   loan_number: text - Loan or account number with the interested party.
   is_payor: yesno - True when this party pays the premium (escrow billing).
   applies_to: [string] - unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).
+  description: text - Printed note about the party's interest or the property it is for ('Escrow Billed', 'Description of Property: ...').
+  party_type: text - The interest or designation as printed beside the party ('Lessor of Premises', 'Vendors', 'Interest Type').
 Watercraft
   unit_id: id - Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.
   watercraft_number: number - Watercraft number as printed on the schedule.
@@ -204,4 +212,4 @@ zip: string - A US ZIP code. `parsed` is 5 digits or ZIP+4 ('12180-1234').
 ## Codes
 CoverageCode: OM_AGREED_VALUE_HULL = Agreed Value Loss Settlement - Hull; OM_AGREED_VALUE_MACHINERY = Agreed Value Loss Settlement - Machinery; OM_COASTAL_NAVIGATION = Coastal Navigation; OM_DISAPPEARING_DEDUCTIBLE = Disappearing / diminishing deductible; OM_DRIVE_SYSTEM_PROTECTION = Drive System Protect Plus Coverage; OM_FUEL_SPILL_LIABILITY = Fuel spill / oil pollution liability; OM_HAUL_OUT_EXPENSE = Hurricane/Tsunami Haul Out Expense Reimbursement; OM_MARINE_ELECTRONICS = Marine Electronics; OM_NEW_BOAT_REPLACEMENT = New Boat Replacement Coverage; OM_ON_WATER_TOWING = On-water towing (Sign & Glide); OM_PERSONAL_PROPERTY = Personal effects / personal property; OM_PROPULSION_PLUS = Propulsion Plus®; OM_REPLACEMENT_COST_PERSONAL_EFFECTS = Replacement Cost Personal Effects; OM_TRAILER = Trailer; OM_WATERCRAFT_EQUIPMENT = Watercraft and equipment (hull) physical damage; OM_WRECKAGE_REMOVAL = Wreckage Removal; X_COLLISION = Collision; X_COMPREHENSIVE = Comprehensive / other than collision; X_MED_PAY = Medical payments; X_TOWING = Towing and roadside assistance; X_UM = Uninsured motorist / boater; X_VEHICLE_LIABILITY = Liability (bodily injury and property damage) for an auto, motorcycle, RV or boat
 DeductibleType: flat | percentage | waiting_period | sir | retention | franchise
-LimitType: per_occurrence | aggregate | products_completed_ops_aggregate | per_person | per_accident | property_damage | combined_single | per_claim | each_employee | policy_limit | per_location | per_item | per_day | per_disablement | sublimit | blanket | scheduled_total | other
+LimitType: per_occurrence | aggregate | products_completed_ops_aggregate | per_person | per_accident | property_damage | combined_single | per_claim | each_employee | policy_limit | per_location | per_item | per_day | per_disablement | sublimit | blanket | scheduled_total | on_premises | off_premises | duration | other

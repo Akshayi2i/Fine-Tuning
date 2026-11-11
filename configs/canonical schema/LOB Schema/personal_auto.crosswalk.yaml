@@ -5,7 +5,7 @@
 # Each entry names the registry fields that declare it. Applied by tools/registry_migrate.py --lob personal_auto.
 lob: personal_auto
 from_schema: "1.5.0"
-to_schema: "1.0.0"
+to_schema: "1.1.0"
 paths:
   # nycm/personal_auto.yaml:coded_score
   additional_fields.coded_score: {overflow: "coded_score"}

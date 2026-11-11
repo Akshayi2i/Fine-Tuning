@@ -5,9 +5,11 @@
 # model's shared code. An insuring agreement's sub-limit is an aggregate limit; its retention a retention
 # deductible; a waiting period a waiting_period deductible.
 # carriers: how many of the seed carrier folders print one of the code's names.
+# 2.1.0 (26 October 2026, additive): the insuring clauses of State National's CFC cyber declarations (`SECTION x: <name>`, aggregate limit and deductible
+# each): printed names of an existing concept became aliases; a concept no code covered got a code. Nothing is removed or renamed.
 lob: cyber
-schema_version: 2.0.0
-common_model_version: 1.1.0
+schema_version: 2.2.0
+common_model_version: 1.5.0
 code_prefix: CY_
 codes:
 - code: CY_POLICY_AGGREGATE
@@ -17,6 +19,8 @@ codes:
   - Aggregate Policy Limit of Liability
   - Policy Aggregate Limit
   - Per Event Limit of Liability
+  # 2.2.0 (27 October 2026): State National / CFC
+  - ALL INSURING CLAUSES COMBINED
   default_limit_types:
   - aggregate
   carriers: 4
@@ -27,6 +31,8 @@ codes:
   - Information Privacy Liability
   - NETWORK AND INFORMATION SECURITY LIABILITY
   - Network Security and Privacy Liability
+  # 2.1.0 (State National / CFC):
+  - PRIVACY LIABILITY
   default_limit_types:
   - aggregate
   carriers: 4
@@ -44,6 +50,8 @@ codes:
   - Regulatory Liability
   - REGULATORY DEFENSE AND PENALTIES
   - 'Regulatory Investigations, Fines and Penalties'
+  # 2.1.0 (State National / CFC):
+  - REGULATORY INVESTIGATION COSTS
   default_limit_types:
   - aggregate
   carriers: 4
@@ -54,6 +62,8 @@ codes:
   - PCI-DSS Liability
   - PCI FINES AND ASSESSMENTS
   - PCI DSS Assessment Expenses
+  # 2.1.0 (State National / CFC):
+  - MERCHANT SERVICES LIABILITY
   default_limit_types:
   - aggregate
   carriers: 4
@@ -70,6 +80,9 @@ codes:
   aliases:
   - Media Liability
   - MULTIMEDIA CONTENT LIABILITY
+  # 2.1.0 (State National / CFC):
+  - DEFAMATION
+  - INTELLECTUAL PROPERTY RIGHTS INFRINGEMENT
   default_limit_types:
   - aggregate
   carriers: 4
@@ -88,6 +101,8 @@ codes:
   - Event Response and Management
   - BREACH RESPONSE COSTS
   - Breach Management Expenses
+  # 2.1.0 (State National / CFC):
+  - INCIDENT RESPONSE COSTS
   default_limit_types:
   - aggregate
   carriers: 4
@@ -111,6 +126,8 @@ codes:
   name: Crisis management and public relations
   aliases:
   - CRISIS MANAGEMENT AND PUBLIC RELATIONS
+  # 2.1.0 (State National / CFC):
+  - CRISIS COMMUNICATION COSTS
   default_limit_types:
   - aggregate
   carriers: 1
@@ -122,6 +139,8 @@ codes:
   - Cyber Extortion
   - RANSOMWARE AND CYBER EXTORTION
   - Cyber Extortion and Ransomware Coverage
+  # 2.1.0 (State National / CFC):
+  - EXTORTION
   default_limit_types:
   - aggregate
   carriers: 4
@@ -131,6 +150,8 @@ codes:
   - BUSINESS INTERRUPTION AND EXTRA EXPENSES
   - Direct Business Interruption
   - Business Interruption
+  # 2.1.0 (State National / CFC):
+  - INCOME LOSS AND EXTRA EXPENSE
   default_limit_types:
   - aggregate
   carriers: 3
@@ -138,6 +159,8 @@ codes:
   name: Contingent business interruption
   aliases:
   - Contingent Business Interruption
+  # 2.1.0 (State National / CFC):
+  - DEPENDENT BUSINESS INTERRUPTION
   default_limit_types:
   - aggregate
   carriers: 3
@@ -157,6 +180,8 @@ codes:
   aliases:
   - Proof of Loss Preparation
   - PROOF OF LOSS PREPARATION EXPENSES
+  # 2.1.0 (State National / CFC):
+  - CLAIM PREPARATION COSTS
   default_limit_types:
   - aggregate
   carriers: 1
@@ -166,6 +191,8 @@ codes:
   - Data Recovery and Computer Replacement Costs
   - DIGITAL ASSET RESTORATION
   - 'Digital Asset Destruction, Data Retrieval and System Restoration'
+  # 2.1.0 (State National / CFC):
+  - SYSTEM DAMAGE AND RECTIFICATION COSTS
   default_limit_types:
   - aggregate
   carriers: 2
@@ -213,6 +240,8 @@ codes:
   - Social Engineering
   - FUNDS TRANSFER FRAUD AND SOCIAL ENGINEERING
   - 'Social Engineering & Cyber Crime Coverage'
+  # 2.1.0 (State National / CFC):
+  - AUTHORIZED PUSH PAYMENT FRAUD
   default_limit_types:
   - aggregate
   carriers: 4
@@ -220,6 +249,8 @@ codes:
   name: Computer fraud
   aliases:
   - Computer Fraud
+  # 2.1.0 (State National / CFC):
+  - ELECTRONIC THEFT OF YOUR FINANCIAL ASSETS
   default_limit_types:
   - aggregate
   carriers: 2
@@ -228,6 +259,8 @@ codes:
   aliases:
   - Service Fraud Including Cryptojacking
   - SERVICE FRAUD INCLUDING CRYPTOJACKING
+  # 2.1.0 (State National / CFC):
+  - UNAUTHORIZED USE OF COMPUTER RESOURCES
   default_limit_types:
   - aggregate
   carriers: 1
@@ -309,6 +342,77 @@ codes:
   name: 'Contingent business interruption: voluntary shutdown'
   aliases:
   - Voluntary Shutdown
+  default_limit_types:
+  - aggregate
+  carriers: 1
+# 2.1.0 (26 October 2026): insuring clauses of State National's CFC cyber declarations that no code covered
+- code: CY_LEGAL_REGULATORY_COSTS
+  name: Legal and regulatory costs
+  aliases:
+  - LEGAL AND REGULATORY COSTS
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_FORENSIC_COSTS
+  name: IT security and forensic costs
+  aliases:
+  - IT SECURITY AND FORENSIC COSTS
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_PRIVACY_BREACH_MANAGEMENT
+  name: Privacy breach management costs
+  aliases:
+  - PRIVACY BREACH MANAGEMENT COSTS
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_THIRD_PARTY_BREACH_MANAGEMENT
+  name: Third party privacy breach management costs
+  aliases:
+  - THIRD PARTY PRIVACY BREACH MANAGEMENT COSTS
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_POST_BREACH_REMEDIATION
+  name: Post breach remediation costs
+  aliases:
+  - POST BREACH REMEDIATION COSTS
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_THIRD_PARTY_FUNDS_THEFT
+  name: Electronic theft of third party funds held in escrow
+  aliases:
+  - ELECTRONIC THEFT OF THIRD PARTY FUNDS HELD IN ESCROW
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_PERSONAL_FINANCIAL_ASSETS_THEFT
+  name: Electronic theft of personal financial assets
+  aliases:
+  - ELECTRONIC THEFT OF PERSONAL FINANCIAL ASSETS
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_TELEPHONE_HACKING
+  name: Telephone hacking
+  aliases:
+  - TELEPHONE HACKING
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_MANAGEMENT_LIABILITY
+  name: Management liability (cyber insuring clause)
+  aliases:
+  - MANAGEMENT LIABILITY
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: CY_TECH_EO
+  name: Technology errors and omissions
+  aliases:
+  - TECHNOLOGY ERRORS AND OMISSIONS
   default_limit_types:
   - aggregate
   carriers: 1

@@ -9,7 +9,7 @@
 # Casualty, filed under ARC Excess & Surplus) and two aliases (policy aggregate, derivative demand).
 # carriers: how many of the seed carrier folders print one of the code's names.
 lob: directors_officers
-schema_version: 2.1.0
+schema_version: 2.2.0
 common_model_version: 1.1.0
 code_prefix: DO_
 codes:
@@ -137,4 +137,158 @@ codes:
   - Fund Management and Professional Liability
   default_limit_types:
   - aggregate
+  carriers: 1
+# 2.2.0 (26 October 2026): Hartford's Private Choice Premier management liability declarations. Fiduciary liability and employment practices liability
+# coverage parts (EPL is the shared code X_EPL), the features the declarations print as NOT COVERED, and the crime coverage part's insuring agreements
+# (a limit and a retention each; the retention is deductibles[]).
+- code: DO_FIDUCIARY
+  name: Fiduciary liability coverage part
+  aliases:
+  - Fiduciary Liability
+  - Fiduciary Liability Coverage Part
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: X_EPL
+  name: Employment practices liability
+  aliases:
+  - Employment Practices Liability
+  - Employment Practices Liability Coverage Part
+  default_limit_types:
+  - per_claim
+  - aggregate
+  carriers: 1
+  shared: true
+- code: DO_ENTITY_LIABILITY
+  name: Entity liability coverage
+  aliases:
+  - Entity Liability Coverage
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_INVESTIGATION_COSTS
+  name: Investigation costs
+  aliases:
+  - Investigation Costs
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_LEGAL_SERVICES_WRONGFUL_ACT
+  name: Legal services wrongful act
+  aliases:
+  - Legal Services Wrongful Act
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_DATA_PRIVACY_EVENT_EXPENSE
+  name: Data privacy event expense coverage
+  aliases:
+  - Data Privacy Event Expense Coverage
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_THIRD_PARTY_LIABILITY
+  name: Third party liability coverage
+  aliases:
+  - Third Party Liability Coverage
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_WAGE_HOUR_DEFENSE
+  name: Wage and hour defense cost coverage extension
+  aliases:
+  - Wage and Hour Defense Cost Coverage Extension
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_WORKPLACE_VIOLENCE_EXPENSES
+  name: Workplace violence expenses coverage extension
+  aliases:
+  - Workplace Violence Expenses Coverage Extension
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_TRAINING_COSTS
+  name: Training costs
+  aliases:
+  - Training Costs
+  default_limit_types:
+  - aggregate
+  carriers: 1
+- code: DO_CRIME_EMPLOYEE_THEFT
+  name: Crime - employee theft
+  aliases:
+  - Employee Theft
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: DO_CRIME_FORGERY_ALTERATION
+  name: Crime - forgery or alteration
+  aliases:
+  - Forgery or Alteration
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: DO_CRIME_INSIDE_PREMISES
+  name: Crime - inside the premises
+  aliases:
+  - Inside the Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: DO_CRIME_OUTSIDE_PREMISES
+  name: Crime - outside the premises
+  aliases:
+  - Outside the Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: DO_CRIME_COMPUTER_FUNDS_TRANSFER_FRAUD
+  name: Crime - computer and funds transfer fraud
+  aliases:
+  - Computer and Funds Transfer Fraud
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: DO_CRIME_MONEY_ORDERS_COUNTERFEIT
+  name: Crime - money orders and counterfeit currency
+  aliases:
+  - Money Orders and Counterfeit Currency
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: DO_CRIME_COMPUTER_SYSTEMS_RESTORATION
+  name: Crime - computer systems restoration expenses
+  aliases:
+  - Computer Systems Restoration Expenses
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: DO_CRIME_IDENTITY_RECOVERY
+  name: Crime - identity recovery expenses reimbursement
+  aliases:
+  - Identity Recovery Expenses Reimbursement
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: DO_CRIME_DECEPTION_FRAUD
+  name: Crime - deception fraud
+  aliases:
+  - Deception Fraud
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: DO_CRIME_CLIENTS_PROPERTY_OFF_PREMISES
+  name: Crime - theft of clients' property off premises
+  aliases:
+  - Theft of Clients' Property Off Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: DO_CRIME_INVESTIGATIVE_EXPENSE
+  name: Crime - investigative expense sublimit
+  aliases:
+  - Investigative Expense Sublimit
+  default_limit_types:
+  - per_occurrence
   carriers: 1

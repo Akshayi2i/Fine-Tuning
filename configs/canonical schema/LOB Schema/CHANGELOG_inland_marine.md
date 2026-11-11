@@ -1,5 +1,12 @@
 # Changelog - inland_marine canonical schema
 
+## 2.1.0 - 27 October 2026 (additive; commercial-line template audit: Philadelphia Fitness package, inland marine part)
+
+Composes common model 1.5.0 (was 1.1.0); the common model's new optional fields are available to this line without a path change.
+
+- New code IM_BUSINESS_PERSONAL_PROPERTY (default per_occurrence).
+- Derived files regenerated: `prompt/policy_check/inland_marine.prompt.json`, `prompt/sections/inland_marine/*`, `prompt/manifest.json`, the FSM hash fixture.
+
 ## Aliases - 12 October 2026 (package policies, PKG2; no field or code change)
 
 `inland_marine.coverage_codes.yaml`, the inland marine part of Dryden Mutual's `Craft 12 - Contractors Package Policy`: `IM_CONTRACTORS_EQUIPMENT` + `Tools Equipment Coverage` (form DMIC MR-79). The code list is unchanged.

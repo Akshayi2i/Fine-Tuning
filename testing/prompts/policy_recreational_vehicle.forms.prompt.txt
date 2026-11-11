@@ -103,6 +103,7 @@ Form - A form or endorsement listed in the forms schedule or attached to the pol
   title: text - Title of the form or endorsement.
   form_type: FormType - Kind of form.
   premium: money - Premium charged for the form or endorsement.
+  sequence: text - Sequence or item number printed after the form number ('- 001' in 'WC 00 04 22 C - 001').
 
 ## Value kinds
 Written as `{"r", "v", "p"}`; what `v` holds:

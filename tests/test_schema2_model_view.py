@@ -161,8 +161,10 @@ def test_the_example_gold_as_the_model_writes_it_fits_the_view():
 def test_the_view_stays_within_its_prompt_budget(lob):
     """About 8.8K tokens for homeowners, measured with the Qwen3-VL tokenizer;
     a model view that grows past this has started carrying what the model never
-    writes."""
-    assert len(_text(lob)) < 40_000
+    writes. Common model 1.5.0 (2026-11-12) added optional fields to blocks every
+    line uses: homeowners 42,460 characters, personal_auto 43,205, motorcycle
+    41,114, recreational_vehicle 41,908, so the bound moved from 40,000 to 45,000."""
+    assert len(_text(lob)) < 45_000
 
 
 def test_alias_lists_never_reach_the_model():

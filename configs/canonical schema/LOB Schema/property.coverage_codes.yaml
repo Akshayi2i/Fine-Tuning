@@ -10,8 +10,8 @@
 # forms_and_endorsements[].premium.
 # carriers: how many of the 2 native seed carriers print one of the code's names.
 lob: property
-schema_version: 2.0.0
-common_model_version: 1.1.0
+schema_version: 2.1.0
+common_model_version: 1.5.0
 code_prefix: PR_
 codes:
 - code: PR_BUILDING
@@ -58,6 +58,8 @@ codes:
   - Business Income and Extra Expense
   - Loss of Income
   - Loss of Earnings
+  # 2.1.0
+  - Business Income with Extra Expense
   default_limit_types:
   - other
   carriers: 2
@@ -95,6 +97,8 @@ codes:
   name: Ordinance or law
   aliases:
   - Building Ordinance or Law Coverage
+  # 2.1.0
+  - Demolition and Increased Cost of Construction
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -138,6 +142,8 @@ codes:
   name: Newly acquired or constructed property - building
   aliases:
   - Building - Newly Acquired or Constructed Property
+  # 2.1.0
+  - Newly Acquired or Constructed Property - Buildings
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -275,6 +281,8 @@ codes:
   aliases:
   - Equipment Breakdown
   - Equipment Breakdown Enhancement Endorsement
+  # 2.1.0: Westchester equipment breakdown declarations
+  - Total Limit per Accident
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -392,6 +400,57 @@ codes:
   name: Tools and equipment off premises
   aliases:
   - Tools & Equipment Off Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 2.1.0 (27 October 2026): USLI commercial property coverage part.
+- code: PR_CONDO_COVERED_PROPERTY
+  name: Condo covered property
+  aliases:
+  - Condo Covered Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 2.1.0 (27 October 2026): Westchester commercial property declarations (name printed over two lines).
+- code: PR_BUILDING_IMPROVEMENTS
+  name: Renovations / building improvements
+  aliases:
+  - Renovations/Building Improvements
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_EB_PERISHABLE_GOODS
+  name: 'Equipment breakdown - perishable goods (ammonia contamination, service interruption)'
+  aliases:
+  - 'Perishable Goods, including Ammonia Contamination and Service Interruption'
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_EB_CFC_REFRIGERANTS
+  name: Equipment breakdown - CFC refrigerants
+  aliases:
+  - CFC Refrigerants
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_EB_COMPUTER_EQUIPMENT
+  name: Equipment breakdown - computer equipment
+  aliases:
+  - Computer Equipment
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_EB_HAZARDOUS_SUBSTANCE
+  name: Equipment breakdown - hazardous substance
+  aliases:
+  - Hazardous Substance
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: PR_EB_DATA_RESTORATION
+  name: Equipment breakdown - data restoration
+  aliases:
+  - Data Restoration
   default_limit_types:
   - per_occurrence
   carriers: 1

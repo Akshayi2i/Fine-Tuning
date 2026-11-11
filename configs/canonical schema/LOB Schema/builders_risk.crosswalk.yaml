@@ -12,7 +12,7 @@
 
 lob: builders_risk
 from_schema: "2.2.0"
-to_schema: "3.0.0"
+to_schema: "3.2.0"
 paths:
   document.document_type: {drop: "the document kind L1 computes (dec page, renewal...), not a printed value; transport metadata (`document_kind`)"}
   document.document_title_as_stated: {new: "document.title"}

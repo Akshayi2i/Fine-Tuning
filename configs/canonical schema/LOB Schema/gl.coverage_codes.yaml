@@ -30,8 +30,8 @@
 # removed or renamed.
 
 lob: gl
-schema_version: 3.2.0
-common_model_version: 1.4.0
+schema_version: 3.3.0
+common_model_version: 1.5.0
 code_prefix: GL_
 codes:
 - code: GL_BI_PD
@@ -59,6 +59,8 @@ codes:
   - Liability and Medical Expenses Limit
   - General Aggregate (other than Products/Completed Operations)
   - GENERAL AGGREGATE LIMIT PER LOCATION
+  # 26 October 2026, aliases only (Atlantic Casualty, stray spaces in its text layer):
+  - Each Occurrence Lim it
   default_limit_types:
   - per_occurrence
   - aggregate
@@ -81,6 +83,8 @@ codes:
   # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
   - Products Completed Operations Aggregate
   - Products/Completed Operations Aggregate
+  # 26 October 2026, aliases only (Atlantic Casualty, stray spaces in its text layer):
+  - Pro d u c t s / Completed Operation s Aggregate Lim it
   default_limit_types:
   - products_completed_ops_aggregate
   carriers: 18
@@ -99,6 +103,9 @@ codes:
   - Coverage P - Personal Injury & Advertising Liability
   # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
   - Personal And Advertising Injury
+  # 26 October 2026, aliases only (Philadelphia Indemnity; Atlantic Casualty, stray spaces in its text layer):
+  - Personal and Advertising Injury Limit (Any One Person or Organization)
+  - Person al an d Advertising Injury Limit
   default_limit_types:
   - per_person
   carriers: 19
@@ -119,6 +126,8 @@ codes:
   - Medical Expense Limit (Any one person)
   - Cov M - Medical Payments
   - Coverage M – Premises Medical Payments
+  # 26 October 2026, aliases only (Atlantic Casualty, stray spaces in its text layer):
+  - Medical Ex pen se Lim it
   default_limit_types:
   - per_person
   shared: true
@@ -141,6 +150,10 @@ codes:
   - Broadened Coverage for Damage to Premises Rented to You
   # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
   - Fire Legal Liability (Toolbox)
+  # 26 October 2026, aliases only (Liberty, USLI, Atlantic Casualty with stray spaces in its text layer, Philadelphia Indemnity):
+  - Damage To Premises Rented To You Limit (Any One Premises)
+  - Rented To You Limit (Any One Premises)
+  - Damages To Premises Rented To You Lim it
   default_limit_types:
   - per_location
   carriers: 18
@@ -160,6 +173,9 @@ codes:
   aliases:
   - Abuse or Molestation Coverage Form
   - Each Act of Abuse
+  # 26 October 2026, aliases only (Philadelphia Indemnity Abusive Conduct Liability Coverage Form PI-SAM-008D):
+  - Abusive Conduct Liability Coverage Form
+  - Each Abusive Conduct Limit
   default_limit_types:
   - per_occurrence
   carriers: 2
@@ -401,6 +417,8 @@ codes:
   aliases:
   - Business income and extra expense
   - Business income and extra expense sub-limit (waiting period 24 hours)
+  # 26 October 2026, aliases only (Main Street America Commercial Portfolio declarations):
+  - Business Income & Extra Expense Including Rental Value
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -467,6 +485,12 @@ codes:
   aliases:
   - Scheduled contractor's equipment
   - Tools & Equipment
+  # 26 October 2026, aliases only (Main Street America Commercial Portfolio declarations):
+  - Scheduled Tools and Equipment
+  - Scheduled Tools and Equipment (per occurrence)
+  # 3.3.0
+  - 'Contractor''s Tools'
+  - 'Blanket Contractor''s Equipment'
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -873,6 +897,57 @@ codes:
   name: Water damage, other liquid, powder or molten material damage
   aliases:
   - Water damage, other liquid, powder or molten material damage
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 3.3.0 (27 October 2026): property, inland marine and garage rows printed by contractor packages (Utica First, Main Street America).
+- code: GL_BUILDING
+  name: Building (package property part)
+  aliases:
+  - Building
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: GL_BUSINESS_PERSONAL_PROPERTY
+  name: Business personal property (package property part)
+  aliases:
+  - Business Personal Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: GL_BPP_OFF_PREMISES
+  name: Business personal property - off premises
+  aliases:
+  - Business Personal Property - Off Premises
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: GL_LOSS_OF_INCOME
+  name: Loss of income (package property part)
+  aliases:
+  - Loss of Income
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: GL_CONTRACTORS_INLAND_MARINE
+  name: Contractors inland marine endorsement
+  aliases:
+  - Contractors Inland Marine Endorsement - Enhanced (per occurrence)
+  - Contractors Inland Marine Endorsement - Enhanced
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: GL_PROPERTY_ENHANCEMENT
+  name: Property enhancement endorsement
+  aliases:
+  - Property Enhancement Endorsement
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: GL_GARAGEKEEPERS_LIABILITY
+  name: Garagekeepers liability
+  aliases:
+  - Garagekeepers Liability
   default_limit_types:
   - per_occurrence
   carriers: 1

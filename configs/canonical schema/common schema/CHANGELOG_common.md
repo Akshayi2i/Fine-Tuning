@@ -10,6 +10,43 @@ crosswalk entry.
 two or more LOBs print it. Anything printed by one LOB only goes in that LOB's
 own block or `coverage_codes.yaml`.
 
+## 1.5.0 — 27 October 2026 (commercial-line template audit: optional fields on existing blocks, one new block)
+
+Requests from the field-by-field audit of the commercial-line registry entries (Hartford, Travelers, Liberty Mutual, Leatherstocking, Utica First, Main Street America, Merchants, Guard, Coalition, US Assure, North Country, NYCM, CNA, USLI, J&J and others), project owner's release instruction of 27 October 2026. Additions only: optional properties of existing blocks and the block `participating_insurers`; nothing renamed, removed, retyped or made required, so every LOB schema pinned at 1.0.0 to 1.4.0 composes this version unchanged (`tools/check_common_compat.py`: compatible). The values travelled as `additional_fields` until now.
+
+| Path | Printed wording | Printed by |
+|---|---|---|
+| `document.quote_number` | `Your Reference Number`, `Quote No.` | Hartford BOP quote, other quotes |
+| `document.endorsement_period_start`, `document.endorsement_period_end` | `Endorsement Period: From ... To` | Liberty Mutual change documents, change endorsements |
+| `carrier.claims_notice_recipient` | `Navigators Pro - Claims Department` | D&O, E&O |
+| `producer.field_office_name`, `producer.field_office_code`, `producer.commission_percent` | `E Field Office Name`, `F Field Office Code`, commission % | Zurich-paper declarations, CNA rating worksheet |
+| `countersignature.representative_title` | `President & CEO` beside the signature | Philadelphia FlexiPlus, D&O |
+| `premium.total_class` | `Total Class Premium` | Hartford WC (all state summaries) |
+| `premium.total_due` | `Total Amount Due` | Westchester property declarations |
+| `PremiumItem.exposure_basis`, `.exposure_amount`, `.rate`, `.rate_basis` | state-summary lines `<basis> <rate> <premium>`; CNA rating worksheet (`SALES 844,119`, rate 3.434) | wc, bopgl, boppr |
+| `Charge.applies_to[]`, `Charge.included` | `*UL Approved Appliance Credit Loc 1/Bldg 1 Included` | North Country, NYCM |
+| `Installment.plan` | `Two / Four / Ten / Twelve payments, with / without AutoPay` | Hartford quote |
+| `billing.bill_to_address` | `Bill to address` | Diamond State binder |
+| `InterestedParty.description`, `InterestedParty.party_type` | `Description: Escrow Billed`, `Type: Lessor of Leased Equipment`, `Vendors:`, `Interest Type` | Leatherstocking, CNA, Utica First, North Country |
+| `Form.sequence` | `WC 00 04 22 C - 001` | Travelers WC |
+| `Building.valuation`, `.cause_of_loss`, `.description` | `Valuation: Replacement Cost`, `Cause of Loss: BP0100 - Standard`, `Building Description: Main Building` | Utica First, property lines |
+| `Location.location_label` | `2-6`, `1-0` (not a plain number) | NYSIF |
+| `Vehicle.class_code`, `.class_description`, `.town_code`, `.rating_factors`, `.radius`, `.size_class`, `.gross_vehicle_weight`, `.seating_capacity`, `.age_group`, `.total_premium`, `.garaging_address` | class code 03483, town code 3403, `Local up to 50 miles`, GVW, age group, per-vehicle total | Liberty Mutual, Merchants, Guard, Main Street America, Preferred Mutual |
+| `ScheduledItem.manufacturer` | `Manufacturer` column (Kubota, Morbark) | inland marine (Leatherstocking) |
+| `Coverage.waiting_period`, `.period_of_restoration`, `.extended_period`, `.qualifier` | `Waiting Period`, `Period of Restoration`, `/48 HOURS` | Hartford SP forms, Travelers cyber, Merchants |
+| `RatingExposure.exposure_qualifier`, `.schedule_number`, `.change_kind` | `Members of LLC or LLP Payroll`, `Schedule Number 01-31-01`, add / change / prior / delete | Liberty gl, Hartford WC |
+| `Deductible.description` | `Property Deductible` where a deductible refers to another deductible | Hartford |
+| `Coverage.inflation_guard_percent` | `Inflation Guard (%)` | Arch boppr |
+| `Charge.rate`, `Charge.code`, `PremiumItem.code` | `Employers Assessment PA 0938 .0202 12.00`, `0932 New York State Assessment Surcharge 0.070 $67.00` | Liberty wc, Markel wc, gl |
+| `LimitType` values `on_premises`, `off_premises`, `duration` | `$10,000 on / $5,000 off`; `Ordinary Payroll (60 Days)`, `Business Income Waiting Period (72 Hours)` | Preferred Mutual boppr |
+| block `participating_insurers[]` (`name`, `policy_number`, `share_percent`, `limit`, `premium`) | Coalition Item 7 quota share table, Active `Insurer` / `Participation` | cyber |
+
+**Requests not taken.** `Form.limit` (a limit outside `coverages[].limits[]` breaks rule 4 of the brief; the limit of a form row belongs to a coverage). `policy.policy_term_months` (`policy.term_months` exists), `policy.minimum_earned_premium_percentage` (`premium.minimum_earned_percent` exists), `carrier.contact.website` (`carrier.web_address` exists). A `premium.state_summary[]` array (the PremiumItem fields carry the lines).
+
+**Effect:** the new fields are in blocks every line uses, so every line's prompt schema, section files, the manifest and the FSM hashes change. The fine-tuning repository does not render them yet: `fideon/vlm/tests/conftest.py` renders this repository's side of the three parity modules without exactly these fields (`AHEAD_OF_FINE_TUNING`, with the six of 1.4.0), so any other drift still fails. Envelope leaf count 181 (was under 150) and personal-lines 285: `test_envelope_leaves_room_for_a_lob` bounds moved to 200 and 300 (SPEC_21 4.3 ceiling).
+
+Regenerated: `common_model.fields.md`, `policy_check/_fallback.json`, every prompt schema and the manifest, the section files, the FSM hash fixture. `lob_schema_map.yaml` `common_model_version` is 1.5.0. Lines released with it: auto 2.1.0, bopgl 2.5.0, boppr 2.5.0, gl 3.3.0, commercial_fire 1.2.0, property 2.1.0, inland_marine 2.1.0, cyber 2.2.0 (pin 1.5.0; new codes and aliases, and the blocks `rating_exposures` (bopgl, boppr, commercial_fire) and `participating_insurers` (cyber)). `tools/build_section_schemas.py` now cuts a line's mandatory fields after its codes (bopgl's 133 codes alone filled the coverages section's token budget).
+
 ## 1.4.0 — 23 October 2026 (six optional fields printed by two or more lines)
 
 DECISIONS_2026-10-19 rows 115 and 116 (Sagar: release now; the fine-tuning side follows). Additions only: six optional `FieldValue`

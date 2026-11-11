@@ -1,5 +1,16 @@
 # Changelog - auto canonical schema (commercial auto)
 
+## 2.1.0 - 27 October 2026 (additive; commercial-line template audit: Liberty Mutual NY and Guard declarations, Main Street America vehicle block)
+
+Composes common model 1.5.0 (was 1.1.0); the common model's new optional fields are available to this line without a path change.
+
+- New code AU_MANDATORY_BASIC_ECONOMIC_LOSS (default per_person); aliases `Mandatory PIP`, `Mandatory Personal Injury Protection`, `Other Necessary Expenses (per day)` (X_PIP), `Business Auto Enhancement Endorsement` (AU_COVERAGE_EXTENSION), `Combined Single Limit` (X_VEHICLE_LIABILITY).
+- Derived files regenerated: `prompt/policy_check/auto.prompt.json`, `prompt/sections/auto/*`, `prompt/manifest.json`, the FSM hash fixture.
+
+## Aliases - 26 October 2026 (Main Street America and Guard printed names; no version change)
+
+`auto.coverage_codes.yaml`: aliases only, so `auto.json` (2.0.0) and the prompt schema are unchanged. `X_UIM`: `Supplementary Uninsured and Underinsured`, `Supplementary Uninsured and Underinsured Motorists (SUM)`, `Supplementary Uninsured/ Underinsured Motorists Coverage (SUM)`; `X_PIP`: `Death Benefit`, `Maximum Monthly Work Loss`, `Other Necessary Expenses`; `AU_OPTIONAL_BASIC_ECONOMIC_LOSS`: `Optional Basic Economic Loss (O.B.E.L.)`; `AU_COVERAGE_EXTENSION`: `Business Auto Broad Form Endorsement`; `X_WAIVER_OF_SUBROGATION`: `Blanket Waiver of Subrogation Endorsement`; `X_ADDITIONAL_INSURED`: `Additional Insured When Required by Contract`; `X_COMPREHENSIVE`: `Physical Damage Comprehensive Coverage`. Already matching: `Aggregate No-Fault Benefits`, the `Physical Damage ...` Specified Causes, Collision and Towing names. Not done: a bare `Combined Single Limit` alias of `X_VEHICLE_LIABILITY` (the caption is printed under uninsured motorists rows as well; the registry should pin it).
+
 ## Alias - 15 October 2026 (Merchants Mutual commercial auto policy; no field change)
 
 `auto.coverage_codes.yaml`: `X_UIM` + `Supplementary Uninsured/Underinsured`, the SUM row name as the first line of Merchants Mutual's Item Two schedule (MU 72 50) prints it in a full commercial automobile policy (read by `merchants_mutual/auto.yaml`). No new code; `auto.json` is unchanged.

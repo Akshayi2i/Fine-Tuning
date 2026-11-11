@@ -1,5 +1,9 @@
 # Changelog - umbrella canonical schema
 
+## 2.1.0 - 26 October 2026 (new coverage codes; minor version)
+
+`umbrella.coverage_codes.yaml` and `umbrella.json`: two new codes for `underlying_insurance[]`, read by `liberty_mutual/umbrella.yaml`: `UM_UNDERLYING_AUTO_LIABILITY` (`combined_single`) and `UM_UNDERLYING_EMPLOYERS_LIABILITY` (`per_accident`, `aggregate`). `fideon:schema_version` 2.0.0 -> 2.1.0. No field or crosswalk change; the common model is untouched. Prompt schema and section files regenerated.
+
 ## 2.0.0 - 11 October 2026 (SPEC_21 Phase 2; draft for the project owner's approval)
 
 First SPEC_21 schema of the line (commercial umbrella and excess liability, L1 code and schema id `umbrella`, batch

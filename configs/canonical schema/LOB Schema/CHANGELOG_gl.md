@@ -1,5 +1,16 @@
 # Changelog - gl canonical schema
 
+## 3.3.0 - 27 October 2026 (additive; commercial-line template audit: contractor packages (Utica First, Main Street America))
+
+Composes common model 1.5.0 (was 1.4.0); the common model's new optional fields are available to this line without a path change.
+
+- Seven new codes for the property, inland marine and garage rows a contractor package prints (GL_BUILDING, GL_BUSINESS_PERSONAL_PROPERTY, GL_BPP_OFF_PREMISES, GL_LOSS_OF_INCOME, GL_CONTRACTORS_INLAND_MARINE, GL_PROPERTY_ENHANCEMENT, GL_GARAGEKEEPERS_LIABILITY); aliases `Contractor's Tools`, `Blanket Contractor's Equipment` (GL_CONTRACTORS_EQUIPMENT).
+- Derived files regenerated: `prompt/policy_check/gl.prompt.json`, `prompt/sections/gl/*`, `prompt/manifest.json`, the FSM hash fixture.
+
+## Aliases - 26 October 2026 (registry printed names; no version change)
+
+`gl.coverage_codes.yaml`: aliases only, so `gl.json` (3.2.0) and the prompt schema are unchanged. `GL_DAMAGE_TO_PREMISES_RENTED`: `Damage To Premises Rented To You Limit (Any One Premises)`, `Rented To You Limit (Any One Premises)`; `GL_PERSONAL_ADVERTISING_INJURY`: `Personal and Advertising Injury Limit (Any One Person or Organization)`; `GL_ABUSE_MOLESTATION`: `Abusive Conduct Liability Coverage Form`, `Each Abusive Conduct Limit` (Philadelphia Indemnity PI-SAM-008D; the same concept, so no `GL_ABUSIVE_CONDUCT` code); `GL_CONTRACTORS_EQUIPMENT`: `Scheduled Tools and Equipment (per occurrence)`; `GL_BUSINESS_INCOME_EXTRA_EXPENSE`: `Business Income & Extra Expense Including Rental Value`; and the Atlantic Casualty captions with the stray spaces of its text layer (`Each Occurrence Lim it`, `Damages To Premises Rented To You Lim it`, `Medical Ex pen se Lim it`, `Person al an d Advertising Injury Limit`, `Pro d u c t s / Completed Operation s Aggregate Lim it`). The other captions of the requests (`General Aggregate Limit (Other than Products - Completed Operations)`, `Medical Expense Limit (Any One Person)`, `Personal and Advertising Injury Limit`, the Liberty `Damages To Premises Rented To You (Any One Premises)`) already matched: L1's name key ignores punctuation and case. Not done: the default limit type of `GL_PERSONAL_ADVERTISING_INJURY` (`per_person` is the printed `Any One Person or Organization` limit), the bare `AGGREGATE LIMIT` caption (too generic to alias), the Main Street America property and inland marine rows (a package matter).
+
 ## 3.2.0 - 26 October 2026 (additive; G1 scanned and hybrid seeds, change request approved by the project owner)
 
 Source: the coverage rows the 56 cgl seed golds (G1 scanned and hybrid folders) printed that no gl code named. Printed names only; no document

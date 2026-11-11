@@ -1,5 +1,13 @@
 # Changelog - dwelling_fire canonical schema
 
+## 1.1.0 - 26 October 2026 (new coverage codes; minor version)
+
+`dwelling_fire.coverage_codes.yaml` and `dwelling_fire.json`: four new codes: `DF_LANDLORDS_CONTENTS` (FL-130 Landlords Contents; `per_occurrence`), `DF_CONDOMINIUM_SHARED_OWNERSHIP` (FL-5 Condominiums and Shared Ownership Housing), `DF_VALUE_PLUS` (Value Plus Endorsement; `other`) and the shared `X_EQUIPMENT_BREAKDOWN` (aliases `Equipment Breakdown`, `FL-345 Equipment Breakdown`; `per_occurrence`), read by `leatherstocking/dwelling_fire.yaml` and `usli/dwelling_fire.yaml`. `fideon:schema_version` 1.0.0 -> 1.1.0. No field, crosswalk or `dwelling_fire.fields.md` change; the common model is untouched. Prompt schema, section files and fine-tuning parity fixtures regenerated; the fine-tuning repository must regenerate from the same canonical files.
+
+## Aliases - 26 October 2026 (registry printed names; no version change)
+
+`dwelling_fire.coverage_codes.yaml`: aliases only, printed names read by the Leatherstocking, Madison Mutual and USLI registry entries: `DF_COV_B` + `Coverage B - Private Structures`, `Related Private Structures - Specified`; `DF_COV_L` + `Coverage L - Farm Premises Liability Coverage`; `X_LOSS_OF_USE` + `Coverage D - Additional Living Expense & Loss of Rent`. No code, field or default limit type changes; `dwelling_fire.json` and the prompt schema are unchanged.
+
 ## Coverage codes, default limit types - 10 October 2026 (no version change)
 
 `dwelling_fire.coverage_codes.yaml`: `default_limit_types` of three codes, the kind L1 gives a printed limit when nothing printed in its cell or its coverage name decides (`fideon.l1.spec21.limits_from`; no other reader uses the field):

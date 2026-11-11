@@ -1,4 +1,4 @@
-# SPEC_21 4.2.4 coverage codes of commercial_fire (schema 1.0.0, common model 1.1.0).
+# SPEC_21 4.2.4 coverage codes of commercial_fire (schema 1.1.0, common model 1.1.0).
 # Built from the 7 single-LOB 'DECLARATION, Commercial Fire and Liability' seed documents of one carrier
 # (Leatherstocking Cooperative Insurance Company), read in place. There is no legacy schema: the line is new.
 # aliases: coverage names as the seeds print them (whitespace collapsed; a wrapped name joined with one space).
@@ -15,8 +15,8 @@
 # premium.items with those coverages' codes.
 # carriers: how many seed carriers print one of the code's names; documents: how many of the 7 seeds do.
 lob: commercial_fire
-schema_version: 1.0.0
-common_model_version: 1.1.0
+schema_version: 1.2.0
+common_model_version: 1.5.0
 code_prefix: CF_
 codes:
 - code: CF_BUILDING
@@ -91,6 +91,8 @@ codes:
   name: Personal injury liability (LS-49)
   aliases:
   - LS-49 Personal Injury Liability
+  # 1.1.0 (Leatherstocking Student Housing declarations):
+  - Personal Injury
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -99,6 +101,8 @@ codes:
   name: Automatic increase in the building limit (SM-26)
   aliases:
   - 'SM-26 Automatic Increase, RC'
+  # 1.1.0 (Leatherstocking SMP declarations): the actual cash value variant
+  - 'SM-26 Automatic Increase, ACV'
   default_limit_types:
   - other
   carriers: 1
@@ -111,3 +115,125 @@ codes:
   - other
   carriers: 1
   documents: 7
+# 1.1.0 (26 October 2026): rows printed by the Leatherstocking Student Housing (SF-10D Deluxe Plan), Special Multi-Peril (SMP) and Manufacturers and Contractors
+# declarations that no code of the line named. A row printed with *** (included, no limit) has no default limit type.
+# Premium rows (Claim Free Renewal Credit, Leatherstocking Credit, Student Housing Surcharge, the OLT / M&C classification rows) and form rows (SF-124,
+# SF-312A Special Limitations, the SF-10D note) are not coverages and get no code.
+- code: CF_RELATED_PRIVATE_STRUCTURE
+  name: Related private structure (Coverage A)
+  aliases:
+  - Coverage A - Related Private Structure
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: CF_ACCOUNTS_RECEIVABLE
+  name: Accounts receivable
+  aliases:
+  - Accounts Receivable
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: CF_ADDITIONAL_EXPENSE
+  name: Additional expense
+  aliases:
+  - Additional Expense
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: CF_EMPLOYEE_DISHONESTY
+  name: Employee dishonesty
+  aliases:
+  - Employee Dishonesty
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: CF_SIGNS
+  name: Exterior signs
+  aliases:
+  - Exterior Signs
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: CF_LOSS_OF_RENTS
+  name: Loss of income / rents (included months)
+  aliases:
+  - Loss of Income/Rents - 6 Months Included
+  # 1.2.0 (27 October 2026): Leatherstocking Student Housing
+  - SF-312A - Loss of Income/Rents - Special Limitations
+  default_limit_types: []
+  carriers: 1
+- code: CF_MONEY_SECURITIES
+  name: Money and securities
+  aliases:
+  - Money and Securities
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: CF_SEASONAL_VARIATION
+  name: Seasonal variation
+  aliases:
+  - Seasonal Variation
+  default_limit_types: []
+  carriers: 1
+- code: CF_SPRINKLER_LEAKAGE
+  name: Sprinkler leakage
+  aliases:
+  - Sprinkler Leakage
+  default_limit_types: []
+  carriers: 1
+- code: CF_VALUABLE_PAPERS
+  name: Valuable papers and records
+  aliases:
+  - Valuable Papers and Records
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: CF_PROPERTY_AWAY
+  name: Business property while away from the insured premises
+  aliases:
+  - While Away From Insured Premises
+  - SF-133 Business Property - While Away From The Insured Premise
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: CF_PRODUCTS_COMPLETED_OPS
+  name: Products and completed operations (Coverage N)
+  aliases:
+  - LS-43 Products/Completed Operations
+  - Coverage N - Products (Each Occurrence)
+  - Coverage N - Products (Products/Completed Operations Aggregate)
+  default_limit_types:
+  - per_occurrence
+  - products_completed_ops_aggregate
+  carriers: 1
+- code: CF_BUILDING_VMM
+  name: Building - vandalism and malicious mischief
+  aliases:
+  - Coverage A - Building - Vandalism
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: CF_LOSS_OF_RENTS_BUILDING
+  name: Loss of rents - building (SF-46)
+  aliases:
+  - SF-46 Loss of Rents - Building
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+- code: X_EQUIPMENT_BREAKDOWN
+  name: Equipment breakdown
+  aliases:
+  - Equipment Breakdown
+  - SF-345 Equipment Breakdown
+  - SF-345 - Equipment Breakdown
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  shared: true
+# 1.2.0 (27 October 2026): Leatherstocking Student Housing form row.
+- code: CF_ROOF_SURFACE_ACV
+  name: Roof surface actual cash value loss settlement (SF-124)
+  aliases:
+  - SF-124 Roof Surface Actual Cash Value Loss Settlement
+  default_limit_types: []
+  carriers: 1

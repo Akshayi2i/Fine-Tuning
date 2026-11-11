@@ -6,7 +6,7 @@
 # carriers: how many of the line's carriers print the coverage. replaces_draft_codes: codes used by the
 # engine-test seed golds for the same coverage; those golds are re-coded at seed review (see CHANGELOG).
 lob: homeowners
-schema_version: 1.0.0
+schema_version: 1.1.0
 common_model_version: 1.0.0
 code_prefix: HO_
 codes:
@@ -77,6 +77,8 @@ codes:
   - Coverage B -- Related Private Structures
   - Other Structures
   - Other permanent structures
+  - Coverage B - Private Structures
+  - Increased Limit (Coverage B)
   default_limit_types:
   - per_occurrence
   carriers: 10
@@ -151,6 +153,15 @@ codes:
   aliases:
   - Incidental Business Pursuits -Including Products Liability
   default_limit_types: []
+  carriers: 1
+- code: HO_INLAND_FLOOD
+  name: Inland Flood
+  aliases:
+  - Inland Flood
+  - FL-FC Inland Flood
+  default_limit_types:
+  - per_occurrence
+  - sublimit
   carriers: 1
 - code: HO_LANDLORD_FURNISHINGS
   name: Landlord Furnishings
@@ -285,6 +296,7 @@ codes:
   aliases:
   - FL-342 Underground Utility Line
   - Underground Utility Line
+  - ML-342 Underground Utility Line
   default_limit_types:
   - per_occurrence
   carriers: 2
@@ -342,6 +354,9 @@ codes:
   - Home Systems Protection
   - MM HO 5346 09 19 Equipment Breakdown Enhancement Endorsement
   - Mech/Elec/Pressure Sys
+  - ML-345 Equipment Breakdown
+  - ML-346B Equipment Breakdown
+  - ML-346B Equipment Breakdown Enhancement
   default_limit_types:
   - per_occurrence
   shared: true
@@ -373,6 +388,7 @@ codes:
   - 'D: LOSS OF USE'
   - Loss Of Use (Cov. D)
   - Increased Limit (Coverage D)
+  - 'Coverage D - Additional Living Expense & Loss of Rent'
   default_limit_types:
   - per_occurrence
   - other
@@ -406,6 +422,9 @@ codes:
   - Ordinance or Law
   - Ordinance Or Law
   - Ordinance and Law
+  - ML-360 Ordinance or Law
+  - FL-360 Ordinance or Law
+  - ML-360 Ordinance and Law
   default_limit_types:
   - per_occurrence
   - sublimit

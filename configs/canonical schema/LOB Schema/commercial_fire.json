@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Fideon canonical schema - commercial_fire (policy_check)",
-  "description": "SPEC_21 section 4 canonical schema for commercial_fire, commercial fire (L1 code commercial_fire), composing common_model.json 1.1.0 by $ref: the envelope plus the locations and buildings blocks the property lines use. Built from the seven single-LOB 'Commercial Fire and Liability' declarations of the source data (one carrier, read in place). A commercial fire policy insures the building and business property against named perils (Section I) and grants premises liability and medical payments beside them (Section II); both are coverages of this line. No LOB block.",
+  "description": "SPEC_21 section 4 canonical schema for commercial_fire, commercial fire (L1 code commercial_fire), composing common_model.json 1.5.0 by $ref: the envelope plus the locations and buildings blocks the property lines use. Built from the seven single-LOB 'Commercial Fire and Liability' declarations of the source data (one carrier, read in place). A commercial fire policy insures the building and business property against named perils (Section I) and grants premises liability and medical payments beside them (Section II); both are coverages of this line. No LOB block.",
   "fideon:doc_type": "policy_check",
   "fideon:lob": "commercial_fire",
   "fideon:lob_code": "TBD",
   "fideon:layout_family": "property_pkg",
-  "fideon:schema_version": "1.0.0",
-  "fideon:common_model_version": "1.1.0",
-  "fideon:status": "SPEC_21 schema of a new line (10 October 2026): the project owner ruled that the 'Commercial Fire and Liability' product is a line of business of its own (CR-BOPPR-06) and approved new canonical schemas. Built from 7 seed documents of 1 carrier; the seed golds drafted against it are DRAFT, pending reviewer sign-off.",
+  "fideon:schema_version": "1.2.0",
+  "fideon:common_model_version": "1.5.0",
+  "fideon:status": "SPEC_21 schema of a new line (10 October 2026): the project owner ruled that the 'Commercial Fire and Liability' product is a line of business of its own (CR-BOPPR-06) and approved new canonical schemas. Built from 7 seed documents of 1 carrier; the seed golds drafted against it are DRAFT, pending reviewer sign-off. 1.1.0 (26 October 2026, additive): fifteen coverage codes and four aliases for the rows printed by the Leatherstocking Student Housing, Special Multi-Peril and Manufacturers and Contractors declarations. 1.2.0 (27 October 2026, additive, commercial-line template audit): new code CF_ROOF_SURFACE_ACV (form row, no limit); alias `SF-312A - Loss of Income/Rents - Special Limitations` (CF_LOSS_OF_RENTS); the block `rating_exposures` is adopted (the rating-information lines: class code, description, exposure basis and amount). Composes common model 1.5.0 (optional fields on existing blocks). Nothing else is removed or renamed.",
   "fideon:built_from": {
     "seed_golds": 7,
     "carriers": [
@@ -24,11 +24,14 @@
   },
   "fideon:blocks_used": [
     "locations",
-    "buildings"
+    "buildings",
+    "rating_exposures"
   ],
   "fideon:lob_block": "None. Every concept the seeds print has a home in the envelope or a common-model building block (SPEC_21 4.2.4). The liability rows of Section II (Coverage L, M, the LS-49 personal injury option) are coverages of this line: Coverage M uses the shared X_MED_PAY; Coverage L and LS-49 use CF_ codes until the shared liability codes of CR-BOPPR-01 exist (CHANGE_REQUESTS_commercial_fire.md CR-CFIRE-01). The OLT classification premiums are premium.items of those coverages.",
   "fideon:coverage_codes_file": "commercial_fire.coverage_codes.yaml",
   "fideon:coverage_codes": [
+    "CF_ACCOUNTS_RECEIVABLE",
+    "CF_ADDITIONAL_EXPENSE",
     "CF_AUTO_INCREASE",
     "CF_BPP",
     "CF_BPP_EC",
@@ -36,9 +39,23 @@
     "CF_BPP_VMM",
     "CF_BUILDING",
     "CF_BUILDING_EC",
+    "CF_BUILDING_VMM",
+    "CF_EMPLOYEE_DISHONESTY",
     "CF_LIABILITY",
+    "CF_LOSS_OF_RENTS",
+    "CF_LOSS_OF_RENTS_BUILDING",
+    "CF_MONEY_SECURITIES",
     "CF_PERSONAL_INJURY",
+    "CF_PRODUCTS_COMPLETED_OPS",
+    "CF_PROPERTY_AWAY",
+    "CF_RELATED_PRIVATE_STRUCTURE",
     "CF_REPLACEMENT_COST",
+    "CF_ROOF_SURFACE_ACV",
+    "CF_SEASONAL_VARIATION",
+    "CF_SIGNS",
+    "CF_SPRINKLER_LEAKAGE",
+    "CF_VALUABLE_PAPERS",
+    "X_EQUIPMENT_BREAKDOWN",
     "X_MED_PAY"
   ],
   "fideon:mandatory_fields": [
@@ -183,6 +200,9 @@
     },
     "buildings": {
       "$ref": "../common/common_model.json#/$defs/buildings"
+    },
+    "rating_exposures": {
+      "$ref": "../common/common_model.json#/$defs/rating_exposures"
     },
     "additional_fields": {
       "$ref": "../common/common_model.json#/$defs/additional_fields"

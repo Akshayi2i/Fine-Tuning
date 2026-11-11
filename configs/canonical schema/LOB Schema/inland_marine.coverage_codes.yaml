@@ -6,8 +6,8 @@
 # the schedule's total (limit_type scheduled_total) or its maximum limit.
 # carriers: how many of the 4 seed carrier folders print one of the code's names.
 lob: inland_marine
-schema_version: 2.0.0
-common_model_version: 1.1.0
+schema_version: 2.1.0
+common_model_version: 1.5.0
 code_prefix: IM_
 codes:
 - code: IM_COMMERCIAL_ARTICLES
@@ -67,3 +67,11 @@ codes:
   - other
   carriers: 1
   shared: true
+# 2.1.0 (27 October 2026): Philadelphia Fitness package inland marine part.
+- code: IM_BUSINESS_PERSONAL_PROPERTY
+  name: Business personal property (inland marine part)
+  aliases:
+  - Business Personal Property
+  default_limit_types:
+  - per_occurrence
+  carriers: 1

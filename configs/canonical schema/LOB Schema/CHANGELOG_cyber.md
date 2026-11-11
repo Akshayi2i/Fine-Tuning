@@ -1,5 +1,21 @@
 # Changelog - cyber canonical schema
 
+## 2.2.0 - 27 October 2026 (additive; commercial-line template audit: State National / CFC and Coalition declarations)
+
+Composes common model 1.5.0 (was 1.1.0); the common model's new optional fields are available to this line without a path change.
+
+- Alias `ALL INSURING CLAUSES COMBINED` (CY_POLICY_AGGREGATE); the block `participating_insurers` is adopted (Coalition Item 7 quota-share table: insurer, policy number, share percent, limit, premium).
+- Derived files regenerated: `prompt/policy_check/cyber.prompt.json`, `prompt/sections/cyber/*`, `prompt/manifest.json`, the FSM hash fixture.
+
+## 2.1.0 - 26 October 2026 (additive; State National / CFC cyber declarations)
+
+Printed names only (`SECTION x: <name>` rows, aggregate limit and deductible each); nothing is removed or renamed, the common model (1.1.0) is untouched, no field change.
+
+- **Aliases on existing codes:** `INCIDENT RESPONSE COSTS` (`CY_EVENT_RESPONSE`), `CRISIS COMMUNICATION COSTS` (`CY_CRISIS_MANAGEMENT`), `EXTORTION` (`CY_EXTORTION`), `AUTHORIZED PUSH PAYMENT FRAUD` (`CY_SOCIAL_ENGINEERING`), `UNAUTHORIZED USE OF COMPUTER RESOURCES` (`CY_SERVICE_FRAUD`), `SYSTEM DAMAGE AND RECTIFICATION COSTS` (`CY_DIGITAL_ASSET_RESTORATION`), `INCOME LOSS AND EXTRA EXPENSE` (`CY_BUSINESS_INTERRUPTION`), `DEPENDENT BUSINESS INTERRUPTION` (`CY_CONTINGENT_BI`), `CLAIM PREPARATION COSTS` (`CY_PROOF_OF_LOSS`), `PRIVACY LIABILITY` (`CY_PRIVACY_LIABILITY`), `REGULATORY INVESTIGATION COSTS` (`CY_REGULATORY`), `MERCHANT SERVICES LIABILITY` (`CY_PCI`), `DEFAMATION` and `INTELLECTUAL PROPERTY RIGHTS INFRINGEMENT` (`CY_MEDIA`), `ELECTRONIC THEFT OF YOUR FINANCIAL ASSETS` (`CY_COMPUTER_FRAUD`). `NETWORK SECURITY LIABILITY` and `ALL INSURING CLAUSES COMBINED` were already read.
+- **New codes (10, default `aggregate`):** `CY_LEGAL_REGULATORY_COSTS`, `CY_FORENSIC_COSTS`, `CY_PRIVACY_BREACH_MANAGEMENT`, `CY_THIRD_PARTY_BREACH_MANAGEMENT`, `CY_POST_BREACH_REMEDIATION`, `CY_THIRD_PARTY_FUNDS_THEFT`, `CY_PERSONAL_FINANCIAL_ASSETS_THEFT` (the two thefts get codes of their own: third party funds and personal assets are not the insured's computer fraud; their printed names were abbreviated in the request and are written out in full), `CY_TELEPHONE_HACKING`, `CY_MANAGEMENT_LIABILITY`, `CY_TECH_EO`.
+- **Not done (needs a field):** the quota-share insurer table of Coalition's Item 7 (`policy.participating_insurers[]`). `cyber.json` has no LOB block and adding one changes `lob_schema_map.yaml` `blocks_used`; see the report to the common-model owner.
+- **Derived files regenerated:** `prompt/policy_check/cyber.prompt.json`, `prompt/sections/cyber/*`, `prompt/manifest.json`, the FSM hash fixture, the fine-tuning parity fixtures (re-derived locally; the fine-tuning repository must regenerate from the same canonical files).
+
 ## 2.0.0 - 11 October 2026 (SPEC_21 Phase 2; draft for the project owner's approval)
 
 First SPEC_21 schema of the line (cyber and privacy liability, L1 code and schema id `cyber`). It replaces the

@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Fideon canonical schema - inland_marine (policy_check)",
-  "description": "SPEC_21 section 4 canonical schema for inland_marine, commercial inland marine (L1 code inland_marine), composing common_model.json 1.1.0 by $ref: the envelope plus the locations and scheduled_items blocks. Built from the 10 single-LOB documents of the source-data inmrc folder (4 folders, read in place, all with a native text layer): Hartford's commercial articles (cameras) policies, Leatherstocking's contractors equipment declarations, Arch's apparatus and equipment declarations (McNeil & Company) and two agency-system prints of a scheduled equipment policy (RT Specialty). Every field of the pre-SPEC_21 inland_marine.json (inland_marine.crosswalk.yaml). No LOB block.",
+  "description": "SPEC_21 section 4 canonical schema for inland_marine, commercial inland marine (L1 code inland_marine), composing common_model.json 1.5.0 by $ref: the envelope plus the locations and scheduled_items blocks. Built from the 10 single-LOB documents of the source-data inmrc folder (4 folders, read in place, all with a native text layer): Hartford's commercial articles (cameras) policies, Leatherstocking's contractors equipment declarations, Arch's apparatus and equipment declarations (McNeil & Company) and two agency-system prints of a scheduled equipment policy (RT Specialty). Every field of the pre-SPEC_21 inland_marine.json (inland_marine.crosswalk.yaml). No LOB block.",
   "fideon:doc_type": "policy_check",
   "fideon:lob": "inland_marine",
   "fideon:lob_code": "TBD",
   "fideon:layout_family": "property_pkg",
-  "fideon:schema_version": "2.0.0",
-  "fideon:common_model_version": "1.1.0",
-  "fideon:status": "SPEC_21 Phase 2 schema (10 October 2026), built from 10 seed documents of 4 carrier folders; replaces the pre-SPEC_21 inland_marine.json. Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off.",
+  "fideon:schema_version": "2.1.0",
+  "fideon:common_model_version": "1.5.0",
+  "fideon:status": "SPEC_21 Phase 2 schema (10 October 2026), built from 10 seed documents of 4 carrier folders; replaces the pre-SPEC_21 inland_marine.json. Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off. 2.1.0 (27 October 2026, additive, commercial-line template audit): new code IM_BUSINESS_PERSONAL_PROPERTY (default per_occurrence). Composes common model 1.5.0 (optional fields on existing blocks). Nothing else is removed or renamed.",
   "fideon:built_from": {
     "seed_golds": 10,
     "carriers": [
@@ -33,6 +33,7 @@
   "fideon:lob_block": "None. A covered class of property is a coverage with its limit and deductible; each scheduled article, apparatus or piece of equipment is a scheduled_items[] element (description, value, serial); nothing the seeds print needs a block of its own (SPEC_21 4.2.4).",
   "fideon:coverage_codes_file": "inland_marine.coverage_codes.yaml",
   "fideon:coverage_codes": [
+    "IM_BUSINESS_PERSONAL_PROPERTY",
     "IM_COMMERCIAL_ARTICLES",
     "IM_CONTRACTORS_EQUIPMENT",
     "IM_EMERGENCY_APPARATUS",

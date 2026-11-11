@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Fideon canonical schema - auto (policy_check)",
-  "description": "SPEC_21 section 4 canonical schema for auto, commercial (business) auto (code AU), composing common_model.json 1.1.0 by $ref: the envelope plus locations (garaging), vehicles, drivers, rating_exposures (hired auto cost of hire, non-ownership employees), rating_modifiers and countersignature. Built from the labels the line's 11 single-LOB seed documents of 5 carriers print (read in place: the business auto declarations, schedules of covered autos, Items Two to Five and the forms schedules), every field of the pre-SPEC_21 auto.json 1.5.0 (auto.crosswalk.yaml) and the line's L1 registry YAMLs. No LOB block.",
+  "description": "SPEC_21 section 4 canonical schema for auto, commercial (business) auto (code AU), composing common_model.json 1.5.0 by $ref: the envelope plus locations (garaging), vehicles, drivers, rating_exposures (hired auto cost of hire, non-ownership employees), rating_modifiers and countersignature. Built from the labels the line's 11 single-LOB seed documents of 5 carriers print (read in place: the business auto declarations, schedules of covered autos, Items Two to Five and the forms schedules), every field of the pre-SPEC_21 auto.json 1.5.0 (auto.crosswalk.yaml) and the line's L1 registry YAMLs. No LOB block.",
   "fideon:doc_type": "policy_check",
   "fideon:lob": "auto",
   "fideon:lob_code": "AU",
   "fideon:layout_family": "casualty_fleet",
-  "fideon:schema_version": "2.0.0",
-  "fideon:common_model_version": "1.1.0",
-  "fideon:status": "SPEC_21 schema (10 October 2026) replacing the generated pre-SPEC_21 auto.json 1.5.0; draft for the project owner's approval. The 11 seed golds are drafted against it (DRAFT, pending reviewer sign-off).",
+  "fideon:schema_version": "2.1.0",
+  "fideon:common_model_version": "1.5.0",
+  "fideon:status": "SPEC_21 schema (10 October 2026) replacing the generated pre-SPEC_21 auto.json 1.5.0; draft for the project owner's approval. The 11 seed golds are drafted against it (DRAFT, pending reviewer sign-off). 2.1.0 (27 October 2026, additive, commercial-line template audit): new code AU_MANDATORY_BASIC_ECONOMIC_LOSS (default per_person); aliases `Mandatory PIP`, `Mandatory Personal Injury Protection`, `Other Necessary Expenses (per day)` (X_PIP), `Business Auto Enhancement Endorsement` (AU_COVERAGE_EXTENSION), `Combined Single Limit` (X_VEHICLE_LIABILITY). Composes common model 1.5.0 (optional fields on existing blocks). Nothing else is removed or renamed.",
   "fideon:built_from": {
     "seed_golds": 11,
     "documents_read": 11,
@@ -61,7 +61,8 @@
     "AU_COVERAGE_EXTENSION",
     "AU_OTHER_AUTO_COVERAGES",
     "X_ADDITIONAL_INSURED",
-    "X_WAIVER_OF_SUBROGATION"
+    "X_WAIVER_OF_SUBROGATION",
+    "AU_MANDATORY_BASIC_ECONOMIC_LOSS"
   ],
   "fideon:mandatory_fields": [
     "carrier.name",

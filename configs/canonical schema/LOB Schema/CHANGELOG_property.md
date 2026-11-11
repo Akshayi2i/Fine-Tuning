@@ -1,5 +1,13 @@
 # Changelog - property canonical schema
 
+## 2.1.0 - 27 October 2026 (additive; commercial-line template audit: USLI commercial property coverage part)
+
+Composes common model 1.5.0 (was 1.1.0); the common model's new optional fields are available to this line without a path change.
+
+- New code PR_CONDO_COVERED_PROPERTY; alias `Business Income with Extra Expense` (PR_LOSS_OF_INCOME).
+- Westchester declarations (covgate audit): new codes `PR_BUILDING_IMPROVEMENTS` (`Renovations/Building Improvements`, printed over two lines), `PR_EB_PERISHABLE_GOODS`, `PR_EB_CFC_REFRIGERANTS`, `PR_EB_COMPUTER_EQUIPMENT`, `PR_EB_HAZARDOUS_SUBSTANCE`, `PR_EB_DATA_RESTORATION`; aliases `Total Limit per Accident` (`X_EQUIPMENT_BREAKDOWN`), `Demolition and Increased Cost of Construction` (`X_ORDINANCE_LAW`), `Newly Acquired or Constructed Property - Buildings` (`PR_NEWLY_ACQUIRED_BUILDING`); the block `countersignature` is adopted.
+- Derived files regenerated: `prompt/policy_check/property.prompt.json`, `prompt/sections/property/*`, `prompt/manifest.json`, the FSM hash fixture.
+
 ## Aliases - 15 October 2026 (Dryden Mutual commercial application; no field or code change)
 
 `property.coverage_codes.yaml`, the property part of Dryden Mutual's Commercial Application (read by `dryden_mutual/property.yaml`): `PR_BUILDING` + `Building Coverage`; `PR_BPP` + `Contents Coverage`; `PR_LOSS_OF_INCOME` + `Loss of Earnings`. The code list, `property.json` and the prompt schema are unchanged.

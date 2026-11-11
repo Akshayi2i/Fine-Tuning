@@ -1,5 +1,13 @@
 # Changelog - homeowners canonical schema
 
+## 1.1.0 - 26 October 2026 (new coverage codes; minor version)
+
+`homeowners.coverage_codes.yaml` and `homeowners.json` (`fideon:coverage_codes`): one new code, `HO_INLAND_FLOOD` (Inland Flood; aliases `Inland Flood`, `FL-FC Inland Flood`; default limit types `per_occurrence`, `sublimit`), read by `leatherstocking/homeowners.yaml` (the Inland Flood optional coverage with its basement-property and additional-living-expense sublimits). `fideon:schema_version` 1.0.0 -> 1.1.0. No field, crosswalk or `homeowners.fields.md` change; the common model is untouched. The prompt schema, section files and the fine-tuning parity fixtures are regenerated; the fine-tuning repository must regenerate from the same canonical files.
+
+## Aliases - 26 October 2026 (registry printed names; no version change)
+
+`homeowners.coverage_codes.yaml`: aliases only, printed names read by the Leatherstocking registry: `HO_COV_B` + `Coverage B - Private Structures`, `Increased Limit (Coverage B)`; `X_LOSS_OF_USE` + `Coverage D - Additional Living Expense & Loss of Rent`; `HO_UNDERGROUND_UTILITY_LINE` + `ML-342 Underground Utility Line`; `X_EQUIPMENT_BREAKDOWN` + `ML-345 Equipment Breakdown`, `ML-346B Equipment Breakdown`, `ML-346B Equipment Breakdown Enhancement`; `X_ORDINANCE_LAW` + `ML-360 Ordinance or Law`, `ML-360 Ordinance and Law`, `FL-360 Ordinance or Law`. No code, field or default limit type changes; `homeowners.json` and the prompt schema are unchanged (`tools/build_prompt_schemas.py --check`: current).
+
 ## Aliases - 14 October 2026 (Madison Mutual homeowners declarations; no field change)
 
 `homeowners.coverage_codes.yaml`: one alias, the coverage name as the Madison Mutual Insurance Company homeowners declarations print it (read by `madison_mutual/homeowners.yaml`, GAP-A): `HO_CREDIT_CARD_FORGERY` + `HO 2530 01 06 Incidental Property Coverages - Higher Limits - Credit Card, Electronic Fund Transfer Card Or Access Device, Forgery And Counterfeit Money` (the form's coverage row, its three printed lines joined). No new code; `homeowners.json` and the prompt schema are unchanged (`tools/build_prompt_schemas.py --check`: homeowners current).

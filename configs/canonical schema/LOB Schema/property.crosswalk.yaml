@@ -9,7 +9,7 @@
 
 lob: property
 from_schema: "1.5.0"
-to_schema: "2.0.0"
+to_schema: "2.1.0"
 paths:
   document.document_type: {drop: "the document kind L1 computes (dec page, renewal...), not a printed value; transport metadata (`document_kind`)"}
   document.document_title_as_stated: {new: "document.title"}

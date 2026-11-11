@@ -5,7 +5,7 @@
 # Each entry names the registry fields that declare it. Applied by tools/registry_migrate.py --lob dwelling_fire.
 lob: dwelling_fire
 from_schema: "1.5.0"
-to_schema: "1.0.0"
+to_schema: "1.1.0"
 paths:
   # leatherstocking/dwelling_fire.yaml:policy_subject_to_the_following_forms_and_endorsements
   additional_fields.forms_sentence: {overflow: "forms_sentence"}

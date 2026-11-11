@@ -130,7 +130,7 @@ def test_a_sliced_key_resolves_its_file_on_the_base():
     assert schemas.slice_of("policy:gl") is None
 
     # A self-contained file's version, and a common-model bundle's.
-    for lob, version in (("equipment_breakdown", "1.5.0"), ("gl", f"3.2.0+common.{_COMMON_VERSION}")):
+    for lob, version in (("equipment_breakdown", "1.5.0"), ("gl", f"3.3.0+common.{_COMMON_VERSION}")):
         for group in groups_for(lob):
             assert schemas.schema_version("policy", None, lob, group) == version
             assert schemas.is_canonical("policy", None, lob)

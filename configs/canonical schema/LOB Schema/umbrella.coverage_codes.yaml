@@ -6,7 +6,7 @@
 # underlying_insurance[] elements, not coverages; their coverage_code is one of the UM_UNDERLYING_ codes.
 # carriers: how many of the seed carrier folders print one of the code's names.
 lob: umbrella
-schema_version: 2.0.0
+schema_version: 2.1.0
 common_model_version: 1.1.0
 code_prefix: UM_
 codes:
@@ -31,6 +31,23 @@ codes:
   - Limit of Liability
   - Excess Liability
   default_limit_types:
+  - aggregate
+  carriers: 1
+- code: UM_UNDERLYING_AUTO_LIABILITY
+  name: 'Underlying auto liability (an underlying_insurance[] coverage_code)'
+  aliases:
+  - Automobile Liability
+  - Auto Liability
+  default_limit_types:
+  - combined_single
+  carriers: 1
+- code: UM_UNDERLYING_EMPLOYERS_LIABILITY
+  name: 'Underlying employers liability (an underlying_insurance[] coverage_code)'
+  aliases:
+  - Employers Liability
+  - 'Employer''s Liability'
+  default_limit_types:
+  - per_accident
   - aggregate
   carriers: 1
 - code: UM_UNDERLYING_GENERAL_LIABILITY

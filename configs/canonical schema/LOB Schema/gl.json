@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Fideon canonical schema - gl (policy_check)",
-  "description": "SPEC_21 section 4 canonical schema for gl, commercial general liability (code GL), composing common_model.json 1.1.0 by $ref: the envelope plus locations, rating_exposures (classifications), claims_made_terms and countersignature. Built from the labels the line's real CGL documents print (105 documents of 23 carriers, read in place: the 49 seed documents of the source-data cgl folder and 56 CGL documents of the policy_CGL corpus), every field of the pre-SPEC_21 gl.json 1.5.0 (gl.crosswalk.yaml) and the line's L1 registry YAMLs. Seed golds are not signed off yet. No LOB block.",
+  "description": "SPEC_21 section 4 canonical schema for gl, commercial general liability (code GL), composing common_model.json 1.5.0 by $ref: the envelope plus locations, rating_exposures (classifications), claims_made_terms and countersignature. Built from the labels the line's real CGL documents print (105 documents of 23 carriers, read in place: the 49 seed documents of the source-data cgl folder and 56 CGL documents of the policy_CGL corpus), every field of the pre-SPEC_21 gl.json 1.5.0 (gl.crosswalk.yaml) and the line's L1 registry YAMLs. Seed golds are not signed off yet. No LOB block.",
   "fideon:doc_type": "policy_check",
   "fideon:lob": "gl",
   "fideon:lob_code": "GL",
   "fideon:layout_family": "casualty_fleet",
-  "fideon:schema_version": "3.2.0",
-  "fideon:common_model_version": "1.4.0",
-  "fideon:status": "SPEC_21 schema built from real CGL documents and the legacy gl.json; 3.0.0 (8 October 2026) adopts common model 1.1.0: the shared X_ codes for additional insured, primary and noncontributory and waiver of subrogation (CR-GL-03), and fields for the concepts 2.0.0 carried as additional_fields (CR-GL-02, CR-GL-12). Draft for the owner's approval; the CGL seed golds are drafted against it once approved. 3.1.0 (23 October 2026) is additive: two coverage codes (GL_SUPPLEMENTARY_PAYMENTS, GL_OWNERS_CONTRACTORS_PROTECTIVE) and printed-name aliases from the recurring wording of the V3 originals; nothing removed or renamed, no new field (the concepts two or more lines print are requested from the common model, CHANGE_REQUESTS_gl.md CR-GL-22). 3.2.0 (26 October 2026, additive): coverage-code names and codes for the coverage rows printed by the G1 scanned and hybrid seed documents (change request approved by the project owner). No path, code or alias is removed or renamed.",
+  "fideon:schema_version": "3.3.0",
+  "fideon:common_model_version": "1.5.0",
+  "fideon:status": "SPEC_21 schema built from real CGL documents and the legacy gl.json; 3.0.0 (8 October 2026) adopts common model 1.1.0: the shared X_ codes for additional insured, primary and noncontributory and waiver of subrogation (CR-GL-03), and fields for the concepts 2.0.0 carried as additional_fields (CR-GL-02, CR-GL-12). Draft for the owner's approval; the CGL seed golds are drafted against it once approved. 3.1.0 (23 October 2026) is additive: two coverage codes (GL_SUPPLEMENTARY_PAYMENTS, GL_OWNERS_CONTRACTORS_PROTECTIVE) and printed-name aliases from the recurring wording of the V3 originals; nothing removed or renamed, no new field (the concepts two or more lines print are requested from the common model, CHANGE_REQUESTS_gl.md CR-GL-22). 3.2.0 (26 October 2026, additive): coverage-code names and codes for the coverage rows printed by the G1 scanned and hybrid seed documents (change request approved by the project owner). No path, code or alias is removed or renamed. 3.3.0 (27 October 2026, additive, commercial-line template audit): seven new codes for the property, inland marine and garage rows a contractor package prints (GL_BUILDING, GL_BUSINESS_PERSONAL_PROPERTY, GL_BPP_OFF_PREMISES, GL_LOSS_OF_INCOME, GL_CONTRACTORS_INLAND_MARINE, GL_PROPERTY_ENHANCEMENT, GL_GARAGEKEEPERS_LIABILITY); aliases `Contractor's Tools`, `Blanket Contractor's Equipment` (GL_CONTRACTORS_EQUIPMENT). Composes common model 1.5.0 (optional fields on existing blocks). Nothing else is removed or renamed.",
   "fideon:built_from": {
     "seed_golds": 0,
     "documents_read": 105,
@@ -141,7 +141,14 @@
     "GL_UMBRELLA_LIABILITY",
     "GL_UNAUTHORIZED_CARD_USE",
     "GL_VALUABLE_PAPERS",
-    "GL_WATER_DAMAGE_OTHER_LIQUID"
+    "GL_WATER_DAMAGE_OTHER_LIQUID",
+    "GL_BUILDING",
+    "GL_BUSINESS_PERSONAL_PROPERTY",
+    "GL_BPP_OFF_PREMISES",
+    "GL_LOSS_OF_INCOME",
+    "GL_CONTRACTORS_INLAND_MARINE",
+    "GL_PROPERTY_ENHANCEMENT",
+    "GL_GARAGEKEEPERS_LIABILITY"
   ],
   "fideon:mandatory_fields": [
     "carrier.name",

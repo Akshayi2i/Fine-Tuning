@@ -6,7 +6,7 @@
   "fideon:lob": "homeowners",
   "fideon:lob_code": "HO",
   "fideon:layout_family": "personal_lines",
-  "fideon:schema_version": "1.0.0",
+  "fideon:schema_version": "1.1.0",
   "fideon:common_model_version": "1.1.0",
   "fideon:status": "SPEC_21 Phase 2 schema, built from 37 seed golds of 11 carriers; field list awaiting project-owner approval",
   "fideon:built_from": {
@@ -52,6 +52,7 @@
     "HO_FIRE_DEPARTMENT_SERVICE_CHARGE",
     "HO_FUNGI_REMEDIATION",
     "HO_INCIDENTAL_BUSINESS",
+    "HO_INLAND_FLOOD",
     "HO_LANDLORD_FURNISHINGS",
     "HO_LOSS_ASSESSMENT",
     "HO_LOSS_ASSESSMENT_LIABILITY",

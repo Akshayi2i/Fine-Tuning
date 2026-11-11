@@ -10,7 +10,7 @@
 
 lob: boppr
 from_schema: "1.5.0"
-to_schema: "2.3.0"
+to_schema: "2.6.0"
 paths:
   document.document_type: {drop: "the document kind L1 computes (dec page, renewal...), not a printed value; transport metadata (`document_kind`)"}
   document.document_title_as_stated: {new: "document.title"}

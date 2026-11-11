@@ -6,7 +6,7 @@
   "fideon:lob": "umbrella",
   "fideon:lob_code": "UM",
   "fideon:layout_family": "casualty_fleet",
-  "fideon:schema_version": "2.0.0",
+  "fideon:schema_version": "2.1.0",
   "fideon:common_model_version": "1.1.0",
   "fideon:status": "SPEC_21 Phase 2 schema (11 October 2026), built from 3 seed documents of 2 carrier folders; replaces the pre-SPEC_21 umbrella.json 1.6.0. Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off.",
   "fideon:built_from": {
@@ -33,6 +33,8 @@
   "fideon:coverage_codes": [
     "UM_EXCESS_LIABILITY",
     "UM_UMBRELLA_LIABILITY",
+    "UM_UNDERLYING_AUTO_LIABILITY",
+    "UM_UNDERLYING_EMPLOYERS_LIABILITY",
     "UM_UNDERLYING_FOLLOWED",
     "UM_UNDERLYING_GENERAL_LIABILITY",
     "UM_UNDERLYING_LAYER",

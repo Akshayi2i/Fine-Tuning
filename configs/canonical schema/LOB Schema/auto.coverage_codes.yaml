@@ -7,8 +7,8 @@
 # lines uses its X_ code (common_model.json fideon:shared_coverage_codes); shared: true marks those.
 # carriers: how many of the 5 carriers print the coverage.
 lob: auto
-schema_version: 2.0.0
-common_model_version: 1.1.0
+schema_version: 2.1.0
+common_model_version: 1.5.0
 code_prefix: AU_
 codes:
 - code: X_VEHICLE_LIABILITY
@@ -20,6 +20,10 @@ codes:
   - Liability To Others
   - Liability To Others-Incl Supplemental Spousal
   - Bodily Injury And Property Damage Liability
+  # 2.1.0: Main Street America vehicle block (the liability limit on its own row)
+  - Combined Single Limit
+  # 30 October 2026 (Liberty Mutual Item Two, the name as printed; aliases only):
+  - Liability Insurance
   default_limit_types:
   - combined_single
   - per_person
@@ -47,6 +51,15 @@ codes:
   - Personal Injury Protection (or equivalent No Fault Coverage)
   - Mandatory Personal Injury Protection
   - PIP
+  # 26 October 2026 (Main Street America; the limits printed under PIP / O.B.E.L., aliases only):
+  - Death Benefit
+  - Maximum Monthly Work Loss
+  - Other Necessary Expenses
+  # 2.1.0: Guard and Liberty Mutual NY declarations
+  - Mandatory PIP
+  - Other Necessary Expenses (per day)
+  # 30 October 2026 (Liberty Mutual Item Two, the name as printed over two rows; aliases only):
+  - Personal Injury Protection or Equivalent No-fault Coverage - By State
   default_limit_types:
   - per_person
   - other
@@ -63,6 +76,8 @@ codes:
   - Added Personal Injury Protection
   - Added Personal Injury Protection (or equivalent added No-Fault coverage)
   - Additional PIP (or equivalent added No Fault Coverage)
+  # 30 October 2026 (Liberty Mutual Item Two, the name as printed over two rows; aliases only):
+  - Added Personal Injury Protection or Equivalent Added No-fault Coverage - By State
   default_limit_types:
   - per_person
   - sublimit
@@ -76,6 +91,8 @@ codes:
   - Optional Basic Economic Loss Coverage
   - OBEL
   - Optional Basic Economic Loss (New York only)
+  # 26 October 2026 (Main Street America, aliases only):
+  - Optional Basic Economic Loss (O.B.E.L.)
   default_limit_types:
   - per_person
   carriers: 5
@@ -121,6 +138,10 @@ codes:
   - Supplementary Uninsured/Underinsured Motorists (SUM)
   - Supplementary Uninsured/Underinsured Motorists Coverage
   - Supp UM/UIM
+  # 26 October 2026 (Main Street America, Guard; aliases only):
+  - Supplementary Uninsured and Underinsured
+  - Supplementary Uninsured and Underinsured Motorists (SUM)
+  - Supplementary Uninsured/ Underinsured Motorists Coverage (SUM)
   default_limit_types:
   - combined_single
   - per_person
@@ -134,6 +155,8 @@ codes:
   - Comprehensive Coverage
   - Physical Damage - Comprehensive
   - Comp
+  # 26 October 2026 (Guard CA DS 03 NY schedule, aliases only):
+  - Physical Damage Comprehensive Coverage
   default_limit_types: []
   shared: true
   carriers: 5
@@ -165,6 +188,8 @@ codes:
   - Physical Damage Towing and Labor
   - Roadside Assistance
   - Roadside
+  # 30 October 2026 (Liberty Mutual Item Two, the name as printed; aliases only):
+  - Towing and Labor Costs
   default_limit_types:
   - per_disablement
   shared: true
@@ -202,6 +227,9 @@ codes:
   aliases:
   - Non-Ownership Liability
   - Schedule for Non-Ownership Liability
+  # 30 October 2026 (Liberty Mutual / Merchants Mutual Item Five, the named insured's business printed as the
+  # coverage's name, wrapped over three rows; aliases only):
+  - Other than Garage Service Operations and Other Than Social Service Agencies
   default_limit_types: []
   carriers: 5
   note: 'Item Five; the number of employees and the premium are a rating_exposures[] row (CR-AU-02).'
@@ -226,6 +254,10 @@ codes:
   aliases:
   - Drive Assured
   - Drive Assured Extension Endorsement
+  # 26 October 2026 (Main Street America, aliases only):
+  - Business Auto Broad Form Endorsement
+  # 2.1.0: Liberty Mutual
+  - Business Auto Enhancement Endorsement
   default_limit_types: []
   carriers: 1
   note: 'A carrier''s package of auto coverage extensions sold as one endorsement with its own premium (Preferred Mutual PMCA9505 Drive Assured).'
@@ -239,6 +271,8 @@ codes:
   name: Additional insured
   aliases:
   - Blanket Additional Insured
+  # 26 October 2026 (Main Street America, aliases only):
+  - Additional Insured When Required by Contract
   default_limit_types: []
   shared: true
   carriers: 1
@@ -246,6 +280,16 @@ codes:
   name: Waiver of subrogation
   aliases:
   - Blanket Waiver of Subrogation
+  # 26 October 2026 (Main Street America, aliases only):
+  - Blanket Waiver of Subrogation Endorsement
   default_limit_types: []
   shared: true
+  carriers: 1
+# 2.1.0 (27 October 2026): Liberty Mutual NY declarations (the basic part of the PIP premium).
+- code: AU_MANDATORY_BASIC_ECONOMIC_LOSS
+  name: Mandatory basic economic loss (New York)
+  aliases:
+  - Mandatory Basic Economic Loss
+  default_limit_types:
+  - per_person
   carriers: 1

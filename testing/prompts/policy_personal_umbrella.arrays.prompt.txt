@@ -113,6 +113,11 @@ Coverage
   coinsurance_percent: percent - Coinsurance percentage that applies to the coverage.
   form_refs: [string] - Form numbers printed with this coverage that grant or modify it. Printed values: each exactly as printed, as a plain string.
   covered_auto_symbols: [text] - ISO covered-auto symbols printed against the coverage (1, 2, 7, 8, 9...). Business auto, garage, truckers and package auto parts.
+  waiting_period: text - Waiting period or time deductible of the coverage, as printed ('72 hours').
+  period_of_restoration: text - Period of restoration or maximum duration of the coverage, as printed ('12 months').
+  extended_period: text - Extended period of indemnity or extended business income days, as printed.
+  qualifier: text - Printed qualifier of the coverage row that has no typed home ('/48 HOURS', 'per day').
+  inflation_guard_percent: percent - Inflation guard percentage that applies to the coverage.
 Deductible - A deductible, inside a coverage or in the top-level deductibles[] when it applies across coverages or perils.
   deductible_type: DeductibleType - Kind of deductible.
   amount: money - Amount of a flat deductible.
@@ -120,6 +125,7 @@ Deductible - A deductible, inside a coverage or in the top-level deductibles[] w
   percentage_basis: text - What the percentage is of, as printed (e.g. 'Coverage A limit').
   peril: text - Peril the deductible applies to (wind/hail, hurricane, all other perils).
   applies_to_coverages: [CoverageCode] - coverage_codes it applies to (top-level deductibles only).
+  description: text - Printed wording of a deductible that has no amount ('Property Deductible' when the deductible is the policy's other deductible).
 InterestedParty
   role: one of mortgagee|loss_payee|additional_insured|lienholder|certificate_holder|additional_interest|other - Role of the party.
   rank: number - 1 for first mortgagee, 2 for second...
@@ -127,6 +133,8 @@ InterestedParty
   address: Address - Address of the interested party.
   loan_number: text - Loan or account number with the interested party.
   is_payor: yesno - True when this party pays the premium (escrow billing).
+  description: text - Printed note about the party's interest or the property it is for ('Escrow Billed', 'Description of Property: ...').
+  party_type: text - The interest or designation as printed beside the party ('Lessor of Premises', 'Vendors', 'Interest Type').
 UnderlyingPolicy
   carrier_name: text - Insurer of the underlying policy.
   policy_number: text - Policy number of the underlying policy.
@@ -176,4 +184,4 @@ zip: string - A US ZIP code. `parsed` is 5 digits or ZIP+4 ('12180-1234').
 ## Codes
 CoverageCode: PU_EXCESS_UM_UIM = Excess uninsured / underinsured motorists; PU_INCIDENTAL_OCCUPANCY = Permitted incidental occupancies; PU_LIABILITY = Personal umbrella liability
 DeductibleType: flat | percentage | waiting_period | sir | retention | franchise
-LimitType: per_occurrence | aggregate | products_completed_ops_aggregate | per_person | per_accident | property_damage | combined_single | per_claim | each_employee | policy_limit | per_location | per_item | per_day | per_disablement | sublimit | blanket | scheduled_total | other
+LimitType: per_occurrence | aggregate | products_completed_ops_aggregate | per_person | per_accident | property_damage | combined_single | per_claim | each_employee | policy_limit | per_location | per_item | per_day | per_disablement | sublimit | blanket | scheduled_total | on_premises | off_premises | duration | other

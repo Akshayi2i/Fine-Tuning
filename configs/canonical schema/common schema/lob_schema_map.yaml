@@ -25,7 +25,7 @@
 # TBD marks a value no source gives. Every TBD is listed under open_items at the end.
 
 version: "1.1.0"
-common_model_version: "1.4.0"
+common_model_version: "1.5.0"
 
 lobs:
   - code: reinsurance
@@ -264,7 +264,7 @@ lobs:
     lob_code: DO            # DECISIONS_2026-10-19 row 34
     routing_key: do
     coverage_code_prefix: TBD
-    blocks_used: [claims_made_terms, insuring_agreements]
+    blocks_used: [claims_made_terms, insuring_agreements, locations]
     seeds: pending
     source_pdfs: {folder: do, carriers: 7, files: 9}
     holdout_carrier: TBD
@@ -283,7 +283,7 @@ lobs:
     lob_code: CY            # DECISIONS_2026-10-19 row 34
     routing_key: cyber
     coverage_code_prefix: TBD
-    blocks_used: [claims_made_terms, insuring_agreements]
+    blocks_used: [claims_made_terms, insuring_agreements, participating_insurers]
     seeds: pending
     source_pdfs: {folder: cyber, carriers: 5, files: 11}
     holdout_carrier: TBD
@@ -568,7 +568,7 @@ lobs:
     lob_code: BG            # DECISIONS_2026-10-19 row 34
     routing_key: null
     coverage_code_prefix: TBD
-    blocks_used: [locations, buildings]
+    blocks_used: [locations, buildings, rating_exposures]
     seeds: pending
     source_pdfs: {folder: bopgl, carriers: 5, files: 13}
     holdout_carrier: TBD
@@ -590,7 +590,7 @@ lobs:
     lob_code: BP            # DECISIONS_2026-10-19 row 34
     routing_key: null
     coverage_code_prefix: TBD
-    blocks_used: [locations, buildings]
+    blocks_used: [locations, buildings, rating_exposures, countersignature, claims_made_terms]
     seeds: pending
     source_pdfs: {folder: boppr, carriers: 3, files: 5}
     holdout_carrier: TBD
@@ -610,7 +610,7 @@ lobs:
     lob_code: TBD
     routing_key: null
     coverage_code_prefix: TBD
-    blocks_used: [locations, buildings]
+    blocks_used: [locations, buildings, rating_exposures]
     seeds: pending
     source_pdfs: {folder: TBD, carriers: 1, files: 7}
     holdout_carrier: TBD
@@ -730,7 +730,7 @@ lobs:
     lob_code: PR
     routing_key: property
     coverage_code_prefix: PR_
-    blocks_used: [locations, buildings, rating_modifiers]
+    blocks_used: [locations, buildings, rating_modifiers, countersignature]
     seeds: pending
     source_pdfs: {folder: prop, carriers: 3, files: 11}
     holdout_carrier: TBD

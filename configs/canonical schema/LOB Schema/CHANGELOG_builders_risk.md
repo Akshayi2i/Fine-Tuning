@@ -1,5 +1,14 @@
 # Changelog - builders_risk canonical schema
 
+## 3.2.0 - 27 October 2026 (additive; commercial-line template audit)
+
+- Alias `VE - BuildersRisk` (BR_BUILDING_UNDER_CONSTRUCTION; the policy type column of the Vacant Express invoice); composes common model 1.5.0.
+- Derived files regenerated: prompt schema, sections, manifest, FSM hash fixture.
+
+## 3.1.0 - 26 October 2026 (additive; US Assure / Zurich declarations)
+
+`builders_risk.coverage_codes.yaml` and `builders_risk.json`: one new code, `BR_CONTRACT_CHANGE_ORDER` (endorsement HBIS-78 `Contract Change Order Coverage`, printed `an additional 10 % of the Limits of Insurance, not to exceed $ 70,000`; default `per_occurrence`: the request's `percentage` is not a `LimitType` value, so the 10 % row is a limit row with the printed percentage and the cap the amount). No field change; the common model (1.1.0) is untouched. Not done: `producer.field_office_name/_code` (common model field, see the report) and the one-year renewal term derivation (Python). Prompt schema, section files, hash fixture and fine-tuning parity fixtures regenerated; the fine-tuning repository must regenerate from the same canonical files.
+
 ## 3.0.0 - 14 October 2026 (SPEC_21 Phase 2; draft for the project owner's approval)
 
 First SPEC_21 schema of the line (builders risk, L1 code and schema id `builders_risk`). It replaces the pre-SPEC_21

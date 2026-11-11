@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Fideon canonical schema - directors_officers (policy_check)",
-  "description": "SPEC_21 section 4 canonical schema for directors and officers liability (L1 code directors_officers), composing common_model.json 1.1.0 by $ref: the envelope plus the claims_made_terms and insuring_agreements blocks. Built from the single-LOB D&O declarations of the source-data do folder (read in place): Wesco's private company D&O coverage element (filed under AmTrust), Zurich's Select Plus private company declarations (ARC Excess & Surplus), Federal's personal director's liability declarations (Chubb), Hudson Excess' Private Defender declarations (CNA Companies), Philadelphia Indemnity's FlexiPlus Five declarations and United States Liability's community association D&O declarations (RT Specialty). Every field of the pre-SPEC_21 directors_officers.json (directors_officers.crosswalk.yaml). No LOB block. 2.1.0 adds the coverage parts of CNA's Investment Management Liability Solutions declarations (Columbia Casualty, filed under ARC Excess & Surplus).",
+  "description": "SPEC_21 section 4 canonical schema for directors and officers liability (L1 code directors_officers), composing common_model.json 1.5.0 by $ref: the envelope plus the claims_made_terms and insuring_agreements blocks. Built from the single-LOB D&O declarations of the source-data do folder (read in place): Wesco's private company D&O coverage element (filed under AmTrust), Zurich's Select Plus private company declarations (ARC Excess & Surplus), Federal's personal director's liability declarations (Chubb), Hudson Excess' Private Defender declarations (CNA Companies), Philadelphia Indemnity's FlexiPlus Five declarations and United States Liability's community association D&O declarations (RT Specialty). Every field of the pre-SPEC_21 directors_officers.json (directors_officers.crosswalk.yaml). No LOB block. 2.1.0 adds the coverage parts of CNA's Investment Management Liability Solutions declarations (Columbia Casualty, filed under ARC Excess & Surplus).",
   "fideon:doc_type": "policy_check",
   "fideon:lob": "directors_officers",
   "fideon:lob_code": "TBD",
   "fideon:layout_family": "exec_specialty",
-  "fideon:schema_version": "2.1.0",
-  "fideon:common_model_version": "1.1.0",
-  "fideon:status": "SPEC_21 Phase 2 schema (12 October 2026), built from the do folder's single-LOB declarations; replaces the pre-SPEC_21 directors_officers.json 1.5.0. Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off. 2.1.0 (14 October 2026): three coverage-part codes and two aliases for CNA's Investment Management Liability Solutions declarations.",
+  "fideon:schema_version": "2.3.0",
+  "fideon:common_model_version": "1.5.0",
+  "fideon:status": "SPEC_21 Phase 2 schema (12 October 2026), built from the do folder's single-LOB declarations; replaces the pre-SPEC_21 directors_officers.json 1.5.0. Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off. 2.1.0 (14 October 2026): three coverage-part codes and two aliases for CNA's Investment Management Liability Solutions declarations. 2.2.0 (26 October 2026, additive): fiduciary liability, the shared employment practices code, the features Hartford's Private Choice Premier declarations print as NOT COVERED, and the crime coverage part's insuring agreements. 2.3.0 (27 October 2026, additive): adopts the block locations (the insured's physical location on an RPS proposal); composes common model 1.5.0.",
   "fideon:built_from": {
     "seed_golds": 9,
     "carriers": [
@@ -30,24 +30,46 @@
   },
   "fideon:blocks_used": [
     "claims_made_terms",
-    "insuring_agreements"
+    "insuring_agreements",
+    "locations"
   ],
   "fideon:lob_block": "None. Each coverage part, element or insuring clause the declarations schedule is a coverage (its limit, sub-limit, retention, premium); the policy aggregate is the DO_POLICY_AGGREGATE coverage; the pending or prior, continuity and retroactive dates and the extended reporting (discovery) period are claims_made_terms; retentions printed by claim type rather than by insuring clause, scheduled organizations and notice addresses are additional_fields (SPEC_21 4.2.4).",
   "fideon:coverage_codes_file": "directors_officers.coverage_codes.yaml",
   "fideon:coverage_codes": [
     "DO_ADDITIONAL_SIDE_A",
     "DO_ADVERSE_MEDIA",
+    "DO_CRIME_CLIENTS_PROPERTY_OFF_PREMISES",
+    "DO_CRIME_COMPUTER_FUNDS_TRANSFER_FRAUD",
+    "DO_CRIME_COMPUTER_SYSTEMS_RESTORATION",
+    "DO_CRIME_DECEPTION_FRAUD",
+    "DO_CRIME_EMPLOYEE_THEFT",
+    "DO_CRIME_FORGERY_ALTERATION",
+    "DO_CRIME_IDENTITY_RECOVERY",
+    "DO_CRIME_INSIDE_PREMISES",
+    "DO_CRIME_INVESTIGATIVE_EXPENSE",
+    "DO_CRIME_MONEY_ORDERS_COUNTERFEIT",
+    "DO_CRIME_OUTSIDE_PREMISES",
+    "DO_DATA_PRIVACY_EVENT_EXPENSE",
     "DO_DEFENSE_COSTS_ADDITIONAL",
     "DO_DERIVATIVE_DEMAND",
     "DO_DIRECTORS_OFFICERS",
+    "DO_ENTITY_LIABILITY",
+    "DO_FIDUCIARY",
     "DO_FUND_MANAGEMENT",
+    "DO_INVESTIGATION_COSTS",
     "DO_INVESTMENT_ADVISER_MANAGEMENT",
     "DO_INVESTMENT_ADVISER_PROFESSIONAL",
+    "DO_LEGAL_SERVICES_WRONGFUL_ACT",
     "DO_POLICY_AGGREGATE",
     "DO_RETIRED_DIRECTORS",
     "DO_SIDE_A",
     "DO_SIDE_B",
-    "DO_SIDE_C"
+    "DO_SIDE_C",
+    "DO_THIRD_PARTY_LIABILITY",
+    "DO_TRAINING_COSTS",
+    "DO_WAGE_HOUR_DEFENSE",
+    "DO_WORKPLACE_VIOLENCE_EXPENSES",
+    "X_EPL"
   ],
   "fideon:mandatory_fields": [
     "carrier.name",
@@ -179,6 +201,9 @@
     },
     "insuring_agreements": {
       "$ref": "../common/common_model.json#/$defs/insuring_agreements"
+    },
+    "locations": {
+      "$ref": "../common/common_model.json#/$defs/locations"
     },
     "additional_fields": {
       "$ref": "../common/common_model.json#/$defs/additional_fields"

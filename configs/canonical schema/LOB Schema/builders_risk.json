@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Fideon canonical schema - builders_risk (policy_check)",
-  "description": "SPEC_21 section 4 canonical schema for builders_risk (L1 code builders_risk), composing common_model.json 1.1.0 by $ref: the envelope plus the locations, buildings and countersignature blocks. Built from the documents of the source-data bldrk folder (3 carrier folders, read in place): US Assure's builders risk renewal application printed from its web portal (three prints, one with its e-signature completion certificate), Vacant Express's premium invoice on Diamond State Insurance Company paper and Zurich's builders risk policy with its New York supplemental declarations (a scan under an OCR text layer). Every field of the pre-SPEC_21 builders_risk.json (builders_risk.crosswalk.yaml). No LOB block.",
+  "description": "SPEC_21 section 4 canonical schema for builders_risk (L1 code builders_risk), composing common_model.json 1.5.0 by $ref: the envelope plus the locations, buildings and countersignature blocks. Built from the documents of the source-data bldrk folder (3 carrier folders, read in place): US Assure's builders risk renewal application printed from its web portal (three prints, one with its e-signature completion certificate), Vacant Express's premium invoice on Diamond State Insurance Company paper and Zurich's builders risk policy with its New York supplemental declarations (a scan under an OCR text layer). Every field of the pre-SPEC_21 builders_risk.json (builders_risk.crosswalk.yaml). No LOB block.",
   "fideon:doc_type": "policy_check",
   "fideon:lob": "builders_risk",
   "fideon:lob_code": "TBD",
   "fideon:layout_family": "property_pkg",
-  "fideon:schema_version": "3.0.0",
-  "fideon:common_model_version": "1.1.0",
-  "fideon:status": "SPEC_21 Phase 2 schema (14 October 2026), built from the bldrk folder's documents; replaces the pre-SPEC_21 builders_risk.json. Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off.",
+  "fideon:schema_version": "3.2.0",
+  "fideon:common_model_version": "1.5.0",
+  "fideon:status": "SPEC_21 Phase 2 schema (14 October 2026), built from the bldrk folder's documents; replaces the pre-SPEC_21 builders_risk.json. Draft for the project owner's approval; the seed golds drafted against it are DRAFT, pending reviewer sign-off. 3.1.0 (26 October 2026, additive): BR_CONTRACT_CHANGE_ORDER (endorsement HBIS-78). 3.2.0 (27 October 2026, additive): alias `VE - BuildersRisk` (BR_BUILDING_UNDER_CONSTRUCTION); composes common model 1.5.0.",
   "fideon:built_from": {
     "seed_golds": 3,
     "carriers": [
@@ -36,6 +36,7 @@
     "BR_CIVIL_AUTHORITY",
     "BR_CLAIM_PREPARATION",
     "BR_COLLAPSE",
+    "BR_CONTRACT_CHANGE_ORDER",
     "BR_CONTRACT_PENALTIES",
     "BR_DEBRIS_REMOVAL",
     "BR_DELAY_IN_COMPLETION",

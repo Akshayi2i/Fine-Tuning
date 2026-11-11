@@ -22,9 +22,13 @@
 # of an existing concept became aliases; a concept no code covered got a code (LOB prefix; counterpart keys between bopgl and boppr). Nothing is
 # removed or renamed.
 
+# 2.4.0 (26 October 2026, additive): the rows the Leatherstocking, Madison Mutual, Utica First, NYCM and CNA registry entries print that the line
+# had no name or code for (audit requests). Printed names of an existing concept became aliases; a concept no code covered got a code on both lines
+# (counterpart keys). Nothing is removed or renamed.
+
 lob: boppr
-schema_version: 2.3.0
-common_model_version: 1.4.0
+schema_version: 2.6.0
+common_model_version: 1.5.0
 code_prefix: BOPPR_
 codes:
 - code: BOPPR_BUILDING
@@ -58,6 +62,8 @@ codes:
   - Coverage B - Business Property
   - Business Personal Property
   - Cov B - Business Property
+  # 2.4.0 (Leatherstocking LCIC(4/11) declarations):
+  - Cov. B - Business Personal Property
   # Cross-copied from BOPGL_BPP (same row on the businessowners declarations), 2.1.0:
   - BUSINESS PERSONAL PROPERTY LIMIT OF INSURANCE
   default_limit_types:
@@ -97,6 +103,10 @@ codes:
   - Loss of Income - 12 Months Included
   # Recurring wording of POLICIES-FINAL-V3 (printed in 5 or more documents of 2 or more carriers), 2.1.0:
   - Business Income and Extra Expense
+  # 2.5.0
+  - Business Income for Interruption of Practice
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - 'Business Income & Extra Expense - Actual Loss Sustained (12 Months)'
   default_limit_types:
   - per_occurrence
   carriers: 2
@@ -105,6 +115,8 @@ codes:
   name: Loss of income included limit (SF-312A Loss of Income Special Limitations)
   aliases:
   - SF-312A - Loss of Income Included Limit
+  # 2.4.0 (Leatherstocking declarations):
+  - SF-312A - Increased Limit, Loss of Income
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -152,6 +164,12 @@ codes:
   - General Aggregate Limit – other than Products/Completed Work
   - LIABILITY AND MEDICAL EXPENSES PER OCCURRENCE
   - LIABILITY AND MEDICAL LIABILITY AGGREGATE
+  # 2.4.0 (CNA Connect businessowners):
+  - Liability and Medical Expense Limit - Each Occurrence
+  # 2.5.0: CNA Connect
+  - General Aggregate
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - General Aggregate (Other than Products - Completed Operations)
   default_limit_types:
   - per_occurrence
   - aggregate
@@ -167,6 +185,8 @@ codes:
   - Products / Completed Operations Annual Aggregate
   # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
   - Aggregate Limit – Products/Completed Work
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Products - Completed Operations Aggregate Limit
   default_limit_types:
   - products_completed_ops_aggregate
   carriers: 2
@@ -185,6 +205,11 @@ codes:
   - Cov. M - Medical Payments (Each Person) - Classic
   - Cov. M - Medical Payments (Each Accident) - Classic
   - Cov M-Premises Medical Payments
+  # 2.4.0 (Utica First, CNA Connect):
+  - Medical Payments Limit
+  - Medical Expense Limit -- Per Person
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Medical Expense Limit (Any One Person)
   default_limit_types:
   - per_person
   carriers: 3
@@ -218,6 +243,10 @@ codes:
   - PERSONAL INJURY
   # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
   - Personal & Advertising Injury Limit
+  # 2.4.0 (NYCM declarations; the limit is per occurrence, not per person):
+  - Personal and Advertising Injury
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Personal and Advertising Injury Limit (Any One Person or Organization)
   default_limit_types:
   - per_occurrence
   carriers: 2
@@ -235,6 +264,14 @@ codes:
   aliases:
   - 'SM-26 Automatic Increase, RC'
   - Automatic Increase - Building - 3 Percent
+  # 2.4.0 (Madison Mutual DEC (7/2013), CNA; the percentage varies by policy):
+  - Automatic Increase - Building - 2 Percent
+  - Automatic Increase - Building - 4 Percent
+  - Automatic Increase - Building - 5 Percent
+  - Automatic Increase - Building - 6 Percent
+  - Automatic Increase - Building - 8 Percent
+  - Automatic Increase - Building - 10 Percent
+  - Inflation Guard
   - BUILDING INFLATION PROTECTION
   # Cross-copied from BOPGL_AUTO_INCREASE_BUILDING (same row on the businessowners declarations), 2.1.0:
   - BUILDING LIMIT - AUTOMATIC ANNUAL INCREASE (PERCENTAGE)
@@ -255,6 +292,11 @@ codes:
   - SF-27B Replacement Cost Provision
   # Cross-copied from BOPGL_BPP_REPLACEMENT_COST (same row on the businessowners declarations), 2.1.0:
   - Business Personal Property Replacement Coverage
+  # 2.5.0
+  - Enhanced Replacement Cost
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Building Replacement Cost
+  - Business Personal Property Replacement Cost
   default_limit_types:
   - other
   carriers: 1
@@ -362,6 +404,10 @@ codes:
   - Earnings From Dependent Locations
   # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
   - Loss of Income From Dependent Property
+  # 2.4.0 (CNA Connect businessowners):
+  - Business Income and Extra Expense - Dependent Properties
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Business Income From Dependent Properties - Waiting Period Applies
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -370,6 +416,8 @@ codes:
   name: Fire department service charge
   aliases:
   - Fire Department Service Charges
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Fire Department Service Charge - No Deductible Applies
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -378,6 +426,10 @@ codes:
   name: Forgery or alteration
   aliases:
   - Forgery
+  # 2.4.0 (CNA Connect businessowners):
+  - Forgery and Alteration
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Forgery or Alteration - Optional Coverage Deductible Applies
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -393,6 +445,8 @@ codes:
   - Increased Cost of Construction
   # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
   - Increased Cost - Ordinance or Law
+  # 2.4.0 (CNA Connect businessowners):
+  - Ordinance or Law - Demolition Cost, Increased Cost of Construction
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -414,6 +468,8 @@ codes:
   - Key and Lock Replacement
   # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
   - Lock Replacement
+  # 2.4.0 (Madison Mutual DEC (7/2013)):
+  - Lock And Keys Replacement
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -457,6 +513,8 @@ codes:
   # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
   - Extended Business Income - Extended Number of Days
   - Business Income - Extended Number of Days for Ordinary Payroll Expenses
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Extended Period of Indemnity (30 Days)
   default_limit_types:
   - other
   carriers: 1
@@ -498,6 +556,8 @@ codes:
   - SEASONAL VARIATION
   # Cross-copied from BOPGL_SEASONAL_INCREASE (same row on the businessowners declarations), 2.1.0:
   - SEASONAL INCREASE PERCENTAGE - BUSINESS PERSONAL PROPERTY
+  # 2.4.0 (CNA Connect businessowners):
+  - Seasonal Increase
   default_limit_types:
   - other
   carriers: 1
@@ -516,6 +576,8 @@ codes:
   - Valuable Papers And Records
   # Cross-copied from BOPGL_VALUABLE_PAPERS (same row on the businessowners declarations), 2.1.0:
   - Valuable Papers and Records (on/off premises)
+  # 2.4.0 (CNA Connect businessowners):
+  - Valuable Papers & Records
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -645,6 +707,8 @@ codes:
   name: Electronic data
   aliases:
   - ELECTRONIC DATA
+  # 2.4.0 (CNA Connect businessowners):
+  - Electronic Data Processing
   default_limit_types:
   - aggregate
   carriers: 1
@@ -739,9 +803,10 @@ codes:
   - MONEY AND SECURITIES
   # Leatherstocking's Businessowner's Policy, Preferred form (SF-10P): DECISIONS row 87, 22 Oct 2026.
   - Money and Securities - On Premise
-  - Money and Securities - Off Premise
   # Cross-copied from BOPGL_MONEY_SECURITIES (same row on the businessowners declarations), 2.1.0:
   - Money and Securities (on/off premises)
+  # 2.5.0
+  - Money And Securities (Inside Premises)
   default_limit_types:
   - per_occurrence
   carriers: 2
@@ -811,6 +876,7 @@ codes:
   default_limit_types:
   - per_occurrence
   carriers: 1
+  counterpart: BOPGL_PROPERTY_AWAY
 - code: BOPPR_PROPERTY_OFF_PREMISES
   name: Property off-premises
   aliases:
@@ -835,6 +901,11 @@ codes:
   - BACK-UP OF SEWERS AND DRAINS COVERAGE
   # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
   - Backup of Sewer and Drains
+  # 2.4.0 (Leatherstocking SF-72A, Madison Mutual):
+  - SF-72A - Backup, Discharge, Or Overflow
+  - Water Backup and Overflow Coverage
+  # 2.5.0
+  - Sewer or Drain Back Up
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -856,6 +927,10 @@ codes:
   - Refrigerated Property
   # G1/bop review, 2.2.0 (businessowners declarations of Utica First and NYCM; labels only):
   - Refrigerated Food Products
+  # 2.4.0 (Madison Mutual DEC (7/2013)):
+  - Spoilage And Contaminated Food Coverage
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Spoilage - $500 Deductible
   default_limit_types:
   - per_occurrence
   carriers: 2
@@ -867,6 +942,7 @@ codes:
   default_limit_types:
   - per_occurrence
   carriers: 1
+  counterpart: BOPGL_SPRINKLER_LEAKAGE
 - code: BOPPR_STRETCH_BLANKET
   name: 'STRETCH blanket limit (the property part''s blanket limit)'
   aliases:
@@ -928,6 +1004,9 @@ codes:
   # Cross-copied from BOPGL_UTILITY_SERVICES_DIRECT (same row on the businessowners declarations), 2.1.0:
   - Utility Services
   - Utility Services - Direct Damage
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Utility Services - Direct Damage Building
+  - Utility Services - Direct Damage Contents
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -964,6 +1043,9 @@ codes:
   - Nonowned Hired Auto Liability
   # G1 scanned/hybrid seeds, 26 October 2026 (printed row names only):
   - Hired/Non-Owned Auto Liability (per occurrence/aggregate)
+  # 2.4.0 (CNA Connect businessowners prints the two on separate rows):
+  - Hired Auto Liability
+  - Nonowned Auto Liability
   default_limit_types:
   - per_occurrence
   - combined_single
@@ -1054,6 +1136,10 @@ codes:
   name: Utility interruption
   aliases:
   - Utility Interruption
+  # 2.4.0 (Madison Mutual DEC (7/2013)):
+  - Utility Service Disruption (Property Damage And Time Element)
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Utility Services - Time Element
   default_limit_types:
   - per_occurrence
   carriers: 1
@@ -1132,6 +1218,204 @@ codes:
   name: Unmanned aircraft liability
   aliases:
   - Unmanned aircraft liability
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+# 2.4.0 (26 October 2026): rows printed by the Madison Mutual, Utica First, NYCM and CNA businessowners declarations; no code covered them before
+- code: BOPPR_MOTEL_GUESTS_PROPERTY
+  name: Motel guests property liability
+  aliases:
+  - Motel Guests Property Liability Coverage
+  # 2.5.0: Madison Mutual
+  - Motel Guests Property Liability Coverage (Each Motel Guest)
+  - Motel Guests Property Liability Coverage (Each Occurrence)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_MOTEL_GUESTS_PROPERTY
+- code: BOPPR_THEFT
+  name: Theft coverage (optional property coverage)
+  aliases:
+  - Theft Coverage
+  default_limit_types:
+  - other
+  carriers: 1
+  counterpart: BOPGL_THEFT
+- code: BOPPR_TREES_PLANTS_SHRUBS_BPP
+  name: Trees, plants and shrubs (business personal property side)
+  aliases:
+  - Trees, Plants, And Shrubs
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_TREES_PLANTS_SHRUBS_BPP
+- code: BOPPR_ADDITIONAL_INSURED_VENDORS
+  name: Additional insured - vendors
+  aliases:
+  - Vendors
+  default_limit_types:
+  - other
+  carriers: 1
+  counterpart: BOPGL_ADDITIONAL_INSURED_VENDORS
+- code: BOPPR_ADDITIONAL_INSURED_OWNER_LEASED_LAND
+  name: Additional insured - owner of leased land
+  aliases:
+  - Owner of Leased Land
+  default_limit_types:
+  - other
+  carriers: 1
+  counterpart: BOPGL_ADDITIONAL_INSURED_OWNER_LEASED_LAND
+- code: BOPPR_GARAGEKEEPERS_LIABILITY
+  name: Garagekeepers liability
+  aliases:
+  - Garagekeepers Liability
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_GARAGEKEEPERS_LIABILITY
+- code: BOPPR_CYBER_LIABILITY
+  name: Cyber liability coverage (Section I of the cyber insurance endorsement)
+  aliases:
+  - SECTION I - CYBER LIABILITY COVERAGE
+  - Cyber Liability Coverage
+  default_limit_types:
+  - per_claim
+  - aggregate
+  carriers: 1
+  counterpart: BOPGL_CYBER_LIABILITY
+- code: BOPPR_CYBER_FIRST_PARTY
+  name: First party breach event coverage (Section II of the cyber insurance endorsement)
+  aliases:
+  - SECTION II - FIRST PARTY BREACH EVENT COVERAGE
+  - First Party Breach Event Coverage
+  default_limit_types:
+  - per_claim
+  - aggregate
+  carriers: 1
+  counterpart: BOPGL_CYBER_FIRST_PARTY
+- code: BOPPR_EMPLOYEE_BENEFITS_LIABILITY
+  name: Employee benefits liability
+  aliases:
+  - Employee Benefits Liability
+  default_limit_types:
+  - each_employee
+  - aggregate
+  carriers: 1
+  counterpart: BOPGL_EMPLOYEE_BENEFITS_LIABILITY
+- code: BOPPR_BROADENED_WIND
+  name: Broadened wind
+  aliases:
+  - Broadened Wind
+  default_limit_types:
+  - other
+  carriers: 1
+  counterpart: BOPGL_BROADENED_WIND
+# 2.5.0 (27 October 2026): commercial-line template audit.
+- code: BOPPR_CONTRACTORS_INSTALLATION
+  name: Contractors installation coverage
+  aliases:
+  - Contractors Installation Coverage
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - Contractors Optional Coverage
+  - Property at each covered job site
+  - Property at a temporary storage location
+  - Property at all covered job sites combined
+  default_limit_types:
+  - per_location
+  - sublimit
+  - aggregate
+  carriers: 1
+  counterpart: BOPGL_CONTRACTORS_INSTALLATION
+- code: BOPPR_CONTRACTORS_TOOLS_UNSCHEDULED
+  name: 'Contractor''s tools and equipment (unscheduled)'
+  aliases:
+  - 'Contractor''s Tools and Equipment Coverage'
+  - Contractors Tools and Equipment Coverage - Unscheduled
+  # 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+  - 'Contractors'' Tools and Equipment - Blanket Basis'
+  default_limit_types:
+  - per_occurrence
+  - per_item
+  carriers: 1
+  counterpart: BOPGL_CONTRACTORS_TOOLS_UNSCHEDULED
+- code: BOPPR_COMPUTER_FRAUD
+  name: Computer fraud and funds transfer fraud
+  aliases:
+  - Computer Fraud and Funds Transfer Fraud
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_COMPUTER_FRAUD
+- code: BOPPR_EPL_FIDUCIARY
+  name: Employment practices / fiduciary liability
+  aliases:
+  - Employment Practices/Fiduciary Liability
+  default_limit_types:
+  - per_claim
+  - aggregate
+  carriers: 1
+  counterpart: BOPGL_EPL_FIDUCIARY
+- code: BOPPR_ERISA_COMPLIANCE
+  name: Welfare and pension plan ERISA compliance
+  aliases:
+  - Welfare and Pension Plan ERISA Compliance
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_ERISA_COMPLIANCE
+- code: BOPPR_MONEY_SECURITIES_OFF_PREMISES
+  name: Money and securities - off premises
+  aliases:
+  - Money and Securities - Off Premise
+  - Money And Securities (Outside Premises)
+  default_limit_types:
+  - per_occurrence
+  carriers: 1
+  counterpart: BOPGL_MONEY_SECURITIES_OFF_PREMISES
+# 2.5.0 (27 October 2026): Preferred Mutual BP DS 01 10 14 PM
+- code: BOPPR_BI_ORDINARY_PAYROLL
+  name: Business income - ordinary payroll
+  aliases:
+  - Ordinary Payroll (60 Days)
+  default_limit_types:
+  - duration
+  carriers: 1
+  counterpart: BOPGL_BI_ORDINARY_PAYROLL
+- code: BOPPR_BI_WAITING_PERIOD
+  name: Business income waiting period
+  aliases:
+  - Business Income Waiting Period (72 Hours)
+  default_limit_types:
+  - duration
+  carriers: 1
+- code: BOPPR_BUSINESSOWNERS_ADVANTAGE
+  name: Businessowners advantage endorsement
+  aliases:
+  - Businessowners Advantage Endorsement
+  default_limit_types: []
+  carriers: 1
+- code: BOPPR_SNOW_ICE_REMOVAL
+  name: Snow and/or ice removal
+  aliases:
+  - Snow and/or Ice Removal
+  default_limit_types: []
+  carriers: 1
+- code: BOPPR_CONTRACTORS_EQUIPMENT
+  name: 'Contractors'' tools and equipment - scheduled basis'
+  aliases:
+  - 'Contractors'' Tools and Equipment - Scheduled Basis'
+  default_limit_types:
+  - scheduled_total
+  - per_item
+  carriers: 1
+  counterpart: BOPGL_CONTRACTORS_EQUIPMENT
+# 2.6.0 (3 November 2026): the row a Hartford property declarations page prints for each location under "Other Location-Based
+# Coverages and Features" (3 November audit of 64 compare reports against the documents: a two-location policy's second
+# location was lost; Additional Personal Property of Others went from $127,100 to $100,000 at location 2).
+- code: BOPPR_ADDITIONAL_PERSONAL_PROPERTY_OF_OTHERS
+  name: Additional personal property of others
+  aliases:
+  - Additional Personal Property of Others
   default_limit_types:
   - per_occurrence
   carriers: 1

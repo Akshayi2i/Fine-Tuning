@@ -1,5 +1,21 @@
 # Changelog - bopgl canonical schema
 
+## 2.5.0 - 27 October 2026 (additive; commercial-line template audit: CNA Connect, Merchants Preferred, Madison Mutual and Leatherstocking declarations)
+
+Composes common model 1.5.0 (was 1.4.0); the common model's new optional fields are available to this line without a path change.
+
+- Six new codes with boppr counterparts (BOPGL_CONTRACTORS_INSTALLATION, BOPGL_CONTRACTORS_TOOLS_UNSCHEDULED, BOPGL_COMPUTER_FRAUD, BOPGL_EPL_FIDUCIARY, BOPGL_ERISA_COMPLIANCE, BOPGL_MONEY_SECURITIES_OFF_PREMISES); aliases `General Aggregate` (BOPGL_LIABILITY), `Sewer or Drain Back Up`, `Business Income for Interruption of Practice`, `Enhanced Replacement Cost`, the two `Motel Guests Property Liability Coverage (...)` rows and `Money And Securities (Inside Premises)`; the alias `Money and Securities - Off Premise` MOVED from BOPGL_MONEY_SECURITIES to the new BOPGL_MONEY_SECURITIES_OFF_PREMISES (a name two codes claim is read by neither); the block `rating_exposures` is adopted (CNA rating worksheet, Leatherstocking rating information).
+- Derived files regenerated: `prompt/policy_check/bopgl.prompt.json`, `prompt/sections/bopgl/*`, `prompt/manifest.json`, the FSM hash fixture.
+
+## 2.4.0 - 26 October 2026 (additive; registry audit requests: Leatherstocking, Madison Mutual, Utica First, NYCM, CNA Connect)
+
+Printed names only; nothing is removed or renamed, the common model (1.4.0) is untouched, `bopgl.fields.md`/crosswalk have no change.
+
+- **Aliases on existing codes:** `Cov. B - Business Personal Property` (`BOPGL_BPP`); `SF-72A - Backup, Discharge, Or Overflow` and `Water Backup and Overflow Coverage` (`BOPGL_SEWER_BACKUP`); `SF-312A - Increased Limit, Loss of Income` (`BOPGL_LOSS_OF_INCOME_LIMIT`); `Automatic Increase - Building - 2/4/5/6/8/10 Percent` and `Inflation Guard` (`BOPGL_AUTO_INCREASE_BUILDING`); `Lock And Keys Replacement`; `Spoilage And Contaminated Food Coverage`; `Utility Service Disruption (Property Damage And Time Element)` (`BOPGL_UTILITY_INTERRUPTION`); `Medical Payments Limit` and `Medical Expense Limit -- Per Person` (`X_MED_PAY`); `Liability and Medical Expense Limit - Each Occurrence` (`BOPGL_LIABILITY`); `Business Income and Extra Expense - Dependent Properties`; `Forgery and Alteration`; `Electronic Data Processing`; `Valuable Papers & Records`; `Seasonal Increase`; `Hired Auto Liability` and `Nonowned Auto Liability` (`X_HIRED_NONOWNED_AUTO`); `Ordinance or Law - Demolition Cost, Increased Cost of Construction` (`BOPGL_ORDINANCE_OR_LAW`).
+- **New codes (12), each with its boppr counterpart:** `BOPGL_SPRINKLER_LEAKAGE`, `BOPGL_PROPERTY_AWAY` (counterparts of existing boppr codes), `BOPGL_MOTEL_GUESTS_PROPERTY`, `BOPGL_THEFT` (`other`), `BOPGL_TREES_PLANTS_SHRUBS_BPP`, `BOPGL_ADDITIONAL_INSURED_VENDORS` and `BOPGL_ADDITIONAL_INSURED_OWNER_LEASED_LAND` (`other`), `BOPGL_GARAGEKEEPERS_LIABILITY`, `BOPGL_CYBER_LIABILITY` and `BOPGL_CYBER_FIRST_PARTY` (`per_claim`, `aggregate`), `BOPGL_EMPLOYEE_BENEFITS_LIABILITY` (`each_employee`, `aggregate`), `BOPGL_BROADENED_WIND` (`other`).
+- **Not done:** `Employment Practices/Fiduciary Liability` (one printed row for two coverages); a second code for the building-side `Valuable Papers And Records` (the capitalisation does not differ in L1's name key, so both spellings are the same alias).
+- **Derived files regenerated:** `prompt/policy_check/bopgl.prompt.json`, `prompt/sections/bopgl/*`, `prompt/manifest.json`, the FSM hash fixture, the fine-tuning parity fixtures (re-derived locally; the fine-tuning repository must regenerate from the same canonical files).
+
 ## 2.3.0 - 26 October 2026 (additive; G1 scanned and hybrid seeds, change request approved by the project owner)
 
 Source: the coverage rows the bopgl seed golds (Hartford, Liberty/Scottsdale) printed in `additional_fields` because no code named them (CR-BG-ALIAS-HRW-01..03, CR-BG-ALIAS-LM2-01/02).

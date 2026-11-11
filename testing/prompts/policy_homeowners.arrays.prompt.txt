@@ -117,6 +117,11 @@ Coverage
   coinsurance_percent: percent - Coinsurance percentage that applies to the coverage.
   form_refs: [string] - Form numbers printed with this coverage that grant or modify it. Printed values: each exactly as printed, as a plain string.
   covered_auto_symbols: [text] - ISO covered-auto symbols printed against the coverage (1, 2, 7, 8, 9...). Business auto, garage, truckers and package auto parts.
+  waiting_period: text - Waiting period or time deductible of the coverage, as printed ('72 hours').
+  period_of_restoration: text - Period of restoration or maximum duration of the coverage, as printed ('12 months').
+  extended_period: text - Extended period of indemnity or extended business income days, as printed.
+  qualifier: text - Printed qualifier of the coverage row that has no typed home ('/48 HOURS', 'per day').
+  inflation_guard_percent: percent - Inflation guard percentage that applies to the coverage.
 Deductible - A deductible, inside a coverage or in the top-level deductibles[] when it applies across coverages or perils.
   deductible_type: DeductibleType - Kind of deductible.
   amount: money - Amount of a flat deductible.
@@ -125,6 +130,7 @@ Deductible - A deductible, inside a coverage or in the top-level deductibles[] w
   peril: text - Peril the deductible applies to (wind/hail, hurricane, all other perils).
   applies_to_coverages: [CoverageCode] - coverage_codes it applies to (top-level deductibles only).
   applies_to: [string] - unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).
+  description: text - Printed wording of a deductible that has no amount ('Property Deductible' when the deductible is the policy's other deductible).
 InterestedParty
   role: one of mortgagee|loss_payee|additional_insured|lienholder|certificate_holder|additional_interest|other - Role of the party.
   rank: number - 1 for first mortgagee, 2 for second...
@@ -133,6 +139,8 @@ InterestedParty
   loan_number: text - Loan or account number with the interested party.
   is_payor: yesno - True when this party pays the premium (escrow billing).
   applies_to: [string] - unit_ids this element applies to; empty or omitted = the whole policy (or the whole part).
+  description: text - Printed note about the party's interest or the property it is for ('Escrow Billed', 'Description of Property: ...').
+  party_type: text - The interest or designation as printed beside the party ('Lessor of Premises', 'Vendors', 'Interest Type').
 Location
   unit_id: id - Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.
   location_number: number - Location number as printed on the schedule.
@@ -143,6 +151,7 @@ Location
   insured_interest: text - The insured's interest in the premises: Owner, Deeded owner, Tenant, LLC member...
   distance_to_fire_station: text - Distance to the responding fire station.
   distance_to_hydrant: text - Distance to the nearest fire hydrant.
+  location_label: text - Location number as printed when it is not a plain number ('2-6', '1-0').
 Building
   unit_id: id - Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.
   location_ref: string - unit_id of the locations[] element this belongs to.
@@ -160,6 +169,9 @@ Building
   heating_type: text - Type of the primary heating system.
   heating_fuel: text - Fuel of the primary heating system.
   heating_year_updated: year - Year the primary heating system was last updated.
+  valuation: valuation - Valuation basis of the building as printed on the building schedule.
+  cause_of_loss: text - Causes of loss form or basis for the building ('BP0100 - Standard', 'Special').
+  description: text - Printed description of the building ('Main Building').
 ScheduledItem
   unit_id: id - Identifier of this entry, unique in the document: its kind's prefix and its position in printed order, from 1 (e.g. 'loc_1', 'veh_2'). Never printed; other entries refer to it.
   item_number: number - Item number as printed on the schedule.
@@ -169,6 +181,7 @@ ScheduledItem
   value: money - Insured value of the item.
   valuation: valuation - Valuation basis of the item.
   location_ref: string - unit_id of the locations[] element this belongs to.
+  manufacturer: text - Manufacturer of the scheduled item (Kubota, Morbark).
 RatingModifier
   modifier_type: one of experience_mod|schedule|irpm|multi_policy|protective_device|loss_free|other - Kind of modifier.
   description: text - As printed, e.g. 'Experience Modification', 'Multi-Policy Discount'.
@@ -208,6 +221,6 @@ state: string - A US state or territory. `parsed` is the two-letter USPS code ('
 zip: string - A US ZIP code. `parsed` is 5 digits or ZIP+4 ('12180-1234').
 
 ## Codes
-CoverageCode: HO_ADDITIONAL_INSURED = Additional insured; HO_ADDITIONAL_REPLACEMENT_COST = Additional Replacement Cost; HO_ADDITIONAL_RESIDENCE_RENTED_LIABILITY = Additional Residential Premises-Rented To Others - Liabili; HO_AUTOMATIC_INCREASE = Automatic increase in insurance; HO_BUSINESS_PROPERTY_INCREASED = Business Property Increased Limits; HO_COV_A = Coverage A - Dwelling / Residence; HO_COV_B = Coverage B - Other / Related Private Structures; HO_COV_C = Coverage C - Personal Property; HO_CREDIT_CARD_FORGERY = Credit card, fund transfer, forgery and counterfeit money; HO_DAMAGE_TO_PROPERTY_OF_OTHERS = Damage to Property of Others; HO_DEBRIS_REMOVAL = Debris Removal; HO_DISAPPEARING_DEDUCTIBLE = Disappearing Deductible; HO_FIRE_DEPARTMENT_SERVICE_CHARGE = Fire Department Service Charge; HO_FUNGI_REMEDIATION = Limited fungi / mold remediation; HO_INCIDENTAL_BUSINESS = Incidental Business Pursuits -Including Products Liability; HO_LANDLORD_FURNISHINGS = Landlord Furnishings; HO_LOSS_ASSESSMENT = Loss assessment (property); HO_LOSS_ASSESSMENT_LIABILITY = Loss assessment (liability); HO_PERSONAL_ARTICLES = PERSONAL ARTICLES COVERAGE; HO_PERSONAL_INJURY = Personal Injury Coverage; HO_PERSONAL_PROPERTY_REPLACEMENT_COST = Personal Property Replacement Cost; HO_PERSONAL_RECORDS_DATA = Personal Records and Data Replacement; HO_PREMISES_LIABILITY_ENDORSEMENT = Premises Liability Coverage; HO_PRIVATE_STRUCTURES_INCREASED = Related Private Structures; HO_PROPERTY_LIABILITY_ENHANCEMENT = Personal Property and Liability Enhancement; HO_REFRIGERATED_FOOD_PRODUCTS = Added Perils For Refrigerated Food Products; HO_RESIDENCE_LOSS_SETTLEMENT = Residence Loss Settlement; HO_SERVICE_LINE = Service Line Coverage; HO_SPECIAL_LIMITS = Special Limits of Liability; HO_SPECIAL_PERSONAL_PROPERTY = Special Personal Property Coverage; HO_TREES_SHRUBS_PLANTS = Trees, Shrubs and Other Plants; HO_TREE_REMOVAL = Tree Removal; HO_UNDERGROUND_UTILITY_LINE = Underground utility line; HO_VALUABLE_ARTICLES = VALUABLE ARTICLES; HO_VIP_ENDORSEMENT = Homeowners VIP Coverage; HO_WATER_DAMAGE_ADDED = Added Water Damages Coverage; HO_WATER_DAMAGE_HIGHER_LIMITS = Higher Limits - Water Damage Coverage; HO_WORKERS_COMP_RESIDENCE_EMPLOYEE = Workers' Compensation Residence Employee; X_CYBER = Cyber / data breach; X_EQUIPMENT_BREAKDOWN = Equipment breakdown; X_IDENTITY_THEFT = Identity theft / fraud expense; X_LOSS_OF_USE = Loss of use / additional living expense / fair rental value; X_MED_PAY = Medical payments; X_ORDINANCE_LAW = Ordinance or law; X_PERSONAL_LIABILITY = Personal liability; X_WATER_BACKUP = Water or sewer backup
+CoverageCode: HO_ADDITIONAL_INSURED = Additional insured; HO_ADDITIONAL_REPLACEMENT_COST = Additional Replacement Cost; HO_ADDITIONAL_RESIDENCE_RENTED_LIABILITY = Additional Residential Premises-Rented To Others - Liabili; HO_AUTOMATIC_INCREASE = Automatic increase in insurance; HO_BUSINESS_PROPERTY_INCREASED = Business Property Increased Limits; HO_COV_A = Coverage A - Dwelling / Residence; HO_COV_B = Coverage B - Other / Related Private Structures; HO_COV_C = Coverage C - Personal Property; HO_CREDIT_CARD_FORGERY = Credit card, fund transfer, forgery and counterfeit money; HO_DAMAGE_TO_PROPERTY_OF_OTHERS = Damage to Property of Others; HO_DEBRIS_REMOVAL = Debris Removal; HO_DISAPPEARING_DEDUCTIBLE = Disappearing Deductible; HO_FIRE_DEPARTMENT_SERVICE_CHARGE = Fire Department Service Charge; HO_FUNGI_REMEDIATION = Limited fungi / mold remediation; HO_INCIDENTAL_BUSINESS = Incidental Business Pursuits -Including Products Liability; HO_INLAND_FLOOD = Inland Flood; HO_LANDLORD_FURNISHINGS = Landlord Furnishings; HO_LOSS_ASSESSMENT = Loss assessment (property); HO_LOSS_ASSESSMENT_LIABILITY = Loss assessment (liability); HO_PERSONAL_ARTICLES = PERSONAL ARTICLES COVERAGE; HO_PERSONAL_INJURY = Personal Injury Coverage; HO_PERSONAL_PROPERTY_REPLACEMENT_COST = Personal Property Replacement Cost; HO_PERSONAL_RECORDS_DATA = Personal Records and Data Replacement; HO_PREMISES_LIABILITY_ENDORSEMENT = Premises Liability Coverage; HO_PRIVATE_STRUCTURES_INCREASED = Related Private Structures; HO_PROPERTY_LIABILITY_ENHANCEMENT = Personal Property and Liability Enhancement; HO_REFRIGERATED_FOOD_PRODUCTS = Added Perils For Refrigerated Food Products; HO_RESIDENCE_LOSS_SETTLEMENT = Residence Loss Settlement; HO_SERVICE_LINE = Service Line Coverage; HO_SPECIAL_LIMITS = Special Limits of Liability; HO_SPECIAL_PERSONAL_PROPERTY = Special Personal Property Coverage; HO_TREES_SHRUBS_PLANTS = Trees, Shrubs and Other Plants; HO_TREE_REMOVAL = Tree Removal; HO_UNDERGROUND_UTILITY_LINE = Underground utility line; HO_VALUABLE_ARTICLES = VALUABLE ARTICLES; HO_VIP_ENDORSEMENT = Homeowners VIP Coverage; HO_WATER_DAMAGE_ADDED = Added Water Damages Coverage; HO_WATER_DAMAGE_HIGHER_LIMITS = Higher Limits - Water Damage Coverage; HO_WORKERS_COMP_RESIDENCE_EMPLOYEE = Workers' Compensation Residence Employee; X_CYBER = Cyber / data breach; X_EQUIPMENT_BREAKDOWN = Equipment breakdown; X_IDENTITY_THEFT = Identity theft / fraud expense; X_LOSS_OF_USE = Loss of use / additional living expense / fair rental value; X_MED_PAY = Medical payments; X_ORDINANCE_LAW = Ordinance or law; X_PERSONAL_LIABILITY = Personal liability; X_WATER_BACKUP = Water or sewer backup
 DeductibleType: flat | percentage | waiting_period | sir | retention | franchise
-LimitType: per_occurrence | aggregate | products_completed_ops_aggregate | per_person | per_accident | property_damage | combined_single | per_claim | each_employee | policy_limit | per_location | per_item | per_day | per_disablement | sublimit | blanket | scheduled_total | other
+LimitType: per_occurrence | aggregate | products_completed_ops_aggregate | per_person | per_accident | property_damage | combined_single | per_claim | each_employee | policy_limit | per_location | per_item | per_day | per_disablement | sublimit | blanket | scheduled_total | on_premises | off_premises | duration | other

@@ -1,5 +1,31 @@
 # Changelog - boppr canonical schema
 
+## 2.6.0 - 3 November 2026 (additive; second-location read, Hartford property declarations)
+
+Composes common model 1.5.0 (unchanged). Nothing is removed or renamed; the 2.5.0 golds, varmaps and registry paths keep working.
+
+- **New code (1):** `BOPPR_ADDITIONAL_PERSONAL_PROPERTY_OF_OTHERS` (alias `Additional Personal Property of Others`, default limit type
+  `per_occurrence`): the row The Hartford prints for each location under `Other Location-Based Coverages and Features`. It is placed per
+  building (`applies_to=bldg_n`) by `hartford/boppr.yaml` since the registry reads every location (`unit_blocks`). Owner decision, 3 November 2026.
+- Derived files regenerated: `prompt/policy_check/boppr.prompt.json`, `prompt/sections/boppr/*`, `prompt/manifest.json`, the FSM hash fixture.
+
+## 2.5.0 - 27 October 2026 (additive; commercial-line template audit: CNA Connect, Madison Mutual and Leatherstocking declarations)
+
+Composes common model 1.5.0 (was 1.4.0); the common model's new optional fields are available to this line without a path change.
+
+- Counterparts of the six bopgl codes (BOPPR_CONTRACTORS_INSTALLATION, BOPPR_CONTRACTORS_TOOLS_UNSCHEDULED, BOPPR_COMPUTER_FRAUD, BOPPR_EPL_FIDUCIARY, BOPPR_ERISA_COMPLIANCE, BOPPR_MONEY_SECURITIES_OFF_PREMISES) and the same aliases; the alias `Money and Securities - Off Premise` MOVED from BOPPR_MONEY_SECURITIES to BOPPR_MONEY_SECURITIES_OFF_PREMISES; the block `rating_exposures` is adopted.
+- Also in 2.5.0 (plaus / covgate requests): the blocks `countersignature` and `claims_made_terms` are adopted (Arch declarations: countersigned date and representative, `Retroactive Date`); Preferred Mutual BP DS 01 10 14 PM names become aliases (`General Aggregate (Other than Products - Completed Operations)`, `Products - Completed Operations Aggregate Limit`, `Personal and Advertising Injury Limit (Any One Person or Organization)`, `Medical Expense Limit (Any One Person)`, the fire department, dependent properties, forgery, spoilage, utility services, extended period, business income and replacement cost rows, the contractors installation rows and `Contractors' Tools and Equipment - Blanket Basis`) and five codes are new: `BOPPR_BI_ORDINARY_PAYROLL`, `BOPPR_BI_WAITING_PERIOD` (limit type `duration`), `BOPPR_BUSINESSOWNERS_ADVANTAGE`, `BOPPR_SNOW_ICE_REMOVAL`, `BOPPR_CONTRACTORS_EQUIPMENT`.
+- Derived files regenerated: `prompt/policy_check/boppr.prompt.json`, `prompt/sections/boppr/*`, `prompt/manifest.json`, the FSM hash fixture.
+
+## 2.4.0 - 26 October 2026 (additive; registry audit requests: Leatherstocking, Madison Mutual, Utica First, NYCM, CNA Connect)
+
+Printed names only; nothing is removed or renamed, the common model (1.4.0) is untouched. Counterpart of CHANGELOG_bopgl.md 2.4.0.
+
+- **Aliases on existing codes:** `Cov. B - Business Personal Property` (`BOPPR_BPP`); `SF-72A - Backup, Discharge, Or Overflow` and `Water Backup and Overflow Coverage` (`BOPPR_SEWER_BACKUP`); `SF-312A - Increased Limit, Loss of Income` (`BOPPR_LOSS_OF_INCOME_LIMIT`); `Automatic Increase - Building - 2/4/5/6/8/10 Percent` and `Inflation Guard` (`BOPPR_AUTO_INCREASE_BUILDING`); `Lock And Keys Replacement` (`BOPPR_LOCK_KEY`); `Spoilage And Contaminated Food Coverage` (`BOPPR_SPOILAGE`); `Utility Service Disruption (Property Damage And Time Element)` (`BOPPR_UTILITY_INTERRUPTION`; the request asked for a new BOPPR_UTILITY_SERVICE_INTERRUPTION, which would duplicate this concept); `Personal and Advertising Injury` (`BOPPR_PERSONAL_INJURY`, per occurrence, so the NYCM row no longer reads `other`); `Medical Payments Limit`, `Medical Expense Limit -- Per Person` (`X_MED_PAY`); `Liability and Medical Expense Limit - Each Occurrence`; `Business Income and Extra Expense - Dependent Properties`; `Forgery and Alteration`; `Electronic Data Processing`; `Valuable Papers & Records`; `Seasonal Increase`; `Hired Auto Liability`, `Nonowned Auto Liability`; `Ordinance or Law - Demolition Cost, Increased Cost of Construction` (`X_ORDINANCE_LAW`).
+- **New codes (10), counterparts on bopgl:** `BOPPR_MOTEL_GUESTS_PROPERTY`, `BOPPR_THEFT`, `BOPPR_TREES_PLANTS_SHRUBS_BPP`, `BOPPR_ADDITIONAL_INSURED_VENDORS`, `BOPPR_ADDITIONAL_INSURED_OWNER_LEASED_LAND`, `BOPPR_GARAGEKEEPERS_LIABILITY`, `BOPPR_CYBER_LIABILITY`, `BOPPR_CYBER_FIRST_PARTY`, `BOPPR_EMPLOYEE_BENEFITS_LIABILITY`, `BOPPR_BROADENED_WIND`. `BOPPR_PROPERTY_AWAY` and `BOPPR_SPRINKLER_LEAKAGE` gained their `counterpart`.
+- **Motel guests:** the request's `per_guest` limit type is not in the common model's `LimitType`; the default is `per_occurrence`, the `(Each Motel Guest)` row keeps its printed qualifier.
+- **Derived files regenerated:** `prompt/policy_check/boppr.prompt.json`, `prompt/sections/boppr/*`, `prompt/manifest.json`, the FSM hash fixture, the fine-tuning parity fixtures (re-derived locally; the fine-tuning repository must regenerate from the same canonical files).
+
 ## 2.3.0 - 26 October 2026 (additive; G1 scanned and hybrid seeds, change request approved by the project owner)
 
 - **Aliases:** `X_HIRED_NONOWNED_AUTO` (Hired/Non-Owned Auto Liability per occurrence/aggregate), `BOPPR_PERIOD_OF_LOSS_EXTENSION` (Extended Business Income - Extended Number of Days).

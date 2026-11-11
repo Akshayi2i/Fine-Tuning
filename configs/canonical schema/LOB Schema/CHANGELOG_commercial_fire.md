@@ -1,5 +1,21 @@
 # Changelog - commercial_fire canonical schema
 
+## 1.2.0 - 27 October 2026 (additive; commercial-line template audit: Leatherstocking Student Housing, SMP and Manufacturers and Contractors declarations)
+
+Composes common model 1.5.0 (was 1.1.0); the common model's new optional fields are available to this line without a path change.
+
+- New code CF_ROOF_SURFACE_ACV (form row, no limit); alias `SF-312A - Loss of Income/Rents - Special Limitations` (CF_LOSS_OF_RENTS); the block `rating_exposures` is adopted (the rating-information lines: class code, description, exposure basis and amount).
+- Derived files regenerated: `prompt/policy_check/commercial_fire.prompt.json`, `prompt/sections/commercial_fire/*`, `prompt/manifest.json`, the FSM hash fixture.
+
+## 1.1.0 - 26 October 2026 (additive; Leatherstocking Student Housing, SMP and Manufacturers and Contractors declarations)
+
+Printed names only; nothing is removed or renamed, the common model (1.1.0) is untouched. These rows coded to nothing, so `require_coded_coverages` had to be switched off in `commercial_fire.yaml`.
+
+- **New codes (14 + 1 shared):** `CF_RELATED_PRIVATE_STRUCTURE`, `CF_ACCOUNTS_RECEIVABLE`, `CF_ADDITIONAL_EXPENSE`, `CF_EMPLOYEE_DISHONESTY`, `CF_SIGNS`, `CF_MONEY_SECURITIES`, `CF_VALUABLE_PAPERS`, `CF_PROPERTY_AWAY` (also `SF-133 Business Property - While Away From The Insured Premise`), `CF_BUILDING_VMM`, `CF_LOSS_OF_RENTS_BUILDING` (`per_occurrence`); `CF_LOSS_OF_RENTS`, `CF_SEASONAL_VARIATION`, `CF_SPRINKLER_LEAKAGE` (printed `***`, no default limit type); `CF_PRODUCTS_COMPLETED_OPS` (`per_occurrence`, `products_completed_ops_aggregate`; `LS-43 Products/Completed Operations` and both `Coverage N - Products (...)` rows); the shared `X_EQUIPMENT_BREAKDOWN` (`Equipment Breakdown`, `SF-345 Equipment Breakdown`, `SF-345 - Equipment Breakdown`).
+- **Aliases:** `Personal Injury` (`CF_PERSONAL_INJURY`), `SM-26 Automatic Increase, ACV` (`CF_AUTO_INCREASE`).
+- **Not coverages, no code:** `Claim Free Renewal Credit`, `Leatherstocking Credit` (discounts), `Student Housing Surcharge` (surcharge), `SF-124`, `SF-312A - Loss of Income/Rents - Special Limitations` and the `SF-10D` note (form or note rows), the `Coverage L / M / N - Manufacturers and Contractors, Classification 1` rows (premium.items of `CF_LIABILITY` / `X_MED_PAY` / `CF_PRODUCTS_COMPLETED_OPS`, a registry matter). `Fire Legal Liability` is already `X_DAMAGE_TO_PREMISES_RENTED`.
+- **Derived files regenerated:** `prompt/policy_check/commercial_fire.prompt.json`, `prompt/sections/commercial_fire/*`, `prompt/manifest.json`, the FSM hash fixture, the fine-tuning parity fixtures (re-derived locally; the fine-tuning repository must regenerate from the same canonical files).
+
 ## 1.0.0 - 10 October 2026 (SPEC_21; draft for the project owner's approval)
 
 First schema of a new line. The project owner ruled on 10 October 2026 that Leatherstocking Cooperative Insurance
