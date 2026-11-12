@@ -119,6 +119,8 @@ QUICK = {
     "common/pdf_access.py",
     # A laptop tool: stages a few hundred MB of PDFs or writes rows into a workbook, in seconds; never run on the pod.
     "testing/testing_record.py",
+    # Sends 27 one-token requests to an already-served model and prints three lines: about a minute, watched.
+    "testing/image_cost_probe.py",
 }
 
 #: The Azure service's processes: each is its container's main process, so it
