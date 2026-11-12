@@ -33,7 +33,22 @@ from typing import Any
 #: A list of entries opened in the answer: ``"coverages": [{`` - not a list of page numbers (``"p": [2]``).
 _LIST_OPENED = re.compile(r'"([A-Za-z_]+)":\s*\[\s*\{')
 #: One extra field as the model writes it: its label and the value as printed (``r``).
-_LABEL_VALUE = re.compile(r'"label":\s*"((?:[^"\\]|\\.)*)",\s*"value":\s*\{\s*"r":\s*"((?:[^"\\]|\\.)*)"')
+#: The value is ``r`` where written, else ``v``: the compact form writes ``r`` only when the printed text differs from
+#: the value (``common.canonical``), so ``{"v": "No"}`` has none (2026-11-12: reading ``r`` alone counted 10 of 195).
+_LABEL_VALUE = re.compile(r'"label":\s*"((?:[^"\\]|\\.)*)",\s*"value":\s*\{([^{}]*)\}')
+_PRINTED = re.compile(r'"r":\s*"((?:[^"\\]|\\.)*)"')
+_VALUE = re.compile(r'"v":\s*(?:"((?:[^"\\]|\\.)*)"|([^,}\s]+))')
+
+
+def _label_values(text: str) -> list[tuple[str, str]]:
+    """Each extra field's label and value, the value as printed where the answer says so."""
+    out = []
+    for label, envelope in _LABEL_VALUE.findall(text):
+        if found := _PRINTED.search(envelope):
+            out.append((label, found.group(1)))
+        elif found := _VALUE.search(envelope):
+            out.append((label, found.group(1) if found.group(1) is not None else found.group(2)))
+    return out
 #: Occurrences of one row name closer than this belong to the same run.
 RUN_GAP_CHARS = 2000
 
@@ -99,7 +114,7 @@ def extra_fields(text: str, page_text: str | None) -> dict[str, Any]:
     window's page text is known - how many of the different values it prints (case and spacing ignored)."""
     from collections import Counter
 
-    pairs = Counter(_LABEL_VALUE.findall(text))
+    pairs = Counter(_label_values(text))
     out: dict[str, Any] = {"pairs": sum(pairs.values()), "different": len(pairs),
                            "most_repeated": [(label[:50], value[:30], n) for (label, value), n in pairs.most_common(3)]}
     if page_text is not None:
@@ -135,7 +150,7 @@ def report_one(answer: dict[str, Any], pages: dict[str, Any] | None = None) -> d
     else:
         found = repeating_row(text)
         if found is None:
-            out.update(kind="none found", start=None)
+            out.update(kind="none found", start=None, ends_in=list_at(text, len(text)))
             return out
         key, value = found
         start = row_loop_start(text, key, value)
@@ -157,7 +172,7 @@ def render(loops: list[dict[str, Any]]) -> str:
             lines.append(f"  extra fields: {extra['pairs']} label/value pairs, {extra['different']} different{printed}")
             lines.append(f"  most repeated: {extra['most_repeated']}")
         if loop.get("kind") == "none found":
-            lines.append("  no loop found: the answer may be long, not looping")
+            lines.append(f"  no loop found: the answer may be long, not looping; it ends in list {loop.get('ends_in')}")
             continue
         what = (f"the same {loop['period']}-char passage x{loop['repeats']}" if loop["kind"] == "exact"
                 else f"the same {loop['key']} {loop['value']!r} again and again")

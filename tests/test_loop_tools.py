@@ -94,3 +94,26 @@ def test_a_long_list_and_a_changing_loop_are_told_apart_by_their_extra_fields(tm
     out = capsys.readouterr().out
     assert "2 answer(s)" in out                                          # the half is reported too
     assert "60 label/value pairs, 60 different, 60 of the different values printed" in out
+
+
+def test_a_value_written_without_its_printed_text_is_counted_too():
+    """The compact form writes ``r`` only when the printed text differs from the value (2026-11-12, pod: reading
+    ``r`` alone counted 10 of policy_0017's 195 extra fields)."""
+    from scripts.loop_report import extra_fields
+
+    text = ('{"additional_fields": [{"label": "Sprinklered (Bldg 1)", "value": {"v": "No", "p": [3]}}, '
+            '{"label": "Year built (Bldg 1)", "value": {"v": 1987, "p": [3]}}, '
+            '{"label": "Limit (Bldg 1)", "value": {"r": "$250,000", "v": 250000.0, "p": [3]}}, '
+            '{"label": "Territory (Bldg 4)", "value": {"')
+    found = extra_fields(text, "Sprinklered No Year built 1987 Limit $250,000")
+    assert (found["pairs"], found["different"], found["printed"]) == (3, 3, 3)
+    assert {(label, value) for label, value, _ in found["most_repeated"]} == {
+        ("Sprinklered (Bldg 1)", "No"), ("Year built (Bldg 1)", "1987"), ("Limit (Bldg 1)", "$250,000")}
+
+
+def test_a_long_answer_with_no_loop_names_the_list_it_ends_in():
+    text = '{"coverages": [' + ", ".join(
+        json.dumps({"coverage_code": f"X_{n}", "coverage_name": {"v": f"Coverage {n}", "p": [1]}}) for n in range(300))
+    found = report_one({"row": {"source_id": "p", "task": "policy_schedule", "window_pages": [1]},
+                        "unparsed_text": text})
+    assert found["kind"] == "none found" and found["ends_in"] == "coverages"
