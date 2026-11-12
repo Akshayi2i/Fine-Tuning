@@ -62,3 +62,35 @@ def test_list_lengths_and_rows_that_name_a_row_twice_are_counted():
     assert extra["rows"] == 2 and extra["longest"] == 30 and report["unreadable_answers"] == 1
     assert report["rows_naming_a_row_twice"] == 1
     assert report["repeated"][0]["names_twice_or_more"] == {"form_number=CG 00 01": 2}
+
+
+def _extra(label: str, value: str, page: int) -> str:
+    return json.dumps({"label": label, "value": {"r": value, "v": value, "p": [page]}, "page_ref": [page]})
+
+
+def test_a_long_list_and_a_changing_loop_are_told_apart_by_their_extra_fields(tmp_path, capsys):
+    """2026-11-12: two answers ran to the limit with no repeated passage; their label/value pairs say which is which."""
+    from scripts.loop_report import main
+
+    real = '{"additional_fields": [' + ", ".join(_extra(f"Territory (Bldg {n})", f"T-{n:03d}", 1) for n in range(60))
+    looping = '{"additional_fields": [' + ", ".join(_extra("Causes of Loss (Loc #/Bldg #)", "Special", 2)
+                                                for _ in range(60))
+    pages = {"policy_0001": {"1": " ".join(f"Bldg {n} territory T-{n:03d}" for n in range(60)), "2": "Basic form"}}
+    rows = [{"row": {"source_id": "policy_0001", "task": "policy_schedule", "window_pages": [1, 2]},
+             "unparsed_text": looping, "halves": [
+                 {"row": {"source_id": "policy_0001", "task": "policy_schedule", "window_pages": [1]},
+                  "unparsed_text": real}]}]
+    answers, page_file = tmp_path / "run.answers.jsonl", tmp_path / "pages.json"
+    answers.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    page_file.write_text(json.dumps(pages), encoding="utf-8")
+
+    assert report_one(rows[0]["halves"][0], pages)["extra_fields"] == {
+        "pairs": 60, "different": 60, "printed": 60,
+        "most_repeated": [("Territory (Bldg 0)", "T-000", 1), ("Territory (Bldg 1)", "T-001", 1),
+                          ("Territory (Bldg 2)", "T-002", 1)]}
+    looped = report_one(rows[0], pages)["extra_fields"]
+    assert (looped["pairs"], looped["different"], looped["printed"]) == (60, 1, 0)
+    assert main(["--answers", str(answers), "--pages", str(page_file)]) == 0
+    out = capsys.readouterr().out
+    assert "2 answer(s)" in out                                          # the half is reported too
+    assert "60 label/value pairs, 60 different, 60 of the different values printed" in out

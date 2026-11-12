@@ -168,3 +168,23 @@ def test_the_selection_report_shows_how_many_halves_each_checkpoint_needed():
         {"checkpoint": "ck-2", "generated": 10, "seconds": 5, "halves_read": 0}])
     cost = generation_cost(scorer)
     assert cost["halves_read"] == 6 and cost["halves_read_by_checkpoint"] == {"ck-1": 6}
+
+
+class _StoppedForRepeating(EchoBackend):
+    """The engine stops a four-page window's answer for repeating itself; answers its halves."""
+
+    def generate(self, messages, config, adapter=None):
+        from inference_core.model_runner import STOPPED_REPEATING
+
+        if len(shown_pages(messages)) > 2:
+            return Generation(text='{"policy": {"policy_number": {"v": "P-1", "p": [1]}, "pol', tokens=["{"],
+                              token_logprobs=[-0.1], finish_reason=STOPPED_REPEATING)
+        return Generation(text="{}", tokens=["{}"], token_logprobs=[-0.01])
+
+
+def test_a_window_stopped_for_repeating_says_so_and_is_read_again_in_halves():
+    """2026-11-12, pod: a loop the engine stopped at 6,009 characters was logged as stopped at the token limit."""
+    client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
+    (window,) = generate_validation([_row()], load_model("base", client, backend_impl=_StoppedForRepeating()))
+    assert window.cut_off and "stopped for repeating itself" in window.error and "token limit" not in window.error
+    assert [h.row["window_pages"] for h in window.halves] == [[1, 2], [3, 4]]

@@ -353,7 +353,8 @@ def documents(answers: list[dict[str, Any]], pages: dict[str, dict[Any, str]]) -
                    for a in answers]
     cut: dict[tuple[str, str], set[int]] = defaultdict(set)
     for a in answers:
-        if a.get("error") and (a.get("unparsed_text") or "token limit" in str(a.get("error"))):
+        error = str(a.get("error") or "")
+        if error and (a.get("unparsed_text") or "token limit" in error or "repeating itself" in error):
             cut[(a["row"].get("source_id"), a["row"].get("modality_mode"))].update(
                 int(p) for p in a["row"].get("window_pages") or [])
     out: dict[tuple[str, str], Document] = {}

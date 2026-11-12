@@ -602,9 +602,14 @@ def _finish(entry: ValidationGeneration, result: Any) -> None:
         evidence = (f" [finish={getattr(result, 'finish_reason', None)}, "
                     f"{len(getattr(result, 'tokens', []) or [])} tokens, {len(text)} chars, "
                     f"ends {text[-60:]!r}]")
-        _record_failure(entry, exc, "output",
-                        "stopped at the token limit before the JSON closed - " if truncated else "",
-                        evidence)
+        from inference_core.model_runner import STOPPED_REPEATING
+
+        # Said as it ended: a loop the engine stopped early is not one that ran to the limit (2026-11-12, pod:
+        # policy_0003 stopped at 6,009 characters was logged as "stopped at the token limit").
+        stopped = ("stopped for repeating itself before the JSON closed - "
+                   if getattr(result, "finish_reason", None) == STOPPED_REPEATING
+                   else "stopped at the token limit before the JSON closed - ")
+        _record_failure(entry, exc, "output", stopped if truncated else "", evidence)
         # Kept whole: the last 60 characters could not tell a loop from a long list of real values (2026-11-09).
         entry.unparsed_text = text
         return

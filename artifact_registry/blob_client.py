@@ -193,7 +193,13 @@ AZURE_RETRY_BACKOFF_S = 2.0
 
 
 def _pooled_transport():
-    """An HTTP transport whose connection pool is large enough for the pipeline's parallel reads."""
+    """An HTTP transport whose connection pool is large enough for the pipeline's parallel reads.
+
+    The time limits are given to the transport itself: the storage client applies its own
+    ``connection_timeout`` / ``read_timeout`` only to a transport it builds (azure-storage-blob
+    ``_shared/base_client.py``: ``if not transport: transport = RequestsTransport(**kwargs)``), so a
+    supplied one kept azure-core's 300 s defaults (2026-11-12, pod 1703c655187d: test 2's rows-file
+    download stalled at 56.6 MB with no data for over 3 minutes and no retry)."""
     import requests
     from azure.core.pipeline.transport import RequestsTransport
     from requests.adapters import HTTPAdapter
@@ -202,7 +208,8 @@ def _pooled_transport():
     adapter = HTTPAdapter(pool_connections=POOL_SIZE, pool_maxsize=POOL_SIZE)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    return RequestsTransport(session=session, session_owner=False)
+    return RequestsTransport(session=session, session_owner=False,
+                             connection_timeout=CONNECTION_TIMEOUT_S, read_timeout=READ_TIMEOUT_S)
 
 
 class AzureBackend(BlobBackend):
