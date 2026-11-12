@@ -90,3 +90,22 @@ def test_the_command_prints_one_line_a_variant(server, capsys):
     assert main(["--url", server, "--requests", "3", "--tokens", "50"]) == 0
     out = capsys.readouterr().out
     assert all(name in out for name, *_ in VARIANTS) and "150 tokens" in out
+
+
+def test_with_pages_the_last_round_runs_while_fresh_page_requests_arrive(server, tmp_path, capsys):
+    from PIL import Image
+
+    pages = tmp_path / "doc" / "pages"
+    pages.mkdir(parents=True)
+    for n in range(1, 13):
+        Image.new("L", (100, 130), 255).save(pages / f"page_{n:03d}.png")
+    assert main(["--url", server, "--requests", "2", "--tokens", "50", "--pages", str(pages)]) == 0
+    out = capsys.readouterr().out
+    assert "+ windows of new page images arriving alongside" in out and "2 page requests done after" in out
+    image_bodies = [b for b in _Server.bodies if any(p.get("type") == "image_url"
+                                                     for p in b["messages"][0]["content"])]
+    urls = [p["image_url"]["url"] for b in image_bodies for p in b["messages"][0]["content"] if p["type"] == "image_url"]
+    assert len(image_bodies) == 2 and len(urls) == 12 == len(set(urls))           # every page once, six a request
+    assert all("/write_speed_probe/fresh_" in url.replace("\\", "/") for url in urls)  # copies, beside the pages
+    with Image.open(urls[0].removeprefix("file://")) as copy:
+        assert copy.size[0] < 100                                                  # not the image the server saw

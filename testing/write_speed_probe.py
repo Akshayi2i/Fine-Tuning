@@ -16,6 +16,16 @@ The request bodies are built by production's own client (``OpenAIChatBackend.pay
 server's own count (``usage.completion_tokens``). Text only, so no page image is prepared and only writing is timed.
 
     python -m testing.write_speed_probe --url http://localhost:8000 --model policy-v3
+
+Measured 2026-11-13 on the pod: 3,133 / 3,129 / 3,010 / 2,577 tokens/s together for the four - production's
+settings cost at most 18%, against a real document's 213 tokens/s. A real document's windows each carry six page
+images and keep arriving while earlier ones write; then (last night) each wrote 5-11 tokens/s, and the last three,
+once every window had started, about 69. ``--pages`` repeats the last variant while windows of page images arrive
+alongside: requests of six pages each, every page used once (as a document's first sight of a page), one answer
+token each, sent as fast as the server takes them. Whether the writing slows while pages are being read is then
+measured, not inferred:
+
+    python -m testing.write_speed_probe --pages /workspace/latency_check_v3_probe/document.fields-first/pages
 """
 
 from __future__ import annotations
@@ -29,6 +39,7 @@ import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 PROMPT = ("Write the coverage schedule of a made-up commercial property policy with 40 locations, as JSON: for each "
@@ -88,16 +99,52 @@ def send(url: str, body: bytes, token: str | None, stream: bool, timeout: float 
         return written, time.perf_counter() - started, finish
 
 
-def measure(url: str, body: bytes, token: str | None, stream: bool, requests: int) -> dict[str, Any]:
-    """``requests`` copies of ``body`` sent at once: tokens written, wall time, and the rate together and each."""
+def page_requests(model: str, pages: list[Path], per_request: int = 6) -> list[bytes]:
+    """One request per ``per_request`` pages, every page in one request only, one answer token each."""
+    from testing.image_cost_probe import request_body as image_body
+
+    return [image_body(model, pages[i:i + per_request]) for i in range(0, len(pages), per_request)]
+
+
+def measure(url: str, body: bytes, token: str | None, stream: bool, requests: int,
+            alongside: list[bytes] | None = None) -> dict[str, Any]:
+    """``requests`` copies of ``body`` sent at once: tokens written, wall time, and the rate together and each.
+
+    With ``alongside``, those requests (page images) are sent at the same time, 16 at a time, and the line reports
+    how long they took too."""
     started = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=requests) as pool:
+    # Two pools: page requests queued in the writers' pool would hold its workers and start the writers late.
+    with ThreadPoolExecutor(max_workers=16) as pages_pool, ThreadPoolExecutor(max_workers=requests) as pool:
+        def page_request(other: bytes) -> float:
+            send(url, other, token, False)
+            return time.perf_counter() - started                     # when it was done, from the start
+
+        side = [pages_pool.submit(page_request, other) for other in alongside or []]
         results = list(pool.map(lambda _: send(url, body, token, stream), range(requests)))
+        side_s = max((future.result() for future in side), default=0.0)
     wall = time.perf_counter() - started
     tokens = sum(written for written, _s, _f in results)
     return {"tokens": tokens, "wall_s": round(wall, 1), "together_per_s": round(tokens / wall, 1) if wall else 0.0,
             "each_per_s": round(statistics.median(w / s for w, s, _f in results if s > 0), 1),
-            "at_limit": sum(1 for _w, _s, finish in results if finish == "length")}
+            "at_limit": sum(1 for _w, _s, finish in results if finish == "length"),
+            "page_requests": len(alongside or []), "pages_done_s": round(side_s, 1)}
+
+
+def fresh_pages(pages: list[Path], out: Path, nonce: int) -> list[Path]:
+    """Copies of ``pages`` the server has not seen: each cropped by a few pixels (a run-unique number), so neither
+    its image cache nor its prefix cache holds them - as a new document's pages arrive."""
+    from PIL import Image
+
+    out.mkdir(parents=True, exist_ok=True)
+    trim = 1 + nonce % 7
+    copies = []
+    for path in pages:
+        with Image.open(path) as image:
+            width, height = image.size
+            target = out / f"fresh_{nonce}_{path.name}"
+            image.crop((0, 0, max(1, width - trim), height)).save(target)
+        copies.append(target)
+    return copies
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tokens", type=int, default=1000, help="answer tokens each request may write")
     parser.add_argument("--lob", default="bopgl", help="the line whose window schema the last variant uses")
     parser.add_argument("--group", default="arrays", help="that window's group")
+    parser.add_argument("--pages", type=Path, default=None,
+                        help="a folder of rendered page images: repeat the last variant while windows of fresh copies "
+                             "of them (six pages each, one answer token) arrive alongside")
     parser.add_argument("--token", default=os.environ.get("FIDEON_REMOTE_TOKEN"))
     args = parser.parse_args(argv)
     from inference_core.openai_backend import OpenAIChatBackend
@@ -116,12 +166,22 @@ def main(argv: list[str] | None = None) -> int:
     schema = window_schema(args.lob, args.group)
     print(f"{args.requests} requests at once, up to {args.tokens} answer tokens each, text only; "
           f"the shape rule is {args.lob}/{args.group}'s window schema ({len(json.dumps(schema)):,} characters)")
-    for name, stream, scores, shaped in VARIANTS:
+    rounds: list[tuple[str, bool, bool, bool, list[bytes] | None]] = [(*variant, None) for variant in VARIANTS]
+    if args.pages is not None:
+        pages = sorted(args.pages.glob("*.png"))
+        if not pages:
+            parser.error(f"{args.pages} holds no page images (*.png)")
+        fresh = fresh_pages(pages, args.pages.parent / "write_speed_probe", nonce=int(time.time()))
+        rounds.append(("+ windows of new page images arriving alongside", True, True, True,
+                       page_requests(args.model, fresh)))
+    for name, stream, scores, shaped, alongside in rounds:
         body = request_body(client, stream=stream, scores=scores, schema=schema if shaped else None,
                             tokens=args.tokens)
-        result = measure(args.url, body, args.token, stream, args.requests)
+        result = measure(args.url, body, args.token, stream, args.requests, alongside)
+        side = (f"; {result['page_requests']} page requests done after {result['pages_done_s']} s"
+                if alongside else "")
         print(f"{name}: {result['tokens']:,} tokens in {result['wall_s']} s = {result['together_per_s']} tokens/s "
-              f"together, {result['each_per_s']} tokens/s each (median); {result['at_limit']} ran to the limit",
+              f"together, {result['each_per_s']} tokens/s each (median); {result['at_limit']} ran to the limit{side}",
               flush=True)
     client.close()
     return 0
