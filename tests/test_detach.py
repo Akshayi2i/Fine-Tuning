@@ -121,6 +121,8 @@ QUICK = {
     "testing/testing_record.py",
     # Sends 27 one-token requests to an already-served model and prints three lines: about a minute, watched.
     "testing/image_cost_probe.py",
+    # Sends four rounds of 32 text-only requests to an already-served model: a few minutes, watched.
+    "testing/write_speed_probe.py",
 }
 
 #: The Azure service's processes: each is its container's main process, so it
