@@ -163,14 +163,19 @@ def chat_messages(messages: list[dict[str, Any]], images: str = "inline", *, lin
 
 
 def repeating_tail(text: str, *, min_chars: int = 3000, min_repeats: int = 6,
-                   max_period: int = 500) -> int | None:
+                   max_period: int = 2000) -> int | None:
     """The length of the passage the end of ``text`` repeats, or None.
 
     The end counts as a loop when its last ``min_chars`` characters (at least
     ``min_repeats`` passages) are one passage of at most ``max_period``
     characters over and over: a run of blank space, the same row again and
-    again. A real answer's rows differ - another vehicle, another page - so it
-    does not stay periodic for thousands of characters.
+    again, the same few rows in turn. A real answer's rows differ - another
+    vehicle, another page - so it does not stay periodic for thousands of
+    characters.
+
+    ``max_period`` was 500 until 2026-11-12: on the pod, two loops of a few rows
+    in turn repeated passages of 596 characters (four extra fields) and 1,042
+    (five coverages) exactly, and ran to the 12,288-token limit.
     """
     end = len(text)
     for period in range(1, max_period + 1):

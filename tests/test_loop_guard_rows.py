@@ -135,3 +135,42 @@ def test_a_streamed_answer_writing_one_row_under_new_names_is_stopped_early():
     result = _read_stream(lines + [b"data: [DONE]"], started=time.perf_counter())
     assert result["finish_reason"] == STOPPED_REPEATING
     assert len(result["text"]) < len(loop) / 2
+
+
+def _extra_field(label: str, value: str, page: int) -> str:
+    return json.dumps({"label": label, "value": {"v": value, "p": [page]}, "section_hint": "coverages[0]",
+                       "page_ref": [page]})
+
+
+def _limit_row(code: str, name: str, kind: str, amount: str) -> str:
+    return json.dumps({"coverage_code": code, "coverage_name": {"v": name, "p": [8]},
+                       "limits": [{"limit_type": kind, "amount": {"r": amount, "v": float(amount.strip("$").replace(
+                           ",", "")), "p": [8]}}]})
+
+
+def test_a_few_rows_written_in_turn_are_a_loop_the_old_passage_limit_missed():
+    """2026-11-12, pod: policy_0018 wrote four form lines about "Loc 1/Bldg 1" in turn (a 596-character passage) and
+    policy_0003 five coverages in turn (1,042 characters), both to the 12,288-token limit: the exact test looked
+    for a passage of at most 500 characters."""
+    forms = [_extra_field(f"{form} (Loc #/Bldg #)", "Loc 1/Bldg 1", page) for form, page in (
+        ("SF-2 0916-Causes of Loss", 1), ("SF-27A 0796-Replacement Cost Provision", 2),
+        ("SF-3 0916-Causes of Loss", 2), ("SF-98 0916-Inflation Guard", 2))]
+    coverages = [_limit_row(*row) for row in (
+        ("BOPGL_UMBRELLA_LIABILITY", "UMBRELLA LIAB EXCESS LIAB", "aggregate", "$1,000,000"),
+        ("BOPGL_LIABILITY", "GENERAL AGGREGATE LIMIT APPLIES PER:", "aggregate", "$2,000,000"),
+        ("BOPGL_LIABILITY", "EACH OCCURRENCE", "per_occurrence", "$1,000,000"),
+        ("BOPGL_DAMAGE_TO_PREMISES_RENTED", "DAMAGE TO RENTED PREMISES (Ea occurrence)", "per_occurrence", "$1,000,000"),
+        ("BOPGL_LIABILITY", "EACH OCCURRENCE", "per_occurrence", "$1,000,000"))]
+    for opening, cycle in (('{"additional_fields": [', forms), ('{"coverages": [', coverages)):
+        text = opening + ", ".join(cycle * 20)
+        period = len(", ".join(cycle)) + 2
+        assert 500 < period <= 2000
+        assert repeating_tail(text, max_period=500) is None                 # the old limit
+        assert repeating_tail(text) == period
+        assert repetition(text)[0] == "repeating_tail"
+
+
+def test_a_long_list_of_buildings_is_still_not_a_loop():
+    rows = [_extra_field(f"{field} (Bldg {n})", value, 1 + n % 3) for n in range(1, 60)
+            for field, value in (("Description", f"Building {n}"), ("Sprinklered", "No"), ("Year built", str(1950 + n)))]
+    assert repetition('{"additional_fields": [' + ", ".join(rows)) is None
