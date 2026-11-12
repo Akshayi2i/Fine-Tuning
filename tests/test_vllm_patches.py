@@ -373,6 +373,12 @@ def _python_with_hook(tmp_path, fake_patches: str, code: str, **env):
 
     shutil.copy(Path(vllm_patches.__file__).resolve().parent / "vllm_site" / "sitecustomize.py", tmp_path)
     (tmp_path / "vllm_patches.py").write_text(fake_patches, encoding="utf-8")
+    # The hook prefers the repository's own fix, so where the repository is installed (the pod's environment) the
+    # real one was applied in place of the stand-in and three tests failed (2026-11-12). A package of that name that
+    # cannot be imported, first on the path, makes the hook take the stand-in beside it wherever the tests run.
+    (tmp_path / "inference_core").mkdir(exist_ok=True)
+    (tmp_path / "inference_core" / "__init__.py").write_text("raise ImportError('no repository here')\n",
+                                                             encoding="utf-8")
     base = {k: v for k, v in os.environ.items()
             if k not in ("PYTHONPATH", "FIDEON_VLLM_PATCH", "FIDEON_VLLM_PARENT_PID")}
     return subprocess.run([sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True, timeout=60,
