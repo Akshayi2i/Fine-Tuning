@@ -72,6 +72,8 @@ def test_a_cycle_waiting_quietly_is_healthy_but_a_quiet_import_is_not(tmp_path):
 
 def test_mid_training_shows_the_step_and_time_left(tmp_path):
     cycle = WAITING + (
+        # A normal step, not a stop (2026-11-14: reported as a problem until the pattern was narrowed).
+        "2026-11-14 13:59:00 UTC full_cycle: stopping the MinerU servers: training needs the GPUs\n"
         "2026-11-14 14:00:00 UTC full_cycle: this cycle is v4: finetune --skip-ingest --fresh\n"
         "2026-11-14 14:00:05 INFO orchestration.pipeline_dag stage 2 preprocessing: already complete, skipping\n"
         "2026-11-14 14:00:06 INFO orchestration.pipeline_dag stage 4 dataset_build [GPU]\n"

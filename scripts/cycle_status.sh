@@ -38,7 +38,8 @@ minutes_quiet() {
 errors_in() {
   local log="$LOG_DIR/$1.log"
   [ -f "$log" ] || return 0
-  grep -aE " ERROR |Traceback|full_cycle: .*(stopping|stopped)|stage [0-9]+ [a-z_]+: failed|failed after [0-9]+ attempt|CUDA out of memory|Killed" \
+  # full_cycle's own stops say "stopping before ..." or "... stopped"; "stopping the MinerU servers" is a normal step.
+  grep -aE " ERROR |Traceback|full_cycle: .*(stopping before|: stopping$|stopped)|stage [0-9]+ [a-z_]+: failed|failed after [0-9]+ attempt|CUDA out of memory|Killed" \
     "$log" | tail -n 5 | cut -c1-220
 }
 
