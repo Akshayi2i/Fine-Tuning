@@ -231,6 +231,15 @@ runs a single one. A corpus already read starts nothing. So the whole cycle is o
 python -m orchestration.run finetune --skip-ingest --fresh   # OCR (server started and stopped), corpus, training, selection
 ```
 
+Or the whole cycle through to the gated release, unattended: `scripts/full_cycle.sh` waits for the runs named with
+`--after` (the import, an OCR pass) to end with exit 0, stops the MinerU servers, runs `finetune` under the next
+version, freezes that version's test split when no eval set is frozen (and copies the review records), then runs
+`package --keep-staging`; it stops at the first step that fails and prints how to resume it:
+
+```bash
+bash scripts/pod_run.sh start cycle2 -- bash scripts/full_cycle.sh --after importc2 --after ocrloop -- --skip-ingest --fresh
+```
+
 A `MINERU_URL` that is not this machine's (a dedicated MinerU 4.0.12/basic on another pod, not production's) is used as
 it is and never stopped. `bash scripts/mineru_server.sh start | check [--pdf FILE] | stop` runs the server by hand,
 for a check before the first run. The in-process MinerU 3.4.5 can no longer produce a trainable corpus, and the
