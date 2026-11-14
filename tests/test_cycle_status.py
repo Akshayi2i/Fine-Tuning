@@ -56,6 +56,20 @@ def test_now_importing_and_reading_and_the_cycle_waiting(tmp_path):
     assert "HEALTH:   OK - no errors found" in out
 
 
+def test_a_cycle_waiting_quietly_is_healthy_but_a_quiet_import_is_not(tmp_path):
+    """The waiting cycle writes nothing for hours (2026-11-14: a "may be stuck" mail for exactly that)."""
+    import os
+    import time
+
+    _status(tmp_path, {"importc2": IMPORTING, "ocrloop": READING, "cycle2": WAITING}, {}, set())
+    old = time.time() - 3600
+    for name in ("cycle2", "importc2"):
+        os.utime(tmp_path / "logs" / f"{name}.log", (old, old))
+    out = _status(tmp_path, {}, {}, {"importc2", "ocrloop", "cycle2"})
+    assert "'cycle2' has written nothing" not in out
+    assert "'importc2' has written nothing for 60 minutes" in out
+
+
 def test_mid_training_shows_the_step_and_time_left(tmp_path):
     cycle = WAITING + (
         "2026-11-14 14:00:00 UTC full_cycle: this cycle is v4: finetune --skip-ingest --fresh\n"

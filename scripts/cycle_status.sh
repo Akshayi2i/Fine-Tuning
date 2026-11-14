@@ -131,7 +131,10 @@ for run in "$IMPORT" "$OCR" "$CYCLE"; do
     dead) problems+=("'$run' is not running and recorded no exit: the pod restarted or its session was killed") ;;
     running)
       q="$(minutes_quiet "$run")"
-      if [ "$q" -ge "$QUIET_MIN" ]; then
+      # The cycle waiting for the import and the OCR writes nothing until they end: quiet, not stuck.
+      if [ "$run" = "$CYCLE" ] && tail -n 1 "$LOG_DIR/$run.log" 2>/dev/null | grep -aq "full_cycle: waiting for"; then
+        :
+      elif [ "$q" -ge "$QUIET_MIN" ]; then
         problems+=("'$run' has written nothing for $q minutes: it may be stuck (training steps can be slow; check again soon)")
       fi ;;
   esac
