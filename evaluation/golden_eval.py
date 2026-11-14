@@ -898,16 +898,12 @@ def evaluate_version(
     judging its candidate on floors alone. The model is never run again.
     """
     from common.adapter import ADAPTER
-    from common.lob import single_line
     from evaluation.run_eval import assert_eval_set_disjoint, build_report
 
     _refuse_interrupted_freeze(client, tenant_id)
     # Before anything is evaluated: a leaked eval set makes every number meaningless.
     assert_eval_set_disjoint(client, corpus_version, tenant_id)
-    documents = load_golden_set(client, ADAPTER.doc_types, tenant_id=tenant_id)
-    if lines is not None:
-        served = set(lines)
-        documents = [d for d in documents if single_line(d.lob) in served]
+    documents = gate_documents(client, tenant_id, lines)
     if not documents:
         raise GoldenEvalError(
             f"the frozen eval set at {paths.golden_eval_set_dir(tenant_id)}/ holds no "
@@ -920,15 +916,14 @@ def evaluate_version(
 
     # The repeat pass for run_to_run_agreement: one more pass in the repeat
     # mode - image_only, the mode production reads.
-    repeat, repeat_mode = run_to_run_check(), run_to_run_mode()
-    noisy_share, repeat_share = golden_noisy_share(), run_to_run_share()
+    repeat, repeat_mode, noisy_share, repeat_share = gate_settings()
     cache = reading_cache_for(client, tenant_id, version, corpus_version, documents, model,
                               adapter_checkpoint, calibrators, thresholds,
                               settings=(repeat, repeat_mode, noisy_share, repeat_share))
     with GpuMemorySampler() as memory:
         triples = evaluate(
             documents, model, client,
-            paths.staging_train_images_dir(f"golden-{corpus_version}", tenant_id),
+            gate_images_root(corpus_version, tenant_id),
             calibrators=calibrators, thresholds=thresholds, run_to_run=repeat, repeat_mode=repeat_mode,
             noisy_share=noisy_share, repeat_share=repeat_share, cache=cache,
         )
@@ -1034,22 +1029,238 @@ def reading_cache_for(client: BlobClient, tenant_id: str | None, version: str, c
                       calibrators: Any, thresholds: Any, *, settings: Any) -> Any:
     """The cache this gate keeps its readings in, or ``None`` when it cannot be kept (``FIDEON_GATE_CACHE=0``).
 
-    The key names what a reading depends on: the release, the adapter checkpoint, the model's tag, the
-    calibrators and thresholds, the frozen documents, the settings and the code commit. A change to any of
-    them reads everything fresh.
+    Named by :func:`gate_reading_key`. The readings made on the other GPUs (:func:`read_on_every_gpu`) are
+    kept under the same name, so the gate takes them from here.
     """
-    if os.environ.get("FIDEON_GATE_CACHE", "1") == "0":
+    if not gate_cache_on():
         return None
-    from evaluation.reading_cache import ReadingCache, cache_key, default_root
+    from evaluation.reading_cache import ReadingCache, default_root
+
+    key = gate_reading_key(
+        version=version, corpus_version=corpus_version, tenant_id=tenant_id, documents=documents,
+        model_tag=getattr(model, "tag", None), adapter_checkpoint=adapter_checkpoint,
+        calibrators=calibrators, thresholds=thresholds, settings=settings,
+    )
+    return ReadingCache(default_root(), key)
+
+
+def gate_cache_on() -> bool:
+    """Whether the gate keeps its readings (``FIDEON_GATE_CACHE``, on unless ``0``)."""
+    return os.environ.get("FIDEON_GATE_CACHE", "1") != "0"
+
+
+def gate_documents(client: BlobClient, tenant_id: str | None,
+                   lines: Collection[str] | None) -> list[GoldenDocument]:
+    """The frozen documents the gate scores: this tenant's frozen set, narrowed to the lines the release serves."""
+    from common.adapter import ADAPTER
+    from common.lob import single_line
+
+    documents = load_golden_set(client, ADAPTER.doc_types, tenant_id=tenant_id)
+    if lines is not None:
+        served = set(lines)
+        documents = [d for d in documents if single_line(d.lob) in served]
+    return documents
+
+
+def gate_settings() -> tuple[bool, str, float, float]:
+    """``(run_to_run, repeat_mode, noisy_share, repeat_share)``: how the gate reads the set (part of its yardstick)."""
+    return run_to_run_check(), run_to_run_mode(), golden_noisy_share(), run_to_run_share()
+
+
+def gate_images_root(corpus_version: str, tenant_id: str | None) -> str:
+    """Where the gate keeps the frozen documents' page images on this machine."""
+    return paths.staging_train_images_dir(f"golden-{corpus_version}", tenant_id)
+
+
+def gate_reading_key(*, version: str, corpus_version: str, tenant_id: str | None,
+                     documents: Sequence[GoldenDocument], model_tag: Any, adapter_checkpoint: str | None,
+                     calibrators: Any, thresholds: Any, settings: Any) -> str:
+    """The name of the gate's saved readings: everything a reading depends on - the release, the adapter
+    checkpoint, the model's tag, the calibrators and thresholds, the frozen documents (all of them, however the
+    reading is shared out), the settings and the code commit. A change to any of them reads everything fresh."""
+    from evaluation.reading_cache import cache_key
     from registry_utils.write_run_manifest import capture_git_commit
 
-    key = cache_key(
+    return cache_key(
         version=version, corpus=corpus_version, tenant=tenant_id, checkpoint=adapter_checkpoint,
-        model=getattr(model, "tag", None), commit=capture_git_commit(),
+        model=model_tag, commit=capture_git_commit(),
         calibrators=repr(calibrators), thresholds=repr(thresholds), settings=repr(settings),
         documents=sorted(d.source_id for d in documents), modes=list(GOLDEN_MODES),
     )
-    return ReadingCache(default_root(), key)
+
+
+def split_by_pages(documents: Sequence[GoldenDocument], parts: int) -> list[list[str]]:
+    """``documents``' source ids in ``parts`` shares of near-equal page counts: the longest first, each to the
+    share with the fewest pages so far (ties to the lower share). The same split on every run."""
+    shares: list[list[str]] = [[] for _ in range(max(1, parts))]
+    pages = [0] * len(shares)
+    for doc in sorted(documents, key=lambda d: (-len(d.image_keys), d.source_id)):
+        index = min(range(len(shares)), key=lambda i: (pages[i], i))
+        shares[index].append(doc.source_id)
+        pages[index] += max(1, len(doc.image_keys))
+    return shares
+
+
+def planned_readings(documents: Sequence[GoldenDocument], settings: Sequence[Any]) -> list[tuple[str, str, str]]:
+    """Every reading the gate makes of ``documents`` under ``settings`` (:func:`gate_settings`), as the saved
+    readings name them - ``(source_id, mode, first or repeat)``: each mode (noisy_ocr_image on its share), and the
+    repeat mode again on the repeat share. A repeat is made only after its first reading succeeds, so this is
+    what a complete gate keeps."""
+    from evaluation.reading_cache import FIRST, REPEAT
+
+    repeat, repeat_mode, noisy_share, repeat_share = settings
+    planned = []
+    for doc in documents:
+        for mode in GOLDEN_MODES:
+            if mode == "noisy_ocr_image" and not in_share(doc.source_id, noisy_share, "noisy"):
+                continue
+            planned.append((doc.source_id, mode, FIRST))
+            if repeat and mode == repeat_mode and in_share(doc.source_id, repeat_share, "repeat"):
+                planned.append((doc.source_id, mode, REPEAT))
+    return planned
+
+
+#: How long the gate's GPU workers may go without one of them keeping a reading before they are stopped and the gate
+#: reads what is left itself: well past the longest reading seen (a few minutes) plus a model load.
+GATE_WORKERS_STALL_S = 45 * 60
+
+
+def read_on_every_gpu(client: BlobClient, *, version: str, corpus_version: str, tenant_id: str | None,
+                      calibrators: Any, thresholds: Any, lines: Collection[str] | None,
+                      adapter_checkpoint: str | None, adapter: str, label: str, gpus: Sequence[str],
+                      work_dir: Path, poll_seconds: float = 30.0, stall_s: float = GATE_WORKERS_STALL_S,
+                      clock: Any = None, sleep: Any = None) -> dict[str, Any]:
+    """Make the gate's readings on every GPU at once, before the gate itself runs.
+
+    The gate's engine reads one document at a time (:func:`documents_in_flight`: the in-process engine cannot
+    take a request while another runs), so on a pod of several GPUs one of them reads the whole frozen set.
+    Here the documents are split by page count (:func:`split_by_pages`), and each GPU's worker
+    (``evaluation.gate_shard_worker``) loads the model as the gate does and reads its share - first readings
+    and repeats - into the gate's saved readings, under the same name (:func:`gate_reading_key`). The gate then
+    runs as always: it takes every kept reading and scores them all together, so what is scored, and how, does
+    not change. A reading no worker made (a worker that failed, a reading that failed) the gate makes itself.
+
+    A share already kept whole starts no worker. Workers that keep nothing for ``stall_s`` are stopped, and every
+    worker is stopped if this returns early for any reason (an error, Ctrl-C): none is left holding a GPU when
+    the gate loads its own model. ``adapter`` must be a local folder (the gate's caller copies a Blob one down
+    once, so the workers do not all write it at once). A worker's failure is logged, never raised.
+    """
+    import pickle
+    import sys
+    import time
+
+    from evaluation.checkpoint_eval import _spawn, _tail
+    from evaluation.reading_cache import ReadingCache, default_root
+
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    if len(gpus) < 2 or not gate_cache_on():
+        return {"gpus": len(gpus), "skipped": True}
+    # The gate's own refusals first: hours of reading on every GPU buy nothing for a gate that then refuses.
+    _refuse_interrupted_freeze(client, tenant_id)
+    documents = gate_documents(client, tenant_id, lines)
+    if not documents:
+        return {"gpus": len(gpus), "documents": 0, "skipped": True}
+    settings = gate_settings()
+    key = gate_reading_key(
+        version=version, corpus_version=corpus_version, tenant_id=tenant_id, documents=documents,
+        model_tag=label, adapter_checkpoint=adapter_checkpoint, calibrators=calibrators,
+        thresholds=thresholds, settings=settings,
+    )
+    cache = ReadingCache(default_root(), key)
+    shares = split_by_pages(documents, len(gpus))
+    by_id = {d.source_id: d for d in documents}
+    planned = planned_readings(documents, settings)
+
+    def kept() -> int:
+        return sum(1 for sid, mode, kind in planned if cache._file(sid, mode, kind).is_file())
+
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = work_dir / "gate-spec.pkl"
+    with spec_path.open("wb") as handle:
+        pickle.dump({
+            "version": version, "corpus_version": corpus_version, "tenant_id": tenant_id,
+            "calibrators": calibrators, "thresholds": thresholds, "adapter_checkpoint": adapter_checkpoint,
+            "adapter": adapter, "label": label, "key": key, "settings": settings, "shares": shares,
+            # The frozen documents themselves, so no worker loads the set from Blob again.
+            "documents": documents,
+        }, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    running: dict[str, tuple[Path, Path, Any]] = {}
+    finished: dict[str, dict[str, Any]] = {}
+    try:
+        for index, gpu in enumerate(gpus):
+            share = shares[index]
+            mine = planned_readings([by_id[sid] for sid in share], settings)
+            if not share or all(cache._file(*reading).is_file() for reading in mine):
+                continue                                   # nothing in it, or kept whole by an earlier run
+            out = work_dir / f"gate-gpu{gpu}.json"
+            out.unlink(missing_ok=True)
+            log_path = work_dir / f"gate-gpu{gpu}.log"
+            command = [sys.executable, "-m", "evaluation.gate_shard_worker", "--spec", str(spec_path),
+                       "--share", str(index), "--out", str(out)]
+            env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu), "FIDEON_NO_DETACH": "1"}
+            running[str(gpu)] = (out, log_path, _spawn(command, env, log_path))
+        log.info("golden eval: %d/%d reading(s) kept; reading the rest of %d frozen document(s) on %d GPU(s) at "
+                 "once (%s page(s) each); worker logs in %s", kept(), len(planned), len(documents), len(running),
+                 " / ".join(str(sum(len(by_id[sid].image_keys) for sid in share)) for share in shares if share),
+                 work_dir)
+        last_count, last_change = kept(), clock()
+        while running:
+            for gpu in [g for g, (*_, proc) in running.items() if proc.poll() is not None]:
+                out, log_path, proc = running.pop(gpu)
+                finished[gpu] = _worker_result(gpu, out, log_path, proc, _tail)
+            if not running:
+                break
+            count = kept()
+            if count != last_count:
+                last_count, last_change = count, clock()
+            elif clock() - last_change > stall_s:
+                log.warning("golden eval: no reading kept for %d min while %d GPU worker(s) read: stopping them; "
+                            "the gate reads what is left itself, on one GPU", int(stall_s // 60), len(running))
+                break
+            # The line orchestration.status reads for how far the gate is.
+            log.info("golden eval: %d/%d reading(s) kept; %d GPU worker(s) still reading", count, len(planned),
+                     len(running))
+            sleep(poll_seconds)
+    finally:
+        for gpu, (out, log_path, proc) in running.items():
+            _stop_worker(proc)
+            finished[gpu] = {**_worker_result(gpu, out, log_path, proc, _tail), "stopped": True}
+    log.info("golden eval: %d/%d reading(s) kept by the GPU workers", kept(), len(planned))
+    return {"gpus": len(finished), "documents": len(documents), "key": key, "kept": kept(),
+            "planned": len(planned), "workers": finished}
+
+
+def _worker_result(gpu: str, out: Path, log_path: Path, proc: Any, tail: Any) -> dict[str, Any]:
+    if getattr(proc, "log_handle", None) is not None:
+        proc.log_handle.close()
+    try:
+        result = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else {}
+    except (OSError, ValueError):
+        result = {}
+    result["exit"] = proc.returncode
+    if proc.returncode != 0 or not result.get("ok"):
+        log.warning("golden eval: the worker on GPU %s did not finish its share (exit %s: %s); the gate makes what "
+                    "it left itself, on one GPU. Its log ends:\n%s", gpu, proc.returncode,
+                    result.get("error") or "no result", tail(log_path))
+    else:
+        log.info("golden eval: the worker on GPU %s read its share: %s", gpu, result.get("summary"))
+    return result
+
+
+def _stop_worker(proc: Any, grace_s: float = 60.0) -> None:
+    """Stop a GPU worker and wait for it to go (its engine's GPU memory with it); killed if it will not."""
+    import subprocess
+
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=grace_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=grace_s)
 
 
 #: Where the eval report's gate metrics carry the readings that failed to

@@ -2409,6 +2409,9 @@ def eval_report_metrics(ctx: StageContext) -> dict[str, Any]:
             "view and its corpus record none), so it has no line to serve or to be scored on."
         )
     loader = ctx.serving_model_loader or _staged_serving_model
+    if ctx.serving_model_loader is None:
+        # Every GPU reads its share first; the gate below takes those readings and reads only what they left.
+        _read_gate_on_every_gpu(ctx, calibrators=calibrators, thresholds=thresholds, lines=lines, scored=scored)
     model = loader(ctx, "bf16")
     try:
         report = evaluate_version(
@@ -3357,8 +3360,41 @@ def _staged_serving_model(ctx: StageContext, fmt: str) -> Any:  # pragma: no cov
     if fmt != "bf16":
         raise PipelineError(f"{fmt} is not served: the release is a LoRA on the bf16 base")
     adapter = serving_adapter(ctx)
-    return load_model("base", ctx.client, backend="vllm", adapter=adapter,
-                      label=f"{ADAPTER.run_id(ctx.out_version)}:bf16")
+    return load_model("base", ctx.client, backend="vllm", adapter=adapter, label=_serving_label(ctx))
+
+
+def _serving_label(ctx: StageContext) -> str:
+    """The name the staged model is loaded under (its tag): part of the name of the gate's saved readings."""
+    return f"{ADAPTER.run_id(ctx.out_version)}:bf16"
+
+
+def _read_gate_on_every_gpu(ctx: StageContext, *, calibrators: Any, thresholds: Any, lines: Any,
+                            scored: str | None) -> None:
+    """On a pod of several GPUs, the gate's readings made on all of them at once, before the gate loads its own
+    model (:func:`evaluation.golden_eval.read_on_every_gpu`); the GPUs selection scored on. Never raises: what
+    the workers did not read, the gate reads itself."""
+    from evaluation.golden_eval import read_on_every_gpu
+
+    gpus = _calibration_gpus()
+    if len(gpus) < 2:
+        return
+    work_dir = Path(paths.scoped_staging_adapter_dir(ADAPTER.name, ctx.out_version)) / "gate_shards"
+    try:
+        from inference_core.model_runner import load_runner_config, prepare_adapter
+
+        # Copied down here, once (with --from-blob it is a Blob prefix): every worker copying it into the same
+        # folder at once would read files another is still writing. The gate's own load finds the copy whole.
+        adapter = prepare_adapter(serving_adapter(ctx), ctx.client, load_runner_config("vllm"))
+        done = read_on_every_gpu(
+            ctx.client, version=ctx.out_version, corpus_version=ctx.corpus, tenant_id=ctx.tenant_id,
+            calibrators=calibrators, thresholds=thresholds, lines=lines, adapter_checkpoint=scored,
+            adapter=adapter, label=_serving_label(ctx), gpus=gpus, work_dir=work_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 - the gate reads everything itself, on one GPU, as before
+        log.warning("the gate's readings could not be shared across the GPUs (%s: %s); the gate reads them all "
+                    "on one GPU", type(exc).__name__, exc)
+        return
+    log.info("gate readings on every GPU: %s", {k: v for k, v in done.items() if k != "workers"})
 
 
 def collect_calibration_samples(ctx: StageContext) -> dict[str, Any]:
