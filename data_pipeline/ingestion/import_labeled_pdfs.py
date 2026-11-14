@@ -259,13 +259,16 @@ def import_bundle(
     tenant_id: str | None = None,
     known_checksums: dict[str, str] | None = None,
     batch: str | None = None,
+    source_id: str | None = None,
 ) -> tuple[str, str]:
     """Store the PDF and its label. Returns ``(source_id, status)``.
 
     The PDF goes through the normal ingestion path — same checksum dedup, same
     write-once raw layer — so an imported document is indistinguishable from one
     ingested any other way by the time OCR sees it. ``batch`` is the intake
-    batch the bundle was pulled from, when the import pulled one.
+    batch the bundle was pulled from, when the import pulled one. ``source_id``:
+    the id a new PDF takes (an already-stored one keeps its own); None works the
+    next free one out from storage.
     """
     from data_pipeline.ingestion.pull_raw_pdfs import ingest_pdf
     from data_pipeline.labeling.export_golden_labels import review_record
@@ -273,6 +276,7 @@ def import_bundle(
     source_id, status = ingest_pdf(
         bundle.pdf, doc_type, raw_client,
         tenant_id=tenant_id,
+        source_id=source_id,
         known_checksums=known_checksums,
         source_system="labeled_import",
     )
@@ -372,20 +376,32 @@ def import_batch(
     # The same checksum map `ingest_directory` builds, so re-importing a
     # corrected batch re-labels the documents already stored rather than storing
     # a second copy of each PDF under a new source_id.
-    from data_pipeline.ingestion.pull_raw_pdfs import IngestionError, _existing_checksums
+    from common.ids import build_source_id, parse_source_id
+    from data_pipeline.ingestion.pull_raw_pdfs import IngestionError, _existing_checksums, taken_source_ids
 
     known = _existing_checksums(raw_client, doc_type, tenant_id)
+    # The next free id, worked out once and counted up here. Listing every id in use for every document
+    # (ingest_pdf's default) reads all of processed/ each time, and the OCR stage adds a page or two there
+    # per page it reads: run beside it, 10 s a document became 45 s and minutes (2026-11-14).
+    next_index = max((parse_source_id(s).index for s in taken_source_ids(raw_client, doc_type, tenant_id)),
+                     default=0) + 1
     for bundle in bundles:
+        candidate = build_source_id(doc_type, next_index)
+        status = "failed"
         try:
             source_id, status = import_bundle(
                 bundle, doc_type, client, raw_client,
-                tenant_id=tenant_id, known_checksums=known, batch=batch,
+                tenant_id=tenant_id, known_checksums=known, batch=batch, source_id=candidate,
             )
         # An unreadable PDF is that document's failure, not the batch's: it ended
         # an import part-way, every later document unimported.
         except (LabeledPdfError, IngestionError, ValueError) as exc:
             next(c for c in report.checks if c.name == bundle.directory.name).errors.append(str(exc))
             continue
+        finally:
+            # Used, or possibly used by a failure part-way: never offered again. A stored PDF kept its own id.
+            if status != "duplicate":
+                next_index += 1
         report.imported[bundle.directory.name] = source_id
         if status == "duplicate":
             report.duplicates[bundle.directory.name] = source_id

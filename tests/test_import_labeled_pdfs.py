@@ -260,6 +260,28 @@ def test_an_invalid_label_is_skipped_while_the_rest_import(tmp_path, client, raw
     assert "ERROR" in report.describe()
 
 
+def test_the_ids_in_use_are_listed_once_per_import_not_once_per_document(tmp_path, client, raw_client, monkeypatch):
+    """2026-11-14: each document listed every id in use, processed/ included, which the OCR stage grows by a page
+    or two per page it reads - run beside it, 10 s a document became 45 s and minutes."""
+    from data_pipeline.ingestion import pull_raw_pdfs
+
+    root = batch(tmp_path, ("a", "b", "c"))
+    first = import_batch(root, "policy", client, raw_client)
+    assert [first.imported[n] for n in ("a", "b", "c")] == ["policy_0001", "policy_0002", "policy_0003"]
+
+    listings = []
+    real = pull_raw_pdfs.taken_source_ids
+    monkeypatch.setattr(pull_raw_pdfs, "taken_source_ids", lambda *a: listings.append(1) or real(*a))
+    for index, name in enumerate(("d", "e", "f", "g")):
+        bundle(root, name, pdf=f"%PDF-1.7 new {index}".encode())
+    second = import_batch(root, "policy", client, raw_client)
+    assert len(listings) == 1                                          # once, for seven documents
+    assert second.duplicates == {"a": "policy_0001", "b": "policy_0002", "c": "policy_0003"}
+    # the stored ones keep their ids, and the new ones take the next free ones in order, none skipped
+    assert [second.imported[n] for n in ("d", "e", "f", "g")] == [
+        "policy_0004", "policy_0005", "policy_0006", "policy_0007"]
+
+
 def test_re_importing_a_corrected_batch_relabels_rather_than_duplicating(
     tmp_path, client, raw_client
 ):
