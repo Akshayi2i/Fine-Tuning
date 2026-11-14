@@ -39,7 +39,7 @@ START_TIMEOUT_S = 900.0
 POLL_S = 5.0
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 #: Parse jobs the server runs at once (scripts/mineru_server.sh, MINERU_CONCURRENCY): the
-#: documents the OCR stage reads in parallel against it.
+#: documents the OCR stage reads in parallel against it (data_pipeline.ocr.served_ocr.SERVER_JOBS).
 SERVER_CONCURRENCY = 4
 
 
@@ -47,14 +47,18 @@ class OcrServerError(RuntimeError):
     """The OCR server could not be started, or never answered."""
 
 
+#: What ``scripts/mineru_server.sh start`` writes to ``.env``: the first server, every server (one per GPU), the token.
+ENV_KEYS = ("MINERU_URL", "MINERU_URLS", "MINERU_TOKEN")
+
+
 def _env_file_values(path: Path) -> dict[str, str]:
-    """``MINERU_URL`` and ``MINERU_TOKEN`` as ``.env`` holds them (what ``start`` writes)."""
+    """``MINERU_URL``, ``MINERU_URLS`` and ``MINERU_TOKEN`` as ``.env`` holds them (what ``start`` writes)."""
     values: dict[str, str] = {}
     if not path.is_file():
         return values
     for line in path.read_text(encoding="utf-8").splitlines():
         key, sep, value = line.strip().partition("=")
-        if sep and key in ("MINERU_URL", "MINERU_TOKEN"):
+        if sep and key in ENV_KEYS:
             values[key] = value.strip().strip('"').strip("'")
     return values
 
@@ -82,8 +86,16 @@ def installed() -> bool:
     return SCRIPT.is_file() and (venv / "bin" / "mineru-api").is_file()
 
 
-def _run_script(action: str, runner: Callable[..., Any]) -> None:
-    result = runner(["bash", str(SCRIPT), action], cwd=REPO, capture_output=True, text=True)
+def _port(url: str) -> int | None:
+    try:
+        return urlsplit(url).port
+    except ValueError:
+        return None
+
+
+def _run_script(action: str, runner: Callable[..., Any], env: dict[str, str] | None = None) -> None:
+    extra = {"env": {**os.environ, **env}} if env else {}
+    result = runner(["bash", str(SCRIPT), action], cwd=REPO, capture_output=True, text=True, **extra)
     if getattr(result, "returncode", 0) != 0:
         raise OcrServerError(
             f"scripts/mineru_server.sh {action} failed: "
@@ -99,56 +111,82 @@ def managed_ocr_server(
 ) -> Iterator[Any]:
     """Run the OCR server for the length of the ``with`` block, when it is needed.
 
-    Yields the engine (:class:`~data_pipeline.ocr.served_ocr.ServedMinerUEngine`) that reads
-    through the server this block started, or ``None`` when the caller's own engine stands:
-    nothing to read, somebody else's server, or one that was already up.
-    ``MINERU_URL`` and ``MINERU_TOKEN`` are set for the block and put back after it.
+    Yields the engine that reads through the servers this block started - one per GPU, shared
+    between (:func:`~data_pipeline.ocr.served_ocr.served_engine`) - or ``None`` when the caller's
+    own engine stands: nothing to read, somebody else's server, or servers that were already up.
+    ``MINERU_URL``, ``MINERU_URLS`` and ``MINERU_TOKEN`` are set for the block and put back after it.
+
+    A server that was already answering when the block began is used and left running: the block
+    stops only the servers it started. One that never answers is left out, and the others read,
+    once the wait is over; only when none answers is it an error.
     """
-    from data_pipeline.ocr.served_ocr import ServedMinerUEngine
+    from data_pipeline.ocr.served_ocr import configured_urls, served_engine, served_urls
 
     # Looked up when called, not when defined, so a replacement of any of them takes effect.
     runner = runner or subprocess.run
     probe = probe or healthy
     can_start = can_start or installed
-    url = (os.environ.get("MINERU_URL") or "").strip()
-    if not pending or (url and not is_local(url)):
+    urls = configured_urls()
+    if not pending or any(not is_local(url) for url in urls):
         yield None                       # nothing to read, or a server that is not ours to run
         return
     token = os.environ.get("MINERU_TOKEN") or os.environ.get("FIDEON_REMOTE_TOKEN") or None
-    if url and probe(url, token):
-        yield None                       # ours, already up: used as it is, left running
+    up_before = {url for url in urls if probe(url, token)}
+    if urls and len(up_before) == len(urls):
+        yield None                       # ours, already up: used as they are, left running
         return
     if not can_start():
         yield None                       # nothing to start here: the stage refuses as it always did
         return
 
-    log.info("documents need OCR: starting the OCR server (scripts/mineru_server.sh start)")
-    saved = {key: os.environ.get(key) for key in ("MINERU_URL", "MINERU_TOKEN")}
+    log.info("documents need OCR: starting the OCR servers, one per GPU (scripts/mineru_server.sh start)")
+    saved = {key: os.environ.get(key) for key in ENV_KEYS}
     started = False
+    ours: list[str] = []
     try:
         started = True
         _run_script("start", runner)
-        # `start` writes the address and a token it made to .env; this process read .env
+        # `start` writes the addresses and a token it made to .env; this process read .env
         # before they were there.
         written = _env_file_values(env_file or REPO / ".env")
-        url, token = written.get("MINERU_URL", url), written.get("MINERU_TOKEN", token or "")
-        if not url:
+        urls = (served_urls(written.get("MINERU_URLS")) or served_urls(written.get("MINERU_URL"))
+                or urls)
+        token = written.get("MINERU_TOKEN", token or "")
+        if not urls:
             raise OcrServerError("the OCR server started, but wrote no MINERU_URL to .env")
-        os.environ["MINERU_URL"], os.environ["MINERU_TOKEN"] = url, token or ""
+        ours = [url for url in urls if url not in up_before]
         deadline = clock() + timeout_s
-        while not probe(url, token or None):
+        waiting = list(urls)
+        while waiting:
+            waiting = [url for url in waiting if not probe(url, token or None)]
+            if not waiting:
+                break
             if clock() > deadline:
-                raise OcrServerError(
-                    f"the OCR server did not answer {url}/v1/health within {int(timeout_s)} s; "
-                    "read it with: bash scripts/pod_run.sh tail mineru-server")
+                where = ("read them with: bash scripts/pod_run.sh tail mineru-server "
+                         "(mineru-server-1, -2, ... for the others)")
+                if len(waiting) == len(urls):
+                    raise OcrServerError(
+                        f"the OCR server(s) at {', '.join(waiting)} did not answer /v1/health within "
+                        f"{int(timeout_s)} s; {where}")
+                log.warning("the OCR server(s) at %s did not answer /v1/health within %d s: reading with the "
+                            "%d that do; %s", ", ".join(waiting), int(timeout_s), len(urls) - len(waiting), where)
+                urls = [url for url in urls if url not in waiting]
+                break
             sleep(POLL_S)
-        log.info("the OCR server answers at %s", url)
-        yield ServedMinerUEngine(url, token or None)
+        os.environ["MINERU_URL"], os.environ["MINERU_URLS"] = urls[0], ",".join(urls)
+        os.environ["MINERU_TOKEN"] = token or ""
+        log.info("the OCR server(s) answer at %s", ", ".join(urls))
+        yield served_engine(urls, token or None)
     finally:
         if started:
-            log.info("stopping the OCR server: training needs the GPU")
+            log.info("stopping the OCR server(s) this run started: training needs the GPUs")
+            # Only those: a server that was already answering is somebody's, and stays up.
+            ports = sorted({p for p in (_port(u) for u in ours) if p is not None})
             try:
-                _run_script("stop", runner)
+                if not up_before:
+                    _run_script("stop", runner)
+                elif ports:
+                    _run_script("stop", runner, {"MINERU_STOP_PORTS": " ".join(map(str, ports))})
             except OcrServerError as exc:
                 log.warning("%s", exc)
         for key, value in saved.items():

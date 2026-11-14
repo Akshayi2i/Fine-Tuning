@@ -220,8 +220,12 @@ half a SAS login under "Still to do").
 **OCR is part of the pipeline, through the served MinerU 4.0.12 (`configs/shared/ocr.yaml`)**: a corpus read by
 another MinerU version or tier is refused at corpus build, at preflight and at promotion. The bootstrap
 installs that MinerU as a server on the training pod, and the OCR stage runs it itself: when documents still need
-reading it starts the server (`scripts/mineru_server.sh start`), waits until it answers, reads the pages and stops
-it before anything else wants the GPU. A corpus already read starts nothing. So the whole cycle is one command:
+reading it starts the servers (`scripts/mineru_server.sh start`: one per GPU, ports 18001 up, all listed in
+`MINERU_URLS`), waits until they answer (one that never does is left out, and the rest read), shares the documents
+between them (4 at a time each; a document a server fails is read once more on another, and a server that keeps
+failing is taken out) and stops the ones it started before anything else wants the GPUs. One server reads about 1.7 pages a second however many documents it is sent
+(measured 2026-11-14, 4x H200), so the servers, not the documents in flight, set the speed; `MINERU_SERVERS=1`
+runs a single one. A corpus already read starts nothing. So the whole cycle is one command:
 
 ```bash
 python -m orchestration.run finetune --skip-ingest --fresh   # OCR (server started and stopped), corpus, training, selection

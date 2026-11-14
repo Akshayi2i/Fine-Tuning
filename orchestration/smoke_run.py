@@ -117,7 +117,9 @@ def assert_served_ocr(steps: list[str], environ: dict[str, str] | None = None) -
     environ = os.environ if environ is None else environ
     # With the pod's own server installed (scripts/pod_bootstrap.sh) the OCR step starts it
     # itself, and stops it after, so no address needs to be set.
-    if "ocr" in steps and not (environ.get("MINERU_URL") or "").strip() and not installed():
+    from data_pipeline.ocr.served_ocr import configured_urls
+
+    if "ocr" in steps and not configured_urls(environ) and not installed():
         raise SmokeError("MINERU_URL is not set: the OCR step would read with the OCR environment's "
                          "MinerU, not the pinned served one, and preflight would refuse every reading "
                          "after the whole subset was read. Set MINERU_URL to the served MinerU.")
@@ -205,9 +207,15 @@ def commands(*, batch_dir: Path, subset_dir: Path, tenant: str, version: str,
     # this environment, several documents at once. Otherwise the OCR
     # environment's MinerU, whose reading the corpus build refuses unless it is
     # the pinned version.
-    served = (os.environ.get("MINERU_URL") or "").strip()
+    # Every server (one per GPU, scripts/mineru_server.sh), each kept to the jobs it runs at once.
+    from data_pipeline.ocr.served_ocr import configured_urls
+    from orchestration.ocr_server import SERVER_CONCURRENCY
+
+    servers = configured_urls()
+    served = ",".join(servers)
     ocr = ([py, "-m", "data_pipeline.ocr.run_mineru", "--doc-type", "policy", "--all-unprocessed",
-            "--tenant", tenant, "--mineru-url", served, "--workers", "4"] if served else
+            "--tenant", tenant, "--mineru-url", served,
+            "--workers", str(SERVER_CONCURRENCY * len(servers))] if served else
            [str(OCR_PYTHON), "-m", "data_pipeline.ocr.run_mineru", "--doc-type", "policy",
             "--all-unprocessed", "--tenant", tenant])
     return {

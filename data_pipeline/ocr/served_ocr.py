@@ -29,12 +29,15 @@ names the OCR stage writes and :func:`serving.pipeline._image_for` reads.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 #: Pages per MinerU run when it takes turns with the model on one GPU: a
 #: document arriving while another's full text is read waits for at most this
@@ -44,6 +47,34 @@ TURN_PAGES = 20
 #: Where the served MinerU is, for the OCR stage: its base URL and bearer token.
 MINERU_URL_ENV = "MINERU_URL"
 MINERU_TOKEN_ENV = "MINERU_TOKEN"
+#: Every server the OCR stage may read through, comma-separated (``scripts/mineru_server.sh start`` runs one per GPU
+#: and writes them here; ``MINERU_URL`` stays the first, for everything that reads through one server).
+MINERU_URLS_ENV = "MINERU_URLS"
+
+
+#: Parse jobs each served MinerU runs at once (``scripts/mineru_server.sh``, ``MINERU_CONCURRENCY``): the documents
+#: the OCR stage keeps in flight per server.
+SERVER_JOBS = 4
+#: Documents a server of a pool may fail in a row before it is taken out of the pool (:class:`PooledServedEngine`).
+SERVER_FAILURES_OUT = 3
+
+
+def served_urls(value: str | None) -> list[str]:
+    """The server addresses in a ``MINERU_URLS``/``--mineru-url`` value: comma-separated, blanks dropped."""
+    return [url.strip() for url in str(value or "").split(",") if url.strip()]
+
+
+def configured_urls(environ: Mapping[str, str] | None = None) -> list[str]:
+    """The served MinerU servers this environment names: every one in ``MINERU_URLS``, else the one ``MINERU_URL``.
+    The one rule for everything that reads through them."""
+    environ = os.environ if environ is None else environ
+    return served_urls(environ.get(MINERU_URLS_ENV)) or served_urls(environ.get(MINERU_URL_ENV))
+
+
+def render_share(documents_at_once: int) -> int:
+    """Page-rendering processes for each document when ``documents_at_once`` are read together: the CPUs shared
+    between them, not multiplied by them."""
+    return max(1, (os.cpu_count() or 1) // max(1, documents_at_once))
 
 
 class ServedOcrError(RuntimeError):
@@ -279,14 +310,14 @@ class ServedMinerUEngine:
                                 expected_tier=self.tier)
 
     @classmethod
-    def from_environment(cls) -> ServedMinerUEngine | None:
-        """The engine for ``$MINERU_URL`` (token ``$MINERU_TOKEN``, else
-        ``$FIDEON_REMOTE_TOKEN``), or None when no served MinerU is configured."""
-        url = (os.environ.get(MINERU_URL_ENV) or "").strip()
-        if not url:
+    def from_environment(cls) -> ServedMinerUEngine | PooledServedEngine | None:
+        """The engine for ``$MINERU_URLS`` (every server, one per GPU), else ``$MINERU_URL`` (token
+        ``$MINERU_TOKEN``, else ``$FIDEON_REMOTE_TOKEN``), or None when no served MinerU is configured."""
+        urls = configured_urls()
+        if not urls:
             return None
         token = os.environ.get(MINERU_TOKEN_ENV) or os.environ.get("FIDEON_REMOTE_TOKEN") or None
-        return cls(url, token)
+        return served_engine(urls, token)
 
     def environment(self) -> Any:
         """What the OCR stage records and checks a stored reading against."""
@@ -331,3 +362,92 @@ class ServedMinerUEngine:
             )
             for number, (text, image) in enumerate(zip(read["texts"].values(), images, strict=True), start=1)
         ]
+
+
+class PooledServedEngine:
+    """Several served MinerU servers - one per GPU - read as one OCR engine (``run_mineru.OcrEngine``).
+
+    Measured 2026-11-14 on the 4x H200 pod: one server reads about 1.7 pages a second whether it is sent one document
+    or four at a time (its GPU 9% busy), so a fourth of the pod's GPUs read all its pages. Each document goes, whole,
+    to the server with the fewest documents in progress; every server runs the same pinned MinerU (version and tier,
+    ``configs/shared/ocr.yaml``), and what is recorded about a reading - ``environment()``, ``meta()`` - is theirs,
+    so a reading is the same whichever server made it, as far as the pin can say.
+
+    A failed server is not trusted to be free: a dead one fails in seconds, so it would always look the least busy
+    and take most of what is left. A document that fails is read once more on another server (one that fails on
+    two is the document's fault, and its error stands), and a server that fails :data:`SERVER_FAILURES_OUT`
+    documents in a row is taken out of the pool for the rest of the batch - never the last one.
+    """
+
+    def __init__(self, urls: list[str], token: str | None = None, **kwargs: Any) -> None:
+        if not urls:
+            raise ValueError("a pool of served MinerU servers needs at least one URL")
+        self.urls = list(urls)
+        self.engines = [ServedMinerUEngine(url, token, **kwargs) for url in self.urls]
+        pins = {(engine.version, engine.tier) for engine in self.engines}
+        if len(pins) != 1:
+            raise ValueError(f"the servers are held to different pins {sorted(pins)}: one corpus, one MinerU")
+        self.version, self.tier = self.engines[0].version, self.engines[0].tier
+        self._lock = threading.Lock()
+        self._busy = [0] * len(self.engines)
+        self._failed_in_a_row = [0] * len(self.engines)
+        #: The servers taken out of the pool.
+        self.out: set[int] = set()
+
+    def environment(self) -> Any:
+        return self.engines[0].environment()
+
+    def meta(self) -> dict[str, Any]:
+        return self.engines[0].meta()
+
+    def _take(self, avoid: int | None = None) -> int | None:
+        with self._lock:
+            free = [i for i in range(len(self.engines)) if i not in self.out and i != avoid]
+            if not free:
+                return None
+            index = min(free, key=lambda i: (self._busy[i], i))
+            self._busy[index] += 1
+            return index
+
+    def _read(self, index: int, pdf_bytes: bytes, kwargs: dict[str, Any]) -> list[Any]:
+        try:
+            result = self.engines[index].process(pdf_bytes, **kwargs)
+        except Exception:
+            with self._lock:
+                self._busy[index] -= 1
+                self._failed_in_a_row[index] += 1
+                left = len(self.engines) - len(self.out)
+                if index not in self.out and left > 1 and self._failed_in_a_row[index] >= SERVER_FAILURES_OUT:
+                    self.out.add(index)
+                    log.warning("served MinerU %s failed %d documents in a row: taken out of the pool for the rest "
+                                "of this batch (%d server(s) left)", self.urls[index],
+                                self._failed_in_a_row[index], left - 1)
+            raise
+        with self._lock:
+            self._busy[index] -= 1
+            self._failed_in_a_row[index] = 0
+        return result
+
+    def process(self, pdf_bytes: bytes, **kwargs: Any) -> list[Any]:
+        index = self._take()
+        if index is None:                                   # cannot happen: the last server is never taken out
+            raise ServedOcrError("no served MinerU is left in the pool")
+        try:
+            return self._read(index, pdf_bytes, kwargs)
+        except Exception as exc:
+            other = self._take(avoid=index)
+            if other is None:
+                raise
+            log.warning("served MinerU %s could not read a document (%s: %s); reading it on %s",
+                        self.urls[index], type(exc).__name__, exc, self.urls[other])
+        return self._read(other, pdf_bytes, kwargs)
+
+
+def served_engine(urls: list[str], token: str | None = None, **kwargs: Any) -> ServedMinerUEngine | PooledServedEngine:
+    """One server's engine, or a pool over several (``PooledServedEngine``). A pool keeps :data:`SERVER_JOBS`
+    documents in flight per server, so unless told otherwise each document renders its pages with its share of the
+    CPUs (:func:`render_share`), not with the share one server alone would give it."""
+    if len(urls) == 1:
+        return ServedMinerUEngine(urls[0], token, **kwargs)
+    kwargs.setdefault("render_workers", render_share(SERVER_JOBS * len(urls)))
+    return PooledServedEngine(urls, token, **kwargs)

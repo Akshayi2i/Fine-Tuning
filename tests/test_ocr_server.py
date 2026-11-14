@@ -26,6 +26,7 @@ class Runner:
 @pytest.fixture
 def env(monkeypatch, tmp_path):
     monkeypatch.delenv("MINERU_URL", raising=False)
+    monkeypatch.delenv("MINERU_URLS", raising=False)
     monkeypatch.delenv("MINERU_TOKEN", raising=False)
     monkeypatch.delenv("FIDEON_REMOTE_TOKEN", raising=False)
     file = tmp_path / ".env"

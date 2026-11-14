@@ -472,7 +472,7 @@ def stage_preprocessing(ctx: StageContext) -> StageResult:
     """
     from data_pipeline.ocr.run_mineru import MinerUEngine, process_batch
     from data_pipeline.ocr.served_ocr import ServedMinerUEngine
-    from orchestration.ocr_server import SERVER_CONCURRENCY, managed_ocr_server
+    from orchestration.ocr_server import SERVER_CONCURRENCY, is_local, managed_ocr_server
 
     engine = ctx.ocr_engine or ServedMinerUEngine.from_environment()
     processed, skipped, failed = [], [], []
@@ -490,8 +490,11 @@ def stage_preprocessing(ctx: StageContext) -> StageResult:
                 engine = MinerUEngine()
             # Concurrently against a served MinerU only: the in-process one holds the GPU.
             workers = max(1, int(getattr(ctx, "ocr_workers", 1) or 1)) if hasattr(engine, "environment") else 1
-            if started is not None:
-                workers = max(workers, SERVER_CONCURRENCY)      # the server runs this many jobs at once
+            # Each of our servers (one per GPU) runs this many jobs at once, and the documents are shared
+            # between them: keep every one full. A server somebody else runs gets what --ocr-workers says.
+            urls = getattr(engine, "urls", None) or [getattr(getattr(engine, "reader", None), "mineru_url", "")]
+            if started is not None or (len(urls) > 1 and all(is_local(url) for url in urls)):
+                workers = max(workers, SERVER_CONCURRENCY * len(urls))
             for doc_type, ids in pending.items():
                 outcome = process_batch(ids, doc_type, ctx.raw, engine, tenant_id=ctx.tenant_id,
                                         workers=workers)
@@ -781,7 +784,7 @@ def ocr_remediation(doc_types: Sequence[str] = ("policy",), tenant_id: str | Non
     tenant = f" --tenant {tenant_id}" if tenant_id else ""
     commands = "; ".join(
         f"python -m data_pipeline.ocr.run_mineru --doc-type {doc_type} --all-unprocessed "
-        f"--mineru-url \"$MINERU_URL\" --workers 4{tenant}" for doc_type in doc_types)
+        f"--mineru-url \"${{MINERU_URLS:-$MINERU_URL}}\"{tenant}" for doc_type in doc_types)
     return (f"{commands} - with MINERU_URL the served MinerU {pin['version']} (tier {pin['tier']}, "
             "configs/shared/ocr.yaml); it needs no GPU or MinerU where it runs")
 

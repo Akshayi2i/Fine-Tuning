@@ -763,18 +763,26 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
     # accepts a single value is a way to be surprised later, not a choice.
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--force-reprocess", action="store_true")
-    parser.add_argument("--mineru-url", default=os.environ.get("MINERU_URL"),
+    parser.add_argument("--mineru-url", default=None,
                         help="read with the served MinerU at this URL (the pin in configs/shared/ocr.yaml; "
-                             "token $MINERU_TOKEN), not the one installed here (default $MINERU_URL)")
+                             "token $MINERU_TOKEN), not the one installed here; several, comma-separated "
+                             "(one per GPU, scripts/mineru_server.sh), share the documents between them "
+                             "(default $MINERU_URLS, else $MINERU_URL)")
     parser.add_argument("--shard", default=None, metavar="I/N",
                         help="process only this share of the documents (0-based I of N), so N "
                              "processes - one per GPU, each with its own CUDA_VISIBLE_DEVICES, or one "
                              "per machine against a served MinerU - split one batch between them")
-    parser.add_argument("--workers", type=int, default=1, metavar="N",
-                        help="documents read at once against the served MinerU (--mineru-url); default 1, "
-                             "one at a time. 4 is a good start against a dedicated MinerU. The MinerU "
-                             "installed here reads one at a time")
+    parser.add_argument("--workers", type=int, default=None, metavar="N",
+                        help="documents read at once against the served MinerU (--mineru-url); default 4 per "
+                             "server named (the jobs each runs at once). The MinerU installed here reads one "
+                             "at a time")
     args = parser.parse_args(list(argv) if argv is not None else None)
+    from data_pipeline.ocr.served_ocr import SERVER_JOBS, configured_urls, served_urls
+
+    # MINERU_URLS, else MINERU_URL: the one rule (served_ocr.configured_urls).
+    args.mineru_url = args.mineru_url or ",".join(configured_urls()) or None
+    if args.workers is None:
+        args.workers = max(1, SERVER_JOBS * len(served_urls(args.mineru_url)))
     if args.workers < 1:
         parser.error("--workers is 1 or more")
     if args.workers > 1 and not args.mineru_url:
@@ -791,10 +799,13 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
                         datefmt="%Y-%m-%d %H:%M:%S")
     client = for_ocr()
     if args.mineru_url:
-        from data_pipeline.ocr.served_ocr import MINERU_TOKEN_ENV, ServedMinerUEngine
+        from data_pipeline.ocr.served_ocr import MINERU_TOKEN_ENV, served_engine
 
-        served = ServedMinerUEngine(
-            args.mineru_url, os.environ.get(MINERU_TOKEN_ENV) or os.environ.get("FIDEON_REMOTE_TOKEN"),
+        urls = served_urls(args.mineru_url)
+        if not urls:
+            parser.error("--mineru-url names no server")
+        served = served_engine(
+            urls, os.environ.get(MINERU_TOKEN_ENV) or os.environ.get("FIDEON_REMOTE_TOKEN"),
             # Each document renders its pages in processes of its own: the CPUs are
             # shared between the documents read at once, not multiplied by them.
             render_workers=max(1, (os.cpu_count() or 1) // args.workers) if args.workers > 1 else None)

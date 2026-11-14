@@ -296,8 +296,11 @@ def test_the_smoke_subset_is_linked_not_moved(tmp_path):
     assert all((f / "document.pdf").is_file() for f in chosen)
 
 
-def test_each_smoke_step_runs_in_its_own_environment_under_the_smoke_tenant(tmp_path):
+def test_each_smoke_step_runs_in_its_own_environment_under_the_smoke_tenant(tmp_path, monkeypatch):
     from orchestration.smoke_run import OCR_PYTHON, commands
+
+    # No served MinerU named (the pod's .env names one, which the OCR step would read through instead).
+    monkeypatch.delenv("MINERU_URL", raising=False)
 
     cmds = commands(batch_dir=tmp_path, subset_dir=tmp_path / "s", tenant="smoke", version="v0",
                     check_out=tmp_path / "c")

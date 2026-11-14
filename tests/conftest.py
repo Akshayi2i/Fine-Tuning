@@ -27,6 +27,14 @@ def _no_gate_cache(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_ocr_server_list(monkeypatch):
+    """On the pod, `scripts/mineru_server.sh start` writes MINERU_URLS (one server per GPU) to the .env pod_run.sh
+    loads, and it outranks MINERU_URL. A test that sets or clears MINERU_URL to mean "this server" or "none" must
+    not read the pod's list instead; the tests of the list set it themselves."""
+    monkeypatch.delenv("MINERU_URLS", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _format_profile(request, monkeypatch):
     """``@pytest.mark.format_profile("standard")``: the test runs in that format
     profile instead of the shipped one (configs/shared/format.yaml, ``fast``).
