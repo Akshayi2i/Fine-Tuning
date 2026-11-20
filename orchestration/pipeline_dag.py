@@ -1030,17 +1030,28 @@ def assign_document_groups(ctx: StageContext, documents: list[Any]) -> dict[str,
     for document in documents:
         by_type.setdefault(document.doc_type, []).append(document)
 
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
     for doc_type, members in sorted(by_type.items()):
-        fingerprints = []
-        for document in members:
+        began = time.monotonic()
+
+        def records(document: Any, doc_type: str = doc_type) -> tuple[dict[str, Any], dict[str, Any]]:
             # The checksum OCR recorded, not the raw metadata: raw-documents/ holds
             # unredacted PII and the dataset build is not allowed to read it (§18a).
-            ocr_meta = ctx.client.read_json(
-                paths.ocr_meta(doc_type, document.source_id, ctx.tenant_id)
-            )
+            ocr_meta = ctx.client.read_json(paths.ocr_meta(doc_type, document.source_id, ctx.tenant_id))
             metadata_key = paths.label_metadata(doc_type, document.source_id, ctx.tenant_id)
-            metadata = ctx.client.read_json(metadata_key) if ctx.client.exists(metadata_key) else {}
-            text = "\n".join(document.ocr_pages)
+            return ocr_meta, (ctx.client.read_json(metadata_key) if ctx.client.exists(metadata_key) else {})
+
+        # Read 16 at once, and the signatures made in parallel (cycle 2: ~1 h+ for 836 documents, one at a time,
+        # the log silent): the same records and the same signatures, only sooner.
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            read = list(pool.map(records, members))
+        signatures = _minhashes(["\n".join(document.ocr_pages) for document in members], minhash)
+        log.info("grouping %d %s document(s): records read and signatures made in %.0f s", len(members), doc_type,
+                 time.monotonic() - began)
+        fingerprints = []
+        for document, (ocr_meta, metadata), signature in zip(members, read, signatures, strict=True):
             fingerprints.append(DocumentFingerprint(
                 source_id=document.source_id,
                 doc_type=doc_type,
@@ -1050,7 +1061,7 @@ def assign_document_groups(ctx: StageContext, documents: list[Any]) -> dict[str,
                     ocr_meta.get("source_checksum") or f"unrecorded:{document.source_id}"
                 ),
                 layout_phash=None,
-                minhash=minhash(text),
+                minhash=signature,
                 carrier=document.carrier,
                 template_id=metadata.get("template_id"),
                 account=_declared_account(document.golden_label),
@@ -1060,6 +1071,22 @@ def assign_document_groups(ctx: StageContext, documents: list[Any]) -> dict[str,
             document.group_id = report.group_of[document.source_id]
         reports[doc_type] = report.as_dict()
     return reports
+
+
+#: Documents from which the MinHash signatures are made in worker processes, not one after another here.
+PARALLEL_MINHASH_FROM = 50
+
+
+def _minhashes(texts: list[str], minhash: Callable[[str], tuple[int, ...]]) -> list[tuple[int, ...]]:
+    """``minhash`` of each text, in order: in worker processes for :data:`PARALLEL_MINHASH_FROM` texts or more
+    (pure Python, CPU-bound: 128 salted hashes per shingle), here for fewer."""
+    if len(texts) < PARALLEL_MINHASH_FROM:
+        return [minhash(text) for text in texts]
+    from concurrent.futures import ProcessPoolExecutor
+
+    workers = max(1, min(32, (os.cpu_count() or 2) - 1))
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(minhash, texts, chunksize=max(1, len(texts) // (workers * 4))))
 
 
 def _is_corpus_built(ctx: StageContext) -> bool:
@@ -1325,15 +1352,19 @@ def stage_dataset_build(ctx: StageContext) -> StageResult:
 
     # Written where training reads them: one file per epoch, one per eval split,
     # all doc types together — one adapter trains on every type (§8.1).
+    # Each also kept on this pod's volume (training.stage_data.keep_corpus_copy): training on the same pod reads it
+    # from disk once it is seen to be the blob's bytes, instead of downloading what was just uploaded.
+    from training.stage_data import keep_corpus_copy
+
     for epoch, rows in train_rows_by_epoch(built).items():
-        ctx.client.write_text(
-            paths.corpus_epoch_file(ctx.corpus, epoch, ctx.tenant_id), write_jsonl(rows)
-        )
+        key, text = paths.corpus_epoch_file(ctx.corpus, epoch, ctx.tenant_id), write_jsonl(rows)
+        ctx.client.write_text(key, text)
+        keep_corpus_copy(key, text)
     for split in ("val", "test"):
-        ctx.client.write_text(
-            paths.corpus_eval_split(ctx.corpus, split, ctx.tenant_id),
-            write_jsonl(built.rows_by_split.get(split, [])),
-        )
+        key = paths.corpus_eval_split(ctx.corpus, split, ctx.tenant_id)
+        text = write_jsonl(built.rows_by_split.get(split, []))
+        ctx.client.write_text(key, text)
+        keep_corpus_copy(key, text)
 
     first = documents[0]
     ocr_environment = ctx.client.read_json(

@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient
 from common.constants import TRAINER_SPECIAL_TAGS
 
@@ -432,7 +433,36 @@ def _download_to(client: BlobClient, targets: list[tuple[str, Path]], workers: i
 
 
 def _read_rows(client: BlobClient, key: str) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in client.read_text(key).splitlines() if line.strip()]
+    return [json.loads(line) for line in _corpus_text(client, key).splitlines() if line.strip()]
+
+
+def _corpus_text(client: BlobClient, key: str) -> str:
+    """``key``'s text: from the copy the corpus build left on this pod's volume (``paths.staging_corpus_mirror``)
+    when its bytes are the blob's - by the MD5 recorded with the blob, one properties call - else from Blob."""
+    mirror = Path(paths.staging_corpus_mirror(key))
+    try:
+        if mirror.is_file() and client.holds(mirror, key):
+            log.info("read %s from this pod's copy (%s), the blob's own bytes", key, mirror)
+            return mirror.read_bytes().decode("utf-8")
+    except Exception as exc:  # noqa: BLE001 - the copy is a shortcut; Blob is the record
+        log.warning("this pod's copy of %s could not be used (%s): reading it from Blob", key, exc)
+    return client.read_text(key)
+
+
+def keep_corpus_copy(key: str, text: str) -> None:
+    """A local copy of a corpus file just written to Blob, for training on this pod (:func:`_corpus_text`). Only
+    where the staging volume is mounted; never fails the build - training then reads Blob, as before."""
+    root = Path(paths.staging_root())
+    if not root.parent.is_dir():
+        return
+    target = Path(paths.staging_corpus_mirror(key))
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_name(f"{target.name}.{os.getpid()}.part")
+        partial.write_bytes(text.encode("utf-8"))
+        partial.replace(target)
+    except OSError as exc:
+        log.warning("no local copy of %s kept (%s): training reads it from Blob", key, exc)
 
 
 def _download(client: BlobClient, key: str, target: Path) -> None:

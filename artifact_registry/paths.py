@@ -744,6 +744,13 @@ def staging_train_data_dir(scope: str, version: str) -> str:
     return _under_staging("train-data", scope, version)
 
 
+def staging_corpus_mirror(key: str) -> str:
+    """A local copy of one corpus file this pod wrote to Blob (``key``), kept beside the upload so training on the
+    same pod reads it from disk once its bytes are seen to be the blob's (``BlobClient.holds``): cycle 2 uploaded
+    ~9.6 GB of epoch files and downloaded them straight back, an hour and more before the first step."""
+    return _under_staging("corpus-mirror", key)
+
+
 def staging_train_images_dir(corpus_version: str, tenant_id: str | None = None) -> str:
     """Page images for one corpus version, shared by every run that trains on it.
 
