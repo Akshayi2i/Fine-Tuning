@@ -111,6 +111,23 @@ class GoldenDocument:
     carrier_seen_in_train: bool | None = None
 
 
+#: Frozen-set files read at once when the set is loaded.
+LOAD_WORKERS = 16
+
+
+def _read_all(client: BlobClient, kinds: dict[str, str]) -> dict[str, Any]:
+    """``{key: content}`` for each key, read ``LOAD_WORKERS`` at a time: ``"json"`` or ``"text"`` per key."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def read(key: str) -> Any:
+        return client.read_json(key) if kinds[key] == "json" else client.read_text(key)
+
+    if not kinds:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(LOAD_WORKERS, len(kinds))) as pool:
+        return dict(zip(kinds, pool.map(read, kinds), strict=True))
+
+
 def load_golden_set(
     client: BlobClient, doc_types: Sequence[str] | None = None, *, tenant_id: str | None = None
 ) -> list[GoldenDocument]:
@@ -131,15 +148,24 @@ def load_golden_set(
         if "/" in rest:
             by_source.setdefault(rest.split("/", 1)[0], []).append(key)
 
+    # Read in parallel, then used in order as before: one at a time, the ~7,400 page texts of cycle 2's set took
+    # ~40 minutes from a laptop (117 s with 24 at once) and part of an hour on the pod, the GPUs idle, twice a gate.
+    metadata_of = _read_all(client, {f"{prefix}/{source_id}/metadata.json": "json" for source_id, keys in
+                                     by_source.items() if f"{prefix}/{source_id}/metadata.json" in keys})
+    wanted = {source_id for source_id, keys in by_source.items()
+              if f"{prefix}/{source_id}/golden.json" in keys
+              and (not doc_types or (metadata_of.get(f"{prefix}/{source_id}/metadata.json") or {}).get("doc_type")
+                   in doc_types)}
+    text_of = _read_all(client, {key: "text" for source_id in wanted for key in by_source[source_id]
+                                 if (match := _PAGE.search(key)) and match.group(2) != "png"})
+
     documents = []
     unreviewed: list[tuple[str, str]] = []
     for source_id, keys in sorted(by_source.items()):
         base = f"{prefix}/{source_id}"
         if f"{base}/golden.json" not in keys:
             continue
-        metadata = (
-            client.read_json(f"{base}/metadata.json") if f"{base}/metadata.json" in keys else {}
-        )
+        metadata = metadata_of.get(f"{base}/metadata.json") or {}
         doc_type = metadata.get("doc_type")
         if not doc_type:
             raise GoldenEvalError(
@@ -161,7 +187,7 @@ def load_golden_set(
                 images[page] = key
             else:
                 # A set frozen before pictures were taken out of page text is read clean (common.ocr_text).
-                texts[page] = clean_page_text(client.read_text(key))
+                texts[page] = clean_page_text(text_of[key] if key in text_of else client.read_text(key))
         if not images:
             raise GoldenEvalError(f"{source_id} has no page images")
         if sorted(images) != list(range(1, len(images) + 1)):
@@ -319,7 +345,6 @@ def evaluate(
     and a run started again with the same key takes it from the cache, so a stop half way costs only the
     readings not yet made. A reading that failed is never kept.
     """
-    from evaluation.run_eval import REPEAT_ANSWER
     from serving.pipeline import ExtractionRequest
 
     repeat = run_to_run_check() if run_to_run is None else run_to_run
@@ -338,6 +363,51 @@ def evaluate(
     if not clean_text and "noisy_ocr_image" in modes:
         log.warning("golden eval: serving takes no printed_texts yet, so noisy_ocr_image readings are held "
                     "to the corrupted text they are sent (not the clean frozen text)")
+    with _documents_share_calls(model):
+        return _evaluate_read(documents, model, modes, local, calibrators, thresholds, seed, clean_text,
+                              noisy_share, repeat, repeat_mode, repeat_share, in_flight, cache)
+
+
+def _documents_share_calls(model: Any) -> Any:
+    """For the reading: the in-process engine made to take several documents' requests in shared calls
+    (``inference_core.batching_backend``, ``golden_batch_documents`` under ``evaluation``), and given back as it
+    was after. A backend that already answers requests as they finish (a served model) is left as it is."""
+    import contextlib
+
+    from common.adapter import ADAPTER
+    from common.config import training_config
+
+    backend = getattr(model, "backend", None)
+    evaluation = training_config(ADAPTER.training_config).get("evaluation") or {}
+    try:
+        already = bool(backend.supports_submit()) if backend is not None else True
+    except Exception:  # noqa: BLE001 - a backend that cannot say is left as it is
+        already = True
+    if already or not evaluation.get("golden_batch_documents", True):
+        return contextlib.nullcontext()
+
+    @contextlib.contextmanager
+    def shared() -> Any:
+        from inference_core.batching_backend import BatchingBackend
+
+        batching = BatchingBackend(backend)
+        model.backend = batching
+        try:
+            yield
+        finally:
+            model.backend = backend
+            batching.stop()
+            log.info("golden eval: %d request(s) in %d shared engine call(s)", batching.requests, batching.calls)
+
+    return shared()
+
+
+def _evaluate_read(documents: Sequence[GoldenDocument], model: Any, modes: Sequence[str], local: Any,
+                   calibrators: Any, thresholds: Any, seed: int, clean_text: bool, noisy_share: float,
+                   repeat: bool, repeat_mode: str | None, repeat_share: float, in_flight: int | None,
+                   cache: Any) -> GoldenTriples:
+    from evaluation.run_eval import REPEAT_ANSWER
+
     workers = documents_in_flight(model) if in_flight is None else max(1, int(in_flight))
     context = _ReadContext(model=model, local=local, calibrators=calibrators, thresholds=thresholds,
                            seed=seed, clean_text=clean_text)
@@ -1097,6 +1167,19 @@ def gate_reading_key(*, version: str, corpus_version: str, tenant_id: str | None
     )
 
 
+#: Documents in one piece of the gate's shared queue: twice what a worker reads side by side
+#: (``golden_documents_in_flight``), so a piece keeps its calls full, and cycle 2's 99 documents make 13 pieces.
+GATE_PIECE_DOCUMENTS = 2 * DOCUMENTS_IN_FLIGHT
+
+
+def pieces_by_pages(documents: Sequence[GoldenDocument], size: int) -> list[list[str]]:
+    """``documents``' source ids in pieces of ``size``, the longest documents first, so the last pieces a queue
+    hands out are the short ones. The same pieces on every run."""
+    ordered = [d.source_id for d in sorted(documents, key=lambda d: (-len(d.image_keys), d.source_id))]
+    size = max(1, int(size))
+    return [ordered[start:start + size] for start in range(0, len(ordered), size)]
+
+
 def split_by_pages(documents: Sequence[GoldenDocument], parts: int) -> list[list[str]]:
     """``documents``' source ids in ``parts`` shares of near-equal page counts: the longest first, each to the
     share with the fewest pages so far (ties to the lower share). The same split on every run."""
@@ -1176,7 +1259,12 @@ def read_on_every_gpu(client: BlobClient, *, version: str, corpus_version: str, 
         thresholds=thresholds, settings=settings,
     )
     cache = ReadingCache(default_root(), key)
-    shares = split_by_pages(documents, len(gpus))
+    # Pieces of a shared queue, not one fixed share per GPU (user, 2026-11-16): each worker reads the next piece when
+    # it is free, so a slow or hot GPU reads fewer.
+    # At most GATE_PIECE_DOCUMENTS a piece, and at least two pieces a GPU where the set allows: a small set in big
+    # pieces would leave GPUs with nothing to take.
+    size = max(1, min(GATE_PIECE_DOCUMENTS, -(-len(documents) // (2 * len(gpus)))))
+    shares = pieces_by_pages(documents, size)
     by_id = {d.source_id: d for d in documents}
     planned = planned_readings(documents, settings)
 
@@ -1194,25 +1282,30 @@ def read_on_every_gpu(client: BlobClient, *, version: str, corpus_version: str, 
             # The frozen documents themselves, so no worker loads the set from Blob again.
             "documents": documents,
         }, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    queue = work_dir / "gate-queue"
+    if queue.is_dir():
+        for stale in queue.glob("piece-*.claim"):
+            stale.unlink()
+    queue.mkdir(parents=True, exist_ok=True)
+    # A piece an earlier run kept whole is claimed now, so no worker reads it again.
+    for index, piece in enumerate(shares):
+        if all(cache._file(*reading).is_file() for reading in planned_readings([by_id[s] for s in piece], settings)):
+            (queue / f"piece-{index}.claim").write_text("kept", encoding="utf-8")
+    left = sum(1 for index in range(len(shares)) if not (queue / f"piece-{index}.claim").exists())
     running: dict[str, tuple[Path, Path, Any]] = {}
     finished: dict[str, dict[str, Any]] = {}
     try:
-        for index, gpu in enumerate(gpus):
-            share = shares[index]
-            mine = planned_readings([by_id[sid] for sid in share], settings)
-            if not share or all(cache._file(*reading).is_file() for reading in mine):
-                continue                                   # nothing in it, or kept whole by an earlier run
+        for gpu in gpus[:left]:
             out = work_dir / f"gate-gpu{gpu}.json"
             out.unlink(missing_ok=True)
             log_path = work_dir / f"gate-gpu{gpu}.log"
             command = [sys.executable, "-m", "evaluation.gate_shard_worker", "--spec", str(spec_path),
-                       "--share", str(index), "--out", str(out)]
+                       "--queue", str(queue), "--out", str(out)]
             env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu), "FIDEON_NO_DETACH": "1"}
             running[str(gpu)] = (out, log_path, _spawn(command, env, log_path))
         log.info("golden eval: %d/%d reading(s) kept; reading the rest of %d frozen document(s) on %d GPU(s) at "
-                 "once (%s page(s) each); worker logs in %s", kept(), len(planned), len(documents), len(running),
-                 " / ".join(str(sum(len(by_id[sid].image_keys) for sid in share)) for share in shares if share),
-                 work_dir)
+                 "once, %d piece(s) of up to %d document(s) taken from a shared queue; worker logs in %s",
+                 kept(), len(planned), len(documents), len(running), left, size, work_dir)
         last_count, last_change = kept(), clock()
         while running:
             for gpu in [g for g, (*_, proc) in running.items() if proc.poll() is not None]:

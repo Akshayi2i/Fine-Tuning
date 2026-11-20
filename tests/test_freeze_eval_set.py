@@ -572,3 +572,26 @@ def test_marking_an_existing_set_records_the_carrier_the_delivery_held_out(clien
         "policy": {"gl": "diamond state"}}
     assert client.read_json(f"{root}/policy_0001/metadata.json")["carrier"] == "diamond state"
     assert client.read_json(f"{root}/policy_0001/golden.json") == golden_before
+
+
+def test_the_leakage_check_reads_the_corpus_manifest_not_every_epoch_file(client):
+    """Cycle 2's gate downloaded ~9.6 GB of epoch files, twice, to collect ids the manifest already lists."""
+    import json
+
+    from evaluation.run_eval import EvalSetLeakage, assert_eval_set_disjoint, corpus_source_ids
+
+    client.write_json(paths.corpus_manifest("v7", None),
+                      {"source_ids_by_split": {"train": ["policy_0003"], "val": ["policy_0004"],
+                                               "test": ["policy_0005"]}})
+    client.write_text(paths.corpus_epoch_file("v7", 1, None), "not read\n")
+    assert corpus_source_ids(client, "v7") == {"policy_0003", "policy_0004"}
+    assert corpus_source_ids(client, "v7", include_test=True) == {"policy_0003", "policy_0004", "policy_0005"}
+
+    client.write_json(manifest_key(), {"source_ids": ["policy_0004"]})
+    client.write_json(f"{paths.golden_eval_set_dir()}/policy_0004/golden.json", {})
+    with pytest.raises(EvalSetLeakage, match="policy_0004"):
+        assert_eval_set_disjoint(client, "v7", None)
+    # A corpus whose manifest lists no ids (built before it did) is still read file by file.
+    client.write_json(paths.corpus_manifest("v8", None), {"corpus_version": "v8"})
+    client.write_text(paths.corpus_epoch_file("v8", 1, None), json.dumps({"source_id": "policy_0009"}) + "\n")
+    assert corpus_source_ids(client, "v8") == {"policy_0009"}

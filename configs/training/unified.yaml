@@ -314,9 +314,15 @@ evaluation:
   # is over fewer documents. Part of the yardstick.
   golden_noisy_share: 1.0
   # Golden-eval readings sent at once, on a backend that answers requests as
-  # they finish (a served vLLM); the in-process engine reads one document at
-  # a time, its windows batched. Results are put back in order.
+  # they finish (a served vLLM). Results are put back in order.
   golden_documents_in_flight: 4
+  # The in-process engine runs a call to its end, so it read one document at
+  # a time and a document's page groups seldom filled a call (cycle 2's gate:
+  # ~17 page groups a minute per GPU, ~10.5 h). On, the gate reads
+  # golden_documents_in_flight documents side by side through
+  # inference_core.batching_backend, their page groups sent together in calls
+  # of up to 96. What each request is answered with does not change.
+  golden_batch_documents: true
   metric_for_best_model: "eval_loss"
   greater_is_better: false
   # No early stopping: ms-swift 3 takes no patience argument, and stopping

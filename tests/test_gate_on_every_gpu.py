@@ -180,7 +180,7 @@ def _start(monkeypatch, tmp_path, docs, outcome, **kwargs):
 
     def spawn(command, env, log_path):
         out = Path(command[command.index("--out") + 1])
-        started.append((env["CUDA_VISIBLE_DEVICES"], int(command[command.index("--share") + 1]), env))
+        started.append((env["CUDA_VISIBLE_DEVICES"], command[command.index("--queue") + 1], env))
         result, code = outcome(env["CUDA_VISIBLE_DEVICES"])
         procs.append(FakeProc(out, result, code))
         return procs[-1]
@@ -197,10 +197,14 @@ def _start(monkeypatch, tmp_path, docs, outcome, **kwargs):
 def test_one_worker_per_gpu_each_on_its_own_card(monkeypatch, tmp_path):
     docs = _docs({"a": 9, "b": 7, "c": 5, "d": 3, "e": 1})
     done, started, _procs = _start(monkeypatch, tmp_path, docs, lambda gpu: ({"ok": True, "summary": "fine"}, 0))
-    assert [(gpu, share) for gpu, share, _env in started] == [("0", 0), ("1", 1), ("2", 2), ("3", 3)]
+    # One worker per GPU, all taking pieces from one shared queue (user, 2026-11-16).
+    assert [gpu for gpu, _queue, _env in started] == ["0", "1", "2", "3"]
+    assert len({queue for _gpu, queue, _env in started}) == 1
     assert all(env["FIDEON_NO_DETACH"] == "1" for *_, env in started)
     spec = pickle.loads((tmp_path / "work" / "gate-spec.pkl").read_bytes())
-    assert spec["key"] == "k" and spec["label"] == "policy-v1:bf16" and spec["shares"] == split_by_pages(docs, 4)
+    # 5 documents on 4 GPUs: pieces of one, the longest first, so no GPU waits for a piece.
+    assert spec["key"] == "k" and spec["label"] == "policy-v1:bf16"
+    assert spec["shares"] == golden_eval.pieces_by_pages(docs, 1) == [["a"], ["b"], ["c"], ["d"], ["e"]]
     assert [d.source_id for d in spec["documents"]] == [d.source_id for d in docs]      # no worker reloads them
     assert done["gpus"] == 4 and done["documents"] == 5
 
@@ -258,7 +262,8 @@ def test_a_share_kept_whole_starts_no_worker_and_progress_is_the_status_line(mon
         kept.put(sid, mode, {"done": True}, kind)
     with caplog.at_level("INFO"):
         done, started, _procs = _start(monkeypatch, tmp_path, docs, lambda gpu: ({"ok": True}, 0))
-    assert [share for _gpu, share, _env in started] == [1]
+    assert len(started) == 1                                       # one piece left, one worker
+    assert (tmp_path / "work" / "gate-queue" / "piece-0.claim").read_text() == "kept"
     status = re.compile(r"golden eval: (\d+)/(\d+) reading")                  # orchestration/status.py's pattern
     lines = [m.groups() for r in caplog.records if (m := status.search(r.getMessage()))]
     planned = len(golden_eval.planned_readings(docs, settings))
@@ -316,3 +321,20 @@ def test_the_gate_stage_shares_its_reading_only_with_several_gpus_and_never_fail
     with caplog.at_level("WARNING"):
         D._read_gate_on_every_gpu(ctx, calibrators=None, thresholds=None, lines=["gl"], scored="c")
     assert any("reads them all on one GPU" in r.getMessage() for r in caplog.records)
+
+
+def test_a_worker_on_the_queue_reads_every_piece_no_other_worker_took(worker_env, tmp_path):
+    docs = worker_env.docs
+    spec = _spec(docs, "key-policy-v1:bf16", shares=golden_eval.pieces_by_pages(docs, 1))
+    queue = tmp_path / "queue"
+    queue.mkdir()
+    (queue / "piece-0.claim").write_text("another worker")
+    result = gate_shard_worker.read_share(spec, None, client=object(), queue=queue,
+                                          loader=lambda adapter, label: SimpleNamespace(tag=label))
+    assert result["ok"] and worker_env.read == [spec["shares"][1]] and len(worker_env.released) == 1
+
+
+def test_pieces_go_longest_first_and_are_the_same_every_run():
+    pages = {"a": 3, "b": 40, "c": 12, "d": 12, "e": 1}
+    assert golden_eval.pieces_by_pages(_docs(pages), 2) == [["b", "c"], ["d", "a"], ["e"]]
+    assert golden_eval.pieces_by_pages(list(reversed(_docs(pages))), 2) == [["b", "c"], ["d", "a"], ["e"]]

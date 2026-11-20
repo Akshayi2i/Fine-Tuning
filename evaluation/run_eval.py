@@ -136,6 +136,17 @@ def corpus_source_ids(
     for every frozen document. The group split keeps a frozen document's
     family out of train and val, so this is not a way around the guarantee.
     """
+    # The build's own record (data_pipeline.corpus_manifest: ``source_ids_by_split``), written from the rows the epoch
+    # and split files are written from - every epoch file holds every train document, or the build refuses
+    # (build_jsonl.train_rows_by_epoch). Reading the files themselves to collect the same ids downloaded every epoch
+    # copy (cycle 2: ~9.6 GB at ~4.5 MB/s, about half an hour, twice per gate, the GPUs idle). A corpus written
+    # before the manifest carried its ids is still read file by file.
+    manifest_key = paths.corpus_manifest(corpus_version, tenant_id)
+    if client.exists(manifest_key):
+        by_split = client.read_json(manifest_key).get("source_ids_by_split")
+        if isinstance(by_split, dict) and by_split:
+            return {str(source) for split, ids in by_split.items() if include_test or split != "test"
+                    for source in ids or ()}
     found: set[str] = set()
     prefix = paths.corpus_dir(corpus_version, tenant_id)
     for key in client.list(prefix):

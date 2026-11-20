@@ -180,6 +180,33 @@ def _small_types(per_type: dict[str, int], *, real: bool) -> dict[str, int]:
     return small
 
 
+#: Pages of one document copied at once while freezing.
+COPY_WORKERS = 16
+
+
+def _copy_pages(client: BlobClient, base: str, doc_type: str, source_id: str, page_count: int,
+                tenant_id: str | None) -> dict[int, str]:
+    """Every page's image and text copied into the frozen set, :data:`COPY_WORKERS` pages at a time; the text of
+    each page that has one, by page. One at a time, cycle 2's 99 test documents (~9,600 pages) took ~3.25 h of pod
+    time, about 48 pages a minute."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def copy(page: int) -> tuple[int, str | None]:
+        client.write_bytes(f"{base}/page_{page}.png",
+                           client.read_bytes(paths.processed_page(doc_type, source_id, page, "png", tenant_id)))
+        md = paths.processed_page(doc_type, source_id, page, "md", tenant_id)
+        if not client.exists(md):
+            return page, None
+        # Frozen without pictures (common.ocr_text): the gate reads what serving reads.
+        text = clean_page_text(client.read_text(md))
+        client.write_text(f"{base}/page_{page}.md", text)
+        return page, text
+
+    with ThreadPoolExecutor(max_workers=max(1, min(COPY_WORKERS, page_count))) as pool:
+        copied = list(pool.map(copy, range(1, page_count + 1)))
+    return {page: text for page, text in copied if text is not None}
+
+
 def freeze_eval_set(
     client: BlobClient,
     corpus_version: str,
@@ -291,17 +318,7 @@ def freeze_eval_set(
             raise FreezeError(f"{source_id} records no pages; it cannot be evaluated")
 
         base = f"{root}/{source_id}"
-        page_texts: dict[int, str] = {}
-        for page in range(1, page_count + 1):
-            client.write_bytes(
-                f"{base}/page_{page}.png",
-                client.read_bytes(paths.processed_page(doc_type, source_id, page, "png", tenant_id)),
-            )
-            md = paths.processed_page(doc_type, source_id, page, "md", tenant_id)
-            if client.exists(md):
-                # Frozen without pictures (common.ocr_text): the gate reads what serving reads.
-                page_texts[page] = clean_page_text(client.read_text(md))
-                client.write_text(f"{base}/page_{page}.md", page_texts[page])
+        page_texts = _copy_pages(client, base, doc_type, source_id, page_count, tenant_id)
         client.write_json(f"{base}/metadata.json", {
             "doc_type": doc_type,
             "acord_form": metadata.get("acord_form"),

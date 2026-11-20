@@ -26,8 +26,11 @@ from pathlib import Path
 from typing import Any
 
 
-def read_share(spec: dict[str, Any], share: int, *, client: Any = None, loader: Any = None) -> dict[str, Any]:
-    """Read share ``share`` of the spec's split into the gate's saved readings; what it did, as a dict."""
+def read_share(spec: dict[str, Any], share: int | None, *, client: Any = None, loader: Any = None,
+               queue: Path | None = None) -> dict[str, Any]:
+    """Read share ``share`` of the spec's split into the gate's saved readings - or, with ``queue``, every piece of
+    the split this worker claims from the queue the workers share (``checkpoint_eval.claimed_pieces``), one after
+    another on one loaded model, so a slow GPU reads fewer; what it did, as a dict."""
     from evaluation import golden_eval
     from evaluation.reading_cache import ReadingCache, default_root
 
@@ -42,11 +45,11 @@ def read_share(spec: dict[str, Any], share: int, *, client: Any = None, loader: 
             return load_model("base", client, backend="vllm", adapter=adapter, label=label)
 
     documents = spec["documents"]                       # the gate's own, as it loaded them
-    wanted = set(spec["shares"][share])
-    mine = [d for d in documents if d.source_id in wanted]
-    if len(mine) != len(wanted):
-        return {"ok": False, "error": f"{len(wanted) - len(mine)} document(s) of this share are not among the "
-                                      "gate's documents"}
+    by_id = {d.source_id: d for d in documents}
+    shares = [spec["shares"][share]] if queue is None else list(spec["shares"])
+    unknown = sum(1 for piece in shares for sid in piece if sid not in by_id)
+    if unknown:
+        return {"ok": False, "error": f"{unknown} document(s) of this share are not among the gate's documents"}
     settings = golden_eval.gate_settings()
     if tuple(settings) != tuple(spec["settings"]):
         return {"ok": False, "error": f"the gate's settings here {settings} are not the gate's {spec['settings']}"}
@@ -71,18 +74,32 @@ def read_share(spec: dict[str, Any], share: int, *, client: Any = None, loader: 
                                           f"{spec['label']!r}: the gate would not find what this worker read"}
         repeat, repeat_mode, noisy_share, repeat_share = settings
         cache = ReadingCache(default_root(), key)
-        triples = golden_eval.evaluate(
-            mine, model, client, golden_eval.gate_images_root(spec["corpus_version"], spec["tenant_id"]),
-            calibrators=spec["calibrators"], thresholds=spec["thresholds"], run_to_run=repeat,
-            repeat_mode=repeat_mode, noisy_share=noisy_share, repeat_share=repeat_share, cache=cache,
-        )
+        if queue is None:
+            pieces: Any = [share]
+        else:
+            from evaluation.checkpoint_eval import claimed_pieces
+
+            pieces = claimed_pieces(Path(queue), len(shares))
+        read: list[Any] = []
+        readings = failed = 0
+        for piece in pieces:
+            mine = [by_id[sid] for sid in spec["shares"][piece]]
+            if not mine:
+                continue
+            triples = golden_eval.evaluate(
+                mine, model, client, golden_eval.gate_images_root(spec["corpus_version"], spec["tenant_id"]),
+                calibrators=spec["calibrators"], thresholds=spec["thresholds"], run_to_run=repeat,
+                repeat_mode=repeat_mode, noisy_share=noisy_share, repeat_share=repeat_share, cache=cache,
+            )
+            read += mine
+            readings += len(triples)
+            failed += len(getattr(triples, "infrastructure_failures", []))
     finally:
         release_model(model)
-    failures = list(getattr(triples, "infrastructure_failures", []))
     return {
-        "ok": True, "documents": len(mine), "pages": sum(len(d.image_keys) for d in mine),
-        "readings": len(triples), "failed": len(failures), "seconds": round(time.monotonic() - began, 1),
-        "summary": (f"{len(mine)} document(s), {len(triples)} reading(s), {len(failures)} failed twice, "
+        "ok": True, "documents": len(read), "pages": sum(len(d.image_keys) for d in read),
+        "readings": readings, "failed": failed, "seconds": round(time.monotonic() - began, 1),
+        "summary": (f"{len(read)} document(s), {readings} reading(s), {failed} failed twice, "
                     f"{cache.summary()}, {round(time.monotonic() - began)} s"),
     }
 
@@ -90,7 +107,9 @@ def read_share(spec: dict[str, Any], share: int, *, client: Any = None, loader: 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read one GPU's share of the gate's frozen documents")
     parser.add_argument("--spec", type=Path, required=True, help="the gate's spec (gate-spec.pkl)")
-    parser.add_argument("--share", type=int, required=True, help="which share of the split to read")
+    parser.add_argument("--share", type=int, default=None, help="which share of the split to read")
+    parser.add_argument("--queue", type=Path, default=None,
+                        help="read every piece of the split this worker claims from this shared queue folder")
     parser.add_argument("--out", type=Path, required=True, help="where to write what it did (JSON)")
     args = parser.parse_args(argv)
     # Started by the gate with FIDEON_NO_DETACH=1, it reads in place; run by hand on the pod, it moves into tmux
@@ -104,12 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(logging.INFO)
     with args.spec.open("rb") as handle:
         spec = pickle.load(handle)  # noqa: S301 - written by this run's own gate, on its own volume
-    if not 0 <= args.share < len(spec["shares"]):
-        parser.error(f"--share is 0 to {len(spec['shares']) - 1}")
+    if args.queue is None and (args.share is None or not 0 <= args.share < len(spec["shares"])):
+        parser.error(f"--share is 0 to {len(spec['shares']) - 1}, or give --queue")
     try:
-        result = read_share(spec, args.share)
+        result = read_share(spec, args.share, queue=args.queue)
     except Exception as exc:  # noqa: BLE001 - reported to the gate, which reads what is left itself
-        logging.getLogger(__name__).exception("the gate's share %d could not be read", args.share)
+        logging.getLogger(__name__).exception("the gate's share %s could not be read", args.share)
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     args.out.write_text(json.dumps(result), encoding="utf-8")
     return 0 if result.get("ok") else 1
