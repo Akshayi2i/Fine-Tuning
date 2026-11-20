@@ -29,10 +29,18 @@ state_of() {
     echo "not started"
   fi
 }
+# The GPU workers of checkpoint selection, calibration and the gate write their own logs under the run's staging
+# folder while the cycle's log stays quiet for hours: the cycle is quiet only when they are too.
+STAGING="${RUNPOD_VOLUME_MOUNT:-/runpod-volume}/staging"
 minutes_quiet() {
-  local log="$LOG_DIR/$1.log"
+  local log="$LOG_DIR/$1.log" newest worker
   [ -f "$log" ] || { echo 0; return; }
-  echo $(( ( $(date +%s) - $(stat -c %Y "$log" 2>/dev/null || date +%s) ) / 60 ))
+  newest="$(stat -c %Y "$log" 2>/dev/null || date +%s)"
+  if [ "$1" = "$CYCLE" ] && [ -d "$STAGING/adapters" ]; then
+    worker="$(find "$STAGING/adapters" -maxdepth 7 -name '*.log' -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)"
+    if [ -n "$worker" ] && [ "$worker" -gt "$newest" ]; then newest="$worker"; fi
+  fi
+  echo $(( ( $(date +%s) - newest ) / 60 ))
 }
 # Lines that mean something went wrong (not the counts of a summary such as "0 failed").
 errors_in() {
@@ -133,7 +141,7 @@ for run in "$IMPORT" "$OCR" "$CYCLE"; do
     running)
       q="$(minutes_quiet "$run")"
       # The cycle waiting for the import and the OCR writes nothing until they end: quiet, not stuck.
-      if [ "$run" = "$CYCLE" ] && tail -n 1 "$LOG_DIR/$run.log" 2>/dev/null | grep -aq "full_cycle: waiting for"; then
+      if [ "$run" = "$CYCLE" ] && tail -n 1 "$LOG_DIR/$run.log" 2>/dev/null | grep -aqE "full_cycle: (still )?waiting for"; then
         :
       elif [ "$q" -ge "$QUIET_MIN" ]; then
         problems+=("'$run' has written nothing for $q minutes: it may be stuck (training steps can be slow; check again soon)")

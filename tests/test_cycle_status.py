@@ -19,7 +19,7 @@ def _git_bash() -> str | None:
 pytestmark = pytest.mark.skipif(_git_bash() is None, reason="needs bash")
 
 
-def _status(tmp_path: Path, logs: dict[str, str], exits: dict[str, str], running: set[str]) -> str:
+def _status(tmp_path: Path, logs: dict[str, str], exits: dict[str, str], running: set[str], env: str = "") -> str:
     (tmp_path / "repo" / "scripts").mkdir(parents=True, exist_ok=True)
     (tmp_path / "logs").mkdir(exist_ok=True)
     (tmp_path / "bin").mkdir(exist_ok=True)
@@ -31,10 +31,10 @@ def _status(tmp_path: Path, logs: dict[str, str], exits: dict[str, str], running
     sessions = " ".join(f"=fideon-{r}" for r in running)
     (tmp_path / "bin" / "tmux").write_bytes(
         f'#!/usr/bin/env bash\nfor s in {sessions}; do [ "$3" = "$s" ] && exit 0; done; exit 1\n'.encode())
-    (tmp_path / "drive.sh").write_bytes(b"""#!/usr/bin/env bash
-S="$(pwd)"; chmod +x "$S/bin/tmux"; export PATH="$S/bin:$PATH" FIDEON_LOG_DIR="$S/logs"
+    (tmp_path / "drive.sh").write_bytes(("""#!/usr/bin/env bash
+S="$(pwd)"; chmod +x "$S/bin/tmux"; export PATH="$S/bin:$PATH" FIDEON_LOG_DIR="$S/logs" """ + env + """
 bash "$S/repo/scripts/cycle_status.sh"
-""")
+""").encode())
     done = subprocess.run([_git_bash(), "drive.sh"], cwd=tmp_path, capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     return done.stdout
@@ -122,3 +122,27 @@ def test_finished(tmp_path):
                   {"importc2": "0", "ocrloop": "0", "cycle2": "0"}, set())
     assert "NOW:      FINISHED - v4 is packaged and gated (not promoted)" in out
     assert "HEALTH:   OK" in out
+
+
+def test_a_cycle_whose_gpu_workers_are_writing_is_not_stuck(tmp_path):
+    """Selection, calibration and the gate log in their workers' own files for hours (2026-11-16: "may be stuck"
+    while three GPUs read); a "still waiting" line is a waiting cycle too."""
+    import os
+    import time
+
+    volume = 'RUNPOD_VOLUME_MOUNT="$S/volume"'
+    worker_logs = tmp_path / "volume" / "staging" / "adapters" / "scope" / "policy" / "v5" / "checkpoint_scores"
+    worker_logs.mkdir(parents=True)
+    (worker_logs / "shard-full-gpu0.log").write_text("validation generation: 12/400 row(s)\n", encoding="utf-8")
+    _status(tmp_path, {"cycle2": "2026-11-16 10:00:00 INFO stage 6 select_checkpoint: started\n"}, {}, set())
+    old = time.time() - 3600
+    os.utime(tmp_path / "logs" / "cycle2.log", (old, old))
+    assert "'cycle2' has written nothing" not in _status(tmp_path, {}, {}, {"cycle2"}, env=volume)
+    os.utime(worker_logs / "shard-full-gpu0.log", (old, old))
+    assert "'cycle2' has written nothing for 60 minutes" in _status(tmp_path, {}, {}, {"cycle2"}, env=volume)
+
+    still = "2026-11-14 11:48:32 UTC full_cycle: still waiting for 'importc2' (10 min)\n"
+    _status(tmp_path, {"cycle2": still}, {}, set())
+    os.utime(tmp_path / "logs" / "cycle2.log", (old, old))
+    assert "'cycle2' has written nothing" not in _status(tmp_path, {}, {}, {"cycle2"})
+

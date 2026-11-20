@@ -336,7 +336,9 @@ def test_the_smoke_ocr_step_reads_through_every_server(tmp_path, monkeypatch):
 
 def test_the_script_runs_one_server_per_gpu_and_stops_them_all():
     assert 'MINERU_SERVERS:-auto' in SCRIPT and "nvidia-smi -L" in SCRIPT
-    assert "export CUDA_VISIBLE_DEVICES=$i" in SCRIPT and "port=$((PORT + i))" in SCRIPT
+    # Server i on GPU i % the GPUs listed: more servers than GPUs share them, never name a GPU that is not there.
+    assert "gpu=$((i % gpus))" in SCRIPT and "export CUDA_VISIBLE_DEVICES=$gpu" in SCRIPT
+    assert "port=$((PORT + i))" in SCRIPT
     assert '("MINERU_URLS", ",".join(urls))' in SCRIPT
     # every server gets a folder of its own (each writes a lock file where it runs)
     assert 'echo "$STATE/gpu$1"' in SCRIPT and 'cd "$dir"' in SCRIPT

@@ -47,7 +47,13 @@ value() { "$PY" -c "$1" "$tenant" | tail -1; }
 # 1. What must be finished first.
 for name in ${after[@]+"${after[@]}"}; do
   say "waiting for '$name' to finish"
-  until [ -f "$LOG_DIR/$name.exit" ]; do sleep "${FULL_CYCLE_POLL_S:-60}"; done
+  # A line every 10 minutes: a log silent for 15 is mailed as "may be stuck" (pod_run.sh), and waiting is not stuck.
+  waited=0
+  until [ -f "$LOG_DIR/$name.exit" ]; do
+    sleep "${FULL_CYCLE_POLL_S:-60}"
+    waited=$((waited + ${FULL_CYCLE_POLL_S:-60}))
+    if [ $((waited % 600)) -lt "${FULL_CYCLE_POLL_S:-60}" ]; then say "still waiting for '$name' ($((waited / 60)) min)"; fi
+  done
   code="$(tr -d '[:space:]' < "$LOG_DIR/$name.exit")"
   if [ "$code" != "0" ]; then
     say "'$name' ended with '$code', not 0: stopping before any training. Read it: bash scripts/pod_run.sh status $name"

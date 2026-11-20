@@ -196,10 +196,13 @@ def near_copy_agreement(documents: Sequence[Any], triples: Sequence[tuple[Any, A
     for pair in near_copy_pairs(documents, page_keys=page_keys):
         by_mode: dict[str, dict[str, float]] = {}
         modes = {mode for source, mode in readings if source == pair.a} & {mode for source, mode in readings if source == pair.b}
+        differ: set[str] | None = None                 # the two golds' difference: one per pair, not per mode
         for mode in sorted(modes, key=str):
             gold_a, answer_a, metadata = readings[(pair.a, mode)]
             gold_b, answer_b, _metadata = readings[(pair.b, mode)]
-            measured = _agreement(answer_a, answer_b, _gold_only_values(gold_a, gold_b), metadata)
+            if differ is None:
+                differ = _gold_only_values(gold_a, gold_b)
+            measured = _agreement(answer_a, answer_b, differ, metadata)
             if measured is None:
                 continue
             share, compared = measured

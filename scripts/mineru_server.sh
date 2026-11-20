@@ -15,7 +15,7 @@
 # server before `finetune`, which needs the whole GPU.
 #
 # One server reads about 1.7 pages a second whether it is sent one document or four at a time (measured
-# 2026-11-14 on a 4x H200 pod), so each GPU runs a server of its own: server i on GPU i, port
+# 2026-11-14 on a 4x H200 pod), so each GPU runs a server of its own: server i on GPU i % GPUs, port
 # MINERU_PORT+i. .env gets MINERU_URL (the first) and MINERU_URLS (all of them); the OCR stage shares
 # its documents between them.
 #
@@ -46,6 +46,15 @@ servers() {
   if [ "$n" = auto ]; then
     n="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)"
   fi
+  [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=1
+  echo "$n"
+}
+# GPUs nvidia-smi lists (at least 1). Server i reads on GPU i % this, so MINERU_SERVERS=8 on 4 GPUs runs two a
+# GPU - not servers 4-7 on GPUs that do not exist. Whether two a GPU read faster is to be measured on a pod
+# (2026-11-14: one server per GPU left the GPUs 0-15% busy).
+gpu_count() {
+  local n
+  n="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)"
   [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=1
   echo "$n"
 }
@@ -110,7 +119,9 @@ PY
       (umask 077; python3 -c "import secrets; print(secrets.token_hex(24))" > "$STATE/token.txt")
     fi
     count="$(servers)"
+    gpus="$(gpu_count)"
     for i in $(seq 0 $((count - 1))); do
+      gpu=$((i % gpus))
       port=$((PORT + i))
       name="$(server_name "$i")"
       dir="$(server_dir "$i")"
@@ -131,9 +142,9 @@ PY
 cd "$dir"
 export MINERU_DEVICE_MODE=cuda
 export MINERU_MODEL_SMALL_BACKEND=torch
-# GPU $i only, numbered as nvidia-smi numbers them.
+# GPU $gpu only (server $i of $count on $gpus GPU(s)), numbered as nvidia-smi numbers them.
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=$i
+export CUDA_VISIBLE_DEVICES=$gpu
 exec "$VENV/bin/mineru-api" --port $port --tier $TIER --api-key "\$(cat $STATE/token.txt)" --concurrency "${MINERU_CONCURRENCY:-4}"
 EOF
       chmod 700 "$dir/run.sh"
