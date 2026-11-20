@@ -901,6 +901,30 @@ def _reads_yes_no(parsed: Any) -> bool:
     return kinds - {"null"} == {"boolean"}
 
 
+#: A date's ``parsed`` as the schema states it (``DateValue``, SPEC_21 D1): MM/DD/YYYY.
+_FOUR_DIGIT_YEAR_DATE = "^(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])/[0-9]{4}$"
+#: ... and as the decoder accepts it: the year in two digits as well.
+_TWO_OR_FOUR_DIGIT_YEAR_DATE = "^(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])/([0-9]{2}|[0-9]{4})$"
+
+
+def _two_digit_years_allowed(parsed: Any) -> Any:
+    """A date ``v`` the decoder lets end after a two-digit year (approved 2026-11-20).
+
+    A page printing "07/11/25" and an answer that left ``r`` out (as it does when the printed form reads as the
+    value): held to four digits, the decoder made the model add two after "25" - "07/11/2555" in every reading of
+    v4's Merchants WC policy, then served as its own printed form, found on no page and taken out. Written
+    "07/11/25", the date is expanded as printed (``raw``) and ``with_output_dates`` writes ``parsed`` as MM/DD/YYYY,
+    the pipeline's rule for every date. Training targets are unchanged: they always write four digits.
+    """
+    if isinstance(parsed, dict):
+        if parsed.get("pattern") == _FOUR_DIGIT_YEAR_DATE:
+            parsed["pattern"] = _TWO_OR_FOUR_DIGIT_YEAR_DATE
+        for key in ("anyOf", "oneOf"):
+            if isinstance(parsed.get(key), list):
+                parsed[key] = [_two_digit_years_allowed(branch) for branch in parsed[key]]
+    return parsed
+
+
 def compact_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """The decoding schema of a compact answer: every envelope schema (an object
     declaring ``raw``, ``parsed`` and ``page_ref``) with those keys renamed
@@ -928,7 +952,9 @@ def compact_schema(schema: dict[str, Any]) -> dict[str, Any]:
             out = {key: copy.deepcopy(value) for key, value in node.items()
                    if key not in ("properties", "required")}
             out["properties"] = {
-                **{COMPACT_KEYS[key]: copy.deepcopy(props[key]) for key in ("raw", "parsed", "page_ref")},
+                COMPACT_KEYS["raw"]: copy.deepcopy(props["raw"]),
+                COMPACT_KEYS["parsed"]: _two_digit_years_allowed(copy.deepcopy(props["parsed"])),
+                COMPACT_KEYS["page_ref"]: copy.deepcopy(props["page_ref"]),
                 **{key: walk(value) for key, value in props.items() if key not in COMPACT_KEYS},
             }
             required = [COMPACT_KEYS.get(key, key) for key in node.get("required") or () if key != "raw"]

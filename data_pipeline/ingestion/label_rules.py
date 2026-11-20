@@ -428,8 +428,8 @@ def split_name_repairs(names: Iterable[str]) -> dict[str, str]:
 
 
 #: A month and a year as an edition prints them: "04 13", "04-13", "4/2013",
-#: "(Ed. 4-84)", "11.98" ...
-_EDITION_MONTH_YEAR = re.compile(r"(?<!\d)(?P<mm>0?[1-9]|1[0-2])\s*[-/. ]\s*(?P<yy>\d{4}|\d{2})(?!\d)")
+#: "(Ed. 4-84)", "11.98", Western World's "01_24" (approved 2026-11-20: read as 01/24, labels and answers alike) ...
+_EDITION_MONTH_YEAR = re.compile(r"(?<!\d)(?P<mm>0?[1-9]|1[0-2])\s*[-/._ ]\s*(?P<yy>\d{4}|\d{2})(?!\d)")
 #: ... or run together: "0413".
 _EDITION_COMPACT = re.compile(r"(?<!\d)(?P<mm>0[1-9]|1[0-2])(?P<yy>\d{2})(?!\d)")
 
@@ -1008,3 +1008,154 @@ def _prints_number(text: str, words: str, number: int, street: str) -> bool:
         return True
     header = re.compile(rf"\b(?:{words})\b\.?[ \t]*(?:#|no\b|num(?:ber)?\b)", re.IGNORECASE)
     return bool(header.search(text) and re.search(rf"(?m)^[ \t]*0*{number}[ \t]*$", text))
+
+
+# --------------------------------------------------------------------------
+# Cycle 3 rules (user, 2026-11-19: data/review_cycle2/LABELLING_RULES_DRAFT.md). Labels only, applied as a bundle is
+# prepared (prepare_bundles) and reported by scripts.check_golds: they are not in apply_label_rules, which serving
+# (serving.conventions) and the gate's golds also go through, so neither a served answer nor the yardstick changes.
+# --------------------------------------------------------------------------
+
+#: A broken character as a label holds it.
+BROKEN_CHARACTER = "\ufffd"
+#: The correction kind for a broken character no page text settles: listed for a person, never guessed.
+BROKEN_CHARACTER_LEFT = "broken character left"
+
+
+def _form_key(text: Any) -> str:
+    return re.sub(r"[^0-9A-Z]", "", str(text or "").upper())
+
+
+def strip_form_ref_editions(gold: dict[str, Any]) -> list[tuple[str, str]]:
+    """R2: each ``coverages[].form_refs`` entry written as the forms list's ``form_number``, without the edition.
+
+    IN PLACE; one note per entry changed. An entry is changed only to a number the forms list holds: the entry is that
+    number with the form's own edition after it ("SP 30 18 10 18" for "SP 30 18", edition "10 18"), or its number part
+    (:func:`split_form_edition`) is that number spelled with other spacing. Anything else is left as it is.
+    """
+    forms: dict[str, str] = {}
+    with_edition: dict[str, str] = {}
+    for row in gold.get("forms_and_endorsements") or []:
+        if not isinstance(row, dict):
+            continue
+        number = _printed(row.get("form_number") or {}) if isinstance(row.get("form_number"), dict) else None
+        if not number:
+            continue
+        number = " ".join(str(number).split())
+        forms.setdefault(_form_key(number), number)
+        edition = row.get("edition_date")
+        printed = _printed(edition) if isinstance(edition, dict) else None
+        if printed:
+            with_edition.setdefault(_form_key(f"{number}{printed}"), number)
+    notes: list[tuple[str, str]] = []
+    if not forms:
+        return notes
+    for index, row in enumerate(gold.get("coverages") or []):
+        refs = row.get("form_refs") if isinstance(row, dict) else None
+        if not isinstance(refs, list):
+            continue
+        for position, ref in enumerate(refs):
+            text = ref.get("raw") if isinstance(ref, dict) else ref
+            if not isinstance(text, str) or not text.strip():
+                continue
+            key = _form_key(text)
+            if key in forms:
+                target = forms[key]
+            elif key in with_edition:
+                target = with_edition[key]
+            elif (split := split_form_edition(text)) and _form_key(split[0]) in forms:
+                target = forms[_form_key(split[0])]
+            else:
+                continue
+            if target == text:
+                continue
+            if isinstance(ref, dict):
+                ref["raw"] = target
+                if isinstance(ref.get("parsed"), str):
+                    ref["parsed"] = target
+            else:
+                refs[position] = target
+            notes.append(("form reference edition removed",
+                          f"coverages[{index}].form_refs[{position}] {text!r} -> {target!r}"))
+    return notes
+
+
+def clear_code_descriptions(gold: dict[str, Any]) -> list[tuple[str, str]]:
+    """R5: a ``rating_exposures[].class_description`` that is the row's own class code is emptied. IN PLACE."""
+    notes: list[tuple[str, str]] = []
+    for index, row in enumerate(gold.get("rating_exposures") or []):
+        if not isinstance(row, dict):
+            continue
+        code, description = row.get("class_code"), row.get("class_description")
+        if not (isinstance(code, dict) and isinstance(description, dict)):
+            continue
+        printed_code, printed_description = _printed(code), _printed(description)
+        if printed_code and printed_description and _form_key(printed_code) == _form_key(printed_description):
+            row["class_description"] = None
+            notes.append(("class code as description",
+                          f"rating_exposures[{index}].class_description {printed_description!r} emptied"))
+    return notes
+
+
+def clear_premiums_without_amount(gold: dict[str, Any]) -> list[tuple[str, str]]:
+    """R3: a coverage premium printed as a word ("Included", "Incl.", "N/A"), with no figure, is emptied. IN PLACE."""
+    notes: list[tuple[str, str]] = []
+    for index, row in enumerate(gold.get("coverages") or []):
+        premium = row.get("premium") if isinstance(row, dict) else None
+        if isinstance(premium, dict) and _printed(premium) is not None and not _has_digits(_printed(premium)):
+            row["premium"] = None
+            notes.append(("premium without an amount", f"coverages[{index}].premium {_printed(premium)!r} emptied"))
+    return notes
+
+
+def _broken_pattern(value: str) -> re.Pattern[str]:
+    """``value`` with each run of broken characters standing for one or two printed characters each, spaces loose."""
+    out = []
+    for run in re.finditer(rf"{BROKEN_CHARACTER}+|\s+|[^\s{BROKEN_CHARACTER}]", value.strip()):
+        text = run.group(0)
+        if text.startswith(BROKEN_CHARACTER):
+            out.append(rf"[^\s{BROKEN_CHARACTER}]{{1,{2 * len(text)}}}")
+        elif text.isspace():
+            out.append(r"\s+")
+        else:
+            out.append(re.escape(text))
+    return re.compile("".join(out))
+
+
+def repair_broken_characters(gold: dict[str, Any], pages: dict[int, str]) -> list[tuple[str, str]]:
+    """R8: a value holding a broken character takes the characters its pages print there. IN PLACE.
+
+    The value's own pages are searched first, then every page; it is repaired only where exactly one spelling fits.
+    A value no text settles (the text layer holds the broken character itself, or two spellings fit) is reported as
+    :data:`BROKEN_CHARACTER_LEFT` and left for a person.
+    """
+    notes: list[tuple[str, str]] = []
+    for path, envelope in list(_envelopes(gold)):
+        raw = envelope.get("raw")
+        if not isinstance(raw, str) or BROKEN_CHARACTER not in raw:
+            continue
+        pattern = _broken_pattern(raw)
+        found: set[str] = set()
+        for numbers in (_pages(envelope), sorted(pages)):
+            for number in numbers:
+                found |= {" ".join(m.group(0).split()) for m in pattern.finditer(pages.get(number) or "")}
+            if found:
+                break
+        if len(found) != 1:
+            notes.append((BROKEN_CHARACTER_LEFT, f"{path} {raw!r}"))
+            continue
+        repaired = found.pop()
+        if envelope.get("parsed") == raw:
+            envelope["parsed"] = repaired
+        envelope["raw"] = repaired
+        notes.append(("broken character repaired", f"{path} {raw!r} -> {repaired!r}"))
+    return notes
+
+
+def apply_cycle3_rules(gold: dict[str, Any], pages: dict[int, str]) -> list[tuple[str, str]]:
+    """The cycle 3 rules that need no person (R2's format, R3, R5, R8), IN PLACE; ``[(kind, detail)]``."""
+    notes = strip_form_ref_editions(gold)
+    notes += clear_code_descriptions(gold)
+    notes += clear_premiums_without_amount(gold)
+    notes += repair_broken_characters(gold, pages)
+    return notes

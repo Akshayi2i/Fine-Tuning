@@ -1208,14 +1208,18 @@ def corrected_gold(
         # once, citing every page that prints it; extra fields only for values
         # with no field of their own; numbers only where printed as numbers.
         from data_pipeline.ingestion.label_rules import (
+            apply_cycle3_rules,
             apply_label_rules,
             merge_coverage_limits,
             page_texts,
             scanned_pages,
         )
 
-        notes.extend(apply_label_rules(gold, page_texts(text_pdf), scanned=scanned_pages(text_pdf)))
+        texts = page_texts(text_pdf)
+        notes.extend(apply_label_rules(gold, texts, scanned=scanned_pages(text_pdf)))
         notes.extend(merge_coverage_limits(gold))
+        # The cycle 3 rules (2026-11-19) that need no person; labels only, like the limits above.
+        notes.extend(apply_cycle3_rules(gold, texts))
 
     errors = list(iter_validation_errors(gold, "policy", None, lob))
     if not errors and is_common_model("policy", None, lob):

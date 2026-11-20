@@ -25,6 +25,9 @@ FORMS = "forms_and_endorsements"
 EDITION_IN_LABEL_NUMBER = "edition_in_label_number"
 EDITION_IN_ANSWER_NUMBER = "edition_in_answer_number"
 
+#: A coverage form reference written with its edition on one side only (approved 2026-11-20, labelling rule R2).
+FORM_REF_EDITION = "form_ref_edition"
+
 #: An edition inside a number, once separators are gone: ``0123``, ``2021``, ``012023``.
 _EDITION_DIGITS = re.compile(r"^\d{2,6}$")
 
@@ -80,7 +83,7 @@ def align_form_editions(expected: Any, got: Any) -> tuple[Any, Counter]:
         return expected, moved
     rows, answers = expected.get(FORMS), got.get(FORMS)
     if not isinstance(rows, list) or not isinstance(answers, list):
-        return expected, moved
+        return _align_form_refs(expected, got, moved), moved
 
     def row_of(row: Any) -> tuple[Any, Any]:
         return (_value(row.get("form_number")), _value(row.get("edition_date"))) if isinstance(row, dict) else (None, None)
@@ -114,4 +117,51 @@ def align_form_editions(expected: Any, got: Any) -> tuple[Any, Counter]:
             free.discard(index)
             moved[direction] += 1
             break
-    return ({**expected, FORMS: out} if out is not None else expected), moved
+    aligned = {**expected, FORMS: out} if out is not None else expected
+    return _align_form_refs(aligned, got, moved), moved
+
+
+def _ref_text(ref: Any) -> Any:
+    return _value(ref) if isinstance(ref, dict) else ref
+
+
+#: What a form reference's edition is, once separators are gone: a month and a year ("1018", "102018") or a year.
+_REF_EDITION = re.compile(r"^(?:(?:0[1-9]|1[0-2])(?:\d{2}|(?:19|20)\d{2})|(?:19|20)\d{2})$")
+
+
+def _same_ref(label: str, answer: str) -> bool:
+    """One form, written with its edition by one side only: ``SP 30 18 10 18`` and ``SP 30 18`` - never ``SP 30 1``,
+    whose leftover "81018" is no edition."""
+    longer, shorter = (label, answer) if len(label) > len(answer) else (answer, label)
+    return bool(shorter) and longer != shorter and longer.startswith(shorter)         and bool(_REF_EDITION.match(longer[len(shorter):]))
+
+
+def _align_form_refs(expected: dict[str, Any], got: dict[str, Any], moved: Counter) -> dict[str, Any]:
+    """Each label ``coverages[].form_refs`` entry the answer writes with or without its edition, written as the answer
+    writes it (labelling rule R2: the form number as in the forms list, without the edition; labels made before it
+    hold it in some). Only a reference the answer holds nowhere as it is, and only to one the answer holds: another
+    form, or another edition, stays what it was."""
+    coverages, answers = expected.get("coverages"), got.get("coverages")
+    if not isinstance(coverages, list) or not isinstance(answers, list):
+        return expected
+    held = {_compact(_ref_text(ref)): _ref_text(ref) for row in answers if isinstance(row, dict)
+            for ref in row.get("form_refs") or [] if _compact(_ref_text(ref))}
+    out = None
+    for index, row in enumerate(coverages):
+        refs = row.get("form_refs") if isinstance(row, dict) else None
+        if not isinstance(refs, list):
+            continue
+        new_refs = list(refs)
+        for position, ref in enumerate(refs):
+            key = _compact(_ref_text(ref))
+            if not key or key in held:
+                continue
+            match = next((text for compact, text in held.items() if _same_ref(key, compact)), None)
+            if match is None:
+                continue
+            new_refs[position] = {**ref, "raw": match, "parsed": match} if isinstance(ref, dict) else match
+            moved[FORM_REF_EDITION] += 1
+        if new_refs != refs:
+            out = out if out is not None else list(coverages)
+            out[index] = {**row, "form_refs": new_refs}
+    return {**expected, "coverages": out} if out is not None else expected
