@@ -198,8 +198,9 @@ def test_a_sharded_pass_makes_the_same_calls_and_scores_as_the_pass_unsharded(cl
         a = C.saved_pass_paths(tmp_path / "single", checkpoint)["generations"].read_text().splitlines()[1:]
         b = Path(parallel.saved[checkpoint]["generations"]).read_text().splitlines()[1:]
         assert a == b
+    # Pieces of a shared queue (user, 2026-11-16), not one fixed share per GPU: every row once, between them.
     shares = [p for p in parallel.passes if p["checkpoint"] == finalists[0]]
-    assert len(shares) == 3 and sum(p["generated"] for p in shares) == 9
+    assert len(shares) == 3 * C.PIECES_PER_GPU and sum(p["generated"] for p in shares) == 9
     assert sum(p.get("repeat", {}).get("generated", 0) for p in shares) == 3
 
 
@@ -413,3 +414,26 @@ def test_the_remaining_rows_are_sharded_across_gpus_on_a_multi_gpu_pod(client, s
     assert how["bf16"]["source"] == "finalist_answers+generated" and how["bf16"]["gpus"] == 2
     assert len(started) == 2 and all("--only-keys" in command for command, _env in started)
     assert any(rows for halves in samples["bf16"].values() for rows in halves.values())
+
+
+def test_every_piece_is_taken_once_and_a_free_worker_takes_more(tmp_path):
+    """A shared queue: a slow worker (a hot GPU) takes fewer pieces, and no piece is made twice."""
+    import threading
+    import time
+
+    queue = tmp_path / "queue"
+    queue.mkdir()
+    taken: dict[str, list[int]] = {"fast": [], "slow": []}
+
+    def work(name: str, seconds: float) -> None:
+        for piece in C.claimed_pieces(queue, 12):
+            taken[name].append(piece)
+            time.sleep(seconds)
+
+    workers = [threading.Thread(target=work, args=("fast", 0.01)), threading.Thread(target=work, args=("slow", 0.1))]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert sorted(taken["fast"] + taken["slow"]) == list(range(12))
+    assert len(taken["fast"]) > len(taken["slow"])

@@ -45,7 +45,7 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -1007,7 +1007,7 @@ def vllm_scorer(
                       cache_dir=cache_dir)
         return score
 
-    rows = read_rows(client.read_text(val_path))
+    rows = read_rows(corpus_text(client, val_path))
     # Checked before the engine loads: a mode filter that matches no row is a
     # configuration error, and an engine loaded first was never released.
     if sample_rows:
@@ -1305,13 +1305,22 @@ def generate_sharded(
     if only_keys is not None:
         keys_file = work_dir / f"shard-{kind}-keys.json"
         keys_file.write_text(json.dumps(sorted(set(only_keys))), encoding="utf-8")
+    # A shared queue of pieces, not one fixed share per GPU (user, 2026-11-16): each worker takes the next piece when
+    # it is free, so a slow or hot GPU makes fewer (cycle 2: GPU 0 at 88 C read half as fast and kept two GPUs idle
+    # 2-3 h behind it).
+    pieces = len(gpus) * PIECES_PER_GPU
+    queue = work_dir / f"queue-{kind}"
+    if queue.is_dir():
+        for stale in queue.glob("piece-*.claim"):
+            stale.unlink()
+    queue.mkdir(parents=True, exist_ok=True)
     running: dict[str, tuple[Path, Path, Any]] = {}
-    for index, gpu in enumerate(gpus):
+    for gpu in gpus:
         out = work_dir / f"shard-{kind}-gpu{gpu}.json"
         out.unlink(missing_ok=True)
         command = [sys.executable, "-m", "evaluation.checkpoint_score_worker", "--val-path", val_path,
                    "--sample-rows", str(sample_rows), "--out", str(out),
-                   "--shard", str(index), "--shards", str(len(gpus))]
+                   "--queue", str(queue), "--shards", str(pieces)]
         if images_root:
             command += ["--images-root", str(images_root)]
         if full:
@@ -1372,23 +1381,33 @@ def generate_sharded(
         again: list[Any] = [None] * len(twice)
         problems: list[str] = []
         for gpu, (results, log_path, code) in sorted(finished.items()):
-            entry = results.get(checkpoint) or {}
-            if "first" not in entry:
-                why = entry.get("error") or f"the worker on GPU {gpu} exited {code} without its share"
+            made = results.get(checkpoint) or {}
+            # A worker on the queue lists each piece it made; one given a fixed share, its one entry.
+            entries = made["pieces"] if isinstance(made.get("pieces"), list) else [made]
+            if made.get("pieces") == [] and not made.get("error"):
+                continue                                      # the other workers left this one no piece
+            if made.get("error") or not any("first" in entry for entry in entries):
+                why = made.get("error") or f"the worker on GPU {gpu} exited {code} without its share"
                 problems.append(f"GPU {gpu}: {why}\n{_tail(log_path)}")
                 continue
-            done.stats.append({"gpu": gpu, **(entry.get("stats") or {}),
-                               **({"repeat": entry["repeat_stats"]} if entry.get("repeat_stats") else {})})
-            if done.settings is None:
-                done.settings = entry.get("settings")
-            elif entry.get("settings") != done.settings:
-                problems.append(f"GPU {gpu} generated with other settings: {entry.get('settings')} != {done.settings}")
-            try:
-                problems += place(first, rows, position, Path(entry["first"]))
-                if twice and entry.get("repeat"):
-                    problems += place(again, twice, twice_position, Path(entry["repeat"]))
-            except (OSError, ValueError) as exc:
-                problems.append(f"GPU {gpu}: its answers could not be read: {exc}")
+            for entry in entries:
+                if "first" not in entry:
+                    problems.append(f"GPU {gpu}: piece {entry.get('piece')}: {entry.get('error') or 'no answers'}")
+                    continue
+                done.stats.append({"gpu": gpu, **({"piece": entry["piece"]} if "piece" in entry else {}),
+                                   **(entry.get("stats") or {}),
+                                   **({"repeat": entry["repeat_stats"]} if entry.get("repeat_stats") else {})})
+                if done.settings is None:
+                    done.settings = entry.get("settings")
+                elif entry.get("settings") != done.settings:
+                    problems.append(f"GPU {gpu} generated with other settings: {entry.get('settings')} != "
+                                    f"{done.settings}")
+                try:
+                    problems += place(first, rows, position, Path(entry["first"]))
+                    if twice and entry.get("repeat"):
+                        problems += place(again, twice, twice_position, Path(entry["repeat"]))
+                except (OSError, ValueError) as exc:
+                    problems.append(f"GPU {gpu}: its answers could not be read: {exc}")
         missing = sum(g is None for g in first) + sum(g is None for g in again)
         if missing and not problems:
             problems.append(f"{missing} row(s) came back from no shard")
@@ -1402,9 +1421,9 @@ def generate_sharded(
 
 def generate_shard(
     *, client: Any, val_path: str, images_root: str | None, sample_rows: int, full: bool,
-    full_modes: Sequence[str] | None, checkpoints: Sequence[str], shard: int, shards: int, out: Path,
+    full_modes: Sequence[str] | None, checkpoints: Sequence[str], shard: int | None, shards: int, out: Path,
     repeat: bool = False, repeat_modes: Sequence[str] | None = None, only_keys: Sequence[str] | None = None,
-    prepare_adapters: bool = False, model: Any = None,
+    prepare_adapters: bool = False, model: Any = None, queue: Path | None = None,
 ) -> dict[str, Any]:
     """One worker's share of a sharded pass (:func:`generate_sharded`): the
     pass's rows built as the parent builds them, shard ``shard`` of ``shards``
@@ -1423,7 +1442,7 @@ def generate_shard(
     )
 
     out = Path(out)
-    rows = pass_rows(read_rows(client.read_text(val_path)), sample_rows=sample_rows, full=full,
+    rows = pass_rows(read_rows(corpus_text(client, val_path)), sample_rows=sample_rows, full=full,
                      full_modes=full_modes)
     if only_keys is not None:
         wanted = set(only_keys)
@@ -1438,12 +1457,44 @@ def generate_shard(
         model = load_model("base", client)
     twice = repeat_rows(rows, repeat_modes) if repeat else []
 
-    def write(index: int, name: str, generations: list[Any]) -> str:
-        path = out.with_name(f"{out.stem}-c{index}-{name}.jsonl")
+    def write(index: int, name: str, generations: list[Any], piece: int | None = None) -> str:
+        part = "" if piece is None else f"-p{piece}"
+        path = out.with_name(f"{out.stem}-c{index}{part}-{name}.jsonl")
         path.write_text("".join(json.dumps(generation_record(g)) + "\n" for g in generations), encoding="utf-8")
         return str(path)
 
     results: dict[str, Any] = {}
+    if queue is not None:
+        try:
+            adapters: dict[str, str] = {}
+            for checkpoint in checkpoints:
+                results[checkpoint] = {"pieces": []}
+            for piece in claimed_pieces(Path(queue), shards):
+                for index, checkpoint in enumerate(checkpoints):
+                    try:
+                        if checkpoint not in adapters:
+                            adapters[checkpoint] = _local_adapter(checkpoint, client, model, prepare=prepare_adapters)
+                        stats: dict[str, Any] = {}
+                        first = generate_validation(rows, model, adapter=adapters[checkpoint], stats=stats,
+                                                    shard=(piece, shards))
+                        entry = {"piece": piece, "first": write(index, "first", first, piece), "stats": stats,
+                                 "settings": generation_settings(getattr(model, "config", None))}
+                        if twice:
+                            repeat_stats: dict[str, Any] = {}
+                            again = generate_validation(twice, model, adapter=adapters[checkpoint],
+                                                        stats=repeat_stats, order="reversed", shard=(piece, shards))
+                            entry.update(repeat=write(index, "repeat", again, piece), repeat_stats=repeat_stats)
+                    except Exception as exc:  # noqa: BLE001 - recorded per piece; the parent reports it
+                        entry = {"piece": piece, "error": f"{type(exc).__name__}: {exc}"}
+                    results[checkpoint]["pieces"].append(entry)
+                # Written after each piece, so a worker that dies later keeps what it made.
+                out.write_text(json.dumps(results), encoding="utf-8")
+            out.write_text(json.dumps(results), encoding="utf-8")
+        finally:
+            from inference_core.model_runner import release_model
+
+            release_model(model)
+        return results
     try:
         for index, checkpoint in enumerate(checkpoints):
             try:
@@ -1467,6 +1518,31 @@ def generate_shard(
 
         release_model(model)
     return results
+
+
+def corpus_text(client: Any, key: str) -> str:
+    """A corpus file's text, from this pod's own copy when it holds the blob's bytes (``training.stage_data``)."""
+    from training.stage_data import _corpus_text
+
+    return _corpus_text(client, key)
+
+
+#: Pieces a sharded pass is cut into per GPU, taken from a shared queue (:func:`claimed_pieces`): enough that a GPU
+#: half as fast as the others leaves them little to wait for, few enough that each piece still fills its calls.
+PIECES_PER_GPU = 6
+
+
+def claimed_pieces(queue: Path, pieces: int) -> Iterator[int]:
+    """The pieces of ``pieces`` this process takes, in order, each claimed by creating its file in ``queue`` - which
+    only one process can do (``O_CREAT | O_EXCL``) - so every piece is made once, by whichever worker is free."""
+    for piece in range(pieces):
+        try:
+            handle = os.open(queue / f"piece-{piece}.claim", os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        with os.fdopen(handle, "w") as claim:
+            claim.write(str(os.getpid()))
+        yield piece
 
 
 def _local_adapter(checkpoint: str, client: Any, model: Any, *, prepare: bool) -> str:
@@ -1500,7 +1576,7 @@ def parallel_vllm_scorer(
     from evaluation.validation_generation import read_rows
     from evaluation.validation_sample import validation_sample
 
-    rows = read_rows(client.read_text(val_path))
+    rows = read_rows(corpus_text(client, val_path))
     if sample_rows:
         rows_in_modes(rows, full_modes)        # refused here, before any worker starts
     if images_root is not None:

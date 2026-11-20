@@ -11,7 +11,8 @@ each ``--checkpoint`` in turn, and writes ``{checkpoint: {"metrics": ...}}`` (or
         [--full [--full-mode ocr_plus_image ...]] [--repeat [--repeat-mode image_only ...]] \\
         [--save-dir <dir>]
 
-With ``--shard K --shards N`` it scores nothing: it generates shard K of N of
+With ``--shard K --shards N`` (or ``--queue <dir> --shards N``: the next free piece of N, again and again, from a
+queue the workers share) it scores nothing: it generates shard K of N of
 each checkpoint's calls and writes the answers beside ``--out``
 (:func:`evaluation.checkpoint_eval.generate_shard`), for the parent to put the
 pass back together and score (``generate_sharded``). ``--only-keys`` narrows
@@ -44,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="save each finalist's answers and error tallies here")
     parser.add_argument("--shard", type=int, default=None, help="generate this shard of each pass's calls")
     parser.add_argument("--shards", type=int, default=None, help="...of this many")
+    parser.add_argument("--queue", type=Path, default=None,
+                        help="with --shards: take pieces from this shared queue folder, not one fixed --shard")
     parser.add_argument("--only-keys", type=Path, default=None,
                         help="a JSON list of the readings to generate (with --shard)")
     parser.add_argument("--prepare-adapter", action="store_true",
@@ -64,15 +67,15 @@ def main(argv: list[str] | None = None) -> int:
     from evaluation import checkpoint_eval
 
     if args.shards is not None:
-        if args.shard is None:
-            parser.error("--shards needs --shard")
+        if args.shard is None and args.queue is None:
+            parser.error("--shards needs --shard or --queue")
         only_keys = json.loads(args.only_keys.read_text(encoding="utf-8")) if args.only_keys else None
         checkpoint_eval.generate_shard(
             client=BlobClient(), val_path=args.val_path, images_root=args.images_root,
             sample_rows=args.sample_rows, full=args.full, full_modes=args.full_modes,
             checkpoints=args.checkpoint, shard=args.shard, shards=args.shards, out=args.out,
             repeat=args.repeat, repeat_modes=args.repeat_modes, only_keys=only_keys,
-            prepare_adapters=args.prepare_adapter)
+            prepare_adapters=args.prepare_adapter, queue=args.queue)
         return 0
 
     extras = {}
