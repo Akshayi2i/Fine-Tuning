@@ -348,3 +348,45 @@ def test_a_line_override_relabels_a_carriers_documents(tmp_path):
     overrides.write_text("source_prefix,lob,reason\nAcme/,pet_insurance,x\n", encoding="utf-8")
     with pytest.raises(BundleError, match="canonical schema"):
         read_lob_overrides(overrides)
+
+
+# --------------------------------------------------------------------------
+# One insured, one split (2026-11-19: cycle 2's U.S. Underwriters leak)
+# --------------------------------------------------------------------------
+
+def _insured_docs(rows):
+    """``(source_id, split, insured, policy number, synthetic, template)`` -> loaded documents."""
+    from types import SimpleNamespace
+
+    docs = []
+    for source_id, split, insured, number, synthetic, template in rows:
+        gold = {"named_insured": {"primary_name": {"raw": insured}},
+                "policy": {"policy_number": {"raw": number}}}
+        docs.append(SimpleNamespace(source_id=source_id, golden_label=gold, synthetic=synthetic, lob="boppr",
+                                    delivered_split=split, template_id=template, family=f"delivered:{template}"))
+    return docs
+
+
+LEAK = [("uw", "test", "Adirondack Inn LLC", "NBP3550236F", False, "uw"),
+        ("uw_2", "test", "Adirondack Inn", "NBP3550236G", False, "uw_2"),
+        ("uw_1", "train", "Old Forge Motel", "NBP3550236G", False, "uw_1"),
+        ("uw_1_twin", "train", "Someone Else Inc", "XX0000001", True, "uw_1"),
+        ("other", "train", "Granite Bakery", "GB1234567", False, "other")]
+
+
+def test_a_delivered_split_with_one_insured_on_both_sides_is_refused_and_named():
+    from orchestration.pipeline_dag import PipelineError, assert_no_insured_across_splits
+
+    with pytest.raises(PipelineError, match=r"test: \['uw', 'uw_2'\], train: \['uw_1'\]"):
+        assert_no_insured_across_splits(_insured_docs(LEAK))
+    assert_no_insured_across_splits(_insured_docs([row for row in LEAK if row[0] != "uw_1"]))
+
+
+def test_a_frozen_test_policy_takes_its_insureds_training_policies_and_their_copies_out(monkeypatch):
+    import evaluation.run_eval
+    from orchestration.pipeline_dag import exclude_eval_families
+
+    monkeypatch.setattr(evaluation.run_eval, "eval_set_source_ids", lambda client, tenant: {"uw", "uw_2"})
+    kept, excluded = exclude_eval_families(None, _insured_docs(LEAK))
+    assert [d.source_id for d in kept] == ["other"]
+    assert excluded == ["uw", "uw_1", "uw_1_twin", "uw_2"]

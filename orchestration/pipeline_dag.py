@@ -859,6 +859,41 @@ def use_delivered_families(documents: list[Any]) -> bool:
     return True
 
 
+def insured_families(documents: list[Any]) -> dict[str, str]:
+    """``{source_id: insured family}`` over the real documents: those printing the same insured name, policy number
+    or mailing address are one insured's, across lines (``prepare_bundles._insured_families``, the join cycle 1's
+    drawn split used). A delivered split is drawn by source document, which that join does not see: cycle 2's put
+    U.S. Underwriters' BOP property policies on both sides, a test policy and a training one sharing policy number
+    NBP3550236G (2026-11-18). Copies are left out: they print other values, and follow their source document."""
+    from data_pipeline.ingestion.prepare_bundles import _insured_families
+
+    real = {d.source_id: d.golden_label for d in documents
+            if not getattr(d, "synthetic", False) and isinstance(getattr(d, "golden_label", None), dict)}
+    return _insured_families(real, {d.source_id: str(getattr(d, "lob", None)) for d in documents
+                                    if d.source_id in real})
+
+
+def assert_no_insured_across_splits(documents: list[Any]) -> None:
+    """Refuse a delivered split that puts one insured's real documents in two splits: a model scored on one after
+    training on the other is scored on a document it has as good as seen. Moving a document between splits is the
+    owner's call (it changes what the gate measures), so this names them and stops; it never moves one."""
+    family = insured_families(documents)
+    splits: dict[str, dict[str, list[str]]] = {}
+    for document in documents:
+        if document.source_id in family:
+            splits.setdefault(family[document.source_id], {}).setdefault(
+                str(document.delivered_split).lower(), []).append(document.source_id)
+    crossing = {name: by_split for name, by_split in splits.items() if len(by_split) > 1}
+    if crossing:
+        listed = "; ".join(", ".join(f"{split}: {sorted(ids)}" for split, ids in sorted(by_split.items()))
+                           for by_split in crossing.values())
+        raise PipelineError(
+            f"the delivered split puts {len(crossing)} insured(s) in more than one split ({listed}). Documents "
+            "printing the same insured name, policy number or mailing address must share a split: deliver them "
+            "in one, with their copies."
+        )
+
+
 def delivered_split_of(documents: list[Any]) -> dict[str, str]:
     """``family -> split`` for a delivered split, refusing a family in two splits."""
     split_of: dict[str, str] = {}
@@ -1048,6 +1083,13 @@ def exclude_eval_families(
 
     frozen = eval_set_source_ids(client, tenant_id)
     families = {d.family for d in documents if d.source_id in frozen}
+    # And, with a delivered split, the same insured's other documents with their copies: its family is one source
+    # document, so a training policy sharing a test policy's number stayed in training (cycle 2, 2026-11-18). A split
+    # drawn here groups its own families (prepare_bundles joins one insured's documents before drawing).
+    if documents and all(getattr(d, "delivered_split", None) for d in documents):
+        insured = insured_families(documents)
+        seen = {insured[sid] for sid in frozen if sid in insured}
+        families |= {d.family for d in documents if insured.get(d.source_id) in seen}
     kept = [d for d in documents if d.source_id not in frozen and d.family not in families]
     excluded = sorted(d.source_id for d in documents if d not in kept)
     return kept, excluded
@@ -1154,6 +1196,7 @@ def plan_corpus(ctx: StageContext) -> CorpusPlan:
     if delivered:
         from data_pipeline.dataset_builder.split_groups import SplitError, assign_delivered_splits
 
+        assert_no_insured_across_splits(documents)
         try:
             assignment = assign_delivered_splits(
                 by_type, delivered_split_of(documents), seed=ctx.seed, with_test=not frozen,
