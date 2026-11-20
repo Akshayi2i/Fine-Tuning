@@ -78,6 +78,11 @@ BORROWED_TEXT = "borrowed"
 #: text to borrow: what was looked up there is unchecked, never clean.
 UNREAD_PAGES = "printed_text_unread_pages"
 
+#: Where such a reading's metadata keeps the answer as the model's merged windows gave it, before the printed-values
+#: check took anything out (2026-11-19): stored with the answers (evaluation.rescore), so a later printed-values or
+#: grounding change can be measured on a release's own readings without running the model again.
+ANSWER_BEFORE_CHECK = "answer_before_printed_check"
+
 #: Gate metrics pooled over the whole set by their per-document weights - the
 #: values checked, the fields compared - rather than each doc type's rate
 #: weighted by its readings: hallucination_rate is every value no page prints

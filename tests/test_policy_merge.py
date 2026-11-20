@@ -239,3 +239,98 @@ def test_merging_leaves_each_window_answer_as_the_model_wrote_it():
     assert [first.extraction, second.extraction] == before
     assert once.extraction == again.extraction
     assert once.extraction["policy"]["policy_number"]["page_ref"] == [140, 142]
+
+
+def test_one_form_spaced_two_ways_by_its_schedule_and_its_own_page_is_one_row():
+    """v4's gate, Western World (2026-11-19): the schedule prints "IL0017 11_98", the form's page "IL 00 17 11 98"."""
+    merged, rows = _forms([_form("IL0017", "11_98", 7, title="COMMON POLICY CONDITIONS")],
+                          [_form("IL 00 17", "11 98", 10)])
+    (row,) = rows
+    assert row["title"]["raw"] == "COMMON POLICY CONDITIONS"
+    assert merged.duplicates_collapsed == 1
+
+
+def test_spacing_never_joins_two_different_forms_or_editions():
+    _, numbers = _forms([_form("CG2139", "10/93", 7)], [_form("CG 21 38", "10/93", 54)])
+    _, editions = _forms([_form("CG2147", "12/07", 7)], [_form("CG 21 47", "12/04", 55)])
+    assert len(numbers) == len(editions) == 2
+
+
+def test_a_wc_form_number_the_model_cut_in_two_is_joined_and_meets_its_own_page():
+    """v4's gate, Merchants WC (2026-11-20): the schedule's "WC 00 04 14 A" came back as "WC 00 04" + edition "14 A"."""
+    merged, rows = _forms([_form("WC 00 04", "14 A", 3), _form("MU 85 66", "10 08", 3)],
+                          [_form("WC 00 04 14 A", None, 12, title="90-DAY REPORTING REQUIREMENT")])
+    by_number = {row["form_number"]["raw"]: row for row in rows}
+    assert set(by_number) == {"WC 00 04 14 A", "MU 85 66"}
+    assert by_number["WC 00 04 14 A"]["title"]["raw"] == "90-DAY REPORTING REQUIREMENT"
+    assert by_number["MU 85 66"]["edition_date"]["raw"] == "10 08"       # an edition that is one stays
+
+
+def test_only_a_cut_wc_number_is_joined():
+    _, rows = _forms([_form("WC 00 04", "04/84", 3), _form("CG 20 10", "04 13", 3), _form("WC 00 04", "04 04", 3)])
+    assert sorted((row["form_number"]["raw"], row["edition_date"]["raw"]) for row in rows) == [
+        ("CG 20 10", "04 13"), ("WC 00 04", "04 04"), ("WC 00 04", "04/84")]
+
+
+def _limit(kind, amount=None, words=None, page=3):
+    row = {"limit_type": kind}
+    if amount is not None:
+        row["amount"] = _fv(str(amount), page, amount)
+    if words is not None:
+        row["description"] = _fv(words, page)
+    return row
+
+
+def test_a_limits_table_read_in_two_halves_is_joined_row_by_row():
+    """v4's gate, Merchants WC: amounts from one window, wording from another - six half-rows."""
+    coverage = {"coverage_code": "WC_EMPLOYERS_LIABILITY", "coverage_name": _fv("Employers Liability", 3), "limits": [
+        _limit("per_accident", 100000), _limit("policy_limit", 500000), _limit("each_employee", 100000),
+        _limit("per_accident", words="Bodily Injury by Accident"),
+        _limit("policy_limit", words="Bodily Injury by Disease"),
+        _limit("each_employee", words="Bodily Injury by Disease")]}
+    merged = merge_policy_windows([PolicyWindow("decl", [3], {"coverages": [coverage]})], "wc")
+    (row,) = merged.extraction["coverages"]
+    assert [(lim["amount"]["parsed"], lim["description"]["raw"]) for lim in row["limits"]] == [
+        (100000, "Bodily Injury by Accident"), (500000, "Bodily Injury by Disease"), (100000, "Bodily Injury by Disease")]
+
+
+def test_limits_halves_that_do_not_line_up_are_left_alone():
+    from serving.policy_merge import join_split_limits
+
+    extraction = {"coverages": [{"limits": [_limit("per_occurrence", 50000), _limit("other", words="12 months"),
+                                            _limit("other", words="None")]}]}
+    assert join_split_limits(extraction) == 0
+    assert len(extraction["coverages"][0]["limits"]) == 3
+
+
+def _rating(code, words, premium, page, **more):
+    row = {"class_code": _fv(code, page), "class_description": _fv(words, page),
+           "premium": _fv(f"${premium}", page, float(premium))}
+    row.update({name: _fv(value, page) for name, value in more.items()})
+    return row
+
+
+def test_a_classification_read_twice_with_its_exposure_split_two_ways_is_one_row():
+    """v4's gate, U.S. Underwriters: the schedule on page 2 and again on page 15, "6 Per Additional Insured" read as
+    basis "6 Per Additional" in one and as amount 6 + basis "Per Additional" in the other - every class twice."""
+    first = [_rating("49950", "Additional Insured - Designated Person", 300, 2, exposure_basis="6 Per Additional"),
+             _rating("41670", "Membership Organization (Business)", 415, 2, rate="4.151")]
+    again = [_rating("49950", "Additional Insured - Designated Person", 300, 15, exposure_basis="Per Additional",
+                     exposure_amount="6"),
+             _rating("41670", "Membership Organization (Business)", 415, 15)]
+    merged = merge_policy_windows([PolicyWindow("decl", [2], {"rating_exposures": first}),
+                                   PolicyWindow("decl", [15], {"rating_exposures": again})], "gl")
+    rows = merged.extraction["rating_exposures"]
+    assert [(r["class_code"]["raw"], r["exposure_basis"]["raw"] if r.get("exposure_basis") else None) for r in rows] \
+        == [("49950", "6 Per Additional"), ("41670", None)]
+    assert rows[1]["rate"]["raw"] == "4.151"
+
+
+def test_two_classes_under_one_code_or_premium_stay_two_rows():
+    from serving.policy_merge import join_repeated_rating_rows
+
+    extraction = {"rating_exposures": [_rating("49950", "Additional Insured - Designated Person", 300, 2),
+                                       _rating("49950", "Primary and Non-Contributory wording", 300, 2),
+                                       _rating("49950", "Additional Insured - Designated Person", 350, 2)]}
+    assert join_repeated_rating_rows(extraction) == 0
+    assert len(extraction["rating_exposures"]) == 3

@@ -356,6 +356,103 @@ def _dedupe(
 #: The forms table: its rows are joined on the form, not on its key as written.
 FORMS_SECTION = "forms_and_endorsements"
 
+#: A workers' compensation form number (NCCI: "WC 00 04 14 A", "WC 31 03 08") cut after its third group, and the
+#: rest the model wrote as the edition. A WC form's edition is printed apart ("(Ed. 1-15)"), never as its last group.
+_WC_CUT_NUMBER = re.compile(r"^WC \d\d \d\d$")
+_WC_CUT_REST = re.compile(r"^\d\d(?: ?[A-Z])?$")
+
+
+def rejoin_cut_wc_numbers(extraction: dict[str, Any]) -> int:
+    """A WC form number the model cut in two joined again, IN PLACE; how many.
+
+    On a forms schedule that mixes forms whose last two groups ARE the edition ("MU 85 66 10 08") with WC forms whose
+    last groups are part of the number, the model cut "WC 00 04 14 A" into "WC 00 04" and an edition "14 A" (v4's
+    gate, Merchants WC, 2026-11-20: 9 rows, each paired with nothing). The number takes the rest back and the edition
+    goes; the same form's own page, read whole, then joins it in the merge.
+    """
+    joined = 0
+    for row in extraction.get(FORMS_SECTION) or []:
+        if not isinstance(row, dict):
+            continue
+        number, edition = row.get("form_number"), row.get("edition_date")
+        if not (is_field_value(number) and is_field_value(edition)):
+            continue
+        head, rest = str(number.get("raw") or "").strip(), str(edition.get("raw") or "").strip()
+        if _WC_CUT_NUMBER.match(head) and _WC_CUT_REST.match(rest):
+            number["raw"] = f"{head} {rest}"
+            if isinstance(number.get("parsed"), str):
+                number["parsed"] = number["raw"]
+            row["edition_date"] = None
+            joined += 1
+    return joined
+
+
+def _plain_key(value: Any) -> str:
+    return re.sub(r"[^0-9a-z]", "", str(values_view(value) or "").casefold())
+
+
+def join_repeated_rating_rows(extraction: dict[str, Any]) -> int:
+    """A classification read twice kept once, IN PLACE; how many rows went.
+
+    A schedule printed twice (the declarations and an extension), or read by two windows, comes back as two rows with
+    the same class code, description, premium, location and rating column - but the exposure split another way in one
+    of them ("6 Per Additional Insured" as basis "6 Per Additional" and amount "Insured"), so the merge's rule that
+    rows stating different values are different rows kept both (v4's gate, U.S. Underwriters: every class twice). The
+    first row stays, as the declarations-led window's value wins; it takes only fields it leaves empty.
+    """
+    rows = extraction.get("rating_exposures")
+    if not isinstance(rows, list):
+        return 0
+    kept: dict[tuple[str, ...], dict[str, Any]] = {}
+    out: list[Any] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            out.append(row)
+            continue
+        key = tuple(_plain_key(row.get(name)) for name in
+                    ("class_code", "class_description", "premium", "location_ref", "rating_component"))
+        if not (key[0] and key[2]) or key not in kept:
+            if key[0] and key[2]:
+                kept[key] = row
+            out.append(row)
+            continue
+        first = kept[key]
+        for name, value in row.items():
+            if values_view(first.get(name)) in (None, "", []) and values_view(value) not in (None, "", []):
+                first[name] = value
+    gone = len(rows) - len(out)
+    extraction["rating_exposures"] = out
+    return gone
+
+
+def join_split_limits(extraction: dict[str, Any]) -> int:
+    """A coverage's limits table read in two halves joined, IN PLACE; how many rows.
+
+    Two windows read one limits table as its amounts (no wording) and its wording (no amounts): v4's gate, Merchants
+    WC's employers liability, "Bodily Injury by Accident / by Disease / by Disease" beside $100,000 / $500,000 /
+    $100,000 - six half-rows, the amounts unpaired. Joined only when the two halves hold the same limit types in the
+    same order, each wording row to the amount row in its place; anything else is left as it is.
+    """
+    joined = 0
+    for coverage in extraction.get("coverages") or []:
+        limits = coverage.get("limits") if isinstance(coverage, dict) else None
+        if not isinstance(limits, list):
+            continue
+        rows = [row for row in limits if isinstance(row, dict)]
+        amounts = [row for row in rows if values_view(row.get("amount")) is not None
+                   and values_view(row.get("description")) in (None, "")]
+        words = [row for row in rows if values_view(row.get("amount")) is None
+                 and values_view(row.get("description")) not in (None, "")]
+        if not amounts or len(amounts) != len(words):
+            continue
+        if [values_view(r.get("limit_type")) for r in amounts] != [values_view(r.get("limit_type")) for r in words]:
+            continue
+        for amount, word in zip(amounts, words, strict=True):
+            amount["description"] = word["description"]
+        coverage["limits"] = [row for row in limits if not any(row is word for word in words)]
+        joined += len(words)
+    return joined
+
 
 def _form_identity(row: Any) -> tuple[str, str | None, str | None] | None:
     """A form row's identity for the merge: ``(number, MM/YY, YY)``.
@@ -375,7 +472,9 @@ def _form_identity(row: Any) -> tuple[str, str | None, str | None] | None:
         return None
     split = split_form_edition(number)
     base, from_number = (split[0], split[2]) if split else (number, None)
-    base = normalize_text(base) or ""
+    # Its letters and digits alone: the forms schedule prints "IL0017" and the form's own page "IL 00 17" - one form,
+    # which stayed two rows (v4's gate, Western World: IL0017/IL 00 17, CG2139/CG 21 39, 2026-11-19).
+    base = re.sub(r"[^0-9a-z]", "", normalize_text(base) or "")
     if not base:
         return None
     edition = values_view(row.get("edition_date"))
@@ -509,6 +608,8 @@ def merge_policy_windows(
     # joined, ids namespaced), and scoring merges the same answers twice and saves them after (2026-11-11: a run's
     # saved answers were the merged-into ones, and its window score could not be re-made from them).
     windows = [dataclasses.replace(window, extraction=copy.deepcopy(window.extraction)) for window in windows]
+    for window in windows:
+        rejoin_cut_wc_numbers(window.extraction)
 
     # No line is the fallback, which composes the common model too.
     if is_common_model("policy", None, lob):
@@ -536,6 +637,8 @@ def merge_policy_windows(
     # table has, and so whether a fragment has exactly one row it can belong to.
     for key, value in report.extraction.items():
         report.extraction[key] = _attach_unidentified(value, key, report, top=True)
+    join_split_limits(report.extraction)
+    report.duplicates_collapsed += join_repeated_rating_rows(report.extraction)
 
     _collect_spans(report.extraction, "", by_id, report.spans)
     # Counted once, on the result: arrays are re-deduplicated as each window
@@ -752,6 +855,8 @@ def _merge_common_model(windows: list[PolicyWindow], lob: str | list[str]) -> Me
     _merged, numbered = renumber_structural_ids(
         report.extraction, lob, assign=("coverage_id",), in_place=True)
     report.dangling_references.extend(numbered.dangling)
+    join_split_limits(report.extraction)
+    report.duplicates_collapsed += join_repeated_rating_rows(report.extraction)
 
     _collect_spans(report.extraction, "", by_id, report.spans)
     from common.schema_sections import array_key

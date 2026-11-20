@@ -153,3 +153,31 @@ def test_the_strict_matcher_agrees_with_the_exact_one_where_the_text_is_clean():
     for raw in ("HO-1234567", "01/01/2026", "$1,250.00", "1250"):
         assert grounding.ground(raw, [1], {1: clean}).printed
         assert ground_tolerant(raw, [1], {1: clean}).printed
+
+
+# --- v4 gate, 2026-11-19: correct values the printed check removed ------------------------------------------------
+
+def test_a_rate_printed_without_its_leading_zero_is_printed():
+    page = {4: "EXPERIENCE MODIFICATION | 9898 |  | .9400 | 46- |\nSTATE ASSESSMENT | 0932 | 742 | .0710 | 53"}
+    for rate in (".9400", ".0710", "0.94"):
+        assert grounding.ground_tolerant(rate, [4], page).printed, rate
+    assert grounding.ground(".9400", [4], page).printed
+
+
+def test_a_leading_point_figure_is_not_the_end_of_another_number():
+    assert not grounding.ground_tolerant("1.9400", [1], {1: "rate .9400 here"}).printed
+    assert not grounding.ground_tolerant("9400", [1], {1: "rate .9400 here"}).printed
+    assert not grounding.ground_tolerant(".9400", [1], {1: "rate 1.9400 here"}).printed
+
+
+def test_a_phrase_the_page_text_runs_together_is_printed():
+    page = {2: "| --- | | PremiumSurplus Lines TaxStamping Fee | $6,894.06$248.19$10.34 |"}
+    assert grounding.ground_tolerant("Surplus Lines Tax", [2], page).printed
+    assert grounding.ground_tolerant("Stamping Fee", [2], page).printed
+
+
+def test_a_short_or_coded_phrase_is_never_found_inside_run_together_words():
+    page = {1: "Premiumsurplustaxstampingfee CG2010 | Additionalinsured"}
+    assert not grounding.ground_tolerant("Tax Stamp", [1], page).printed          # 8 letters
+    assert not grounding.ground_tolerant("CG 20 10 Endorsement X", [1], page).printed
+    assert not grounding.ground_tolerant("Flood Coverage Limit", [1], page).printed

@@ -455,7 +455,14 @@ def _read(context: _ReadContext, doc: GoldenDocument, mode: str, *, repeat: bool
     """One document read in one mode through serving, as :func:`evaluate` scores it."""
     from calibration.fit_calibration import CalibrationParams
     from data_pipeline.dataset_builder.noisy_ocr_augment import corrupt_ocr_pages
-    from evaluation.run_eval import BORROWED_TEXT, IMAGE_ONLY_MODE, PRINTED_CHECK, PRINTED_TEXT, UNREAD_PAGES
+    from evaluation.run_eval import (
+        ANSWER_BEFORE_CHECK,
+        BORROWED_TEXT,
+        IMAGE_ONLY_MODE,
+        PRINTED_CHECK,
+        PRINTED_TEXT,
+        UNREAD_PAGES,
+    )
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import ExtractionRequest, extract
 
@@ -532,6 +539,7 @@ def _read(context: _ReadContext, doc: GoldenDocument, mode: str, *, repeat: bool
             # confidence computed again on the text, as production does once
             # the text arrives (calibration.post_text).
             _recalibrate(held, doc.page_texts, context)
+            metadata[ANSWER_BEFORE_CHECK] = copy.deepcopy(result.extraction)
             result = held
             metadata.update({PRINTED_CHECK: held.printed_check, PRINTED_TEXT: BORROWED_TEXT,
                              UNREAD_PAGES: unread})

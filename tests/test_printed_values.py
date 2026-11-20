@@ -561,3 +561,31 @@ def test_told_the_line_its_schema_decides_how_a_value_is_taken_out():
     assert _nullable({}, "equipment_breakdown") is False
     assert _nullable({}, "homeowners") is True
     assert _nullable({}, None) is True                   # no line: the fallback, on the common model
+
+
+def test_a_form_row_left_with_neither_its_number_nor_its_title_goes():
+    """v4's gate, Western World (2026-11-19): a form number read wrong was taken out and its row kept only the
+    edition date - a row no reader can find, counted wrong in every field. Labelling rule R9."""
+    pages = {7: "SCHEDULE OF FORMS\nIL0017 11/98 COMMON POLICY CONDITIONS\nWW1 06/12 DEDUCTIBLE ENDORSEMENT"}
+    answer = {"forms_and_endorsements": [
+        {"form_number": _fv("NNTC FR01", 7), "edition_date": _fv("11/98", 7)},
+        {"form_number": _fv("WWI-9", 7), "edition_date": _fv("06/12", 7), "title": _fv("DEDUCTIBLE ENDORSEMENT", 7)},
+        {"form_number": _fv("IL0017", 7), "edition_date": _fv("11/98", 7)},
+        {"edition_date": _fv("06/12", 7), "title": _fv("DEDUCTIBLE ENDORSEMENT", 7)},
+    ]}
+    held = hold_to_printed(answer, {}, pages)
+    rows = held.extraction["forms_and_endorsements"]
+    # The first goes (its number printed nowhere, no title); the second keeps its printed title; a row the model
+    # wrote with a title and no number is not touched.
+    assert [values_view(row.get("form_number")) for row in rows] == [None, "IL0017", None]
+    assert values_view(rows[0]["title"]) == "DEDUCTIBLE ENDORSEMENT"
+    assert "forms_and_endorsements[#0].form_number:not_printed_removed" in held.flags
+
+
+def test_flag_mode_keeps_an_unnamed_form_row():
+    pages = {7: "SCHEDULE OF FORMS\nIL0017 11/98"}
+    answer = {"forms_and_endorsements": [{"form_number": _fv("NNTC FR01", 7), "edition_date": _fv("11/98", 7)}]}
+    checked = printed_values._check(answer, printed_values._prepared(pages), printed_values.FLAG)
+    assert not checked.edits
+    strict = printed_values._check(answer, printed_values._prepared(pages), printed_values.STRICT)
+    assert strict.edits.dropped == {"forms_and_endorsements": [0]}

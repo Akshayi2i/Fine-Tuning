@@ -24,7 +24,8 @@ Where it is looked for, and what each outcome does:
 3. **printed nowhere** - on no page with text, and every page it cites has text
    (or it cites none) - in ``strict`` mode, the default, taken out of the JSON:
    its key stays, null; an extra field leaves its list; a table row goes once no
-   value in it is still printed and the rows after it move up. Each is flagged
+   value in it is still printed - a forms row once neither its form number nor
+   its title is left - and the rows after it move up. Each is flagged
    ``not_printed_removed``. In ``flag`` mode it is kept and flagged
    ``not_printed``. The mode is ``printed_values.mode`` in
    ``configs/inference/vllm_serving.yaml``;
@@ -391,6 +392,27 @@ def _printed_strings(extraction: Any) -> Iterable[tuple[str, str, list[int]]]:
     yield from walk(extraction, "")
 
 
+#: The values that name a form (labelling rule R9, 2026-11-19): a form row keeps at least one of them.
+_FORM_NAMES = ("form_number", "title")
+
+
+def _forms_left_unnamed(extraction: Mapping[str, Any], out: set[str], rows: Mapping[str, list[int]]) -> set[str]:
+    """The forms rows strict mode would leave naming no form: a value of theirs taken out, and neither a form number
+    nor a title left. Such a row - an edition date alone - is no form a reader can find (v4's gate, 2026-11-19: four on
+    Western World, each counted wrong in every field); it goes as a row with nothing printed goes."""
+    from common.canonical import values_view
+
+    unnamed: set[str] = set()
+    for index, row in enumerate(extraction.get("forms_and_endorsements") or []):
+        path = f"forms_and_endorsements[{index}]"
+        if not isinstance(row, dict) or not rows.get(path, [0])[0]:
+            continue
+        if not any(values_view(row.get(name)) not in (None, "") and f"{path}.{name}" not in out
+                   for name in _FORM_NAMES):
+            unnamed.add(path)
+    return unnamed
+
+
 def _check(extraction: Mapping[str, Any], pages: Mapping[int, Any], mode: str) -> _Checked:
     """Every printed value of ``extraction`` looked up on ``pages``, and what
     ``mode`` makes of those no page prints.
@@ -477,6 +499,7 @@ def _check(extraction: Mapping[str, Any], pages: Mapping[int, Any], mode: str) -
         # A row goes once no value in it is still printed: one with a value
         # found, or one the text could not settle, stays with what it has.
         taken = {row for row, (out, kept) in rows.items() if out and not kept}
+        taken |= _forms_left_unnamed(extraction, {*unprinted, *mismatched}, rows)
         for row in taken:
             if not any(up in taken for up in _rows_of(row)):
                 head, at = _list_and_position(row)

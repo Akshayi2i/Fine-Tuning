@@ -444,3 +444,21 @@ def test_the_repeat_goes_to_the_pass_the_finalists_are_judged_on(monkeypatch, tm
     monkeypatch.setattr(C, "vllm_scorer", lambda **kw: asked.append(kw) or "S")
     pipeline_dag._checkpoint_scorer(SimpleNamespace(client=object(), corpus="v1", tenant_id="t", out_version="v1"))
     assert asked[0]["repeat"] is True
+
+
+def test_an_image_only_reading_keeps_its_answer_before_the_check_for_a_later_rescore(monkeypatch):
+    """2026-11-19: what the check took out is kept beside what was scored, so a later printed-values or grounding
+    change is measured on the release's own readings without the model."""
+    from evaluation import golden_eval
+    from evaluation.run_eval import ANSWER_BEFORE_CHECK
+
+    calls: list[tuple[str, str, str]] = []
+    _fake_extract(monkeypatch, calls)
+    triples = golden_eval.evaluate(_golden_docs(), object(), object(), "/tmp", run_to_run=False)
+    for _gold, got, meta in triples:
+        if meta["modality_mode"] != "image_only":
+            assert ANSWER_BEFORE_CHECK not in meta
+            continue
+        before = meta[ANSWER_BEFORE_CHECK]
+        assert before["policy"]["effective_date"]["parsed"] == "01/01/2026"
+        assert before is not got

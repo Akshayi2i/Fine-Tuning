@@ -57,11 +57,13 @@ def normalise(text: Any) -> str:
 #: A figure as a page prints it, whole: its digits with their separators, and a
 #: "$" before them. Never a piece of a longer figure ("500" of "1,500.00") or of
 #: a word or code glued to it ("000001" of "KA000001").
-_FIGURE = re.compile(r"(?:\$\s?|(?<![0-9A-Za-z.,$]))\d(?:[\d,.]*\d)?(?![0-9A-Za-z]|[.,]\d)")
+#: A rate printed with no 0 before its point (".9400", "$.50") is a figure too: read without it, Merchants' WC rating
+#: schedule's ".9400", ".0710" and ".0400" were "printed nowhere" and removed though read right (v4 gate, 2026-11-19).
+_FIGURE = re.compile(r"(?:\$\s?|(?<![0-9A-Za-z.,$]))(?:\d(?:[\d,.]*\d)?|\.\d+)(?![0-9A-Za-z]|[.,]\d)")
 #: Only figure characters: an amount or a count, not a code that holds digits.
 _AMOUNT = re.compile(r"[\s$()+\-.,%]*\d[\d,]*(?:\.\d+)?[\s$()%]*")
 #: What makes a figure an amount: a "$", a thousands separator, or cents.
-_MARKED = re.compile(r"\$|\d[.,]\d")
+_MARKED = re.compile(r"\$|\d[.,]\d|(?<!\d)\.\d")
 #: A run of digits led by a 0 ("07001", "0042"): a code, read as words - "0042"
 #: is not the 42 of "Page 42".
 _LEADING_ZERO = re.compile(r"\s*0\d+\s*")
@@ -381,6 +383,8 @@ class TolerantPage:
             self.amounts |= _readings(body)
             if not figure.startswith("$") and body.startswith("5") and body[1:2].isdigit():
                 self.amounts |= _readings(body[1:])
+        #: The page's letters and digits with every space and mark gone, for a phrase its text runs together.
+        self.run_together = "".join(self.exact.padded.split())
         self._near: dict[str, set[str]] | None = None
         self._at: dict[str, list[int]] | None = None
         self._joined: set[str] | None = None
@@ -442,6 +446,9 @@ class TolerantPage:
         return bool(self.exact.words)
 
 
+#: A phrase is looked for with the page's spaces gone (:func:`_tolerantly_on`) only with this many letters or more.
+MIN_RUN_TOGETHER_LETTERS = 10
+
 #: A code split by spaces is looked for over at most this many words ("CG 20 10 04 13" is five).
 MAX_CODE_PIECES = 5
 #: A code read with or without its spaces: this long once its spaces are gone, holding a letter and a digit.
@@ -481,6 +488,12 @@ def _tolerantly_on(raw: Any, page: TolerantPage) -> bool:
         code = _fold("".join(plain))
         if code in page.words or len(plain) == 1 and page.joins(code):
             return True
+    # A phrase whose words the page's text runs together ("PremiumSurplus Lines TaxStamping Fee", a table's cells
+    # read as one line): its letters one after another. Only a phrase of two words or more and
+    # :data:`MIN_RUN_TOGETHER_LETTERS` letters, all letters, so a short or coded value is never found inside a word.
+    letters = "".join(words)
+    if len(words) > 1 and letters.isalpha() and len(letters) >= MIN_RUN_TOGETHER_LETTERS and letters in page.run_together:
+        return True
     if len(tokens) == 1:
         return page.in_order(tokens[0])
     # A phrase broken across lines or columns: each token found apart - but
