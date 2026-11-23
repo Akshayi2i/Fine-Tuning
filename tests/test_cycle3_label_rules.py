@@ -61,7 +61,7 @@ def test_a_class_code_written_as_the_description_is_emptied():
     gold = {"rating_exposures": [{"class_code": _env("768606"), "class_description": _env("768606")},
                                  {"class_code": _env("41650"), "class_description": _env("Restaurants")}]}
     notes = clear_code_descriptions(gold)
-    assert gold["rating_exposures"][0]["class_description"] is None
+    assert "class_description" not in gold["rating_exposures"][0]
     assert gold["rating_exposures"][1]["class_description"]["raw"] == "Restaurants"
     assert len(notes) == 1
 
@@ -69,7 +69,7 @@ def test_a_class_code_written_as_the_description_is_emptied():
 def test_a_premium_printed_as_a_word_is_emptied_and_an_amount_kept():
     gold = {"coverages": [{"premium": _env("Included")}, {"premium": _env("$1,250")}, {"premium": None}]}
     notes = clear_premiums_without_amount(gold)
-    assert gold["coverages"][0]["premium"] is None
+    assert "premium" not in gold["coverages"][0]
     assert gold["coverages"][1]["premium"]["raw"] == "$1,250"
     assert notes == [("premium without an amount", "coverages[0].premium 'Included' emptied")]
 

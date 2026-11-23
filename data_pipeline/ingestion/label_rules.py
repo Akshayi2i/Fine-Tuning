@@ -149,14 +149,29 @@ _NUMBER_WORDS = {
 }
 
 
-def page_texts(pdf: Path) -> dict[int, str]:
-    """Each page's text layer by page number; empty when the file has none or
-    cannot be read - then only the rules that need no text apply."""
-    if not pdf.is_file():
-        return {}
+class PdfReaderMissing(RuntimeError):
+    """The PDF library (PyMuPDF) cannot be loaded on this machine. Every PDF would read as having no text, and the
+    rules that need text would be skipped for every document without a word (a laptop whose application control
+    blocked the library's DLL, 2026-11-23) - so this stops the step instead."""
+
+
+def _pdf_library() -> Any:
     try:
         import pymupdf
+    except Exception as exc:  # noqa: BLE001 - ImportError, or a DLL the system refuses to load
+        raise PdfReaderMissing(f"the PDF library (PyMuPDF) cannot be loaded here ({type(exc).__name__}: {exc}); "
+                               "run this where it loads (the pod) or allow it on this machine") from exc
+    return pymupdf
 
+
+def page_texts(pdf: Path) -> dict[int, str]:
+    """Each page's text layer by page number; empty when the file has none or
+    cannot be read - then only the rules that need no text apply. Raises
+    :class:`PdfReaderMissing` when the PDF library itself cannot be loaded."""
+    if not pdf.is_file():
+        return {}
+    pymupdf = _pdf_library()
+    try:
         with pymupdf.open(pdf) as doc:
             return {number: page.get_text() for number, page in enumerate(doc, start=1)}
     except Exception:  # noqa: BLE001 - an unreadable PDF only means no text rules
@@ -168,9 +183,8 @@ def scanned_pages(pdf: Path) -> set[int]:
     characters drawn invisibly (PDF text render mode 3), under the image."""
     if not pdf.is_file():
         return set()
+    pymupdf = _pdf_library()
     try:
-        import pymupdf
-
         out = set()
         with pymupdf.open(pdf) as doc:
             for number, page in enumerate(doc, start=1):
@@ -1091,7 +1105,7 @@ def clear_code_descriptions(gold: dict[str, Any]) -> list[tuple[str, str]]:
             continue
         printed_code, printed_description = _printed(code), _printed(description)
         if printed_code and printed_description and _form_key(printed_code) == _form_key(printed_description):
-            row["class_description"] = None
+            del row["class_description"]            # removed, not null: the schema holds a field, never null
             notes.append(("class code as description",
                           f"rating_exposures[{index}].class_description {printed_description!r} emptied"))
     return notes
@@ -1103,7 +1117,7 @@ def clear_premiums_without_amount(gold: dict[str, Any]) -> list[tuple[str, str]]
     for index, row in enumerate(gold.get("coverages") or []):
         premium = row.get("premium") if isinstance(row, dict) else None
         if isinstance(premium, dict) and _printed(premium) is not None and not _has_digits(_printed(premium)):
-            row["premium"] = None
+            del row["premium"]                      # removed, not null: the schema holds a field, never null
             notes.append(("premium without an amount", f"coverages[{index}].premium {_printed(premium)!r} emptied"))
     return notes
 

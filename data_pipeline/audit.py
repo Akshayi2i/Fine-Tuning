@@ -36,7 +36,7 @@ hand, the only check that a value is *right* and not just present.
     python -m data_pipeline.audit --input "D:/data/personal" --lines homeowners,personal_auto
 
 The CSVs quote label values: they hold the documents' personal data. They are
-written to ``data/audit_report/`` (git-ignored) and must not leave the machine.
+written to ``data/audit_report/<the input folder's name>/`` (git-ignored) and must not leave the machine.
 """
 
 from __future__ import annotations
@@ -111,7 +111,8 @@ class ValueCheck:
     path: str
     raw: str
     page_ref: str
-    result: str            # ok | wrong_page | not_found | no_page_ref | needs_ocr | skipped_short
+    # ok | wrong_page | not_found | no_page_ref | needs_ocr | skipped_short | image_page | phrase_elsewhere
+    result: str
     found_on: str = ""
 
 
@@ -285,6 +286,28 @@ def _read_pdf(pdf: Path) -> tuple[list[str], str | None]:
         return [], f"PDF cannot be opened ({type(exc).__name__}: {exc})"
 
 
+#: The share of a page an image must cover for its missing text to be read as printed in the image.
+IMAGE_PAGE_SHARE = 0.3
+
+
+def _image_pages(pdf: Path) -> set[int]:
+    """The pages an image covers at least :data:`IMAGE_PAGE_SHARE` of: where a table printed as a picture sits under
+    a header in text. Empty when the PDF cannot be read (its blocker says so)."""
+    import pymupdf
+
+    out: set[int] = set()
+    try:
+        with pymupdf.open(pdf) as doc:
+            for number, page in enumerate(doc, start=1):
+                area = abs(page.rect) or 1.0
+                covered = sum(abs(pymupdf.Rect(info["bbox"]) & page.rect) for info in page.get_image_info())
+                if covered / area >= IMAGE_PAGE_SHARE:
+                    out.add(number)
+    except Exception:  # noqa: BLE001 - unreadable: no page is read as an image
+        return set()
+    return out
+
+
 def audit_document(folder: Path, report: AuditReport, checksums: dict[str, str]) -> DocumentAudit:
     from common.lob import known_lines, lob_lines, within_lines
     from data_pipeline.ingestion.import_labeled_pdfs import LabeledPdf, check_bundle
@@ -382,6 +405,22 @@ def audit_document(folder: Path, report: AuditReport, checksums: dict[str, str])
     # one is its blocker, not N "needs OCR" rows.
     pages = [_Page(text) for text in page_texts]
     tolerant: dict[int, Any] | None = None
+    image_backed: set[int] | None = None
+
+    def on_image_page(refs: list[int]) -> bool:
+        # A cited page whose text layer misses most of the figures the label cites on it (the preparation's label
+        # rules read it the same way: label_rules._reliable_pages) AND that a large image covers - a table printed
+        # as a picture, under a header in text - cannot say a value is not there, or elsewhere. Found 2026-11-23:
+        # 86% of the copies' "not found" values were on such pages, printed in the image. Both are asked: a text
+        # page citing one figure wrongly is also "unreliable", and is a wrong page_ref.
+        nonlocal image_backed
+        if image_backed is None:
+            from data_pipeline.ingestion.label_rules import _reliable_pages
+
+            reliable = _reliable_pages(label, {i + 1: grounding.PageText(text) for i, text in enumerate(page_texts)
+                                               if has_text[i]})
+            image_backed = _image_pages(pdfs[0]) - reliable
+        return bool(set(refs) & image_backed)
     for path, envelope in envelopes if audit.pages else ():
         raw = envelope.get("raw")
         if raw in (None, "") or isinstance(raw, (dict, list)):
@@ -411,6 +450,13 @@ def audit_document(folder: Path, report: AuditReport, checksums: dict[str, str])
             record.found_on = ",".join(map(str, on[:5]))
             if set(on) & set(refs):
                 record.result = "ok"
+            elif on_image_page(refs):
+                record.result = "image_page"
+            elif on and not any(ch.isdigit() for ch in raw):
+                # A name or a phrase its page's text does not hold, printed elsewhere: most often the policy
+                # wording mentioning a coverage the declarations list (its home) - a person's call, not a page_ref
+                # to move.
+                record.result = "phrase_elsewhere"
             elif on:
                 record.result = "wrong_page"
             else:
@@ -1095,6 +1141,10 @@ def render(report: AuditReport, facts: dict[str, Any]) -> str:
         f"- not in the document (check the value): {values.get('not_found', 0)}",
         f"- no page_ref: {values.get('no_page_ref', 0)}",
         f"- on scanned pages, to check after OCR: {values.get('needs_ocr', 0)}",
+        f"- on pages whose table is an image (text layer misses it), to check after OCR: "
+        f"{values.get('image_page', 0)}",
+        f"- a name or phrase its page's text lacks, printed elsewhere (often a mention; check by hand): "
+        f"{values.get('phrase_elsewhere', 0)}",
         f"- too short to check: {values.get('skipped_short', 0)}",
         "Every non-ok value is listed in value_checks.csv.",
         "",
@@ -1148,7 +1198,9 @@ def render(report: AuditReport, facts: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit a labeled-PDF training folder (read-only)")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--out", type=Path, default=None,
+                        help=f"where the report goes (default {DEFAULT_OUT}/<the input folder's name>: one audit "
+                             "never replaces another's report)")
     parser.add_argument("--lines", default=None,
                         help="comma-separated lines documents must be of; every line by default")
     parser.add_argument("--seed", type=int, default=42)
@@ -1171,6 +1223,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     report = audit_folder(args.input, lines=lines, seed=args.seed)
 
+    # Its own folder per audited folder: one default folder for all of them let the cycle 3 rehearsal's audit
+    # replace an earlier audit's CSVs (2026-11-23).
+    args.out = args.out or DEFAULT_OUT / args.input.resolve().name
     facts = write_report(report, args.out)
     print((args.out / "report.md").read_text(encoding="utf-8"))
     print(f"report and CSVs in {args.out}")

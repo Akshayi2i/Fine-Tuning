@@ -415,7 +415,7 @@ It reports blockers (one PDF + `golden.json` + `metadata.json` per folder, PDF r
 `--lines` when given), `page_ref` inside the PDF, a review record, no form edition left inside a form number on a common-model line),
 checks each labelled value against the text on its page, checks formats, label consistency and
 totals, and draws a 5% spot-check sample per line. Fix and re-run until it exits 0. The report and CSVs go to
-`data/audit_report/`, which is git-ignored: they quote label values.
+`data/audit_report/<the input folder's name>/` (or `--out`), which is git-ignored: they quote label values.
 
 **Each kind of value written one way** (decision 2026-10-24). The audit warns, and never blocks, when the
 labels write a field more than one way: a typed field (date, money, number, percent, boolean, enum) in more

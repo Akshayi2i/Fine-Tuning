@@ -96,6 +96,8 @@ QUICK = {
     "scripts/diag_last_chunk.py",
     # Reads one stored report and prints a table: seconds, no model, no GPU.
     "scripts/show_eval_errors.py",
+    # Reads a delivery's manifest and its real golds (no PDF) and prints the insureds in two splits: seconds.
+    "scripts/split_leaks.py",
     # Downloads one Blob file in pieces with a time limit per piece and resumes where it stopped; run by hand to watch it.
     "scripts/pull_blob_file.py",
     # Reads the .env text and names the lines bash would misread: milliseconds, run before a job starts.

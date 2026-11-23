@@ -23,6 +23,10 @@ from data_pipeline.dataset_builder.split_groups import (
 )
 from tests.test_dataset_builder import _documents
 
+#: A gold the schema accepts: since 2026-11-23 a manifest.csv delivery's golds are corrected and validated as the
+#: other deliveries' are, and one outside its line's schema is left out.
+EXAMPLE = Path("configs/canonical schema/common schema/examples/homeowners_minimal.json")
+
 # --------------------------------------------------------------------------
 # The assignment
 # --------------------------------------------------------------------------
@@ -188,7 +192,7 @@ def _delivery(tmp_path: Path) -> Path:
         name = f"{lob}__{Path(source).stem}__{tail}"
         pdf, gold = f"{split}/pdfs/{name}.pdf", f"{split}/gold json/{name}.json"
         if write:
-            for rel, body in ((pdf, b"%PDF-1.7"), (gold, b"{}")):
+            for rel, body in ((pdf, b"%PDF-1.7"), (gold, EXAMPLE.read_bytes())):
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_bytes(body)
         rows.append({"split": split, "lob": lob, "carrier": "Acme", "source": source, "sample": sample,
@@ -225,7 +229,7 @@ def test_prepare_bundles_writes_one_folder_per_document(tmp_path):
     meta = json.loads((folder / "metadata.json").read_text("utf-8"))
     assert meta == {"lob": "homeowners", "synthetic": True, "template_id": "Acme/homeowners/ho_1",
                     "split": "train", "carrier": "Acme", "source_system": "fideon_synth", "sample": 1,
-                    "render_mode": None,
+                    "render_mode": None, "unprinted_values": [],
                     # Its seed's own row records no review, so the twin has none.
                     "reviewer_id": None, "review_date": None, "draft_backend": None,
                     "review_inherited_from": None}
@@ -343,7 +347,10 @@ def test_a_line_override_relabels_a_carriers_documents(tmp_path):
     report = prepare_bundles(_delivery(tmp_path), out, lines=frozenset({"homeowners", "dwelling_fire"}),
                              mode="copy", lob_overrides=read_lob_overrides(overrides))
     assert report.relined == {"homeowners -> dwelling_fire": 2}
-    assert json.loads((out / "homeowners__ho_1__original/metadata.json").read_text("utf-8"))["lob"] == "dwelling_fire"
+    # Relined, a gold is corrected and validated as the new line's: the homeowners example is no dwelling fire gold,
+    # so both of ho_1's are left out, named - never bundled under a line whose schema they break.
+    assert not (out / "homeowners__ho_1__original").exists()
+    assert sum(n for reason, n in report.skipped.items() if "outside its line's schema" in reason) == 2
     assert json.loads((out / "homeowners__ho_2__synth_001/metadata.json").read_text("utf-8"))["lob"] == "homeowners"
     overrides.write_text("source_prefix,lob,reason\nAcme/,pet_insurance,x\n", encoding="utf-8")
     with pytest.raises(BundleError, match="canonical schema"):

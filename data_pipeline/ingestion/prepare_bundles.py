@@ -30,6 +30,20 @@ Rows outside the lines asked for (``--lines``; every line by default), rows the
 generator flagged (``ok`` false) and rows whose files are missing are skipped
 and counted.
 
+Each gold is corrected as the other deliveries' are (:func:`corrected_gold`: code
+re-coding, a premium written twice, the label rules and the cycle 3 rules, read
+against the document's own PDF text); a gold outside its line's schema after
+correction is left out, and every change is listed in ``<out>/corrections.csv``.
+The delivery's own golds are never changed: a corrected gold is written new.
+
+One insured's real documents share a split: documents printing the same insured
+name, policy number or mailing address (``_insured_families``) in two splits are
+refused before anything is written, naming them. The owner moves a source
+document, with its copies, to another split in ``--split-overrides`` (default
+``data/split_overrides.csv``: ``source,split,reason``, ``source`` being the
+manifest's, as its copies name it); ``python -m scripts.split_leaks`` lists the
+groups that cross and proposes the rows.
+
     python -m data_pipeline.ingestion.prepare_bundles --input "data/training data" --out data/bundles
 
 Files are hard-linked by default: instant, and no second copy of 16 GB on the
@@ -134,6 +148,8 @@ DEFAULT_EXCLUSIONS = Path("data") / "bundle_exclusions.csv"
 #: ``source_prefix,lob,reason``: a line the generator's folder got wrong, e.g. a
 #: carrier's classic-car policies filed under personal_auto.
 DEFAULT_LOB_OVERRIDES = Path("data") / "bundle_lob_overrides.csv"
+DEFAULT_SPLIT_OVERRIDES = Path("data") / "split_overrides.csv"
+SPLITS = ("train", "val", "test")
 REQUIRED_COLUMNS = ("split", "lob", "source", "kind", "pdf", "gold", "ok")
 
 #: A SPEC_21 delivery's manifest: one row per twin, both renders and the gold.
@@ -181,6 +197,7 @@ class PrepareReport:
     skipped: Counter = field(default_factory=Counter)          # reason -> rows
     skipped_lines: Counter = field(default_factory=Counter)    # lob -> rows outside --lines
     relined: Counter = field(default_factory=Counter)          # "old -> new" -> rows given another line
+    moved: Counter = field(default_factory=Counter)            # "old -> new" -> rows moved by split_overrides
     linked: int = 0
     copied: int = 0
     #: Folders an earlier run made for documents this run leaves out.
@@ -208,6 +225,8 @@ class PrepareReport:
             lines.append("  outside --lines: " + ", ".join(f"{k} {v}" for k, v in sorted(self.skipped_lines.items())))
         if self.relined:
             lines.append("  line overridden: " + ", ".join(f"{k} ({v})" for k, v in sorted(self.relined.items())))
+        if self.moved:
+            lines.append("  split overridden: " + ", ".join(f"{k} ({v})" for k, v in sorted(self.moved.items())))
         for kind, n in sorted(self.corrections.items()):
             lines.append(f"  gold corrected ({kind}): {n}")
         lines.append(f"  files linked {self.linked}, copied {self.copied}")
@@ -267,10 +286,13 @@ def prepare_bundles(
     mode: str = "link",
     exclusions: dict[str, str] | None = None,
     lob_overrides: list[tuple[str, str]] | None = None,
+    split_overrides: dict[str, str] | None = None,
     dry_run: bool = False,
 ) -> PrepareReport:
     """Write ``out/<name>/{document.pdf, golden.json, metadata.json}`` for each usable row
-    (with ``dry_run``, count them and write nothing)."""
+    (with ``dry_run``, count them and write nothing). ``split_overrides`` (``{source: split}``) moves a source
+    document and its copies; an insured's real documents left in two splits are refused before anything is
+    written (:func:`assert_one_split_per_insured`)."""
     if (delivery / TWIN_MANIFEST).is_file():
         return prepare_twin_bundles(delivery, out, lines=lines, mode=mode, exclusions=exclusions,
                                     dry_run=dry_run)
@@ -287,6 +309,12 @@ def prepare_bundles(
 
     report = PrepareReport(out=out, dry_run=dry_run)
     seen: dict[str, str] = {}
+    overrides = dict(split_overrides or {})
+    unused = set(overrides)
+    planned: list[tuple[str, Path, Path, dict]] = []
+    corrected: dict[str, dict | None] = {}          # name -> the corrected gold, None where it is as delivered
+    recodes = read_recodes()
+    leftovers: list[str] = []
     # Each seed's review record, from its own row, for its twins to inherit.
     reviews = seed_review_records(rows)
     for row in rows:
@@ -315,17 +343,35 @@ def prepare_bundles(
             report.skipped[f"excluded: {exclusions[name]}"] += 1
             if (out / name).is_dir():
                 report.removed += 1
-                if not dry_run:
-                    shutil.rmtree(out / name)      # made by an earlier run: take it out
+                leftovers.append(name)             # made by an earlier run: taken out once nothing is refused
             continue
         if name in seen:
             raise BundleError(f"two manifest rows name the document {name!r} ({seen[name]}, {row['pdf']})")
         seen[name] = row["pdf"]
         split = row["split"].strip().split("/")[-1].lower()
-        if split not in ("train", "val", "test"):
+        if split not in SPLITS:
             raise BundleError(f"{name}: split {row['split']!r} is not Train, Val or Test")
         kind = row["kind"].strip().lower()
         template_id = template_of(row)
+        if template_id in overrides:
+            unused.discard(template_id)
+            if overrides[template_id] != split:
+                report.moved[f"{split} -> {overrides[template_id]}"] += 1
+                split = overrides[template_id]
+        try:
+            delivered = json.loads(gold.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise BundleError(f"{name}: {row['gold']} is not JSON ({exc})") from exc
+        fixed, notes, problem = corrected_gold(delivered, lob, carrier=row.get("carrier") or "", text_pdf=pdf,
+                                               recodes=recodes)
+        if problem:
+            report.skipped[f"gold outside its line's schema after correction: {problem}"] += 1
+            report.correction_rows.append((name, "left out", problem))
+            continue
+        for note_kind, detail in notes:
+            report.corrections[note_kind] += 1
+            report.correction_rows.append((name, note_kind, detail))
+        corrected[name] = fixed if _gold_changed(notes) else None
 
         metadata = {
             "lob": lob,
@@ -338,20 +384,102 @@ def prepare_bundles(
             # The twin's render mode (SPEC_21 §7.8: native, scanned_from_digital,
             # ...): the per-seed twin cap counts each mode apart.
             "render_mode": render_mode(row, gold),
+            # Values no page prints: the corpus build leaves out the windows holding them.
+            "unprinted_values": _unprinted(notes),
             # A real document's review record is its own row's; a twin's, its seed's.
             **(inherited_review(reviews.get(template_id), template_id) if kind == "synthetic"
                else row_review(row)),
         }
         report.written[(split, "synthetic" if metadata["synthetic"] else "real")] += 1
         report.unreviewed += _unreviewed(metadata)
-        if dry_run:
-            continue
+        planned.append((name, pdf, gold, metadata))
+    if unused:
+        raise BundleError(f"split overrides name source(s) no usable manifest row has: {sorted(unused)} - "
+                          "check the spelling against the manifest's source column")
+    assert_one_split_per_insured(planned)
+    if dry_run:
+        return report
+    for name in leftovers:
+        shutil.rmtree(out / name)
+    for name, pdf, gold, metadata in planned:
         folder = out / name
         folder.mkdir(parents=True, exist_ok=True)
         _place(pdf, folder / "document.pdf", mode, report)
-        _place(gold, folder / "golden.json", mode, report)
+        if corrected[name] is not None:
+            _write_gold(folder / "golden.json", corrected[name])
+        else:
+            _place(gold, folder / "golden.json", "copy" if mode == "move" else mode, report)
         _write_new(folder / "metadata.json", json.dumps(metadata, indent=2))
+    out.mkdir(parents=True, exist_ok=True)         # every row left out still leaves its corrections.csv
+    _repair_split_coverage_names(out, report)
+    with (out / "corrections.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["document", "correction", "detail"])
+        writer.writerows(report.correction_rows)
     return report
+
+
+def insured_split_groups(planned: list[tuple[str, Path, Path, dict]]) -> dict[str, dict[str, list[str]]]:
+    """``{insured family: {split: [real documents]}}`` over the real documents of ``planned`` (name, pdf, gold,
+    metadata): those printing one insured's name, policy number or mailing address, across lines
+    (:func:`_insured_families`, the join the corpus build's ``assert_no_insured_across_splits`` makes). Copies print
+    other values and follow their source document's split, so only real documents are read."""
+    golds: dict[str, dict] = {}
+    line_of: dict[str, str] = {}
+    split_of: dict[str, str] = {}
+    for name, _pdf, gold_path, metadata in planned:
+        if metadata.get("synthetic"):
+            continue
+        try:
+            gold = json.loads(Path(gold_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue                                # an unreadable gold is the audit's to report
+        if isinstance(gold, dict):
+            golds[name], line_of[name], split_of[name] = gold, str(metadata.get("lob")), metadata["split"]
+    groups: dict[str, dict[str, list[str]]] = {}
+    for name, family in _insured_families(golds, line_of).items():
+        groups.setdefault(family, {}).setdefault(split_of[name], []).append(name)
+    return groups
+
+
+def assert_one_split_per_insured(planned: list[tuple[str, Path, Path, dict]]) -> None:
+    """Refuse, before anything is written, a delivery that puts one insured's real documents in two splits: a model
+    scored on one after training on another is scored on a document it has as good as seen (cycle 2 put U.S.
+    Underwriters' BOP property policies in test and train, sharing a policy number). Which split they share is the
+    owner's call, made in the split overrides; this only names them."""
+    crossing = [by_split for by_split in insured_split_groups(planned).values() if len(by_split) > 1]
+    if crossing:
+        listed = "; ".join(", ".join(f"{split}: {sorted(names)}" for split, names in sorted(by_split.items()))
+                           for by_split in crossing)
+        raise BundleError(
+            f"{len(crossing)} insured(s) have real documents in more than one split ({listed}). Documents printing "
+            "the same insured name, policy number or mailing address must share a split: move them, with their "
+            f"copies, in {DEFAULT_SPLIT_OVERRIDES} (source,split,reason); python -m scripts.split_leaks proposes "
+            "the rows."
+        )
+
+
+def read_split_overrides(path: Path) -> dict[str, str]:
+    """``{source: split}`` from a ``source,split,reason`` CSV; empty when there is none. ``source`` is the
+    manifest's source column without its suffix (``template_of``), so a document's copies move with it."""
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    if rows and not {"source", "split"} <= set(rows[0]):
+        raise BundleError(f"{path} needs the columns source,split,reason")
+    out: dict[str, str] = {}
+    for r in rows:
+        raw = (r["source"] or "").strip()
+        if not raw:
+            continue
+        source, split = str(PurePosixPath(raw).with_suffix("")), (r["split"] or "").strip().lower()
+        if split not in SPLITS:
+            raise BundleError(f"{path}: {source}: split {r['split']!r} is not train, val or test")
+        if out.get(source, split) != split:
+            raise BundleError(f"{path}: {source} is moved to both {out[source]} and {split}")
+        out[source] = split
+    return out
 
 
 def delivery_line(lob: str) -> str:
@@ -1245,19 +1373,23 @@ def printed_carrier(pdf: Path, carrier: str) -> tuple[str, list[int]] | None:
     """
     import re
 
-    import pymupdf
+    from data_pipeline.ingestion.label_rules import _pdf_library
 
     tokens = [t for t in re.split(r"[\s_]+", carrier.strip()) if t]
     if not tokens:
         return None
+    pymupdf = _pdf_library()                # a missing library stops the step; an unreadable PDF prints nothing
     pattern = re.compile(r"\b" + r"[\s-]*".join(map(re.escape, tokens)) + r"\b", re.IGNORECASE)
     raw, pages = None, []
-    with pymupdf.open(pdf) as doc:
-        for number, page in enumerate(doc, start=1):
-            found = pattern.search(page.get_text())
-            if found:
-                raw = raw or found.group(0)
-                pages.append(number)
+    try:
+        with pymupdf.open(pdf) as doc:
+            for number, page in enumerate(doc, start=1):
+                found = pattern.search(page.get_text())
+                if found:
+                    raw = raw or found.group(0)
+                    pages.append(number)
+    except Exception:  # noqa: BLE001 - unreadable: no page prints the carrier (page_texts reads it as no text too)
+        return None
     return (raw, pages) if raw else None
 
 
@@ -1324,6 +1456,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="document,reason CSV of documents to leave out")
     parser.add_argument("--lob-overrides", type=Path, default=DEFAULT_LOB_OVERRIDES,
                         help="source_prefix,lob,reason CSV of lines to correct")
+    parser.add_argument("--split-overrides", type=Path, default=DEFAULT_SPLIT_OVERRIDES,
+                        help="source,split,reason CSV moving a source document and its copies to another split "
+                             "(python -m scripts.split_leaks proposes the rows)")
     parser.add_argument("--dry-run", action="store_true",
                         help="report the bundles (and a SPEC_21 delivery's gold corrections), write nothing")
     parser.add_argument("--originals", type=Path, default=DEFAULT_ORIGINALS,
@@ -1377,7 +1512,8 @@ def main(argv: list[str] | None = None) -> int:
             args.out = args.out or DEFAULT_OUT
             report = prepare_bundles(args.input, args.out, lines=lines, mode=args.mode,
                                      exclusions=read_exclusions(args.exclude),
-                                     lob_overrides=read_lob_overrides(args.lob_overrides), dry_run=args.dry_run)
+                                     lob_overrides=read_lob_overrides(args.lob_overrides),
+                                     split_overrides=read_split_overrides(args.split_overrides), dry_run=args.dry_run)
     except (BundleError, LobError) as exc:
         print(exc, file=sys.stderr)
         return 1

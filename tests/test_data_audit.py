@@ -360,3 +360,49 @@ def test_a_clean_document_reports_no_application_rows_and_counts_pages_it_could_
     _document(tmp_path, "good", pages=[PAGE_1, []])
     facts = summary(audit_folder(tmp_path))["application_pages"]
     assert facts == {"documents": 0, "pages": 0, "rows_citing_only_them": 0, "pages_not_judged_no_text": 1}
+
+
+def _with_image_on_page_2(folder: Path) -> None:
+    """Page 2 rewritten as a header in text over a table printed as a picture, half the page."""
+    pdf = folder / "policy0.pdf"
+    doc = pymupdf.open(pdf)
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 60), False)
+    pix.clear_with(200)
+    doc[1].insert_image(pymupdf.Rect(50, 200, 560, 620), pixmap=pix)
+    doc.save(folder / "with_image.pdf")
+    doc.close()
+    pdf.unlink()
+
+
+def test_a_value_cited_on_an_image_page_is_left_for_the_check_after_ocr(tmp_path):
+    """2026-11-23: a copy's coverage table printed as a picture under a text header - 86% of the copies' "not found"
+    values were on such pages, printed in the image. Not "not found", not a page_ref to move."""
+    golden = copy.deepcopy(GOLDEN)
+    golden["policy"]["policy_number"]["page_ref"] = [2]              # page 2's text lacks it; its image may hold it
+    _with_image_on_page_2(_document(tmp_path, "doc", golden=golden))
+    report = audit_folder(tmp_path)
+    assert _results(report, "doc")["policy.policy_number"] == "image_page"
+    from data_pipeline.audit import render
+
+    assert "pages whose table is an image" in render(report, summary(report))
+
+
+def test_a_name_its_page_lacks_but_the_wording_prints_is_a_phrase_elsewhere(tmp_path):
+    """A coverage name cited on the declarations and found only in the policy wording is a mention, a person's call;
+    a figure on the wrong page is still a wrong page_ref."""
+    golden = copy.deepcopy(GOLDEN)
+    golden["named_insured"]["primary_name"]["page_ref"] = [2]        # printed on page 1 only
+    _document(tmp_path, "doc", golden=golden)
+    assert _results(audit_folder(tmp_path), "doc")["named_insured.primary_name"] == "phrase_elsewhere"
+
+
+def test_without_out_each_audited_folder_gets_its_own_report_folder(tmp_path, monkeypatch):
+    """2026-11-23: one default folder for every audit let the cycle 3 rehearsal's audit replace an earlier report."""
+    import data_pipeline.audit as audit
+
+    monkeypatch.setattr(audit, "DEFAULT_OUT", tmp_path / "audit_report")
+    for name in ("bundles_a", "bundles_b"):
+        _document(tmp_path / name, "good", pages=[PAGE_1 + ["one"]])
+        assert main(["--input", str(tmp_path / name)]) == 0
+    assert (tmp_path / "audit_report" / "bundles_a" / "report.md").is_file()
+    assert (tmp_path / "audit_report" / "bundles_b" / "report.md").is_file()
