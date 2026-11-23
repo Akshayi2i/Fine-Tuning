@@ -22,6 +22,27 @@ from pathlib import Path
 from typing import Any
 
 
+def use_pixel_budget(max_pixels: int) -> None:
+    """Every full-resolution task read at ``max_pixels`` for this process: the window planner, the page check and the
+    engine all take their budget from ``common.config.vision_for_task``, which reads ``shared_vision_config`` - so
+    the override is made there, once, and they stay consistent. A budget that is not a whole number of 32x32 visual
+    tokens is refused, as ``pixel_budget`` refuses one."""
+    import copy
+
+    from common import config
+    from data_pipeline.dataset_builder.cap_check import PIXELS_PER_VISUAL_TOKEN
+
+    if max_pixels <= 0 or max_pixels % PIXELS_PER_VISUAL_TOKEN:
+        raise SystemExit(f"--max-pixels must be a positive multiple of {PIXELS_PER_VISUAL_TOKEN}")
+    original = config.shared_vision_config()
+    changed = copy.deepcopy(original)
+    for block in [changed.get("defaults") or {}, *(changed.get("tasks") or {}).values(),
+                  *(changed.get("profiles") or {}).values()]:
+        if isinstance(block, dict) and "max_pixels" in block and int(block["max_pixels"]) > 300_000:
+            block["max_pixels"] = max_pixels
+    config.shared_vision_config = lambda: changed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--adapter", required=True, help="the release's adapter: a Blob prefix or a local folder")
@@ -29,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True, help="where to write the result (JSON)")
     parser.add_argument("--tenant", default=None)
     parser.add_argument("--documents", nargs="*", default=None, help="only these frozen source ids")
+    parser.add_argument("--max-pixels", type=int, default=None,
+                        help="read the pages at this pixel budget instead of the configured one (e.g. 2483200, "
+                             "the standard profile's ~2.48 MP, against the fast profile's 1254400): the sharper-"
+                             "images test. Applied to every full-resolution task for this run only; vision.yaml "
+                             "is not changed")
     args = parser.parse_args(argv)
     from orchestration.detach import detach_module_if_needed
 
@@ -38,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
 
     setup_logging(logging.INFO)
     log = logging.getLogger("check_served_fixes")
+    if args.max_pixels is not None:
+        use_pixel_budget(args.max_pixels)
+        log.info("reading the pages at max_pixels=%d for this run (vision.yaml unchanged)", args.max_pixels)
 
     from artifact_registry import paths
     from artifact_registry.blob_client import BlobClient
@@ -76,7 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         dates[meta.get("source_id")] = {name: (policy.get(name) or {}).get("raw") if isinstance(policy.get(name), dict)
                                         else policy.get(name) for name in ("effective_date", "expiration_date")}
     result = {
-        "adapter": args.adapter, "documents": len(documents), "readings": len(triples),
+        "adapter": args.adapter, "max_pixels": args.max_pixels or "configured",
+        "documents": len(documents), "readings": len(triples),
         "failed": len(getattr(triples, "infrastructure_failures", [])),
         "served_field_match": round(statistics.mean(served.values()), 4) if served else None,
         "baseline_served_field_match": (round(statistics.mean(baseline[s] for s in served if s in baseline), 4)
