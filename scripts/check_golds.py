@@ -95,11 +95,15 @@ def cycle3_findings(gold: dict[str, Any], pages: dict[int, str], *, lob: Any) ->
         elif not _FORM_TITLE.search(str(title.get("raw") or "")):
             out.append(("R1: a form with no number, not titled as a form (a service or marketing page?)", where,
                         f"{title.get('raw')!r} pages {title.get('page_ref')}"))
-    premium_items = {}
+    # A coverage's premium is the premium list's amount for the same coverage code AND the same units
+    # (`applies_to`): an auto policy lists each coverage once per vehicle, each with its own premium, and a code
+    # alone would hand vehicle 1's amount to every vehicle.
+    premium_items: dict[tuple, list] = {}
     premium = gold.get("premium") if isinstance(gold.get("premium"), dict) else {}
     for item in premium.get("items") or []:
         if isinstance(item, dict) and item.get("unit_type") == "coverage" and _filled(item.get("amount")):
-            premium_items.setdefault(item.get("coverage_code"), item["amount"])
+            units = frozenset(item.get("applies_to") or [])
+            premium_items.setdefault((item.get("coverage_code"), units), []).append(item["amount"])
     for index, row in enumerate(gold.get("coverages") or []):
         if not isinstance(row, dict):
             continue
@@ -111,10 +115,14 @@ def cycle3_findings(gold: dict[str, Any], pages: dict[int, str], *, lob: Any) ->
             if form_numbers and re.sub(r"[^0-9A-Z]", "", str(text or "").upper()) not in form_numbers:
                 out.append(("R2: a coverage form reference not in the forms list", where, repr(text)))
         code = row.get("coverage_code")
-        if not _filled(row.get("premium")) and code in premium_items:
-            amount = premium_items[code]
+        amounts = premium_items.get((code, frozenset(row.get("applies_to") or [])), [])
+        if not _filled(row.get("premium")) and len(amounts) == 1:
+            amount = amounts[0]
             out.append(("R3: coverage premium empty, its premium is in the premium list", where,
                         f"{code} {amount.get('raw')!r} pages {amount.get('page_ref')}"))
+        elif not _filled(row.get("premium")) and len(amounts) > 1:
+            out.append(("R3: coverage premium empty, several premium-list amounts match it (check by hand)", where,
+                        f"{code} {[a.get('raw') for a in amounts]!r}"))
     rows = [row for row in gold.get("rating_exposures") or [] if isinstance(row, dict)]
     for index, row in enumerate(rows):
         if not _filled(row.get("class_code")) and not _filled(row.get("class_description")):

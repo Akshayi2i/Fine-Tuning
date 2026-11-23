@@ -140,6 +140,27 @@ def test_the_checker_lists_rows_and_values_a_person_should_look_at():
     assert sum(r.startswith("R7:") for r in rules) == 3      # print date, countersignature, officers
 
 
+def test_a_coverage_premium_is_matched_on_its_vehicle_not_its_code_alone():
+    # An auto policy lists each coverage once per vehicle; the premium list holds one amount per vehicle.
+    gold = {
+        "coverages": [{"coverage_name": _env("Liability"), "coverage_code": "X_LIAB", "applies_to": ["veh_1"]},
+                      {"coverage_name": _env("Liability"), "coverage_code": "X_LIAB", "applies_to": ["veh_2"]},
+                      {"coverage_name": _env("Collision"), "coverage_code": "X_COLL", "applies_to": ["veh_1"]}],
+        "premium": {"items": [
+            {"unit_type": "coverage", "coverage_code": "X_LIAB", "applies_to": ["veh_1"], "amount": _env("$44", (21,))},
+            {"unit_type": "coverage", "coverage_code": "X_LIAB", "applies_to": ["veh_2"], "amount": _env("$61", (22,))},
+            {"unit_type": "coverage", "coverage_code": "X_COLL", "applies_to": ["veh_1"], "amount": _env("$10", (21,))},
+            {"unit_type": "coverage", "coverage_code": "X_COLL", "applies_to": ["veh_1"], "amount": _env("$12", (23,))},
+        ]},
+        "policy": {}, "document": {},
+    }
+    found = {where: (rule, detail) for rule, where, detail in cycle3_findings(gold, {}, lob="auto")
+             if rule.startswith("R3")}
+    assert "'$44'" in found["coverages[0]"][1]
+    assert "'$61'" in found["coverages[1]"][1]          # vehicle 2's own amount, not vehicle 1's
+    assert "check by hand" in found["coverages[2]"][0]  # two amounts for one coverage and vehicle: a person decides
+
+
 def test_a_complete_gold_gets_no_hint():
     gold = {"forms_and_endorsements": [_form("IL 00 17")],
             "coverages": [{"coverage_name": _env("Hired Auto"), "form_refs": ["IL 00 17"]}],
