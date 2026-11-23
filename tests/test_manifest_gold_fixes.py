@@ -58,6 +58,7 @@ def test_a_manifest_gold_is_corrected_and_the_delivery_left_as_it_was(tmp_path):
 def test_an_uncorrected_gold_is_linked_as_before(tmp_path):
     gold = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     gold["premium"].pop("items", None)            # the example writes two coverages' premiums twice
+    label_rules.normalise_value_shapes(gold)      # and its whole amounts as 25.0
     delivery = _delivery(tmp_path, {"ho_policy": gold})
     out = tmp_path / "bundles"
     report = prepare_bundles(delivery, out)

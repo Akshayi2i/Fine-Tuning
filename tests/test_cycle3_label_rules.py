@@ -268,3 +268,42 @@ def test_training_targets_still_write_four_digit_years():
 
     target = to_compact_answer({"effective_date": {"raw": "07/11/25", "parsed": "07/11/2025", "page_ref": [3]}})
     assert target["effective_date"] == {"r": "07/11/25", "v": "07/11/2025", "p": [3]}
+
+
+# --------------------------------------------------------------------------
+# One shape per value (user, 2026-11-23): parsed only; raw stays as printed
+# --------------------------------------------------------------------------
+
+
+def test_a_whole_amount_is_written_whole_and_a_decimal_kept():
+    from data_pipeline.ingestion.label_rules import normalise_value_shapes
+
+    gold = {"coverages": [{"limits": [{"amount": {"raw": "$1,000,000", "parsed": 1000000.0, "page_ref": [2]}},
+                                      {"amount": {"raw": "$1,250.50", "parsed": 1250.5, "page_ref": [2]}}],
+                           "premium": {"raw": "$400", "parsed": 400, "page_ref": [2]}}],
+            "rating_exposures": [{"rate": {"raw": "2.000", "parsed": 2.0, "page_ref": [3]}}]}
+    notes = normalise_value_shapes(gold)
+    limits = gold["coverages"][0]["limits"]
+    assert limits[0]["amount"]["parsed"] == 1000000 and isinstance(limits[0]["amount"]["parsed"], int)
+    assert limits[0]["amount"]["raw"] == "$1,000,000"                  # as printed, untouched
+    assert limits[1]["amount"]["parsed"] == 1250.5
+    assert gold["rating_exposures"][0]["rate"]["parsed"] == 2 and isinstance(gold["rating_exposures"][0]["rate"]["parsed"], int)
+    assert [kind for kind, _ in notes] == ["whole number written whole"] * 2
+
+
+def test_a_set_value_in_capitals_is_written_in_title_case_and_raw_kept():
+    from data_pipeline.ingestion.label_rules import normalise_value_shapes
+
+    def insured(value):
+        return {"named_insured": {"entity_type": {"raw": value, "parsed": value, "page_ref": [1]}}}
+
+    for printed, expected in [("CORPORATION", "Corporation"), ("LIMITED LIABILITY COMPANY", "Limited Liability Company"),
+                              ("LLC", "LLC"), ("Individual", "Individual"), ("JOINT VENTURE OR PARTNERSHIP",
+                                                                           "Joint Venture or Partnership")]:
+        gold = insured(printed)
+        normalise_value_shapes(gold)
+        assert gold["named_insured"]["entity_type"]["parsed"] == expected, printed
+        assert gold["named_insured"]["entity_type"]["raw"] == printed
+    listed = {"carrier": {"admitted_status": {"raw": "Surplus Lines", "parsed": "surplus_lines", "page_ref": [1]}},
+              "named_insured": {"mailing_address": {"state": {"raw": "NY", "parsed": "NY", "page_ref": [1]}}}}
+    assert normalise_value_shapes(listed) == []                       # values a list holds are left alone

@@ -1166,10 +1166,62 @@ def repair_broken_characters(gold: dict[str, Any], pages: dict[int, str]) -> lis
     return notes
 
 
+#: Words a title-cased value keeps lower case after its first word.
+_SMALL_WORDS = frozenset({"and", "or", "of", "the", "a", "an", "in", "for", "to", "by", "with"})
+#: An all-capitals word this long or shorter is an abbreviation (LLC, INC, LP) and stays as it is.
+_ABBREVIATION_LETTERS = 3
+
+
+def _title_case(text: str) -> str:
+    """``"LIMITED LIABILITY COMPANY"`` -> ``"Limited Liability Company"``; an abbreviation (``LLC``) kept."""
+    words = text.split(" ")
+    out = []
+    for index, word in enumerate(words):
+        letters = re.sub(r"[^A-Za-z]", "", word)
+        if not letters or len(letters) <= _ABBREVIATION_LETTERS and word.lower() not in _SMALL_WORDS:
+            out.append(word)
+        elif index and word.lower() in _SMALL_WORDS:
+            out.append(word.lower())
+        else:
+            out.append(word[:1] + word[1:].lower())
+    return " ".join(out)
+
+
+def normalise_value_shapes(gold: dict[str, Any]) -> list[tuple[str, str]]:
+    """One shape per kind of ``parsed`` value (user, 2026-11-23), IN PLACE; ``raw`` stays as printed.
+
+    * an amount or a number that is whole is written whole: ``1250.0`` -> ``1250`` (the audit found 18 fields
+      written both ways - the model learns both);
+    * a set value written as free text (``named_insured.entity_type``: "As printed: Individual, Corporation,
+      LLC...") is written in title case when it was written in capitals: ``"CORPORATION"`` -> ``"Corporation"``.
+      A value the schema holds to a list (``surplus_lines``, a state's ``NY``) is never in capitals of more than
+      three letters, so it is left alone, as is a value in mixed case.
+    """
+    from calibration.features import infer_field_type
+
+    notes: list[tuple[str, str]] = []
+    for path, envelope in _envelopes(gold):
+        parsed = envelope.get("parsed")
+        if isinstance(parsed, bool) or not isinstance(parsed, (int, float, str)):
+            continue
+        kind = infer_field_type(re.sub(r"\[\d+\]", "[]", path), common_model=True)
+        if kind in ("money", "number") and isinstance(parsed, float) and parsed.is_integer():
+            envelope["parsed"] = int(parsed)
+            notes.append(("whole number written whole", f"{path} {parsed!r} -> {int(parsed)!r}"))
+        elif kind == "enum" and isinstance(parsed, str) and parsed.isupper() and len(re.sub(r"[^A-Z]", "", parsed)) > 3:
+            title = _title_case(parsed)
+            if title != parsed:
+                envelope["parsed"] = title
+                notes.append(("set value in title case", f"{path} {parsed!r} -> {title!r}"))
+    return notes
+
+
 def apply_cycle3_rules(gold: dict[str, Any], pages: dict[int, str]) -> list[tuple[str, str]]:
-    """The cycle 3 rules that need no person (R2's format, R3, R5, R8), IN PLACE; ``[(kind, detail)]``."""
+    """The cycle 3 rules that need no person (R2's format, R3, R5, R8, one shape per value), IN PLACE;
+    ``[(kind, detail)]``."""
     notes = strip_form_ref_editions(gold)
     notes += clear_code_descriptions(gold)
     notes += clear_premiums_without_amount(gold)
     notes += repair_broken_characters(gold, pages)
+    notes += normalise_value_shapes(gold)
     return notes
