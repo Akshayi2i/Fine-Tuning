@@ -161,6 +161,17 @@ def test_a_coverage_premium_is_matched_on_its_vehicle_not_its_code_alone():
     assert "check by hand" in found["coverages[2]"][0]  # two amounts for one coverage and vehicle: a person decides
 
 
+def test_a_policy_minimum_is_flagged_only_when_the_policy_prints_a_minimum_per_coverage_part():
+    gold = {"premium": {"minimum": _env("$455", (5,))}, "policy": {}, "document": {}}
+    two_parts = {4: "MINIMUM PREMIUM FOR PROPERTY COVERAGE PART: $50",
+                 5: "MINIMUM PREMIUM FOR GENERAL LIABILITY COVERAGE PART:\n$455"}
+    one_minimum = {3: "MINIMUM PREMIUM $ 345   DEPOSIT PREMIUM $ 995"}
+    assert any(r.startswith("R11:") for r, _, _ in cycle3_findings(gold, two_parts, lob="boppr"))
+    assert not any(r.startswith("R11:") for r, _, _ in cycle3_findings(gold, one_minimum, lob="wc"))
+    empty = {"premium": {}, "policy": {}, "document": {}}
+    assert not any(r.startswith("R11:") for r, _, _ in cycle3_findings(empty, two_parts, lob="boppr"))
+
+
 def test_a_complete_gold_gets_no_hint():
     gold = {"forms_and_endorsements": [_form("IL 00 17")],
             "coverages": [{"coverage_name": _env("Hired Auto"), "form_refs": ["IL 00 17"]}],

@@ -66,6 +66,9 @@ _PRINT_DATE = re.compile(r"\b(?:date\s+printed|printed\s+(?:on|date)|print\s+dat
 _COUNTERSIGN = re.compile(r"\bcounter-?\s?sign", re.IGNORECASE)
 _OFFICERS = re.compile(r"\b(?:name\s+of\s+officers?|officers?\b.{0,80}\b(?:included|excluded))", re.IGNORECASE | re.DOTALL)
 _RATING_COLUMNS = re.compile(r"\bPr\s?/\s?Co\b|\bProd\.?\s?/\s?Comp|\bproducts[- ]completed\s+op", re.IGNORECASE)
+#: A coverage part's own minimum premium ("MINIMUM PREMIUM FOR GENERAL LIABILITY COVERAGE PART").
+_PART_MINIMUM = re.compile(r"\bminimum\s+premium\s+for\s+(?:the\s+)?([a-z][a-z /&-]{2,60}?)\s+coverage\s+part\b",
+                           re.IGNORECASE)
 
 
 def _printing(pages: dict[int, str], pattern: re.Pattern[str]) -> list[int]:
@@ -138,6 +141,14 @@ def cycle3_findings(gold: dict[str, Any], pages: dict[int, str], *, lob: Any) ->
     if not _filled(policy.get("policy_type")):
         out.append(("R4: policy type empty (fill if a product name is printed on the declarations)",
                     "policy.policy_type", ""))
+    # R11 (2026-11-23): premium.minimum is the policy's one minimum; a policy printing a minimum per coverage part
+    # keeps each as an extra field and leaves premium.minimum empty.
+    premium = gold.get("premium") if isinstance(gold.get("premium"), dict) else {}
+    parts = sorted({re.sub(r"\s+", " ", m.group(1)).strip().upper()
+                    for text in pages.values() if text for m in _PART_MINIMUM.finditer(text)})
+    if _filled(premium.get("minimum")) and len(parts) >= 2:
+        out.append(("R11: premium.minimum filled, but the policy prints a minimum per coverage part (leave it empty)",
+                    "premium.minimum", f"parts {parts}"))
     document = gold.get("document") if isinstance(gold.get("document"), dict) else {}
     if not _filled(document.get("print_date")) and (found := _printing(pages, _PRINT_DATE)):
         out.append(("R7: print date empty, a print date may be printed", "document.print_date", f"pages {found}"))
