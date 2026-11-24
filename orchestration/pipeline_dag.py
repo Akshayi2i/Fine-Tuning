@@ -418,7 +418,7 @@ def _pending_ocr(ctx: StageContext, engine: Any) -> dict[str, list[str]]:
 
 
 def _is_preprocessed(ctx: StageContext) -> bool:
-    from data_pipeline.ocr.served_ocr import ServedMinerUEngine
+    from adapters.served_ocr import ServedMinerUEngine
 
     # A document another MinerU read still needs reading, by the served one.
     return not _pending_ocr(ctx, ctx.ocr_engine or ServedMinerUEngine.from_environment())
@@ -446,7 +446,7 @@ def _assert_ocr_runnable(ctx: StageContext, pending: dict[str, list[str]]) -> No
     pin = served_mineru()
     counts = ", ".join(f"{dt}: {len(ids)}" for dt, ids in pending.items())
     if importlib.util.find_spec("mineru") is not None:
-        from data_pipeline.ocr.mineru_version import get_mineru_version
+        from adapters.mineru_version import get_mineru_version
 
         local = get_mineru_version()
         if local == pin["version"]:
@@ -470,8 +470,8 @@ def stage_preprocessing(ctx: StageContext) -> StageResult:
     ``ctx.ocr_workers`` documents at once: it runs anywhere that reaches it.
     Otherwise a MinerU installed here at the pinned version, one document at a time.
     """
+    from adapters.served_ocr import ServedMinerUEngine
     from data_pipeline.ocr.run_mineru import MinerUEngine, process_batch
-    from data_pipeline.ocr.served_ocr import ServedMinerUEngine
     from orchestration.ocr_server import SERVER_CONCURRENCY, is_local, managed_ocr_server
 
     engine = ctx.ocr_engine or ServedMinerUEngine.from_environment()

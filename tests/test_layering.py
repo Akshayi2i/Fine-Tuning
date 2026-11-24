@@ -19,25 +19,27 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-RUNTIME = ("common", "contracts", "inference_core", "calibration", "serving", "azure_service")
+RUNTIME = ("common", "contracts", "adapters", "inference_core", "calibration", "serving", "azure_service")
 BUILD_TIME = ("data_pipeline", "training", "evaluation", "orchestration", "testing", "scripts", "pilot")
 
 #: (importing file, imported module) still allowed - today's violations, to be removed.
 ALLOWED: set[tuple[str, str]] = {
-    # The served MinerU client (an adapter, not a contract): the worker reads pages with it.
-    ("azure_service/runtime.py", "data_pipeline.ocr.served_ocr"),
     # The retention CLI's tmux guard, run by hand; not the worker's path.
     ("azure_service/retention.py", "orchestration.detach"),
     # Fitting the calibrators reads validation generations: build time, in a runtime package.
     ("calibration/population.py", "evaluation.validation_generation"),
     # A stalled engine sends the operator a message.
     ("inference_core/stall_guard.py", "orchestration.notify"),
-    # The OCR environment probe (installed MinerU, CUDA): an adapter, at the old endpoint's cold start.
-    ("serving/vllm_entrypoint.py", "data_pipeline.ocr.mineru_version"),
 }
 
 #: ``contracts`` may lean on the standard library and ``common`` only.
 CONTRACTS_MAY_IMPORT = ("common", "contracts")
+
+#: ``adapters`` (the served MinerU, the PDF renderer, the OCR environment) may also use
+#: third-party libraries and the Blob store - never this repository's other packages.
+ADAPTERS_MAY_IMPORT = ("common", "contracts", "adapters", "artifact_registry")
+#: This repository's own top-level packages, which ``adapters`` may not reach beyond the above.
+REPO_PACKAGES = frozenset(p.name for p in REPO.iterdir() if (p / "__init__.py").is_file())
 
 
 def upward_imports() -> set[tuple[str, str]]:
@@ -76,6 +78,28 @@ def contracts_imports() -> set[tuple[str, str]]:
                 if top not in CONTRACTS_MAY_IMPORT and top not in sys.stdlib_module_names and top != "__future__":
                     found.add((path.relative_to(REPO).as_posix(), module))
     return found
+
+
+def adapters_imports() -> set[tuple[str, str]]:
+    """Imports inside ``adapters`` of this repository's packages other than :data:`ADAPTERS_MAY_IMPORT`."""
+    found: set[tuple[str, str]] = set()
+    for path in sorted((REPO / "adapters").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                modules = [node.module]
+            elif isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            else:
+                continue
+            for module in modules:
+                top = module.split(".")[0]
+                if top in REPO_PACKAGES and top not in ADAPTERS_MAY_IMPORT:
+                    found.add((path.relative_to(REPO).as_posix(), module))
+    return found
+
+
+def test_adapters_lean_on_common_contracts_and_the_blob_store_only() -> None:
+    assert adapters_imports() == set()
 
 
 def test_runtime_code_imports_no_new_build_time_code() -> None:

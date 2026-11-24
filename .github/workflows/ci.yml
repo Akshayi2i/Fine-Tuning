@@ -39,7 +39,7 @@ jobs:
         # errors older than this check are frozen per file; a new one fails
         # (scripts/check_type_errors.py).
         run: |
-          mypy common artifact_registry registry_utils data_pipeline inference_core training evaluation calibration serving postprocessing testing orchestration pilot azure_service contracts > mypy.txt || true
+          mypy common artifact_registry registry_utils data_pipeline inference_core training evaluation calibration serving postprocessing testing orchestration pilot azure_service contracts adapters > mypy.txt || true
           cat mypy.txt
           python -m scripts.check_type_errors mypy.txt
 

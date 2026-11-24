@@ -1,4 +1,5 @@
 {
+  "adapters/mineru_api.py": 2,
   "calibration/features.py": 1,
   "common/adapter.py": 1,
   "common/lob.py": 2,
@@ -22,7 +23,6 @@
   "data_pipeline/ingestion/pull_raw_pdfs.py": 1,
   "data_pipeline/labeling/active_learning.py": 1,
   "data_pipeline/labeling/pre_annotate.py": 1,
-  "data_pipeline/ocr/mineru_api.py": 2,
   "data_pipeline/ocr/mineru_config.py": 1,
   "data_pipeline/ocr/render_only.py": 2,
   "data_pipeline/ocr/run_mineru.py": 2,

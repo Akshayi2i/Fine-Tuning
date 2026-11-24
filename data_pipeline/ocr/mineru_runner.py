@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
-from data_pipeline.ocr.modality import MODALITIES, NATIVE
+from adapters.modality import MODALITIES, NATIVE
 from data_pipeline.ocr.run_mineru import MinerUEngine, OcrEngine, PageOutput
 
 NATIVE_TIMEOUT_S = 30

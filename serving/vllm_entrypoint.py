@@ -124,7 +124,7 @@ def assert_ocr_pin(corpus_manifest: dict[str, Any]) -> None:
     deployment, and a per-request check would turn one configuration mistake
     into a per-request cost while still not fixing it.
     """
-    from data_pipeline.ocr.mineru_version import assert_version_matches
+    from adapters.mineru_version import assert_version_matches
 
     if not corpus_manifest.get("mineru_version"):
         raise ColdStartError(
@@ -132,7 +132,7 @@ def assert_ocr_pin(corpus_manifest: dict[str, Any]) -> None:
             "checked against what the model trained on. That pin is the arch §8a guarantee; "
             "serving without it means an OCR upgrade becomes an unattributable accuracy drop."
         )
-    from data_pipeline.ocr.mineru_version import UNKNOWN, MinerUVersionError, get_mineru_version
+    from adapters.mineru_version import UNKNOWN, MinerUVersionError, get_mineru_version
 
     if get_mineru_version() == UNKNOWN:
         # This endpoint runs no OCR: requests arrive with their page texts. The pin

@@ -2149,6 +2149,10 @@ corrected at bundling instead.
 - A stored reading that records no `read_every_page_by_ocr` stands, with the setting on, only when it was read by OCR (`run_mineru.read_as_configured`): `find_unprocessed`, `process_document` and the corpus build agree, and the corpus manifest records the setting.
 - `smoke_run` needs `--batch` and, for its OCR step, `MINERU_URL`; it takes families of at most `--max-pages` (40) pages.
 
+## Changes of 2026-11-24 (review Phase 4, A1: the OCR clients move to adapters/)
+
+- `data_pipeline/ocr/served_ocr.py`, `mineru_api.py`, `mineru_version.py` and `modality.py` moved whole to `adapters/`; the old paths are aliases of the same modules, so imports and patches through either name reach one object. The page renderer's functions (`render_pdf_pages`, `smart_resize`, `page_pixel_budget`, `RenderError`, ...) moved to `adapters/pdf_pages.py`, and `python -m data_pipeline.ocr.render_only` (the render stage) stays where it was, re-exporting them. `OcrError`, `PageOutput`, `text_layer_pages` and the page markers moved to `adapters/ocr_pages.py`, re-exported by `run_mineru`; `count_table_rows` is in `contracts/page_text.py`. No behaviour change.
+
 ---
 
 # IMPL-04_labeling_golden_json
@@ -5762,6 +5766,7 @@ real vLLM engines (the tests fake the engine), and a real upload.
 - `tests/test_layering.py`: runtime packages (`common`, `contracts`, `inference_core`, `calibration`, `serving`, `azure_service`) import nothing from build-time ones (`data_pipeline`, `training`, `evaluation`, `orchestration`, `testing`, `scripts`, `pilot`) beyond an allow-list that may only shrink (22 pairs, then 5), and `contracts` leans on `common` and the standard library only.
 - `tests/test_production_image_imports.py`: every runtime package is copied into the image, and every copied folder is let into the build context (`Dockerfile.dockerignore`).
 - `contracts` is type-checked in CI; 12 type errors moved with their code into it (total still 271).
+- `adapters/` (the served MinerU client, the MinerU API, the PDF renderer, the OCR environment, modality): runtime, may import only the standard library, third-party libraries, `common`, `contracts`, `adapters` and `artifact_registry` (`tests/test_layering.py`); the allow-list is down to 3. The whole modules moved from `data_pipeline/ocr/` keep their old paths as aliases of the same module object, so every test patch through the old name still reaches the code; `tests/test_remote_failures.py` patches the renderer where `ServedOcr` reads it. CI type-checks `adapters`; 2 type errors moved with `mineru_api`.
 
 ---
 
@@ -6108,7 +6113,7 @@ At start, `runtime.load_runtime` loads, for each tenant in `SERVED_TENANTS`:
 2. The model: vLLM asked for `policy-<release>` (`scripts.served_adapter.lora_name`) through `inference_core.openai_backend.OpenAIChatBackend`, which refuses a name the server does not serve or an adapter on another base. One backend per served name (`runtime.openai_models`). The first one also checks how the server was started (`runtime.check_server_settings`, `OpenAIChatBackend.server_setting_problems`): the vLLM version, its context length, answer spacing, the no-whitespace rule, raw logprobs and image reading. A mismatch stops the start; a server that cannot be probed is only warned about.
 3. The release calibrators and thresholds, from Blob (`runtime.load_calibrators`, `serving.vllm_entrypoint.load_release_calibration`). The adapter itself is not downloaded; it is on the pod's volume. A release with no fitted calibrators is served with raw confidence (`calibration: identity`).
 
-`load_runtime` also refuses retired serving settings (`assert_no_retired_settings`) and builds the pinned MinerU reader (`runtime.served_reader`, `data_pipeline.ocr.served_ocr.ServedOcr`), which refuses text from another MinerU version or tier. Any failed check is a `ColdStartError`; the worker exits with code 3 (a settings error exits with 2). Proven by `test_a_release_this_code_cannot_serve_refuses_the_cold_start`.
+`load_runtime` also refuses retired serving settings (`assert_no_retired_settings`) and builds the pinned MinerU reader (`runtime.served_reader`, `adapters.served_ocr.ServedOcr`), which refuses text from another MinerU version or tier. Any failed check is a `ColdStartError`; the worker exits with code 3 (a settings error exits with 2). Proven by `test_a_release_this_code_cannot_serve_refuses_the_cold_start`.
 
 **Base-model fallback.** With nothing promoted, the worker refuses to start unless `ALLOW_BASE_FALLBACK=true` with `BASE_MODEL_NAME` (`runtime.load_tenant`; `Settings.from_env` refuses the first without the second). With the fallback on, a line the release did not train on is read by the base model, route `base_model_fallback`, release null. With it off (the default), such a job fails at once. DEPLOY.md says to keep it off (decided 2026-10-26).
 
@@ -6173,9 +6178,9 @@ Read elsewhere: `API_PORT` (default 8080, `api.main`); `AZURE_STORAGE_CONNECTION
 
 `azure_service/Dockerfile` builds two targets from one base: `api` (`python -m azure_service.api`, port 8080) and `worker` (`python -m azure_service.worker`). Base `python:3.11-slim`, run as uid 10001. Dependencies: `requirements-service.lock`, installed with `pip install --no-deps`. No GPU, torch, vLLM or MinerU.
 
-COPY lines: `pyproject.toml`, `requirements-service.lock`, `common/`, `contracts/` (since 2026-11-24, review A1), `artifact_registry/`, `registry_utils/`, `data_pipeline/`, `inference_core/`, `calibration/`, `serving/`, `postprocessing/`, `evaluation/`, `orchestration/`, `scripts/__init__.py`, `scripts/served_adapter.py`, `configs/`, `schemas/`, `prompts/`, `azure_service/`.
+COPY lines: `pyproject.toml`, `requirements-service.lock`, `common/`, `contracts/` and `adapters/` (since 2026-11-24, review A1), `artifact_registry/`, `registry_utils/`, `data_pipeline/`, `inference_core/`, `calibration/`, `serving/`, `postprocessing/`, `evaluation/`, `orchestration/`, `configs/`, `schemas/`, `prompts/`, `azure_service/`.
 
-`training/`, `testing/`, `pilot/`, `data/` and `tests/` are not in it. The served packages (`common`, `contracts`, `inference_core`, `calibration`, `serving`, `azure_service`) import nothing from the build-time ones beyond the few `tests/test_layering.py` still allows, each named there; until that list is empty the image keeps `data_pipeline/`, `evaluation/`, `orchestration/` and `scripts/served_adapter.py`. `tests/test_production_image_imports.py` runs the served code with every package the image leaves out blocked, so served code that imports one fails on a laptop too (`test_the_dockerfile_leaves_training_and_testing_out`). `azure_service/Dockerfile.dockerignore` and the root `.dockerignore` exclude everything else from the build context (`test_the_root_dockerignore_leaves_out_what_the_service_one_does`). DEPLOY.md says to build from a clean `git archive` export, never from the working tree.
+`training/`, `testing/`, `pilot/`, `data/` and `tests/` are not in it. The served packages (`common`, `contracts`, `adapters`, `inference_core`, `calibration`, `serving`, `azure_service`) import nothing from the build-time ones beyond the few `tests/test_layering.py` still allows, each named there; until that list is empty the image keeps `data_pipeline/`, `evaluation/` and `orchestration/`. `scripts/` left it on 2026-11-24. `tests/test_production_image_imports.py` runs the served code with every package the image leaves out blocked, so served code that imports one fails on a laptop too (`test_the_dockerfile_leaves_training_and_testing_out`). `azure_service/Dockerfile.dockerignore` and the root `.dockerignore` exclude everything else from the build context (`test_the_root_dockerignore_leaves_out_what_the_service_one_does`). DEPLOY.md says to build from a clean `git archive` export, never from the working tree.
 
 ## Open
 

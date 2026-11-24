@@ -513,8 +513,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    from adapters.served_ocr import ServedOcr
     from artifact_registry.blob_client import BlobClient, InMemoryBackend
-    from data_pipeline.ocr.served_ocr import ServedOcr
     from inference_core.model_runner import load_model
     from inference_core.openai_backend import OpenAIChatBackend
 

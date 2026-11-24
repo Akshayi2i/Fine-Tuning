@@ -806,8 +806,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         model = load_model(args.gpu_memory_utilization, args.adapter)    # vLLM first: MinerU takes the rest
     if args.mineru_url:
+        from adapters.served_ocr import ServedOcr
         from common.config import served_mineru
-        from data_pipeline.ocr.served_ocr import ServedOcr
 
         pin = served_mineru()
         ocr: Any = ServedOcr(args.mineru_url, args.remote_token, tier=args.tier or pin["tier"],

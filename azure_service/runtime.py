@@ -307,8 +307,8 @@ def check_server_settings(backend: Any) -> None:
 
 def served_reader(settings: Any) -> Any:
     """The pinned MinerU at ``MINERU_URL``, in runs of ``RUN_PAGES`` pages."""
+    from adapters.served_ocr import ServedOcr
     from common.config import served_mineru
-    from data_pipeline.ocr.served_ocr import ServedOcr
 
     pin = served_mineru()
     return ServedOcr(settings.mineru_url, settings.mineru_token, tier=pin["tier"],

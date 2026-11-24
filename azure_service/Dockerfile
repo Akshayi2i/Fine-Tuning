@@ -34,6 +34,7 @@ RUN pip install --no-deps -r requirements-service.lock
 # testing/, pilot/, data/ or tests/.
 COPY common/ common/
 COPY contracts/ contracts/
+COPY adapters/ adapters/
 COPY artifact_registry/ artifact_registry/
 COPY registry_utils/ registry_utils/
 COPY data_pipeline/ data_pipeline/

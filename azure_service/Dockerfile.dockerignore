@@ -6,6 +6,7 @@
 !requirements-service.lock
 !common/
 !contracts/
+!adapters/
 !artifact_registry/
 !registry_utils/
 !data_pipeline/

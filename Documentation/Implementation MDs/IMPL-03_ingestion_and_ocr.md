@@ -489,3 +489,8 @@ corrected at bundling instead.
 - A package's dropped parts keep their printed title, form and premium as extra fields; `<input>/exclusions.csv` is read on every run.
 - A stored reading that records no `read_every_page_by_ocr` stands, with the setting on, only when it was read by OCR (`run_mineru.read_as_configured`): `find_unprocessed`, `process_document` and the corpus build agree, and the corpus manifest records the setting.
 - `smoke_run` needs `--batch` and, for its OCR step, `MINERU_URL`; it takes families of at most `--max-pages` (40) pages.
+
+## Changes of 2026-11-24 (review Phase 4, A1: the OCR clients move to adapters/)
+
+- `data_pipeline/ocr/served_ocr.py`, `mineru_api.py`, `mineru_version.py` and `modality.py` moved whole to `adapters/`; the old paths are aliases of the same modules, so imports and patches through either name reach one object. The page renderer's functions (`render_pdf_pages`, `smart_resize`, `page_pixel_budget`, `RenderError`, ...) moved to `adapters/pdf_pages.py`, and `python -m data_pipeline.ocr.render_only` (the render stage) stays where it was, re-exporting them. `OcrError`, `PageOutput`, `text_layer_pages` and the page markers moved to `adapters/ocr_pages.py`, re-exported by `run_mineru`; `count_table_rows` is in `contracts/page_text.py`. No behaviour change.
+

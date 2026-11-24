@@ -274,7 +274,7 @@ def test_an_answer_this_client_cannot_read_is_said_with_the_answer(mineru, where
 
 
 def test_a_failed_rendering_stops_minerUs_reading(mineru, monkeypatch, tmp_path):
-    from data_pipeline.ocr import render_only
+    from adapters import pdf_pages as render_only  # where ServedOcr renders from (review A1)
 
     fake, url = mineru
     fake.status = lambda task: "running"                                   # a task that never ends

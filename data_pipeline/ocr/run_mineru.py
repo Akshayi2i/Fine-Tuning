@@ -25,10 +25,20 @@ import argparse
 import logging
 import os
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from adapters.mineru_version import Device, current_environment, get_mineru_version
+from adapters.ocr_pages import (  # noqa: F401 - moved (review A1)
+    _PAGE_FOOT,
+    _PAGE_HEAD,
+    INVISIBLE_TEXT_MODES,
+    TEXT_LAYER_MIN_CHARS,
+    OcrError,
+    PageOutput,
+    text_layer_pages,
+    visible_text_chars,
+)
 from artifact_registry import paths
 from artifact_registry.blob_client import BlobClient, for_ocr
 from common.config import resolution_cap_px
@@ -39,30 +49,8 @@ from contracts.page_text import (  # noqa: F401 - moved (review A1)
     _count_pipe_rows,
     count_table_rows,
 )
-from data_pipeline.ocr.mineru_version import Device, current_environment, get_mineru_version
 
 log = logging.getLogger(__name__)
-
-
-class OcrError(RuntimeError):
-    """Raised when a document cannot be processed."""
-
-
-@dataclass
-class PageOutput:
-    """One page's OCR text and rendered image."""
-
-    page_number: int          # 1-based; ordering is positionally meaningful
-    markdown: str
-    image_bytes: bytes
-    table_row_count: int = 0  # feeds the row-completeness signal (IMPL-09)
-    ocr_failed: bool = False
-    #: The page has no text layer (a scan). A document with any such page is
-    #: OCR'd whole and recorded as ``is_scanned``.
-    scanned: bool = False
-    #: MinerU read the document in OCR mode (a scan, a mixed document, drawn
-    #: figures, or the caller's force_ocr), not from its text layer.
-    read_by_ocr: bool = False
 
 
 class OcrEngine(Protocol):
@@ -142,7 +130,7 @@ class MinerUEngine:
                 "bash scripts/download_mineru_models.sh"
             ) from exc
 
-        from data_pipeline.ocr.modality import ModalityError, reads_by_ocr
+        from adapters.modality import ModalityError, reads_by_ocr
 
         try:
             ocr = reads_by_ocr(pdf_bytes, modality=modality, force_ocr=force_ocr)
@@ -204,60 +192,11 @@ class MinerUEngine:
         ]
 
 
-#: Characters of embedded text below which a page counts as having no text layer.
-TEXT_LAYER_MIN_CHARS = 30
-
-#: Text render modes that draw nothing on the page: 3 is invisible text - the
-#: layer a scanner's OCR lays under a page image to make it searchable - and 7
-#: adds the text to a clipping path only.
-INVISIBLE_TEXT_MODES = (3, 7)
-
 #: Versions of the rules that decide how a document is read; recorded in its OCR
 #: meta so a stored reading made under older rules is checked again
 #: (_needs_ocr_now). 1: drawn figures send a native PDF through OCR. 2: only
 #: visible text counts as a text layer, so a searchable scan is a scan.
 OCR_RULES_VERSION = 2
-
-
-def visible_text_chars(page: Any) -> int:
-    """Characters of text drawn visibly on a page, not counting an invisible
-    OCR layer or fully transparent text."""
-    return sum(
-        len(span.get("chars", ()))
-        for span in page.get_texttrace()
-        if span.get("type") not in INVISIBLE_TEXT_MODES and span.get("opacity", 1) > 0
-    )
-
-
-def text_layer_pages(pdf_bytes: bytes) -> list[bool]:
-    """Per page, whether it is a digital page rather than a scan.
-
-    A page with visible text is digital. Only visible text counts: a scan made
-    searchable is a page image with the scanner's OCR text laid invisibly under
-    it, and counting that layer called it digital - its own OCR was read
-    instead of MinerU's, and it was recorded as not scanned. An EMPTY page - no
-    text, no image, no drawing - is digital too: there is nothing on it to OCR.
-    Counting it as a scan sent a whole digital policy with one blank page
-    through OCR mode and into the scanned eval subset. A page with no visible
-    text but an image or drawings on it is a scan (or might be), and is read by
-    OCR.
-    """
-    import pymupdf
-
-    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
-        return [
-            visible_text_chars(page) >= TEXT_LAYER_MIN_CHARS
-            or not (page.get_images() or page.get_drawings())
-            for page in doc
-        ]
-
-
-#: Content-list blocks at a page's edges. MinerU 3.x lists them after the page's
-#: body; a page's header is put back at its head and the rest at its foot, so the
-#: text reads top to bottom. MinerU 1.x dropped them: a form's number, printed in
-#: its footer, was in no page's text.
-_PAGE_HEAD = ("header",)
-_PAGE_FOOT = ("footer", "page_number", "page_footnote", "aside_text")
 
 
 def pages_from_content_list(blocks: Iterable[dict[str, Any]], page_count: int) -> list[str]:
@@ -455,7 +394,7 @@ def _needs_ocr_now(existing: dict[str, Any], client: BlobClient, doc_type: str, 
         return False
     if existing.get("read_by_ocr"):
         return None
-    from data_pipeline.ocr import modality
+    from adapters import modality
 
     try:
         pdf = client.read_bytes(paths.raw_pdf(doc_type, source_id, tenant_id))
@@ -701,7 +640,7 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
                              "server named (the jobs each runs at once). The MinerU installed here reads one "
                              "at a time")
     args = parser.parse_args(list(argv) if argv is not None else None)
-    from data_pipeline.ocr.served_ocr import SERVER_JOBS, configured_urls, served_urls
+    from adapters.served_ocr import SERVER_JOBS, configured_urls, served_urls
 
     # MINERU_URLS, else MINERU_URL: the one rule (served_ocr.configured_urls).
     args.mineru_url = args.mineru_url or ",".join(configured_urls()) or None
@@ -723,7 +662,7 @@ def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin C
                         datefmt="%Y-%m-%d %H:%M:%S")
     client = for_ocr()
     if args.mineru_url:
-        from data_pipeline.ocr.served_ocr import MINERU_TOKEN_ENV, served_engine
+        from adapters.served_ocr import MINERU_TOKEN_ENV, served_engine
 
         urls = served_urls(args.mineru_url)
         if not urls:

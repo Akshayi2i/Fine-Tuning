@@ -120,7 +120,7 @@ def managed_ocr_server(
     stops only the servers it started. One that never answers is left out, and the others read,
     once the wait is over; only when none answers is it an error.
     """
-    from data_pipeline.ocr.served_ocr import configured_urls, served_engine, served_urls
+    from adapters.served_ocr import configured_urls, served_engine, served_urls
 
     # Looked up when called, not when defined, so a replacement of any of them takes effect.
     runner = runner or subprocess.run

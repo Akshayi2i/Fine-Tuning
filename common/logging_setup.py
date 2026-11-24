@@ -22,7 +22,7 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 #: This repository's top-level packages: their loggers are never left disabled.
 OWN_PACKAGES = frozenset({
-    "artifact_registry", "calibration", "common", "contracts", "data_pipeline", "evaluation", "inference_core",
+    "adapters", "artifact_registry", "calibration", "common", "contracts", "data_pipeline", "evaluation", "inference_core",
     "orchestration", "pilot", "postprocessing", "registry_utils", "scripts", "serving", "testing",
     "training", "azure_service",
 })
