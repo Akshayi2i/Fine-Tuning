@@ -15,8 +15,6 @@
 !postprocessing/
 !evaluation/
 !orchestration/
-!scripts/__init__.py
-!scripts/served_adapter.py
 !configs/
 !schemas/
 !prompts/

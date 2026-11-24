@@ -517,7 +517,7 @@ def ocr_pin_refusal(ocr_pin: dict[str, Any] | None, pin: dict[str, str] | None =
     holds it).
     """
     from common.config import served_mineru
-    from scripts.served_adapter import ServedAdapterError, assert_ocr_pin
+    from contracts.served_release import ServedAdapterError, assert_ocr_pin
 
     pin = pin or served_mineru()
     recorded = dict(ocr_pin or {})

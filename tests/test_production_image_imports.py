@@ -28,9 +28,9 @@ def _copied_packages() -> set[str]:
 
 
 def _left_out_packages() -> list[str]:
-    """Top-level Python packages in the repo the image does not carry.
-    ``scripts`` is copied in part (two files), so it is not blocked here."""
-    copied = _copied_packages() | {"scripts"}
+    """Top-level Python packages in the repo the image does not carry
+    (``scripts`` among them since 2026-11-24: nothing in the image imports it)."""
+    copied = _copied_packages()
     return sorted(
         child.name for child in REPO.iterdir()
         if child.is_dir() and (child / "__init__.py").exists() and child.name not in copied

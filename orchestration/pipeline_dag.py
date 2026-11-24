@@ -4328,8 +4328,8 @@ def release_next_steps(ctx: StageContext, bundle: Any, not_promotable: list[str]
     shadow check of the gated release on the real server path, then its
     promotion by a named person. A release ``promote`` would refuse says what
     to fix first; a dry run pushed placeholders, so it has nothing to read."""
+    from contracts.served_release import lora_name
     from registry_utils.releases import promoted_release_id
-    from scripts.served_adapter import lora_name
 
     release = bundle.release_id
     if ctx.dry_run:

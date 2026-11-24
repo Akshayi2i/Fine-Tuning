@@ -43,7 +43,6 @@ COPY serving/ serving/
 COPY postprocessing/ postprocessing/
 COPY evaluation/ evaluation/
 COPY orchestration/ orchestration/
-COPY scripts/__init__.py scripts/served_adapter.py scripts/
 COPY configs/ configs/
 COPY schemas/ schemas/
 COPY prompts/ prompts/

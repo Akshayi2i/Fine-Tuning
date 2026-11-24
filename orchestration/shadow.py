@@ -246,7 +246,7 @@ def side_for(name: str, bundle: dict[str, Any], tenant: str) -> Side:
     worker makes (``azure_service.runtime.check_release``); ``error`` says why
     it fails them."""
     from azure_service.runtime import check_release
-    from scripts.served_adapter import lora_name
+    from contracts.served_release import lora_name
     from serving.release_router import ServingPlan, _as_release
     from serving.vllm_entrypoint import ColdStartError
 
