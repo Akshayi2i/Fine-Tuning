@@ -44,6 +44,52 @@ BASE_FALLBACK_ROUTE = "base_model_fallback"
 RELEASE_ROUTE = "release"
 
 
+#: The calibration a reading with no fitted calibrators uses: raw confidence.
+IDENTITY_CALIBRATION = "identity"
+
+
+def served_pins(release: Any, *, calibration: str | None) -> dict[str, Any]:
+    """What a result is read with, in one block (review S1): the base model and
+    its revision, the release, the prompt hash, the window plan, the format
+    profile, the served MinerU (version and tier) and where the calibration came
+    from. ``release`` None is the base model with no adapter. The line's schema
+    version is added per job (:func:`schema_pin`). Built from the same values
+    the start-up checks hold the release to, so a result names what it was
+    read with without a registry lookup."""
+    from common.config import base_model_config, format_profile, served_mineru
+    from common.prompts import prompt_hash
+    from data_pipeline.dataset_builder.policy_windows import window_plan_id
+
+    if release is not None:
+        base_model = str(release.base_model)
+    else:
+        base = base_model_config()["model"]
+        base_model = f"{base['model_id']}@{base['revision']}"
+    ocr = served_mineru()
+    return {
+        "base_model": base_model,
+        "release": release.release_id if release is not None else None,
+        "prompt_hash": prompt_hash(),
+        "window_plan": window_plan_id(),
+        "format_profile": format_profile(),
+        "ocr_version": ocr["version"],
+        "ocr_tier": ocr["tier"],
+        "calibration": calibration or IDENTITY_CALIBRATION,
+    }
+
+
+def schema_pin(lob: Any) -> str | None:
+    """The version of the schema a policy of ``lob`` is read against; None
+    (and a warning) when it cannot be read - the pins never cost a job."""
+    from common.schemas import schema_version
+
+    try:
+        return schema_version("policy", None, lob or None)
+    except Exception as exc:  # noqa: BLE001 - a record of the reading, never a reason to fail it
+        log.warning("the schema version of line %r could not be read for the result's pins: %s", lob, exc)
+        return None
+
+
 class JobRefused(RuntimeError):
     """A job this worker can never read as configured: failed at once, never retried."""
 
@@ -57,6 +103,9 @@ class Reading:
     route: str
     calibrators: Any = None
     thresholds: Any = None
+    #: What the result was read with (:func:`served_pins`), written into every
+    #: result and status record (review S1).
+    pins: dict[str, Any] = field(default_factory=dict)
 
     def extract_options(self, tuning: dict[str, Any]) -> dict[str, Any]:
         """What :func:`serving.pipeline.extract` is given beside the request: the
@@ -77,6 +126,18 @@ class TenantRuntime:
     #: The base model with no LoRA, when the fallback is configured.
     base_model: Any = None
     release_runtime: ReleaseRuntime | None = None
+    #: The pins of a release reading and of a base-model reading, built once
+    #: (:meth:`build_pins`, at start-up in :func:`load_tenant`).
+    release_pins: dict[str, Any] | None = None
+    base_pins: dict[str, Any] | None = None
+
+    def build_pins(self) -> None:
+        """Both readings' pins, from the values the start-up checks read."""
+        if self.release_pins is None and self.release is not None:
+            calibration = self.release.calibrators if self.release_runtime and                 self.release_runtime.calibrators is not None else IDENTITY_CALIBRATION
+            self.release_pins = served_pins(self.release, calibration=calibration)
+        if self.base_pins is None:
+            self.base_pins = served_pins(None, calibration=IDENTITY_CALIBRATION)
 
     @property
     def release(self) -> Any:
@@ -90,9 +151,11 @@ class TenantRuntime:
             routed = self.plan.route("policy", lob, allow_fallback=True)
             if routed.release is not None:
                 runtime = self.release_runtime
+                self.build_pins()
                 return Reading(self.release_model, release.release_id, RELEASE_ROUTE,
                                calibrators=runtime.calibrators if runtime else None,
-                               thresholds=runtime.thresholds if runtime else None)
+                               thresholds=runtime.thresholds if runtime else None,
+                               pins=dict(self.release_pins or {}))
         if self.base_model is None:
             from serving.release_router import business_owners_hint
 
@@ -100,7 +163,8 @@ class TenantRuntime:
                     if release is not None else f"no release is promoted for tenant {self.tenant}")
             raise JobRefused(f"{what}, and this worker does not read with the base model "
                              f"(ALLOW_BASE_FALLBACK is off).{business_owners_hint(lob)}")
-        return Reading(self.base_model, None, BASE_FALLBACK_ROUTE)
+        self.build_pins()
+        return Reading(self.base_model, None, BASE_FALLBACK_ROUTE, pins=dict(self.base_pins or {}))
 
 
 @dataclass
@@ -197,6 +261,7 @@ def load_tenant(tenant: str, registry: Any, settings: Any, models: Callable[[str
             "(ALLOW_BASE_FALLBACK=true with BASE_MODEL_NAME): there is nothing to read with")
     if settings.allow_base_fallback:
         runtime.base_model = models(settings.base_model_name)
+    runtime.build_pins()
     return runtime
 
 

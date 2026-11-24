@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import re
-
 from types import SimpleNamespace
 
 import pytest
@@ -551,9 +550,8 @@ def test_only_a_server_side_http_status_is_a_transport_failure(status, transport
 
     from unittest import mock
 
-    with mock.patch("common.transport.open_url", side_effect=error):
-        with pytest.raises(ModelRunnerError) as raised:
-            backend._request("/v1/chat/completions", b"{}")
+    with mock.patch("common.transport.open_url", side_effect=error), pytest.raises(ModelRunnerError) as raised:
+        backend._request("/v1/chat/completions", b"{}")
     assert isinstance(raised.value, ModelTransportError) is transport
     # A proxy's HTML page is reduced to its title, never the whole page.
     assert "Waiting for service to respond - RunPod" in str(raised.value) and len(str(raised.value)) < 200
@@ -568,9 +566,8 @@ def test_an_unreachable_server_and_a_broken_off_answer_are_transport_failures():
 
     backend = OpenAIChatBackend("https://pod.example.test", "tok", model="m")
     for failure in (urllib.error.URLError("[Errno 11001] getaddrinfo failed"), ConnectionResetError("reset")):
-        with mock.patch("common.transport.open_url", side_effect=failure):
-            with pytest.raises(ModelTransportError):
-                backend._request("/v1/chat/completions", b"{}")
+        with mock.patch("common.transport.open_url", side_effect=failure), pytest.raises(ModelTransportError):
+            backend._request("/v1/chat/completions", b"{}")
 
 
 # --------------------------------------------------------------------------

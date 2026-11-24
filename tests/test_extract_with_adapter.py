@@ -161,8 +161,9 @@ def test_a_gold_with_no_review_record_is_extracted_but_not_scored(client, tmp_pa
     summary = run_batch(model, client, ["policy_0001"], tenant_id="t1",
                         images_root=tmp_path / "pages", root=tmp_path / "out")
     assert summary.documents == 1 and not summary.failed
-    assert (tmp_path / "out" / "results" / model.tag / "policy_0001.json").is_file()   # still extracted
-    metrics = json.loads((tmp_path / "out" / "metrics" / model.tag / "policy_0001.metrics.json")
+    run = summary.run_id
+    assert (tmp_path / "out" / "results" / model.tag / run / "policy_0001.json").is_file()   # still extracted
+    metrics = json.loads((tmp_path / "out" / "metrics" / model.tag / run / "policy_0001.metrics.json")
                          .read_text(encoding="utf-8"))
     assert "field_normalized_match_rate" not in metrics
     assert metrics["ground_truth"].startswith("not scored: its gold has no review record")
@@ -181,22 +182,85 @@ def test_the_extraction_command_runs_each_document_through_serving_with_the_adap
 
     assert summary.documents == 2 and [sid for sid, _ in summary.failed] == ["policy_9999"]
     assert echo.calls and {call["adapter"] for call in echo.calls} == {model.default_adapter}
-    result = json.loads((tmp_path / "out" / "results" / model.tag / "policy_0001.json").read_text(encoding="utf-8"))
+    run = summary.run_id
+    result = json.loads((tmp_path / "out" / "results" / model.tag / run / "policy_0001.json")
+                        .read_text(encoding="utf-8"))
     extraction = result["extraction"]
     assert extraction["policy"]["policy_number"]["raw"] == "HO-1"
     assert "effective_date" in extraction["policy"]              # every schema key, null where not found
-    metrics = json.loads((tmp_path / "out" / "metrics" / model.tag / "policy_0001.metrics.json")
+    metrics = json.loads((tmp_path / "out" / "metrics" / model.tag / run / "policy_0001.metrics.json")
                          .read_text(encoding="utf-8"))
     assert metrics["fields"]["policy.policy_number"]["correct"] is True
-    assert (tmp_path / "out" / "metrics" / model.tag / "summary.json").is_file()
+    assert (tmp_path / "out" / "metrics" / model.tag / run / "summary.json").is_file()
     # Every field of the schema, graded against the gold, in the JSON a reader opens.
     every = result["all_fields"]["fields"]
     assert every["policy.policy_number"]["result"] == "correct"
     assert (every["policy.effective_date"]["status"], every["policy.effective_date"]["result"]) == ("null", "empty")
     assert "all_fields" not in metrics
     # Each written output is traced to what produced it; the failed document wrote none.
-    registry = json.loads((tmp_path / "out" / "extraction_registry.json").read_text(encoding="utf-8"))
-    assert [(e["document"], e["model_version"]) for e in registry["extractions"]] == [("policy_0001", model.tag)]
+    registry = json.loads((tmp_path / "out" / "results" / "extraction_registry.json").read_text(encoding="utf-8"))
+    assert [(e["document"], e["model_version"], e["run_id"]) for e in registry["extractions"]] == [
+        ("policy_0001", model.tag, run)]
+
+
+def test_one_failed_document_fails_the_run_and_is_counted(client, tmp_path):
+    """Review R3 (decision 2026-11-24): one failure out of two exits 1 unless
+    allowed, and the summary counts what each mean is over."""
+    from testing.run_extraction import exit_code, run_batch
+
+    _imported_document(client)
+    model = load_model("base", client, backend_impl=EchoBackend(ANSWER), adapter=str(_adapter(tmp_path)))
+    summary = run_batch(model, client, ["policy_0001", "policy_9999"], tenant_id="t1",
+                        images_root=tmp_path / "pages", root=tmp_path / "out")
+    assert exit_code(summary) == 1                                    # was 0: only an all-failed run exited 1
+    assert exit_code(summary, allow_failures=1) == 0
+    assert summary.counts == {"read": 2, "extracted": 1, "scored": 1, "failed": 1, "not_scored": 0}
+    written = json.loads((tmp_path / "out" / "metrics" / model.tag / summary.run_id / "summary.json")
+                         .read_text(encoding="utf-8"))
+    assert written["counts"] == summary.counts
+    assert summary.closing_line() == "read 2, scored 1, failed 1, not scored 0"
+    clean = run_batch(model, client, ["policy_0001"], tenant_id="t1", images_root=tmp_path / "pages",
+                      root=tmp_path / "out")
+    assert exit_code(clean) == 0
+
+
+def test_two_runs_keep_two_result_sets(client, tmp_path):
+    """Review R2: a second run, in another mode, never writes over the first;
+    each run folder says what it was read with."""
+    from common.prompts import prompt_hash
+    from testing.run_extraction import run_batch
+    from testing.testing_record import read_csv
+
+    _imported_document(client)
+    model = load_model("base", client, backend_impl=EchoBackend(ANSWER), adapter=str(_adapter(tmp_path)))
+    runs = [run_batch(model, client, ["policy_0001"], tenant_id="t1", mode=mode,
+                      images_root=tmp_path / "pages", root=tmp_path / "out",
+                      run_info={"corpus": "c3", "split": "test"}).run_id
+            for mode in ("image_only", "ocr_plus_image")]
+    assert len(set(runs)) == 2 and runs[0].endswith("-image_only") and runs[1].endswith("-ocr_plus_image")
+    for run, mode in zip(runs, ("image_only", "ocr_plus_image"), strict=True):
+        for kind in ("results", "metrics"):
+            folder = tmp_path / "out" / kind / model.tag / run
+            record = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+            assert record["run_id"] == run and record["mode"] == mode and record["model"] == model.tag
+            assert record["prompt_hash"] == prompt_hash() and record["corpus"] == "c3" and record["split"] == "test"
+            assert record["counts"]["read"] == 1 and record["finished_at"]
+        result = json.loads((tmp_path / "out" / "results" / model.tag / run / "policy_0001.json")
+                            .read_text(encoding="utf-8"))
+        assert result["mode"] == mode
+    registry = json.loads((tmp_path / "out" / "results" / "extraction_registry.json").read_text(encoding="utf-8"))
+    assert [e["run_id"] for e in registry["extractions"]] == runs
+    rows = read_csv(tmp_path / "out" / "metrics" / model.tag / "test_record.csv")
+    assert [row["Run ID"] for row in rows] == runs
+    # The same mode in the same second takes another id, never the first's folder.
+    from datetime import UTC, datetime
+
+    from testing.run_extraction import new_run_id
+
+    now = datetime(2026, 11, 24, 9, 31, 12, tzinfo=UTC)
+    first = new_run_id("image_only", now=now, root=tmp_path / "out", model_version=model.tag)
+    (tmp_path / "out" / "results" / model.tag / first).mkdir(parents=True)
+    assert new_run_id("image_only", now=now, root=tmp_path / "out", model_version=model.tag) == f"{first}-2"
 
 
 def test_the_extract_subcommand_passes_the_adapter_through(monkeypatch):

@@ -23,7 +23,7 @@ be delivered, and the corpus, the frozen eval set and the adapter are rebuilt fr
 
 | Where | What |
 |---|---|
-| `Documentation/finetuning-architecture-v2.7.docx` | The design and its rationale - the *why* (v2.7: printed values only, consistent output, fields first, one MinerU and production on Azure, on top of v2.6's one policy adapter and incremental training; the decisions of 2026-10-19 to 2026-10-24, §0e and Appendix A). v2.6, v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only |
+| `Documentation/Architecture/finetuning-architecture-v2.7.docx` | The design and its rationale - the *why* (v2.7: printed values only, consistent output, fields first, one MinerU and production on Azure, on top of v2.6's one policy adapter and incremental training; the decisions of 2026-10-19 to 2026-10-24, §0e and Appendix A). v2.6, v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only |
 | `Documentation/Implementation MDs/IMPL-00` .. `IMPL-15` | Module specs and acceptance criteria - the *how*; IMPL-00 §13 indexes what the code does now |
 | `Documentation/Implementation MDs/IMPL_ALL_COMBINED.md` | All specs in one file |
 
@@ -94,14 +94,18 @@ python -m orchestration.run finetune --input ./intake --fresh     # from the bas
 #    calibration and the gate score the base with the adapter applied, as it is served.
 python -m orchestration.run package --version v3
 #    The gate compares v3 with the tenant's promoted release. A release that improves no primary metric
-#    needs --fixes-defect "<ticket>" (a blank or placeholder value is refused). Scored on fewer than 150
-#    real frozen policies (twins do not count), it is capped at interim. A promoted release scored on
-#    another frozen set, tenant or scoring code is no baseline: the candidate is judged on floors alone.
-#    A failed gate ships only with a written override, naming real gates:
+#    fails the improvement rule unless --fixes-defect "<ticket>" names what it fixes (a blank or placeholder
+#    value is refused). A promoted release scored on another frozen set, tenant or scoring code is no
+#    baseline: the candidate is judged on floors alone.
+#    A failed gate is a flag, not a bar (decision 2026-11-04): the release is still packaged, recorded as
+#    "Gate failed due to ...", and a person decides whether to promote it. A gate that could not decide
+#    (readings the engine failed twice) still stops the package: run the eval again. A written override
+#    records a waiver instead of the flag:
 #    --override-approver "<person>" --override-reason "<why, 20+ chars>" --override-gate <gate>
-#    A release that passes is left gated; nothing is archived. Production tier: served field match (image_only
+#    The release is left gated; nothing is archived. Production tier: served field match (image_only
 #    readings of real documents, as served) >= 0.92 with its one-sided 95% lower bound >= 0.90 ("confirmed"
-#    when the bound >= 0.92), on >= 150 real policies.
+#    when the bound >= 0.92). How many documents were scored caps no tier (decision 2026-11-04): a small
+#    test set shows as a wide lower bound.
 
 # 2b the shadow check, on the pod's real server path: ~50 frozen documents read by the candidate and by the
 #    promoted release (vLLM with both adapters, --max-loras 2), scored as the gate scores them, and timed:
@@ -117,7 +121,8 @@ python -m orchestration.run finetune --version v3 --from-stage training
 
 # the registry: every version, its run status and its release status
 python -m orchestration.run versions
-# a rollback: serve v2 again (v3 is archived; its weights stay in Blob). Run it from v2's code.
+# a rollback: serve v2 again (v3 is archived; its weights stay in Blob). Run it from v2's code: promote
+# prints the pair it serves as, "v2 = adapter ... + code commit ..." (releases packaged since 2026-11-24).
 python -m orchestration.run promote --version v2 --by "<person>"
 
 # 3  extraction through the serving pipeline, on documents already imported and OCR'd
@@ -125,9 +130,20 @@ python -m orchestration.run extract --model base|v1|v2 --tenant T --source-ids p
 python -m orchestration.run extract --model base|v1|v2 --tenant T --split test --corpus v1
 #    base model + a LoRA adapter applied per request, NOT merged (a checkpoint or the run's adapter):
 python -m orchestration.run extract --model base --adapter /workspace/staging/.../checkpoint-280 --tenant T --split test --corpus v1
-#    JSON per document in testing/results/<model>/, metrics and summary.json in testing/metrics/<model>/
-#    and a testing-record row per document (round, date, split, carrier, line, pages, field match, latency,
-#    input/output tokens) in testing/metrics/<model>/test_record.csv - --round names the round, e.g. Baseline.
+#    Each run has its own folders: JSON per document in testing/results/<model>/<run_id>/, metrics and
+#    summary.json in testing/metrics/<model>/<run_id>/, each with a run.json (model, mode, prompt hash, commit);
+#    run_id is the UTC start time and the mode, e.g. 20261124T093112Z-image_only. A testing-record row per
+#    document (round, date, split, carrier, line, pages, field match, latency, input/output tokens, run id) goes
+#    to testing/metrics/<model>/test_record.csv - --round names the round, e.g. Baseline.
+#    The run exits 1 when any document failed (--allow-failures N allows N); its last line reads
+#    "read X, scored Y, failed Z, not scored W".
+#    The default reads the model (--mode, identity calibration: every field flagged). To read as production
+#    serves - image_only, the release's calibrators, the answer held to the stored page text by the gate's own
+#    reading, so the number is comparable with the gate's - add --as-served (run.json and every metrics file
+#    say "path": "as_served"). Each document then also carries its fields-first result (what a user sees
+#    first: <doc>.fields_first.json, and "fields_first" in the metrics and summary). By its own name:
+python -m orchestration.run extract --model v3 --as-served --tenant T --split test --corpus v1
+python -m orchestration.run release-check --version v3 --tenant T --corpus v1      # --split test by default
 #    Copy the rows into the team's workbook (fills its "Testing Record" sheet; never overwrites, never twice):
 python -m testing.testing_record --model base --round Baseline --xlsx "Documentation/Testing Records/FIdeon SLM - Model Training & Test Record_v1.xlsx"
 #    No project code on the pod (it serves only `vllm serve` and the MinerU API): stage the bundles here, read
@@ -804,7 +820,7 @@ Azure account.
 
 | Phase | Scope | State |
 |---|---|---|
-| 0 | Infra + dependency spike | **pending (yours)** |
+| 0 | Infra + dependency spike | the stack ran in cycles 1-2 (v3, v4); the spike script's own run is not recorded here |
 | 1 | Contracts, configs, fixtures | done |
 | 2 | Blob I/O + run registry | done |
 | 3 | Ingest + MinerU OCR (GPU) | done |
@@ -884,15 +900,17 @@ process, which is why CI covers this much without a pod.
   GPU, the base weights, ms-swift and vLLM, and has not run there yet.
 - **Field glosses need SME review.** They are prompt text; changing one after the
   first corpus build forces a rebuild and retrain.
-- **The dependency spike has not run.** ms-swift with Qwen3-VL, flash-attn,
-  vLLM multi-LoRA, MinerU on GPU and its determinism. `scripts/pod_bootstrap.sh`
-  runs it; the base model is pinned to `0c351dd01ed87e9c1b53cbc748cba10e6187ff3b`
+- **The dependency stack has run, the spike's own record has not been kept.** ms-swift with Qwen3-VL,
+  vLLM with the adapter on the base and MinerU on GPU trained, gated and served v3 (cycle 1) and v4 (cycle 2,
+  `Training Records/Cycle 2/`). `scripts/phase0_spike.py` (run by `scripts/pod_bootstrap.sh`) checks them one
+  by one, flash-attn and determinism included; no report of a run of it is in this repo. The base model is pinned to `0c351dd01ed87e9c1b53cbc748cba10e6187ff3b`
   (the Hub commit of 2025-10-15).
 - **The Azure service has not run on Azure.** `azure_service/` is tested with in-memory stand-ins for the queue,
   Blob and the model; the queue, managed identity, ingress limits, the Docker build and the 2-minute timing are
   checked on the first deployment (`azure_service/DEPLOY.md`).
-- **The fast format profile is unmeasured on a GPU.** Its sizes are measured on synthetic documents; its speed and
-  accuracy come from the first training cycle run in it.
+- **The fast format profile is measured in cycle 2.** It is the shipped profile since 2026-10-26; v4 was trained
+  and gated after that on GPUs (`Training Records/Cycle 2/`). The profile v4's corpus was built with is recorded in
+  its release bundle (`window_plan_version`), not in this repo.
 - **The pilot protocol is unrun.** `python -m pilot.pilot_report` reports
   `INCOMPLETE` until Experiments A, B and C have each written a report, and a
   missing experiment blocks rather than passing.

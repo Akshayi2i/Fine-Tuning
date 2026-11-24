@@ -76,8 +76,9 @@ separate container (`REVIEW_CONTAINER`) before the PDF above is deleted.
 A job whose phase-1 checkpoint exists (`fields_ready`) **resumes phase 2** - MinerU
 reads its pages, no model time is spent again, the served fields stay as they
 were. A job without one (the worker died during phase 1) is **read again from the
-start**. After `MAX_ATTEMPTS` deliveries a job is given up (poison): `failed`, or
-`done` with `full_text: false` when its checked fields were already served.
+start**. After `MAX_ATTEMPTS` deliveries a job is given up (poison): `failed`, even
+when its checked fields were already served (decision 2026-10-30: extraction never
+skips MinerU; `Worker._give_up`).
 
 ## 2. Prerequisites
 
@@ -218,8 +219,9 @@ ENV_COMMON=(
 ```
 
 **The API** - external HTTPS ingress, the only app with one. `allowInsecure` stays
-false (HTTP is redirected to HTTPS), and `REQUIRE_HTTPS=true` refuses any request
-the ingress did not receive over HTTPS.
+false (HTTP is redirected to HTTPS), and the API refuses any request the ingress
+did not receive over HTTPS. That refusal is on by default (since 24 November 2026);
+`REQUIRE_HTTPS=false` turns it off, for local tests only.
 
 ```bash
 az containerapp create -g $RG -n extraction-api --environment $ENV \
@@ -259,7 +261,7 @@ az containerapp create -g $RG -n extraction-worker --environment $ENV \
 |---|---|---|---|
 | `EXTRACTION_API_KEYS` | api | - | `{"tenant": ["key", ...]}` (secret) |
 | `MAX_PDF_MB`, `MAX_PAGES` | api | 150, 1000 | refused above (413) |
-| `REQUIRE_HTTPS` | api | false | refuse requests not received over HTTPS (set true) |
+| `REQUIRE_HTTPS` | api | true | refuse requests not received over HTTPS (false for local tests only) |
 | `API_PORT` | api | 8080 | the port the API listens on (the ingress's target port) |
 | `PUBLIC_BASE_URL` | both | - | `https://<api fqdn>`, for the webhook's links |
 | `WEBHOOK_SECRET`, `WEBHOOK_SECRETS` | both | - | the webhook HMAC secret; per tenant (secrets) |
@@ -272,6 +274,8 @@ az containerapp create -g $RG -n extraction-worker --environment $ENV \
 | `AZURE_BLOB_CONTAINER` | worker | insurance-extraction | the registry's container |
 | `MODEL_URL`, `MODEL_TOKEN` | worker | - | the pod's vLLM (HTTPS), its `--api-key` |
 | `MINERU_URL`, `MINERU_TOKEN` | worker | - | the pod's MinerU 4 API (HTTPS), its token |
+| `FIDEON_REMOTE_TOKEN` | worker | - | used for `MODEL_TOKEN` and `MINERU_TOKEN` when either is unset |
+| `AZURE_RAW_CONTAINER` | worker, retention | - | the raw container (`intake/`): `REVIEW_CONTAINER` may not be it; `azure_service.retention` needs it |
 | `SERVED_TENANTS` | worker | default | tenants whose promoted release is loaded at start |
 | `ALLOW_BASE_FALLBACK`, `BASE_MODEL_NAME` | worker | false, - | read a line no release covers with the base model (vLLM's `--served-model-name`). Keep it off (decided 2026-10-26): the base model never learned the format or the schema, so a line the release does not cover is refused, never answered unreliably |
 | `MAX_ATTEMPTS` | worker | 3 | deliveries before a job is given up |
@@ -283,7 +287,7 @@ az containerapp create -g $RG -n extraction-worker --environment $ENV \
 | `REVIEW_RETENTION_TENANTS` | worker, retention CLI | empty = **off** | tenants whose flagged, low-confidence and sampled documents are kept for review (section 9). Set only after the sign-off there |
 | `REVIEW_RETENTION_SAMPLE` | worker | 0.05 | share of an opted-in tenant's unflagged jobs kept anyway (hash of the job id) |
 | `REVIEW_RETENTION_LOW_CONFIDENCE` | worker | 0.80 | an overall confidence below this keeps the job |
-| `REVIEW_RETENTION_FLAG_KINDS` | worker | `low_confidence,no_confidence,not_printed,not_printed_removed,parsed_mismatch,role_mismatch,printed_off_cited_page,near_tie,likely_missed,unverified_unread_page,link_to_removed_row,row_count_mismatch,window_failed` | review-flag kinds (suffix after the flag's last `:`) that keep a job; document-level flags such as `uncalibrated` or `schema:invalid` never do alone |
+| `REVIEW_RETENTION_FLAG_KINDS` | worker | `low_confidence,no_confidence,not_printed,not_printed_removed,parsed_mismatch,role_mismatch,printed_off_cited_page,near_tie,likely_missed,unverified_unread_page,link_to_removed_row,row_count_mismatch,window_failed,unknown_key_removed,date_order,term_too_long,implausible_date,limit_order,premium_below_items,bad_postal_code,bad_state,bad_policy_no` | review-flag kinds (suffix after the flag's last `:`) that keep a job; document-level flags such as `uncalibrated` or `schema:invalid` never do alone |
 | `REVIEW_RETENTION_DAYS` | worker | 90 | days a retained document is kept before `retention purge` deletes it |
 | `REVIEW_CONTAINER` | worker, retention CLI | review-retention | where retained documents go: a container of its own (the jobs, registry or raw one is refused) |
 
@@ -403,8 +407,12 @@ deleted - if **any** of these holds (`azure_service/retention.py`):
   `REVIEW_RETENTION_FLAG_KINDS` - a value that needs a person: `low_confidence`,
   `no_confidence`, `not_printed`, `not_printed_removed`, `parsed_mismatch`,
   `role_mismatch`, `printed_off_cited_page`, `near_tie`, `likely_missed`,
-  `unverified_unread_page`, `link_to_removed_row`, and data that may be missing:
-  `row_count_mismatch`, `window_failed`. A document-level system flag
+  `unverified_unread_page`, `link_to_removed_row`; data that may be missing:
+  `row_count_mismatch`, `window_failed`; a key the schema has no place for, taken
+  out: `unknown_key_removed`; and values that cannot all be true together, or of a
+  shape the field never has (`serving.consistency`): `date_order`, `term_too_long`,
+  `implausible_date`, `limit_order`, `premium_below_items`, `bad_postal_code`,
+  `bad_state`, `bad_policy_no` (`settings.DEFAULT_RETENTION_FLAG_KINDS`). A document-level system flag
   (`uncalibrated`, `schema:invalid`, `printed_values:no_page_text`) alone keeps
   nothing, or nearly every document would be kept. The manifest names the kinds
   that kept it (`triggered_kinds`);
@@ -537,6 +545,8 @@ az storage queue create     -n extraction-jobs --connection-string "$AZURE_STORA
 export EXTRACTION_API_KEYS='{"default": ["a-local-key-of-at-least-32-characters"]}' WEBHOOK_SECRET=local
 export MODEL_URL=https://<pod>-8000.proxy.runpod.net MINERU_URL=https://<pod>-8001.proxy.runpod.net
 export MODEL_TOKEN=... MINERU_TOKEN=... PUBLIC_BASE_URL=http://localhost:8080 WORK_DIR=./work
+# plain HTTP on this machine only: HTTPS is required by default (REQUIRE_HTTPS, since 2026-11-24)
+export REQUIRE_HTTPS=false
 # with no promoted release in Azurite's registry container:
 export ALLOW_BASE_FALLBACK=true BASE_MODEL_NAME=<vLLM served name of the base>
 python -m azure_service.api &       # http://localhost:8080

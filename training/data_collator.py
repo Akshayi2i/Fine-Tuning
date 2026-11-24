@@ -14,7 +14,8 @@ while it happens, because reproducing a prompt is an easy objective that
 converges nicely. There is no other symptom until evaluation, by which point a
 training run has been spent.
 
-That is why ``test_data_collator`` is mutation-checked: a guard against a silent
+That is why its guard is mutation-checked (``tests/test_training.py``,
+``test_masking_out_assistant_tokens_is_caught`` and its neighbours): a guard against a silent
 failure is only worth having if it actually fires.
 """
 

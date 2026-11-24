@@ -11,6 +11,11 @@ Run after editing any spec:
 
 ``tests/test_repo_contracts.py`` runs it in check mode, so a stale combined file
 fails CI rather than being discovered by someone reading the wrong one.
+
+Only the current specifications are combined. A spec split into its current
+text and a dated history (review R6, 2026-11-24) keeps the history in
+``changelog/<spec>.changelog.md``, which the combined file leaves out: it is
+read where it is, from the link at the top of its spec.
 """
 
 from __future__ import annotations

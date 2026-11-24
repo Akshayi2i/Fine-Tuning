@@ -35,8 +35,13 @@ jobs:
 
       - name: Types
         # The whole tree, not a subset: a package excluded from type checking is
-        # a package where a signature change breaks a caller silently.
-        run: mypy common artifact_registry registry_utils data_pipeline inference_core training evaluation calibration serving postprocessing testing orchestration pilot
+        # a package where a signature change breaks a caller silently. The 271
+        # errors older than this check are frozen per file; a new one fails
+        # (scripts/check_type_errors.py).
+        run: |
+          mypy common artifact_registry registry_utils data_pipeline inference_core training evaluation calibration serving postprocessing testing orchestration pilot azure_service > mypy.txt || true
+          cat mypy.txt
+          python -m scripts.check_type_errors mypy.txt
 
       - name: Generated prompt artefacts are current
         # testing/prompts/*.prompt.txt are rendered from common.prompts. A stale
@@ -45,49 +50,36 @@ jobs:
         run: python -m testing.render_prompts --check
 
       - name: Tests
-        # GPU and live-Azure tests are marked and excluded; everything else runs.
+        # GPU and live-Azure tests are marked and excluded; everything else runs,
+        # once: the coverage report it writes feeds the gate below.
         run: |
           pytest -q -m "not gpu and not azure" \
             --cov=common --cov=training --cov=data_pipeline --cov=inference_core \
             --cov=evaluation --cov=calibration --cov=registry_utils --cov=orchestration \
-            --cov-report=term-missing
+            --cov=serving --cov=postprocessing --cov=azure_service \
+            --cov-report=term-missing --cov-report=json:coverage.json
 
       - name: Coverage gate on the correctness-critical modules
         # These are the modules whose failures are silent: broken label masking
         # does not show in a loss curve, a leaked split inflates every number,
         # and a prompt that drifts between corpus build and inference degrades
-        # accuracy with no other symptom. Coverage elsewhere is ordinary hygiene;
-        # here it is the difference between a guard and a hope.
-        run: |
-          pytest -q -m "not gpu and not azure" \
-            --cov=training.data_collator \
-            --cov=data_pipeline.dataset_builder.split_groups \
-            --cov=inference_core.input_builder \
-            --cov=inference_core.span_map \
-            --cov=common.prompts \
-            --cov=common.normalize \
-            --cov=evaluation.gating \
-            --cov=calibration.apply_calibration \
-            --cov=registry_utils.models \
-            --cov-fail-under=85
+        # accuracy with no other symptom. Each module is held to its own floor
+        # (scripts/check_module_coverage.py), the served path included (review R8).
+        run: python -m scripts.check_module_coverage coverage.json
 
   secrets-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: No real document data in fixtures
-        # Fixtures are synthetic. A real policy number or SSN reaching the repo
-        # is a disclosure that survives in git history even after deletion.
-        run: |
-          set -e
-          if grep -rInE '[0-9]{3}-[0-9]{2}-[0-9]{4}' tests/fixtures/ schemas/examples/ 2>/dev/null; then
-            echo "::error::an SSN-shaped string is present in fixtures"
-            exit 1
-          fi
-          if grep -rInE '(AccountKey=|SharedAccessSignature|BEGIN [A-Z ]*PRIVATE KEY)' . \
-             --exclude-dir=.git --exclude-dir=.github 2>/dev/null; then
-            echo "::error::a credential-shaped string is present in the repo"
-            exit 1
-          fi
-          echo "fixtures clean"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: No secrets or real document data in the committed files
+        # Matches the shapes of real secrets (a storage key's 86+ base64
+        # characters, a SAS signature, a private key block) and SSN-shaped
+        # strings in the fixtures - not the words: the old pattern matched
+        # every `AccountKey=...` placeholder and failed every push (review R5).
+        # The public Azurite key is allowed in azure_service/DEPLOY.md only.
+        run: python scripts/scan_secrets.py

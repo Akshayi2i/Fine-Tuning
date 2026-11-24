@@ -35,7 +35,7 @@ tasks:
   classify:
     max_pixels: 262144          # ~0.26M, roughly 256 visual tokens per page
     min_pixels: 50176
-    note: "page 1 only; reads the form's shape, not its small print"
+    note: "pages 1-2 (serving.doc_type_classifier.CLASSIFIER_PAGES); reads the form's shape, not its small print"
 
   # --- extraction: small print and checkboxes must survive -----------------
   extract:

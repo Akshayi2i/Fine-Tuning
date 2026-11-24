@@ -84,7 +84,9 @@ def test_switching_the_endpoint_stays_in_the_foreground(launched, monkeypatch):
 
 #: Entry points that finish in seconds, or only print a pointer and exit.
 QUICK = {
-    "registry_utils/query_registry.py", "scripts/combine_specs.py",
+    "registry_utils/query_registry.py", "scripts/combine_specs.py", "scripts/scan_secrets.py", "scripts/export_openapi.py",
+    "scripts/check_module_coverage.py", "scripts/check_type_errors.py",
+    "azure_service/jobs.py",
     "scripts/derive_aliases_from_canonical.py", "testing/render_prompts.py",
     "pilot/pilot_report.py", "pilot/zero_shot_baseline.py",
     "data_pipeline/ocr/mineru_config.py", "scripts/propose_field_types.py",

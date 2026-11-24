@@ -900,7 +900,11 @@ def prepare_original_bundles(
     Never ``move``: a re-run leaves out a document whose PDF is gone, and removes
     its folder - the only copy of a moved PDF.
     """
-    from data_pipeline.dataset_builder.split_groups import GroupRecord, assign_cell_splits, assign_group_splits
+    from data_pipeline.dataset_builder.split_groups import (
+        GroupRecord,
+        assign_cell_splits,
+        assign_group_splits,
+    )
 
     if mode not in ("link", "copy"):
         raise BundleError(f"mode {mode!r}: real documents are bundled by link or copy, never moved - "

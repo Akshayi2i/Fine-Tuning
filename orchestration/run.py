@@ -12,6 +12,8 @@ the next version number, which names its run, adapter and release::
     python -m orchestration.run versions                           # the registry, per version
     python -m orchestration.run extract  --model v2 --split test --corpus v1
     python -m orchestration.run extract  --model base --adapter ./checkpoint-400 --source-ids policy_0001
+    python -m orchestration.run extract  --model v3 --as-served --split test --corpus v1   # read as served
+    python -m orchestration.run release-check --version v3 --corpus v1                    # the same, named
 
 A fresh ``finetune`` or ``all`` takes the next version itself; ``--version``
 names one only to resume a cycle (``--from-stage``) or rerun one that failed.
@@ -222,7 +224,13 @@ def run_extract(args: argparse.Namespace) -> int:
     """
     from testing import run_extraction
 
-    argv = ["--model", args.model, "--mode", args.mode, "--doc-type", args.doc_type]
+    argv = ["--model", args.model, "--doc-type", args.doc_type]
+    if args.mode:
+        argv += ["--mode", args.mode]
+    if getattr(args, "as_served", False):
+        argv += ["--as-served"]
+    if getattr(args, "release", None):
+        argv += ["--release", args.release]
     if args.adapter:
         argv += ["--adapter", args.adapter]
     if args.label:
@@ -243,7 +251,21 @@ def run_extract(args: argparse.Namespace) -> int:
         argv += ["--tenant", args.tenant]
     if getattr(args, "round_label", None):
         argv += ["--round", args.round_label]
+    if getattr(args, "allow_failures", 0):
+        argv += ["--allow-failures", str(args.allow_failures)]
     return run_extraction.main(argv)
+
+
+def run_release_check(args: argparse.Namespace) -> int:
+    """A release read as production serves it, on a split of a corpus: ``extract
+    --model vN --as-served`` by its own name (review R1, decision 2026-11-24).
+    Its numbers are comparable with the release's gate; it reports the final
+    and the fields-first result."""
+    return run_extract(argparse.Namespace(
+        model=args.version, release=args.version, as_served=True, mode=None, doc_type="policy",
+        adapter=None, label=None, source_ids=None, split=args.split, corpus=args.corpus, score=True,
+        quant_format=args.quant_format, limit=args.limit, tenant=args.tenant, round_label=None,
+        allow_failures=args.allow_failures))
 
 
 # --------------------------------------------------------------------------
@@ -379,7 +401,13 @@ def build_parser() -> argparse.ArgumentParser:
     picked.add_argument("--split", choices=["train", "val", "test"], default=None)
     extract.add_argument("--corpus", default=None, help="the corpus whose split --split reads")
     extract.add_argument("--doc-type", dest="doc_type", default="policy")
-    extract.add_argument("--mode", default="ocr_plus_image", choices=["ocr_plus_image", "image_only"])
+    extract.add_argument("--mode", default=None, choices=["ocr_plus_image", "image_only"],
+                         help="default ocr_plus_image; --as-served reads image_only")
+    extract.add_argument("--as-served", dest="as_served", action="store_true",
+                         help="read as production serves: image_only, the release's calibrators, held to the "
+                              "stored page text by the gate's own reading (review R1)")
+    extract.add_argument("--release", default=None,
+                         help="with --as-served: the release whose calibrators are used (default: --model)")
     extract.add_argument("--no-score", dest="score", action="store_false",
                          help="extract without comparing to the gold labels")
     extract.add_argument("--format", dest="quant_format", default=None)
@@ -388,6 +416,21 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--round", dest="round_label", default=None,
                          help="the Training Round its testing-record rows are filed under "
                               "(testing/metrics/<model>/test_record.csv; default: the model's tag)")
+    extract.add_argument("--allow-failures", dest="allow_failures", type=int, default=0,
+                         help="documents that may fail before the run exits 1 (default 0: any failure fails it)")
+
+    check = sub.add_parser(
+        "release-check", help="read a release as production serves it (image_only, its calibrators, held to "
+                              "the page text) on a corpus split, scored as the gate scores: extract "
+                              "--model vN --as-served")
+    check.add_argument("--version", required=True, help="the release to read, e.g. v4")
+    check.add_argument("--corpus", required=True, help="the corpus whose split is read")
+    check.add_argument("--split", choices=["train", "val", "test"], default="test")
+    check.add_argument("--format", dest="quant_format", default=None)
+    check.add_argument("--limit", type=int, default=None)
+    check.add_argument("--tenant", default=None)
+    check.add_argument("--allow-failures", dest="allow_failures", type=int, default=0,
+                       help="documents that may fail before the run exits 1 (default 0)")
 
     shadow = sub.add_parser(
         "shadow", help="read a gated release on the real server path (fields first, the pod's vLLM and "
@@ -531,6 +574,16 @@ def flag_problem(args: argparse.Namespace) -> str | None:
             return "extract --split needs --corpus"
         if args.adapter and args.model != "base":
             return "extract --adapter applies a LoRA to the base model: use --model base with it"
+        if args.as_served and args.mode not in (None, "image_only"):
+            return "extract --as-served reads image_only, as production does: leave out --mode"
+        if args.as_served and args.model == "base" and not args.release:
+            return "extract --as-served reads with a release's calibrators: name it with --release"
+        if args.release and not args.as_served:
+            return "extract --release is read only with --as-served"
+        return None
+    if args.command == "release-check":
+        if paths.version_number(str(args.version)) is None:
+            return f"release-check --version names a release, vN; got {args.version!r}"
         return None
     if args.command == "label-noise":
         if args.limit is not None and args.limit < 1:
@@ -637,6 +690,14 @@ def promotion_evidence(client: BlobClient, version: str, tenant: str | None) -> 
     return f"promoted by {last.get('promoted_by')} at {last.get('promoted_at')} on {how}{tier}{accepted}{slow}"
 
 
+def promoted_pair(client: BlobClient, version: str, tenant: str | None) -> str:
+    """The adapter and the code the promoted release is served with (review S6)."""
+    from registry_utils.releases import serving_pair
+
+    key = paths.release_bundle(version, tenant)
+    return serving_pair(client.read_json(key)) if client.exists(key) else f"{version}: no bundle found"
+
+
 #: Stages removed from the pipeline, and why. Named by ``--from-stage`` they are
 #: refused with the reason, before the command detaches.
 REMOVED_STAGES: dict[str, str] = {
@@ -730,6 +791,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     if args.command == "extract":
         return run_extract(args)
+    if args.command == "release-check":
+        return run_release_check(args)
 
     if args.command == "freeze-eval-set":
         from evaluation.freeze_eval_set import freeze_eval_set, mark_held_out, mark_reviewed, mark_templates
@@ -771,6 +834,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"{args.version} is promoted" + (f"; archived {', '.join(archived)}" if archived else ""))
         if evidence := promotion_evidence(client, args.version, args.tenant):
             print(f"  {evidence}")
+        print(f"  serves as: {promoted_pair(client, args.version, args.tenant)}")
         return 0
 
     if args.command == "shadow":

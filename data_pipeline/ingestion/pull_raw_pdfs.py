@@ -333,6 +333,11 @@ def _pod_volume(tenant: str, doc_type: str | None = None, source_id: str | None 
              "source id, not by tenant, so confirm each is this tenant's document before deleting it"),
             (f"{testing}/metrics/*/{source_id}.metrics.json",
              "its metrics from the same runs, filed the same way: confirm each is this tenant's"),
+            (f"{testing}/results/*/*/{source_id}.json",
+             "the same, from runs filed one folder per run (results/<model>/<run>/, since 2026-11-24): "
+             "confirm each is this tenant's document before deleting it"),
+            (f"{testing}/metrics/*/*/{source_id}.metrics.json",
+             "its metrics from those runs, filed the same way: confirm each is this tenant's"),
         ]
     else:
         entries += [
@@ -375,7 +380,8 @@ def _pod_volume(tenant: str, doc_type: str | None = None, source_id: str | None 
     actions = [f"{path}: {action}" for path, action in entries] + [
         "/workspace/logs/: diagnose_generation reports are named after the document they compare "
         "and hold its values (a compare folder holds its PDF too) - check by hand",
-        f"{testing}/results/comparisons/ and {testing}/extraction_registry.json: compare_models' "
+        f"{testing}/results/comparisons/, {testing}/results/extraction_registry.json and the older "
+        f"{testing}/extraction_registry.json: compare_models' "
         "folders (each compared document's PDF, gold and both extractions, when kept with "
         "--keep-on-pod or downloaded) and the harness's list of every extraction by source id - "
         "check by hand",

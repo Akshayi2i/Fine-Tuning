@@ -24,6 +24,8 @@ htmlcov/
 *.ckpt
 
 testing/results/
+# The harness's list of every extraction (now under testing/results/; the old place too).
+testing/extraction_registry.json
 testing/metrics/
 testing/ocr_cache/
 testing/test_data/

@@ -592,6 +592,16 @@ class ReleaseBundle(_Base):
     vision_config_hash: str
     vllm_config_hash: str
 
+    #: The repository commit the release was packaged from: the code that
+    #: renders its prompt and cuts its windows. A rollback to this release
+    #: needs this code as well as its adapter (README "Rollback"; review S6).
+    #: None on bundles written before it was recorded (v3, v4: their code is
+    #: the run manifest's ``code_git_commit``).
+    code_git_commit: str | None = None
+    #: The service image that serves it, once images are built and recorded at
+    #: deployment. None until then.
+    image_digest: str | None = None
+
     #: ms-swift, transformers, peft, torch, flash-attn and vllm pinned together.
     #: Recorded because the trainer stack's behaviour is version-dependent and a
     #: run reproduced against different pins is not the same run (§10.2).

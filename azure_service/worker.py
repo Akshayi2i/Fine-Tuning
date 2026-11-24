@@ -72,6 +72,7 @@ from azure_service.runtime import (
     JobRefused,
     ServingRuntime,
     identity_calibration,
+    schema_pin,
 )
 from azure_service.store import FINAL, JobStore
 
@@ -324,7 +325,8 @@ class Worker:
             record.update(status="fields_ready" if already_served else "running", error=None,
                           started=record.get("started") or now, model=reading.model.tag,
                           release=reading.release_id, route=reading.route,
-                          calibration="release" if reading.calibrators is not None else "identity")
+                          calibration="release" if reading.calibrators is not None else "identity",
+                          pins={**reading.pins, "schema_version": schema_pin(record["lob"])})
             record.setdefault("timings_s", {})["queued"] = round(record["started"] - record["submitted"], 2)
             self._write_status(record, lease)
             pdf = self.store.read_pdf(tenant, job_id)
@@ -451,6 +453,7 @@ class Worker:
             "release": record.get("release"), "route": record.get("route"),
             "calibration": record.get("calibration"), "lob": record.get("lob"), "pages": record.get("pages"),
             "fields_verified": record.get("fields_verified"), "timings_s": dict(record.get("timings_s") or {}),
+            "pins": dict(record.get("pins") or {}),
             "output": result.as_dict(),
         }
 

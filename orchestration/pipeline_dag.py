@@ -4203,6 +4203,7 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
             vision_config_hash=_file_hash(root / "configs" / "shared" / "vision.yaml"),
             vllm_config_hash=_file_hash(root / "configs" / "inference" / "vllm_serving.yaml"),
             lockfile_hash=_file_hash(lockfile),
+            code_git_commit=_packaged_commit(ctx),
             override=override,
             gate_flag=gate_flag,
         )
@@ -4210,6 +4211,15 @@ def build_release_bundle(ctx: StageContext) -> tuple[Any, list[str]]:
         raise PipelineError(f"the release bundle for {ctx.release_id} is invalid: {exc}") from exc
     record_release_measurements(ctx, bundle)
     return bundle, reasons
+
+
+def _packaged_commit(ctx: StageContext) -> str | None:
+    """The commit this release is packaged from (review S6): the run's, else
+    this checkout's; None when git cannot say (never a guess)."""
+    from registry_utils.write_run_manifest import capture_git_commit
+
+    commit = ctx.git_commit or capture_git_commit(short=False)
+    return None if not commit or commit == "unknown" else commit
 
 
 def trained_lines(ctx: StageContext, corpus_manifest: dict[str, Any]) -> list[str]:

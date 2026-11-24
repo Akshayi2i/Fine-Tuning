@@ -8,7 +8,7 @@ Why that matters: the system prompt is the conditioning input on every training
 row *and* every production request. If the two ever diverge — by a character —
 the fine-tuned model degrades at serving time, and **nothing in the training
 metrics shows it**, because training never sees the serving prompt (arch §7).
-``test_prompt_parity`` asserts the equality this module exists to provide.
+``tests/test_parity.py`` and ``tests/test_serving_parity.py`` assert the equality this module exists to provide.
 
 The rendered prompt carries each field's ``description``: a semantic gloss with
 exclusions, which is how the model maps an unseen surface label onto a canonical

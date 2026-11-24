@@ -170,9 +170,9 @@ def propose(path: str, values: list) -> dict:
     elif by_values == "enum" and by_name == "free_text" and (
             has_word(leaf, ENUM_WORDS) or leaf.startswith("is_")):
         proposed = "enum"
-    elif by_values is None and by_name == "free_text":
-        if has_word(leaf, ("vin", "serial")) or "hull_id" in leaf:
-            proposed = "identifier"
+    elif by_values is None and by_name == "free_text" and (
+            has_word(leaf, ("vin", "serial")) or "hull_id" in leaf):
+        proposed = "identifier"
     # A person decides where the name and the label values point different ways.
     # Where they agree - or the labels hold too few values to say - the name stands.
     review = proposed != by_name

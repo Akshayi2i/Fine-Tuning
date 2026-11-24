@@ -123,7 +123,8 @@ class Service:
         self.clock = clock or Clock()
         settings = dict(api_keys=parse_api_keys(json.dumps({"default": KEY, "other": [OTHER_KEY]})),
                         webhook_secret=SECRET, public_base_url="https://api.example.test",
-                        work_dir=tmp_path / "work", tenants=("default", "other"), retry_delay_s=30)
+                        work_dir=tmp_path / "work", tenants=("default", "other"), retry_delay_s=30,
+                        require_https=False)                    # the test client calls over plain HTTP
         settings.update(overrides)
         self.settings = Settings(**settings)
         self.blob = InMemoryBackend()
@@ -294,6 +295,14 @@ def test_a_webhook_needs_a_secret_for_the_tenant(tmp_path):
                                  content=PDF, headers={"X-API-Key": KEY, "Content-Type": "application/pdf"})
     assert answer.status_code == 400 and "not configured" in answer.json()["error"]
     service.submit(key=OTHER_KEY, webhook=HOOK)                     # the other tenant has one
+
+
+def test_https_is_required_unless_turned_off():
+    """On by default (review S9): a deployment that forgets REQUIRE_HTTPS refuses plain HTTP."""
+    from azure_service.settings import _flag
+
+    assert Settings.require_https is True
+    assert _flag(None, default=True) is True and _flag("false", default=True) is False
 
 
 def test_https_only_refuses_a_request_the_ingress_took_over_http(tmp_path):
@@ -704,3 +713,160 @@ def test_the_root_dockerignore_leaves_out_what_the_service_one_does():
 
     assert entries(root / ".dockerignore") == entries(root / "azure_service" / "Dockerfile.dockerignore")
     assert entries(root / ".dockerignore")[0] == "*"
+
+
+# --------------------------------------------------------------------------
+# Release pins (review S1)
+# --------------------------------------------------------------------------
+
+PIN_KEYS = ("base_model", "release", "prompt_hash", "window_plan", "format_profile", "ocr_version",
+            "ocr_tier", "calibration", "schema_version")
+
+
+def test_every_result_and_status_names_what_it_was_read_with(service):
+    """One pins block, built at start, in the fields result, the final result and
+    the status record: no registry lookup is needed to know how a result was read."""
+    from common.config import format_profile, served_mineru
+    from common.prompts import prompt_hash
+    from common.schemas import schema_version
+    from data_pipeline.dataset_builder.policy_windows import window_plan_id
+
+    job_id = service.submit()["job_id"]
+    worker = service.worker()
+    assert worker.poll_once()
+    fields = service.get(f"/v1/extractions/{job_id}/result").json()
+    assert worker.text_once()
+    final = service.get(f"/v1/extractions/{job_id}/result").json()
+    status = service.status(job_id)
+    for pins in (fields["pins"], final["pins"], status["pins"]):
+        missing = [key for key in PIN_KEYS if pins.get(key) in (None, "")]
+        assert not missing, (missing, pins)
+        assert pins["release"] == "v3" and pins["base_model"] == "qwen"
+        assert pins["prompt_hash"] == prompt_hash() and pins["window_plan"] == window_plan_id()
+        assert pins["format_profile"] == format_profile()
+        assert pins["ocr_version"] == served_mineru()["version"] and pins["ocr_tier"] == served_mineru()["tier"]
+        assert pins["schema_version"] == schema_version("policy", None, "personal_auto")
+        assert pins["calibration"] == "identity"          # the stand-in release has no fitted calibrators
+
+
+def test_a_base_model_reading_pins_the_base_and_no_release(tmp_path):
+    from common.config import base_model_config
+
+    service = Service(tmp_path, base_model=True)
+    job_id = service.submit(lob="homeowners")["job_id"]
+    assert service.worker().poll_once()
+    pins = service.status(job_id)["pins"]
+    base = base_model_config()["model"]
+    assert pins["release"] is None and pins["base_model"] == f"{base['model_id']}@{base['revision']}"
+    assert pins["calibration"] == "identity" and pins["prompt_hash"]
+
+
+# --------------------------------------------------------------------------
+# Failure handling (review S5; azure_service/RUNBOOK.md)
+# --------------------------------------------------------------------------
+
+
+class StopsAnswering(EchoBackend):
+    """A model server that answers ``ok_calls`` requests, then cannot be reached.
+
+    It fails as the real client does (``inference_core.openai_backend``): a
+    refused connection, a cut answer or a 5xx is a ``ModelTransportError``.
+    """
+
+    def __init__(self, ok_calls: int) -> None:
+        super().__init__(ANSWER)
+        self.ok_calls = ok_calls
+
+    def generate(self, messages, config, adapter=None):
+        from inference_core.model_runner import ModelTransportError
+
+        if len(self.calls) >= self.ok_calls:
+            self.calls.append({"refused": True})
+            raise ModelTransportError("could not reach http://model: Connection refused")
+        return super().generate(messages, config, adapter)
+
+
+class AnswersBadly(EchoBackend):
+    """A model server that answers its first ``ok_calls`` requests well, then with
+    text that is not JSON: the model was reached and its answer was unreadable."""
+
+    def __init__(self, ok_calls: int) -> None:
+        super().__init__(ANSWER)
+        self.ok_calls = ok_calls
+
+    def generate(self, messages, config, adapter=None):
+        generation = super().generate(messages, config, adapter)
+        if len(self.calls) > self.ok_calls:
+            generation.text, generation.tokens = "not json", ["not json"]
+            generation.token_logprobs = [-0.01]
+        return generation
+
+
+def _with_backend(service: Service, backend: EchoBackend) -> Service:
+    service.backend = backend
+    model = served_model(backend, "policy-v3")
+    for runtime in service.runtime.tenants.values():
+        runtime.release_model = model
+    return service
+
+
+@pytest.mark.parametrize("ok_calls", [0, 1], ids=["down-from-the-start", "stops-mid-job"])
+def test_a_model_server_that_cannot_be_reached_puts_the_job_back(tmp_path, ok_calls):
+    """Runbook case 1: down before the job, or stopping partway through it, the
+    job is never served with pages missing - it goes back on the queue, the
+    error on its status, and is read again whole."""
+    from azure_service.jobs import partial_jobs
+
+    service = _with_backend(Service(tmp_path), StopsAnswering(ok_calls))
+    job_id = service.submit()["job_id"]
+    worker = service.worker()
+    worker.poll_once()
+    worker.text_once()
+    view = service.status(job_id)
+    assert view["status"] == "queued" and view["attempts"] == 1
+    assert "never reached the model" in view["error"]
+    assert list(partial_jobs(service.store)) == []
+
+
+def test_an_answer_the_model_wrote_badly_is_served_flagged_and_listed(tmp_path):
+    """Runbook case 4: the model answered, but some windows' answers could not be
+    read even one page at a time. Those pages are dropped and flagged
+    ``window_failed:``, the result is not schema-valid, and
+    ``python -m azure_service.jobs partial`` lists the job."""
+    from azure_service.jobs import failed_jobs, partial_jobs
+
+    service = _with_backend(Service(tmp_path), AnswersBadly(1))
+    job_id = service.submit()["job_id"]
+    worker = service.worker()
+    worker.poll_once()
+    worker.text_once()
+    view = service.status(job_id)
+    assert view["status"] == "done" and view["error"] is None
+    output = service.get(f"/v1/extractions/{job_id}/result").json()["output"]
+    unread = [flag for flag in output["review_flags"] if flag.startswith("window_failed:")]
+    assert unread and output["schema_valid"] is False
+    listed = list(partial_jobs(service.store))
+    assert [line["job_id"] for line in listed] == [job_id]
+    assert listed[0]["unread_windows"] == sorted(flag.split(":", 1)[1] for flag in unread)
+    assert list(failed_jobs(service.store)) == []
+    assert "document" not in json.dumps(listed)                    # no client data in the listing
+
+
+def test_given_up_jobs_are_listed_without_document_names(service):
+    from azure_service.jobs import failed_jobs, partial_jobs
+
+    job_id = service.submit()["job_id"]
+    for _ in range(service.settings.max_attempts):
+        assert service.queue.receive(300) is not None
+        service.clock.advance(301)
+    service.worker().poll_once()
+    done_id = service.submit()["job_id"]
+    worker = service.worker()
+    worker.poll_once()
+    worker.text_once()
+    listed = list(failed_jobs(service.store))
+    assert [line["job_id"] for line in listed] == [job_id]
+    assert "given up after" in listed[0]["error"] and listed[0]["attempts"] == 4
+    assert "document" not in listed[0]
+    assert [line["job_id"] for line in failed_jobs(service.store, "other")] == []
+    assert done_id not in [line["job_id"] for line in partial_jobs(service.store)]

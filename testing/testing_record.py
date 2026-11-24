@@ -53,8 +53,9 @@ from typing import Any
 SHEET = "Testing Record"
 COLUMNS = ("Training Round", "Training/Testing Date", "Test/Val", "Carrier", "LOB", "Doc ID", "# Pages",
            "F1 Score Accuracy", "Latency", "Input Tokens", "Output Tokens")
-#: Beside the sheet's columns in the CSV: what read the document, and how.
-EXTRA = ("Model", "Mode")
+#: Beside the sheet's columns in the CSV: what read the document, how, and in
+#: which run (``results/<model>/<run>/``, review R2).
+EXTRA = ("Model", "Mode", "Run ID")
 RECORD_FILE = "test_record.csv"
 
 
@@ -81,7 +82,8 @@ def _tokens(result: Any, key: str) -> int | None:
 
 
 def record_row(result: Any, metrics: dict[str, Any], *, metadata: dict[str, Any], golden: dict[str, Any] | None,
-               pages: int, round_label: str, date: str | None = None) -> dict[str, Any]:
+               pages: int, round_label: str, date: str | None = None,
+               run_id: str | None = None) -> dict[str, Any]:
     """One document's row: the sheet's columns, then :data:`EXTRA`."""
     match = metrics.get("field_normalized_match_rate")
     return {
@@ -98,6 +100,7 @@ def record_row(result: Any, metrics: dict[str, Any], *, metadata: dict[str, Any]
         "Output Tokens": _tokens(result, "answer_tokens"),
         "Model": result.model_version,
         "Mode": result.mode,
+        "Run ID": run_id,
     }
 
 
@@ -107,9 +110,18 @@ def append_csv(rows: Iterable[dict[str, Any]], path: Path) -> None:
     if not rows:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
+    columns = [*COLUMNS, *EXTRA]
+    if path.exists():
+        with path.open(encoding="utf-8", newline="") as handle:
+            header = next(csv.reader(handle), [])
+        if header and header != columns:
+            # A record written before a column was added (Run ID, 2026-11-24):
+            # rewritten once with the new header, its old rows' new cells empty.
+            rows = [*read_csv(path), *rows]
+            path.unlink()
     new = not path.exists()
     with path.open("a", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=[*COLUMNS, *EXTRA])
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
         if new:
             writer.writeheader()
         writer.writerows(rows)

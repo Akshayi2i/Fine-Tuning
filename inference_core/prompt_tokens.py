@@ -9,7 +9,7 @@ how long each prompt was (``usage.prompt_tokens``); this says how long it
 should have been.
 
 * **Images** are counted from each page's size by the resize rule both sides
-  run (``training.length_check.image_tokens``) at the budget the request sends
+  run (``common.token_math.image_tokens``) at the budget the request sends
   (``common.config.pixel_budget``) - exact, no pixel decoded.
 * **Text** is counted exactly with the model's tokenizer when one is on this
   machine (``common.config.base_model_dir``); the prompt is then expected to
@@ -42,7 +42,7 @@ SLACK_TOKENS = 64
 
 @lru_cache(maxsize=4096)
 def _png_size(path: str) -> tuple[int, int] | None:
-    from training.length_check import LengthCheckError, png_size
+    from common.token_math import LengthCheckError, png_size
 
     try:
         return png_size(path)
@@ -93,7 +93,7 @@ def expected_prompt(messages: list[Mapping[str, Any]], *, budget: tuple[int, int
     ``expected`` are None without a tokenizer; ``low``/``high`` bound the
     prompt either way. None when a page's size cannot be read (bytes, a URL,
     a missing file): nothing to hold the server to."""
-    from training.length_check import TOKENS_PER_IMAGE_WRAPPER, TOKENS_PER_MESSAGE, image_tokens
+    from common.token_math import TOKENS_PER_IMAGE_WRAPPER, TOKENS_PER_MESSAGE, image_tokens
 
     if budget is None:
         from common.config import pixel_budget

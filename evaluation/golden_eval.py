@@ -523,6 +523,38 @@ def _attempts(call: Any, what: str) -> tuple[Any, list[str]]:
 
 def _read(context: _ReadContext, doc: GoldenDocument, mode: str, *, repeat: bool) -> _Reading:
     """One document read in one mode through serving, as :func:`evaluate` scores it."""
+    return _read_with_result(context, doc, mode, repeat=repeat).reading
+
+
+@dataclass
+class AsServed:
+    """One document read as the gate reads it (:func:`read_as_served`).
+
+    ``reading`` is the gate's own record of it (its ``triple`` is what the gate
+    scores); ``answer`` the model's answer as serving returned it, before the
+    page text held it (an image-only reading is sent none); ``result`` what is
+    scored - for an image-only policy, ``answer`` held to the page text with its
+    confidence computed again on it, as production serves it once the text is
+    read. ``answer`` and ``result`` are None when the reading failed twice."""
+
+    reading: _Reading
+    answer: Any = None
+    result: Any = None
+
+
+def read_as_served(doc: GoldenDocument, model: Any, local_images: dict[str, str], *, calibrators: Any = None,
+                   thresholds: Any = None, mode: str = RUN_TO_RUN_MODE, seed: int = 42) -> AsServed:
+    """``doc`` read once in ``mode`` (image_only: the mode production reads) by the
+    gate's own reading, :func:`_read` - the one place it is implemented; the
+    test routine's ``--as-served`` calls this (review R1). ``local_images`` maps
+    each of ``doc.image_keys`` to the local page image."""
+    context = _ReadContext(model=model, local=dict(local_images), calibrators=calibrators, thresholds=thresholds,
+                           seed=seed, clean_text=True)
+    return _read_with_result(context, doc, mode, repeat=False)
+
+
+def _read_with_result(context: _ReadContext, doc: GoldenDocument, mode: str, *, repeat: bool) -> AsServed:
+    """:func:`_read`, with the answer and the scored result kept beside the reading."""
     from calibration.fit_calibration import CalibrationParams
     from data_pipeline.dataset_builder.noisy_ocr_augment import corrupt_ocr_pages
     from evaluation.run_eval import (
@@ -590,7 +622,8 @@ def _read(context: _ReadContext, doc: GoldenDocument, mode: str, *, repeat: bool
         reading.retried = {"source_id": doc.source_id, "mode": mode, "pass": "first", "error": errors[0]}
     if result is None:
         reading.failure = {"source_id": doc.source_id, "mode": mode, "pass": "first", "error": errors[-1]}
-        return reading
+        return AsServed(reading)
+    answer = result
     if repeat:
         reading.again = (doc, request, calibration, metadata)
     # Serving's own printed-values check (serving.printed_values): the
@@ -632,7 +665,7 @@ def _read(context: _ReadContext, doc: GoldenDocument, mode: str, *, repeat: bool
     metadata["schema_valid"] = result.schema_valid
     metadata["validation_errors"] = list(result.validation_errors[:4])
     reading.triple = (doc.golden, result.extraction, metadata)
-    return reading
+    return AsServed(reading, answer, result)
 
 
 def _read_kept(cache: Any, context: _ReadContext, doc: GoldenDocument, mode: str, *, repeat: bool) -> _Reading:

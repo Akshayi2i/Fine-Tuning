@@ -8,7 +8,7 @@ tests would describe the wrong one.
     OCR (if provided)
       -> classify document type (+ ACORD form)
       -> route adapter / prompt / schema
-      -> page-route if the document is long
+      -> read every page, in windows (policies: grouped by section; decision 2026-10-19)
       -> generate with logprobs
       -> per-field confidence, calibrated
       -> list-completeness cross-check
@@ -900,6 +900,10 @@ def _window_stat(group: str, pages: list[int], attempt: int, result: Any, outcom
     }
 
 
+#: The reasons the prompt-length check could not run, each warned about once.
+_PROMPT_CHECK_FAILURES: set[str] = set()
+
+
 def _check_prompt_tokens(source_id: str, stat: dict[str, Any], result: Any,
                          messages: list[dict[str, Any]] | None, warned: list[str]) -> None:
     """The prompt's length the backend reports (``prompt_tokens``), held to
@@ -907,15 +911,23 @@ def _check_prompt_tokens(source_id: str, stat: dict[str, Any], result: Any,
     recorded in the window's stat as ``prompt_check``. One implausible length
     is warned about once per document: a server that resizes pages to another
     budget than the request's shows the model pages it was not trained on, and
-    nothing else would say so. Never fails a window."""
+    nothing else would say so. Never fails a window; a check that cannot run
+    is warned about once per process and recorded in the stat
+    (``prompt_check_error``), never dropped silently: in production it is the
+    only sign of a server reading pages at the wrong size (review R4)."""
     if messages is None or not isinstance(result, Generation) or result.prompt_tokens is None:
         return
-    from inference_core.prompt_tokens import check_prompt, expected_prompt
-
     try:
+        from inference_core.prompt_tokens import check_prompt, expected_prompt
+
         checked = check_prompt(result.prompt_tokens, expected_prompt(messages))
     except Exception as exc:  # noqa: BLE001 - a diagnostic: it never costs the window
-        log.debug("%s: the prompt-length check could not run: %s", source_id, exc)
+        reason = f"{type(exc).__name__}: {exc}"[:200]
+        stat["prompt_check_error"] = reason
+        if reason not in _PROMPT_CHECK_FAILURES:
+            _PROMPT_CHECK_FAILURES.add(reason)
+            log.warning("%s: the prompt-length check could not run (%s); a server resizing pages "
+                        "to another budget would go unnoticed", source_id, reason)
         return
     if checked is None:
         return

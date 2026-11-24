@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from artifact_registry.blob_client import BlobClient, BlobError
@@ -114,6 +115,13 @@ class JobStore:
         if not self.client.exists(key):
             return None
         return self.client.read_json(key)
+
+    def statuses(self, tenant: str | None = None) -> Iterator[dict[str, Any]]:
+        """Every job's record, of one tenant or all, in key order (``python -m azure_service.jobs``)."""
+        prefix = f"jobs/{tenant}/" if tenant else "jobs/"
+        for key in self.client.list(prefix):
+            if key.endswith("/status.json"):
+                yield self.client.read_json(key)
 
     def write_status(self, record: dict[str, Any]) -> None:
         self.client.write_json(self.status_key(record["tenant"], record["job_id"]), record)

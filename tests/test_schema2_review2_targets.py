@@ -191,7 +191,7 @@ def test_an_underlying_limit_is_the_limit_with_a_plain_basis(group):
     assert len(underlying["anyOf"]) == len(shared["anyOf"]) == 2
     assert underlying["anyOf"][0]["required"] == shared["anyOf"][0]["required"]
     assert "percentage" not in underlying["anyOf"][1]["properties"]
-    for mine, theirs in zip(underlying["anyOf"], shared["anyOf"]):
+    for mine, theirs in zip(underlying["anyOf"], shared["anyOf"], strict=True):
         basis = mine["properties"].get("basis_coverage_code")
         if basis is not None:
             assert basis["type"] == "string" and "$ref" not in basis

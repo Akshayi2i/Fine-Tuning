@@ -71,9 +71,11 @@ A test suite + CI that verifies the correctness-critical pieces without GPUs or 
 | `test_orchestration.py` | `finetune` writes a Blob manifest with `status: "staged"` even though weights stay on the volume; `package` flips it to `"published"` with real paths and fails loudly when the version is not staged (IMPL-13) |
 
 ### 3. CI
-- `.github/workflows/ci.yml`, on every push and pull request: install `.[data,eval,dev]`, `ruff check .`, `mypy` over the code packages (`common artifact_registry registry_utils data_pipeline inference_core training evaluation calibration serving postprocessing testing orchestration pilot`), `python -m testing.render_prompts --check` (the checked-in reference prompts are current), then `pytest -q -m "not gpu and not azure"` with coverage. GPU and live-Azure tests are marked (`gpu`, `azure` in `pyproject.toml`) so CI is **CPU-only and fast**.
-- **Coverage gate on the correctness-critical modules** (`--cov-fail-under=85`): `training.data_collator`, `inference_core.input_builder`, `inference_core.span_map`, `common.prompts`, `common.normalize`, `evaluation.gating`, `calibration.apply_calibration`, `registry_utils.models` and the split code, `data_pipeline.dataset_builder.split_groups`.
-- A **secret/PII scan** job: SSN-shaped strings in `tests/fixtures/` and `schemas/examples/`, and credential-shaped strings (`AccountKey=`, SAS signatures, private keys) anywhere in the repo, fail the build.
+- `.github/workflows/ci.yml`, on every push and pull request: install `.[data,eval,dev]`; `ruff check .`; `mypy` over the code packages (`common artifact_registry registry_utils data_pipeline inference_core training evaluation calibration serving postprocessing testing orchestration pilot azure_service`, mypy pinned to 2.3.1, `platform = "linux"`); `python -m testing.render_prompts --check` (the checked-in reference prompts are current); then **one** `pytest -q -m "not gpu and not azure"` run with coverage of `common training data_pipeline inference_core evaluation calibration registry_utils orchestration serving postprocessing azure_service`, writing `coverage.json`. GPU and live-Azure tests are marked (`gpu`, `azure` in `pyproject.toml`) so CI is **CPU-only**.
+- **Type errors frozen per file** (2026-11-24): 271 errors in 62 files are older than the check; `scripts/check_type_errors.py` reads mypy's output and fails when a file has more than `scripts/type_error_baseline.json` allows, or a file it does not list has any. A file with fewer is named, and `--update` lowers its count; output that is not a finished mypy run fails.
+- **Coverage floor per module** (`python -m scripts.check_module_coverage coverage.json`, review R8): each correctness-critical module is held to its own floor, read from the one test run's report - 85% for `training.data_collator`, `data_pipeline.dataset_builder.split_groups`, `inference_core.input_builder`, `inference_core.span_map`, `common.prompts`, `common.normalize`, `evaluation.gating`, `calibration.apply_calibration`, `registry_utils.models`; the served path at what it measured on 2026-11-24, rounded down: `serving.pipeline` 97%, `serving.policy_merge` 93%, `serving.printed_values` 97%, `serving.fields_first` 97% (measured on Windows; CI runs Linux). A module missing from the report fails. Before, the suite ran twice and the 85% held the nine modules' total, not each one.
+- A **secret/PII scan** job (`python scripts/scan_secrets.py`, review R5): account keys, SAS signatures and private keys anywhere in the committed files, SSN-shaped strings in `tests/fixtures/` and `schemas/examples/`, fail the build; the Azurite emulator's published key is allowed in `azure_service/DEPLOY.md` only. It matched placeholders before and was red at every push.
+- **Until 2026-11-24 CI was red at every push**: 271 type errors, 7 lint errors, a `render_prompts --check` flag that did not exist, and the scan matching placeholders.
 
 ## Constraints
 - Runs without GPU or live Azure (mock/stub heavy deps).
@@ -92,12 +94,12 @@ A test suite + CI that verifies the correctness-critical pieces without GPUs or 
 - [ ] `test_schema_contract.py::test_line_of_business_is_a_required_list_of_enum_values` fails when a flat schema drops `line_of_business`.
 - [ ] `test_dataset_builder.py::test_cross_tenant_mixing_is_refused` fails when a corpus mixes tenants.
 - [ ] `test_orchestration.py::test_no_cli_flag_can_override_the_gate` fails if a bypass flag (`--force`, `--skip-gate` and the like) is introduced; the only override is a recorded written one (named approver, reason, waived gates — `test_evaluation_calibration.py::test_an_override_must_be_attributable`), and its flags work only all three together (`test_orchestration.py::test_an_override_flag_alone_is_no_way_round_the_gate`).
-- [ ] `test_orchestration.py::test_all_never_reaches_package_on_a_failed_gate` and `test_all_never_includes_extraction` fail if `all` ever pushes past a failed gate, or invokes extraction.
+- [ ] `test_orchestration.py::test_all_reaches_package_on_a_failed_gate_and_the_gate_is_recorded_as_not_passed`, `test_a_gate_that_could_not_decide_still_blocks` and `test_all_never_includes_extraction` fail if `all` stops at a failed gate instead of packaging it with the gate recorded as not passed (a flag, not a bar: decision 2026-11-04), goes past a gate that could not decide, or invokes extraction.
 - [ ] `test_orchestration.py::test_finetune_writes_a_blob_manifest_while_weights_stay_staged` fails if `finetune` can complete without writing a manifest to Blob.
 - [ ] `test_schema_contract.py` fails when any schema field is missing a `description` (`test_every_field_has_a_description`, `test_every_canonical_field_has_a_description`), or when an alias string leaks into a rendered prompt (`test_no_alias_string_reaches_the_prompt`).
 - [ ] `test_no_runtime_aliases` fails the moment a serving or inference module imports `common.aliases`.
 - [ ] `tests/test_module_seams.py` passes — **the seam suite**.
-- [ ] `ruff` + `mypy` clean.
+- [ ] `ruff` clean; no file gains a `mypy` error (`scripts/check_type_errors.py`).
 
 **Seam tests: run both sides, never hand-write one of them.** A full-tree review found 34 defects while the suite was entirely green, and every one lived at a boundary between two modules that had each been tested against a hand-written fixture rather than against what its neighbour actually produces. Three tests passed *because* they encoded the bug they were meant to guard: one asserted a review flag string nothing emits, one asserted a dry run moves the endpoint, one asserted a dry-run pipeline can publish.
 
@@ -304,3 +306,9 @@ real vLLM engines (the tests fake the engine), and a real upload.
 ## Changes of 2026-10-26 (gate and release decisions)
 
 - `tests/test_decision_gate_served_tier.py`, `test_decision_gate_line_rule.py`, `test_decision_gate_line_rescore.py`, `test_decision_rescore.py`, `test_decision_promotion.py`, `test_decision_retention.py`: the six gate and release decisions of 2026-10-26.
+
+## Changes of 2026-11-24 (extraction routine review, Phases 1 and 2)
+
+- §3: CI runs the tests once; per-module coverage floors (`scripts/check_module_coverage.py`, serving modules added); type errors frozen per file (`scripts/check_type_errors.py`, mypy pinned, Linux platform); `azure_service` type-checked; the secret scan is `scripts/scan_secrets.py`; the 7 old lint errors fixed.
+- New tests: `test_production_image_imports.py`, `test_scan_secrets.py`, `test_check_module_coverage.py`, `test_check_type_errors.py`, `test_release_code_pin.py`, `test_api_contract.py`, `test_doc_references.py`, `test_as_served.py`, `test_reference_prompts.py`; `test_azure_service.py` adds the pins, HTTPS and failure-handling tests (a model server that cannot be reached puts the job back; an unreadable answer is served flagged and listed).
+

@@ -482,8 +482,26 @@ def serving_refusal(bundle: dict[str, Any]) -> str | None:
         assert_window_plan_served(plan)
         assert_base_model_served(plan)
     except ColdStartError as exc:
-        return str(exc)
-    return ocr_pin_refusal(bundle.get("ocr_pin"))
+        return str(exc) + code_hint(bundle)
+    refusal = ocr_pin_refusal(bundle.get("ocr_pin"))
+    return refusal + code_hint(bundle) if refusal else None
+
+
+def code_hint(bundle: dict[str, Any]) -> str:
+    """Which code serves ``bundle`` (review S6), as a sentence to add to a refusal."""
+    commit = bundle.get("code_git_commit")
+    if commit:
+        return f" {bundle.get('release_id')} was packaged from code commit {commit}: serve it from that code."
+    return (f" {bundle.get('release_id')} records no code commit (packaged before it was recorded): its "
+            "training run's manifest names the commit (code_git_commit).")
+
+
+def serving_pair(bundle: dict[str, Any]) -> str:
+    """The pair a rollback needs (review S6): the adapter and the code."""
+    commit = bundle.get("code_git_commit") or "not recorded (see its training run's manifest)"
+    image = f", image {bundle['image_digest']}" if bundle.get("image_digest") else ""
+    adapter = (bundle.get("serving_formats") or {}).get("bf16") or bundle.get("adapter")
+    return f"{bundle.get('release_id')} = adapter {adapter} + code commit {commit}{image}"
 
 
 def ocr_pin_refusal(ocr_pin: dict[str, Any] | None, pin: dict[str, str] | None = None) -> str | None:

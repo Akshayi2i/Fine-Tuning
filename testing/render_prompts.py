@@ -39,10 +39,23 @@ log = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
-#: The mode these reference files render. ``ocr_plus_image`` is the primary
-#: production mode, and ``noisy_ocr_image`` renders identically to it by design,
-#: so one file covers both; the image-only variant differs and is emitted too.
+#: The modes these reference files render. Production reads ``image_only``
+#: first (fields first, ``serving.fields_first``); ``ocr_plus_image`` is the
+#: mode the standard path and most training rows read, and ``noisy_ocr_image``
+#: renders identically to it by design, so one file covers both.
 REFERENCE_MODES: tuple[str, ...] = ("ocr_plus_image", "image_only")
+
+#: The lines whose window prompts are rendered (review P7, 2026-11-24): the
+#: personal lines of :data:`common.schemas.SNAPSHOT_LINES` and the commercial
+#: lines cycle 2 trained on. Not SNAPSHOT_LINES itself: tests and release
+#: routing hold that to seven entries (tests/test_schema_contract.py).
+REFERENCE_WINDOW_LINES: tuple[str, ...] = (*SNAPSHOT_LINES, "gl", "bopgl", "boppr", "wc")
+
+#: The whole-schema policy prompt is kept as the one reference a test reads
+#: (tests/test_repo_contracts.py), though serving never sends it: every policy
+#: is read in windows (``serving.pipeline``). The per-line whole-schema files
+#: were dropped for that reason (review P7, decision 2026-11-24).
+WHOLE_POLICY_NOTE = "# Not sent by serving: every policy is read in windows (the *.<group>.prompt.txt files).\n"
 
 def reference_targets() -> list[tuple[str, str | None, str | None]]:
     """Every ``(doc_type, acord_form, lob)`` triple that renders a distinct prompt.
@@ -51,11 +64,10 @@ def reference_targets() -> list[tuple[str, str | None, str | None]]:
     different schemas, so a single acord file pinned to one of them would be a
     reference that misrepresents the other two.
 
-    Policies get one **per registered line of business**, for the same reason and
-    with more at stake: a homeowners prompt and an ocean marine prompt carry
-    different canonical schemas, and the generic `policy` file proves nothing
-    about either. The bare `policy` entry stays — it is what a package policy and
-    an unclassified line still render.
+    A policy is never sent its whole schema - every policy is read in windows -
+    so a line's policy prompts are its window files (:func:`window_targets`).
+    The bare ``policy`` entry stays, in the primary mode only: the one
+    whole-schema reference a test reads (:data:`WHOLE_POLICY_NOTE`).
     """
     targets: list[tuple[str, str | None, str | None]] = []
     for doc_type in ACTIVE_DOC_TYPES:
@@ -63,29 +75,27 @@ def reference_targets() -> list[tuple[str, str | None, str | None]]:
             targets += [(doc_type, form, None) for form in sorted(ACORD_FORMS, key=int)]
             continue
         targets.append((doc_type, None, None))
-        if doc_type == "policy":
-            targets += [(doc_type, None, lob) for lob in SNAPSHOT_LINES]
     return targets
 
 
 def window_targets() -> list[tuple[str, str]]:
-    """Every ``(lob, group)`` window prompt of a common-model line: what training
-    rows and serving actually send - a section group's slice of the schema, its
-    outline and its rules - where the files above show the whole schema. In the
-    primary mode only: the image-only text differs from it in the evidence
-    paragraph alone, which the whole-schema image-only file shows."""
+    """Every ``(lob, group)`` window prompt of a common-model line of
+    :data:`REFERENCE_WINDOW_LINES`: what training rows and serving actually
+    send - a section group's slice of the schema, its outline and its rules.
+    Rendered in both :data:`REFERENCE_MODES` (:func:`_reference_files`)."""
     from common.schema_sections import groups_for
     from common.schemas import is_common_model
 
-    return [(lob, group) for lob in SNAPSHOT_LINES
+    return [(lob, group) for lob in REFERENCE_WINDOW_LINES
             if is_common_model("policy", None, lob) for group in groups_for(lob)]
 
 
 def _reference_files() -> list[tuple[str, str, str | None, str | None, str | None]]:
     """``(doc_type, mode, acord_form, lob, sections)`` of every reference file."""
     files = [(doc_type, mode, form, lob, None)
-             for doc_type, form, lob in reference_targets() for mode in REFERENCE_MODES]
-    files += [("policy", REFERENCE_MODES[0], None, lob, group) for lob, group in window_targets()]
+             for doc_type, form, lob in reference_targets() for mode in REFERENCE_MODES
+             if doc_type != "policy" or mode == REFERENCE_MODES[0]]
+    files += [("policy", mode, None, lob, group) for lob, group in window_targets() for mode in REFERENCE_MODES]
     return files
 
 
@@ -147,8 +157,10 @@ def file_contents(
     doc_type: str, modality_mode: str, acord_form: str | None = None, lob: str | None = None,
     sections: str | None = None,
 ) -> str:
+    whole_policy = doc_type == "policy" and not sections
     return (
         header(stem(doc_type, acord_form, lob, sections), modality_mode)
+        + (WHOLE_POLICY_NOTE if whole_policy else "")
         + "\n"
         + render(doc_type, modality_mode, acord_form, lob, sections)
     )
@@ -224,8 +236,8 @@ def old_style_fingerprints() -> dict[str, dict[str, str]]:
 
     Every registered selector except the common-model lines, over the whole
     schema and every window slice, in both reference modes. The snapshots in
-    ``testing/prompts`` cover only the personal-lines family and the whole
-    schema; this covers the rest, including the windowed prompts serving sends.
+    ``testing/prompts`` cover the window prompts of :data:`REFERENCE_WINDOW_LINES`;
+    this covers the rest.
     """
     import hashlib
     import json
@@ -280,6 +292,8 @@ def write_fingerprints(path: Path = FINGERPRINTS_PATH) -> Path:
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Render the reference prompt files")
     parser.add_argument("--write", action="store_true", help="regenerate the files")
+    parser.add_argument("--check", action="store_true",
+                        help="report files that differ from a fresh render (the default; CI names it)")
     parser.add_argument(
         "--write-fingerprints", action="store_true",
         help="re-freeze the old-style fingerprints (only for a deliberate change to those lines)",

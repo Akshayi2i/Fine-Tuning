@@ -178,7 +178,8 @@ class Settings:
     #: inside the same network only.
     allow_private_webhooks: bool = False
     #: Refuse a request the ingress did not receive over HTTPS (X-Forwarded-Proto).
-    require_https: bool = False
+    #: On unless REQUIRE_HTTPS=false (local tests only; decision 2026-11-24, review S9).
+    require_https: bool = True
 
     # -- webhooks (both: the API refuses a webhook a tenant has no secret for) -
     webhook_secrets: Mapping[str, str] = field(default_factory=dict, repr=False)
@@ -275,7 +276,7 @@ class Settings:
             max_pages=int(_number(env, "MAX_PAGES", 1000, minimum=1)),
             public_base_url=(text("PUBLIC_BASE_URL") or "").rstrip("/") or None,
             allow_private_webhooks=_flag(env.get("ALLOW_PRIVATE_WEBHOOKS")),
-            require_https=_flag(env.get("REQUIRE_HTTPS")),
+            require_https=_flag(env.get("REQUIRE_HTTPS"), default=True),
             webhook_secrets=parse_secrets(env.get("WEBHOOK_SECRETS"), "WEBHOOK_SECRETS"),
             webhook_secret=text("WEBHOOK_SECRET"),
             model_url=text("MODEL_URL"),

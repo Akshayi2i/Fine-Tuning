@@ -28,7 +28,7 @@ tasks:
   classify:
     max_seq_len: 4096
     max_output_tokens: 128
-    composition: "page 1 thumbnail (~256) + enum schema + short JSON answer"
+    composition: "pages 1-2 thumbnails (~256 each; serving.doc_type_classifier.CLASSIFIER_PAGES) + enum schema + short JSON answer"
 
   extract:
     max_seq_len: 24576

@@ -94,7 +94,10 @@ service = [
 eval = ["numpy>=1.26", "scikit-learn>=1.4", "openpyxl>=3.1,<4"]  # openpyxl: testing/comparison.py workbooks
 track = ["mlflow>=2.12"]
 dev = [
-    "pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.4", "mypy>=1.10", "types-PyYAML",
+    "pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.4",
+    # Pinned: CI holds the type-error count per file (scripts/check_type_errors.py),
+    # and another mypy counts differently.
+    "mypy==2.3.1", "types-PyYAML",
     "types-jsonschema",
     # tests/test_dependency_locks.py checks each lock against these specifiers.
     "packaging>=23",
@@ -133,6 +136,7 @@ ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
+platform = "linux"                     # what CI, the pod and Azure run: one count on every machine
 warn_unused_ignores = true
 warn_redundant_casts = true
 ignore_missing_imports = true          # heavy GPU deps are absent off-pod

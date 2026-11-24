@@ -115,12 +115,12 @@ def test_the_extraction_run_writes_a_row_per_document(tmp_path):
     client = BlobClient(backend=InMemoryBackend(), container="main", raw_container="raw")
     _imported_document(client)
     model = load_model("base", client, backend_impl=EchoBackend(ANSWER))
-    run_batch(model, client, ["policy_0001"], tenant_id="t1", images_root=tmp_path / "pages",
-              root=tmp_path / "out", round_label="Baseline")
+    summary = run_batch(model, client, ["policy_0001"], tenant_id="t1", images_root=tmp_path / "pages",
+                        root=tmp_path / "out", round_label="Baseline")
     rows = read_csv(tmp_path / "out" / "metrics" / model.tag / "test_record.csv")
-    assert [(r["Training Round"], r["Doc ID"], r["LOB"], r["# Pages"]) for r in rows] == [
-        ("Baseline", "policy_0001", "homeowners", "2")]
-    metrics = json.loads((tmp_path / "out" / "metrics" / model.tag / "policy_0001.metrics.json")
+    assert [(r["Training Round"], r["Doc ID"], r["LOB"], r["# Pages"], r["Run ID"]) for r in rows] == [
+        ("Baseline", "policy_0001", "homeowners", "2", summary.run_id)]
+    metrics = json.loads((tmp_path / "out" / "metrics" / model.tag / summary.run_id / "policy_0001.metrics.json")
                          .read_text(encoding="utf-8"))
     assert float(rows[0]["F1 Score Accuracy"]) == round(metrics["field_normalized_match_rate"], 4)
 
@@ -178,3 +178,22 @@ def test_a_latency_check_run_becomes_testing_record_rows(tmp_path):
         "Training Round": "Baseline", "Test/Val": "test", "Carrier": "Harborline Mutual", "LOB": "gl",
         "Doc ID": ident, "# Pages": 12, "F1 Score Accuracy": 0.6667, "Latency": 33.3,
         "Input Tokens": 17_000, "Output Tokens": 1_000}        # the model's seconds, not OCR's
+
+
+def test_a_record_written_before_the_run_id_column_is_rewritten_once(tmp_path):
+    """Review R2: test_record.csv files written before 24 November 2026 have no
+    Run ID column; the next row rewrites the file with it, old rows kept."""
+    import csv
+
+    from testing.testing_record import COLUMNS, append_csv
+
+    path = tmp_path / "test_record.csv"
+    old_columns = [*COLUMNS, "Model", "Mode"]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=old_columns)
+        writer.writeheader()
+        writer.writerow({"Training Round": "v3", "Doc ID": "old", "Model": "v3", "Mode": "image_only"})
+    append_csv([{"Training Round": "v4", "Doc ID": "new", "Model": "v4", "Mode": "image_only",
+                 "Run ID": "20261124T093112Z-image_only"}], path)
+    rows = read_csv(path)
+    assert [(r["Doc ID"], r["Run ID"]) for r in rows] == [("old", ""), ("new", "20261124T093112Z-image_only")]

@@ -176,7 +176,7 @@ def test_alias_lists_never_reach_the_model():
         bundle = S.load_schema("policy", None, lob)
         aliases: set[str] = set()
 
-        def collect(node):
+        def collect(node, aliases=aliases):
             if isinstance(node, dict):
                 for key, value in node.items():
                     if key == "fideon:aliases" and isinstance(value, list):

@@ -253,6 +253,16 @@ def _as_release(bundle: dict[str, Any], fmt: str) -> ServedRelease:
     )
 
 
+def release_for(client: BlobClient, release_id: str, *, tenant_id: str | None = None,
+                fmt: str = "bf16") -> ServedRelease:
+    """One release, by its id, as serving reads it (promoted or not): for a
+    reading made as that release serves (``testing.run_extraction --as-served``)."""
+    key = paths.release_bundle(release_id, tenant_id)
+    if not client.exists(key):
+        raise ValueError(f"release {release_id} has no bundle at {key}")
+    return _as_release(client.read_json(key), fmt)
+
+
 def promoted_rows(client: BlobClient, tenant_id: str | None = None) -> list[dict[str, Any]]:
     """The tenant's release-index rows marked promoted, newest first."""
     index_key = paths.release_index(tenant_id)

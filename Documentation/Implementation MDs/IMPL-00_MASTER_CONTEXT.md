@@ -2,9 +2,9 @@
 
 > Aligned with the code of 2026-10-23.
 
-> **Purpose of this file.** This is the shared context every other spec assumes. When you run any individual spec (IMPL-01 … IMPL-15) in Claude Code, that spec references this file for global conventions. Read this once; each module spec then adds only what's specific to it.
+> **Purpose of this file.** This is the shared context every other spec assumes. When you run any individual spec (IMPL-01 … IMPL-16) in Claude Code, that spec references this file for global conventions. Read this once; each module spec then adds only what's specific to it.
 >
-> **Source of truth.** This spec set and the architecture document **`Documentation/finetuning-architecture-v2.7.docx`** are **in sync** as of this revision (v2.6, v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only). Where a spec cites a section like "(arch §4)", it refers to that document.
+> **Source of truth.** This spec set and the architecture document **`Documentation/Architecture/finetuning-architecture-v2.7.docx`** are **in sync** as of this revision (v2.6, v2.5, v2.4, v2.3, v2.1 and v1 are kept for history only). Where a spec cites a section like "(arch §4)", it refers to that document.
 >
 > **Precedence.** The architecture carries the *why* — design rationale, trade-offs, the reasoning behind each decision. These specs carry the *how* — module boundaries, file paths, function signatures, acceptance criteria. Neither outranks the other: they describe the same system at different altitudes. **If they disagree, that is a bug in one of them.** Fix the disagreement rather than picking a winner, and say which one you changed.
 >
@@ -410,6 +410,7 @@ IMPL-12  Testing / extraction routine (CLI harness)            (deps: 01, 02, 03
 IMPL-13  Orchestration (RunPod controller, pipeline DAG)       (deps: 01-12)
 IMPL-14  Unit tests + CI fixtures                              (deps: 01-13)
 IMPL-15  Pilot validation protocol (operational runbook)       (deps: 01-14; executed, not imported)
+IMPL-16  Extraction service on Azure (azure_service/)          (deps: 02, 03, 07, 09, 11; added 2026-11-24)
 ```
 
 **Deferred until after IMPL-15 passes** (they are real work, just not first-cycle work):

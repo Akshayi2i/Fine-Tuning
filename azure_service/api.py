@@ -18,7 +18,7 @@ time, against every configured key.
 
 Refused before anything is stored: a body over ``MAX_PDF_MB`` (413), one that
 is not a PDF or cannot be opened, needs a password and came without its own, or
-has too many pages (400), a line of business with no canonical policy schema
+has more pages than ``MAX_PAGES`` (413), a line of business with no canonical policy schema
 (400, by ``serving.vllm_entrypoint.request_lob``), a webhook that is not HTTPS
 (400), a password in the URL (400).
 

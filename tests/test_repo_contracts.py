@@ -498,7 +498,7 @@ def test_a_result_traces_back_to_the_model_that_produced_it(tmp_path):
     results_path, metrics_path = write_outputs(result, {"document": "policy_0001"}, root=tmp_path)
     append_registry(result, results_path, metrics_path, root=tmp_path, quant_format="q5_k_m")
 
-    registry = json.loads((tmp_path / "extraction_registry.json").read_text(encoding="utf-8"))
+    registry = json.loads((tmp_path / "results" / "extraction_registry.json").read_text(encoding="utf-8"))
     row = registry["extractions"][0]
     assert row["model_version"] == "v2"       # -> resolves to a run_manifest
     assert row["quant_format"] == "q5_k_m"
@@ -541,7 +541,7 @@ def test_appending_twice_accumulates_rather_than_overwrites(tmp_path):
         paths_ = write_outputs(result, {}, root=tmp_path)
         append_registry(result, *paths_, root=tmp_path)
 
-    registry = json.loads((tmp_path / "extraction_registry.json").read_text(encoding="utf-8"))
+    registry = json.loads((tmp_path / "results" / "extraction_registry.json").read_text(encoding="utf-8"))
     assert [r["document"] for r in registry["extractions"]] == ["policy_0001", "policy_0002"]
 
 
