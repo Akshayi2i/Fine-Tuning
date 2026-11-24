@@ -364,7 +364,7 @@ def rule_checks(field_path: str, value: Any, document: dict[str, Any]) -> bool |
     which means a rule applied and the value broke it.
     """
     from common.normalize import normalize_currency, normalize_date
-    from evaluation.metrics.field_accuracy import flatten_scalars
+    from contracts.rows import flatten_scalars
 
     leaf = field_path.rsplit(".", 1)[-1].casefold()
     # Siblings are read beside the field, wherever it sits: a canonical policy's
@@ -520,7 +520,7 @@ def build_document_features(
     fitted and served under one calibrator.
     """
     from common.canonical import printed_view, values_view
-    from evaluation.metrics.field_accuracy import flatten_scalars
+    from contracts.rows import flatten_scalars
 
     # Envelopes in, values out: features are keyed and valued on the value view
     # (both views are no-ops on a flat extraction). The printed view keeps each

@@ -122,3 +122,22 @@ def test_a_failed_prompt_check_is_warned_and_recorded(monkeypatch, caplog) -> No
     assert second["prompt_check_error"] == first["prompt_check_error"]
     warnings = [r for r in caplog.records if "could not run" in r.getMessage()]
     assert len(warnings) == 1
+
+
+def test_every_runtime_package_is_in_the_image() -> None:
+    """The packages the served path is built from (``tests/test_layering.RUNTIME``) are
+    all copied: ``contracts/`` was added on 2026-11-24 (review A1) and served code
+    imports it, mostly inside functions, which no import at start-up would show."""
+    from tests.test_layering import RUNTIME
+
+    missing = sorted(set(RUNTIME) - _copied_packages())
+    assert not missing, f"azure_service/Dockerfile copies no {missing}: add `COPY <name>/ <name>/`"
+
+
+def test_every_copied_folder_reaches_the_build() -> None:
+    """The build context sends only what ``Dockerfile.dockerignore`` lets through
+    (``*``, then ``!name/``): a folder copied but not let through is a COPY of nothing."""
+    ignore = (REPO / "azure_service" / "Dockerfile.dockerignore").read_text(encoding="utf-8").splitlines()
+    let_through = {line[1:].rstrip("/") for line in ignore if line.startswith("!") and line.endswith("/")}
+    missing = sorted(_copied_packages() - let_through)
+    assert not missing, f"copied but left out of the build context: {missing} (add `!<name>/`)"

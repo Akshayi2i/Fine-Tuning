@@ -21,9 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-NATIVE = "native_pdf"
-SCANNED = "scanned_pdf"
-MODALITIES = (NATIVE, SCANNED)
+from contracts.modality import MODALITIES, NATIVE, SCANNED  # noqa: F401 - moved (review A1)
 
 #: A filled vector path this small is the size of a glyph: a digit drawn as an
 #: outline rather than typed. Points; a 6-12 pt figure is 4-12 pt tall.

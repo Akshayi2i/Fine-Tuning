@@ -30,19 +30,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from contracts.served_release import (  # noqa: F401 - moved (review A1)
+    ServedAdapterError,
+    assert_ocr_pin,
+    lora_name,
+)
+
 #: Ranks vLLM's ``--max-lora-rank`` accepts.
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)
 #: Module names that put a LoRA on the vision tower or its merger.
 VISION_MODULES = ("visual", "vision", "merger", "patch_embed")
-
-
-class ServedAdapterError(RuntimeError):
-    """The release cannot be served as a LoRA on the pod's vLLM."""
-
-
-def lora_name(release_id: str) -> str:
-    """The name vLLM serves the release's adapter as, and the routine asks for."""
-    return f"policy-{release_id}"
 
 
 def vllm_rank(rank: int) -> int:
@@ -71,42 +68,6 @@ def check_adapter_config(config: dict[str, Any]) -> int:
     if rank <= 0:
         raise ServedAdapterError("adapter_config.json records no rank (r)")
     return rank
-
-
-def assert_ocr_pin(release_pin: dict[str, Any], pin: dict[str, str]) -> None:
-    """Refuse a release whose corpus another MinerU read than the one serving reads
-    with: another version, or another tier where the corpus recorded one."""
-    trained = release_pin.get("mineru_version")
-    if trained != pin["version"]:
-        raise ServedAdapterError(
-            f"the release was trained on text from MinerU {trained or '(not recorded)'}, but serving reads "
-            f"pages with MinerU {pin['version']} (configs/shared/ocr.yaml): its text is formatted otherwise, "
-            "input the model never saw. Re-OCR the corpus with the served MinerU and train a new version."
-        )
-    # The tier, where the corpus recorded one: a reading at another tier was made
-    # by other models. An in-process reading records none and is held to its
-    # version alone, as find_unprocessed holds it.
-    tier = release_pin.get("mineru_tier")
-    if tier is not None and tier != pin["tier"]:
-        raise ServedAdapterError(
-            f"the release was trained on text from MinerU {trained} at tier {tier}, but serving reads pages "
-            f"at tier {pin['tier']} (configs/shared/ocr.yaml): another tier reads a page with other models. "
-            "Re-OCR the corpus with the served MinerU and train a new version."
-        )
-    # Whether every page was read by OCR, where the corpus recorded it: a model
-    # trained on a hybrid PDF's text layer reads OCR text it never saw, and the
-    # other way round.
-    every_page = release_pin.get("read_every_page_by_ocr")
-    if every_page is not None:
-        from common.config import ocr_every_page
-
-        serving = pin.get("read_every_page_by_ocr", ocr_every_page())
-        if every_page != serving:
-            raise ServedAdapterError(
-                f"the release was trained on text read with read_every_page_by_ocr {every_page}, but serving "
-                f"reads with {serving} (configs/shared/ocr.yaml): a PDF with a text layer is read another "
-                "way. Re-OCR the corpus with the served setting and train a new version."
-            )
 
 
 def vllm_flags(name: str, rank: int, pod_path: str) -> str:

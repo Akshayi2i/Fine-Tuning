@@ -43,15 +43,7 @@ from common.prompts import (
     render_system_prompt,
 )
 from common.schemas import schema_version
-
-#: Prefixed to each page's OCR text. Deliberately visible text rather than an
-#: HTML comment: models attend to visible tokens far more reliably, and this
-#: marker has a second job — on a window of a longer document it tells the
-#: model it is looking at a fragment of it, so the fields that are absent are
-#: absent because they live on pages it was not shown. Angle brackets are not
-#: Markdown syntax, so the marker cannot be mistaken for document content the
-#: way a `#` heading or a `---` rule would be.
-PAGE_MARKER = "<page {page} of {total}>"
+from contracts.page_text import EMPTY_PAGE_TEXT, PAGE_MARKER  # noqa: F401 - moved (review A1)
 
 
 def page_total(messages: list[dict[str, Any]]) -> int | None:
@@ -165,15 +157,6 @@ class BuiltMessages:
                 + ". Training-time and inference-time prompts must render identically (arch §7) — "
                 "a change to either forces a corpus rebuild and a new training cycle."
             )
-
-
-#: Stands in for a page whose OCR recovered no text, in training AND serving.
-#: Serving substituted it and training sent the marker alone, so the model
-#: trained on one prompt for a blank page and was served another. An empty
-#: string is not an option at serving either: every page is read, a poorly
-#: scanned one included, and a request that refused on it would abort exactly
-#: the messy documents.
-EMPTY_PAGE_TEXT = "(no OCR text recovered for this page — read it from the image)"
 
 
 def _image_block(image: str | Path | bytes) -> dict[str, Any]:

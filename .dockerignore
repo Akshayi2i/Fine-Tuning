@@ -4,6 +4,7 @@
 !pyproject.toml
 !requirements-service.lock
 !common/
+!contracts/
 !artifact_registry/
 !registry_utils/
 !data_pipeline/

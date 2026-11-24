@@ -463,7 +463,7 @@ def _form_identity(row: Any) -> tuple[str, str | None, str | None] | None:
     number; and its year alone, from either, for an edition printed as a year
     ("2018"). ``None`` for a row with no form number - joined as before.
     """
-    from data_pipeline.ingestion.label_rules import edition_mm_yy, split_form_edition
+    from contracts.label_rules import edition_mm_yy, split_form_edition
 
     if not isinstance(row, dict):
         return None
@@ -527,7 +527,7 @@ def _attach_unidentified(node: Any, path: str, report: MergedPolicy, *, top: boo
     A fragment that states a different value for a field the row also states is
     never joined.
     """
-    from evaluation.metrics.field_accuracy import ROW_IDENTIFIERS
+    from contracts.rows import ROW_IDENTIFIERS
 
     if is_field_value(node):
         return node
@@ -565,7 +565,7 @@ def _attach_unidentified(node: Any, path: str, report: MergedPolicy, *, top: boo
 def _identifiers(rows: list[Any]) -> tuple[str, ...]:
     """The strong identifier these rows carry, as scoring infers it; ``()``
     when none is filled in most rows - those rows join only when identical."""
-    from evaluation.metrics.field_accuracy import _infer_key_fields
+    from contracts.rows import _infer_key_fields
 
     if not rows or not all(isinstance(r, dict) for r in rows):
         return ()

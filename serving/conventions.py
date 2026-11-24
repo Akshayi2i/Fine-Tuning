@@ -58,7 +58,7 @@ def conform(
     conventions against ``page_texts`` (every page's text, by page number).
     ``native``: the document is born digital, its text a text layer rather than
     OCR of a scan."""
-    from data_pipeline.ingestion.label_rules import PRINTED_NOWHERE, _envelopes, apply_label_rules
+    from contracts.label_rules import PRINTED_NOWHERE, _envelopes, apply_label_rules
 
     before = list(extraction.get("additional_fields") or [])
     original = {id(entry): index for index, entry in enumerate(before)}

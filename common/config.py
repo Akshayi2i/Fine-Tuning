@@ -294,7 +294,7 @@ def pixel_budget(tasks: Any = None) -> tuple[int, int]:
     # and as a token count (pixels // 1024); a budget that is not a multiple
     # makes those two forms disagree, and which one a processor reads decides
     # the resolution the model sees.
-    from data_pipeline.dataset_builder.cap_check import PIXELS_PER_VISUAL_TOKEN
+    from common.token_math import PIXELS_PER_VISUAL_TOKEN
 
     uneven = [v for v in budget if v % PIXELS_PER_VISUAL_TOKEN]
     if uneven:

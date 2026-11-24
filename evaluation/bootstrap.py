@@ -40,6 +40,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from contracts.calibration_stats import binomial_upper_bound  # noqa: F401 - moved (review A1)
+
 log = logging.getLogger(__name__)
 
 #: Resamples per comparison. 10,000 is the arch §15.5 figure: enough that the
@@ -419,20 +421,3 @@ def _side_mean(
     )
 
 
-def binomial_upper_bound(successes: int, trials: int, *, confidence: float = 0.95) -> float:
-    """Upper bound of a proportion, by the Wilson score interval.
-
-    Used where the question is "how bad could the error rate really be" on a
-    small sample — the §5.4 review thresholds, and the gate's absolute floors on
-    error rates. The Wilson interval rather than the normal approximation
-    because at n=30 with two errors the normal approximation gives nonsense, and
-    n=30 is the size these eval sets actually are.
-    """
-    if trials <= 0:
-        return 1.0
-    z = 1.959964 if confidence >= 0.95 else 1.644854
-    p = successes / trials
-    denominator = 1 + z * z / trials
-    centre = p + z * z / (2 * trials)
-    margin = z * ((p * (1 - p) / trials + z * z / (4 * trials * trials)) ** 0.5)
-    return min(1.0, (centre + margin) / denominator)

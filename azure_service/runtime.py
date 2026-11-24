@@ -5,11 +5,11 @@ For each tenant it serves (``SERVED_TENANTS``):
 1. the promoted release (:func:`serving.release_router.build_serving_plan`),
    refused unless it is served as a LoRA on the base (``lora_on_base``: the only
    kind the pod's stock vLLM can load), trained on the pinned MinerU's text
-   (``scripts.served_adapter.assert_ocr_pin``), packaged with the prompts and
+   (``contracts.served_release.assert_ocr_pin``), packaged with the prompts and
    the window plan this code renders, on the configured base
    (``serving.vllm_entrypoint.assert_prompt_hash``, ``assert_window_plan_served``,
    ``assert_base_model_served``);
-2. the model: vLLM asked for ``policy-<release>`` (``scripts.served_adapter.lora_name``),
+2. the model: vLLM asked for ``policy-<release>`` (``contracts.served_release.lora_name``),
    which :class:`inference_core.openai_backend.OpenAIChatBackend` checks vLLM
    serves, on our base;
 3. the release's calibrators, from Blob, as
@@ -58,7 +58,7 @@ def served_pins(release: Any, *, calibration: str | None) -> dict[str, Any]:
     read with without a registry lookup."""
     from common.config import base_model_config, format_profile, served_mineru
     from common.prompts import prompt_hash
-    from data_pipeline.dataset_builder.policy_windows import window_plan_id
+    from contracts.window_plan import window_plan_id
 
     if release is not None:
         base_model = str(release.base_model)
@@ -223,7 +223,7 @@ def load_calibrators(release: Any, registry: Any) -> ReleaseRuntime:
 def check_release(plan: Any) -> None:
     """The vllm_entrypoint cold-start checks that apply to a release served by the pod's vLLM."""
     from common.config import served_mineru
-    from scripts.served_adapter import ServedAdapterError, assert_ocr_pin
+    from contracts.served_release import ServedAdapterError, assert_ocr_pin
     from serving.vllm_entrypoint import (
         assert_base_model_served,
         assert_prompt_hash,
@@ -246,7 +246,7 @@ def check_release(plan: Any) -> None:
 
 def load_tenant(tenant: str, registry: Any, settings: Any, models: Callable[[str], Any]) -> TenantRuntime:
     """One tenant's release, model and calibrators; ``models(name)`` gives the served model ``name``."""
-    from scripts.served_adapter import lora_name
+    from contracts.served_release import lora_name
     from serving.release_router import build_serving_plan
 
     plan = build_serving_plan(registry, tenant_id=tenant)

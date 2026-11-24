@@ -412,12 +412,14 @@ def test_training_and_serving_plan_the_same_windows():
 def test_a_window_plan_cut_before_these_rules_is_refused(monkeypatch):
     """The windows changed for the same input, so the plan's version did: a
     corpus, or a release, cut with the version-3 plan is refused."""
+    import contracts.window_plan as window_plan
     import data_pipeline.dataset_builder.policy_windows as policy_windows
     from serving.release_router import ServedRelease, ServingPlan
     from serving.vllm_entrypoint import ColdStartError, assert_window_plan_served
 
     current = policy_windows.window_plan_id()
-    monkeypatch.setattr(policy_windows, "WINDOW_PLAN_VERSION", "3")
+    # Where window_plan_id reads it since the planner moved (review A1).
+    monkeypatch.setattr(window_plan, "WINDOW_PLAN_VERSION", "3")
     previous = policy_windows.window_plan_id()
     monkeypatch.undo()
     assert current.startswith("4:") and previous.startswith("3:") and previous != current

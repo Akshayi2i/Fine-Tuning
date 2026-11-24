@@ -27,6 +27,12 @@ TOKENS_PER_MESSAGE = 8
 TOKENS_PER_IMAGE_WRAPPER = 4
 
 
+#: Pixels per visual token - 16px patches with a 2x2 spatial merge. Moved here from ``data_pipeline.dataset_builder.cap_check``
+#: (review A1, 2026-11-24), which re-exports it: ``common.config`` checks the
+#: pixel budget with it and may not import build-time code.
+PIXELS_PER_VISUAL_TOKEN = 32 * 32
+
+
 class LengthCheckError(RuntimeError):
     """Raised when a staged row or a page cannot be measured."""
 

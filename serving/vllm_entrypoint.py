@@ -531,7 +531,7 @@ def assert_window_plan_served(plan: Any) -> None:
     was trained on (``ReleaseBundle.window_plan_version``); one that records none
     was packaged before every page was read and is refused too.
     """
-    from data_pipeline.dataset_builder.policy_windows import window_plan_id
+    from contracts.window_plan import window_plan_id
 
     current = window_plan_id()
     for release in plan.served:

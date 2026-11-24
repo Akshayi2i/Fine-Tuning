@@ -115,7 +115,7 @@ def recalibrate_after_text(
 def _served_values(extraction: Any) -> dict[str, Any]:
     """Every scalar field of what is served, by values-view path."""
     from common.canonical import values_view
-    from evaluation.metrics.field_accuracy import flatten_scalars
+    from contracts.rows import flatten_scalars
 
     return flatten_scalars(values_view(extraction or {}))
 
@@ -164,7 +164,7 @@ def _overall(result: Any, rescored: Mapping[str, tuple[float | None, bool]]) -> 
     it: off the envelopes for a canonical answer (``serving.printed_values``),
     off ``fields`` otherwise."""
     try:
-        from serving.printed_values import _overall_confidence
+        from contracts.confidence import _overall_confidence
 
         if _has_envelope(result.extraction):
             return _overall_confidence(result.extraction, result.review_flags)

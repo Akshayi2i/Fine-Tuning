@@ -28,7 +28,7 @@ import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any, NamedTuple
+from typing import Any
 
 from calibration.apply_calibration import CalibratedField, CalibratedResult, apply_calibration
 from calibration.features import shown_ocr_text
@@ -63,6 +63,7 @@ from common.schemas import (
     resolved_schema,
     with_page_bounds,
 )
+from contracts.window_plan import _halves, _Planned  # noqa: F401 - moved (review A1)
 from inference_core.input_builder import EMPTY_PAGE_TEXT, build_messages
 from inference_core.model_runner import Generation, LoadedModel, generate, generate_batch
 from inference_core.span_map import SpanMapError, map_compact_field_spans, map_field_spans
@@ -571,7 +572,7 @@ def _extract_policy_windows(
     window - is dropped from the value and the value flagged
     (:data:`PAGE_REF_OUTSIDE_WINDOW_FLAG`), as training's targets never cite one.
     """
-    from data_pipeline.dataset_builder.policy_windows import pages_to_read, plan_windows
+    from contracts.window_plan import pages_to_read, plan_windows
     from inference_core.model_runner import can_submit
     from serving.policy_merge import merge_policy_windows
 
@@ -674,18 +675,6 @@ class _WindowsRead:
     flags: list[str] = field(default_factory=list)
 
 
-class _Planned(NamedTuple):
-    """One window to read: a section group over pages, and whether its group's
-    declarations lead it (``PolicyWindowPlan.leads``)."""
-
-    group: str
-    pages: list[int]
-    leads: bool = False
-    #: Already sent once more after its request failed to reach the model (:func:`_settle`). A half is a new
-    #: window and has its own one resend (code review 2026-11-10: halves had none).
-    resent: bool = False
-
-
 @dataclass
 class _Settled:
     """One window's answer: read, split into two smaller windows, or failed."""
@@ -768,22 +757,6 @@ def _settle(source_id: str, route_: Route, window: _Planned, result: Any, attemp
                     window=PolicyWindow(group, pages, extraction, spans, result.latency_ms,
                                         leads=window.leads),
                     flags=[f"{path}:{PAGE_REF_OUTSIDE_WINDOW_FLAG}" for path in outside])
-
-
-def _halves(window: _Planned, declarations_page: int | None) -> list[_Planned]:
-    """A failed window as two smaller ones, in page order.
-
-    The declarations lead the half holding their page - the first half when
-    neither does - as they led the window: the rule training marks its windows
-    by (``policy_windows._home_window``). Led by neither, a declarations window
-    cut off on the declarations page lost its place to the half holding page 1,
-    and a renewal notice's prior policy number was served.
-    """
-    half = len(window.pages) // 2
-    pieces = [window.pages[:half], window.pages[half:]]
-    home = next((index for index, pages in enumerate(pieces) if declarations_page in pages), 0)
-    return [_Planned(window.group, pages, window.leads and index == home)
-            for index, pages in enumerate(pieces)]
 
 
 def _section_shapes(route_: Route, lob: str | list[str] | None, group: str) -> dict[str, str]:
@@ -1412,8 +1385,8 @@ def lossrun_windows(request: ExtractionRequest) -> list[list[int]]:
     text: nothing to estimate from (image only), or a joined ``ocr_text``,
     which the one-call path refuses for a multi-page document.
     """
-    from data_pipeline.dataset_builder.expand_tasks import TOKENS_PER_CLAIM_ROW, plan_windows
-    from data_pipeline.ocr.run_mineru import count_table_rows
+    from contracts.page_text import count_table_rows
+    from contracts.window_sizing import TOKENS_PER_CLAIM_ROW, plan_windows
 
     pages = sorted(request.page_texts) or list(range(1, len(request.image_paths) + 1))
     if not request.page_texts:
@@ -1953,7 +1926,7 @@ def extract(
             # answer against every page's text (serving.conventions): each value
             # once, citing every page that prints it; no extra field repeating a
             # field; a value no page prints flagged.
-            from data_pipeline.ocr.modality import NATIVE
+            from contracts.modality import NATIVE
             from serving.conventions import conform
 
             page_texts = None if request.modality_mode == "image_only" else (

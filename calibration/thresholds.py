@@ -48,7 +48,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from evaluation.bootstrap import binomial_upper_bound
+from contracts.calibration_stats import binomial_upper_bound
 
 log = logging.getLogger(__name__)
 

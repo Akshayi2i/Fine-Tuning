@@ -171,7 +171,7 @@ def ece_by_mode(
     ``half`` of each mode's readings: whether the confidence means what it says
     in each mode production or the gate reads. ``all`` is None where the
     calibrators scored nothing."""
-    from evaluation.metrics.coverage_metrics import expected_calibration_error
+    from contracts.calibration_stats import expected_calibration_error
 
     def ece(pairs: list[tuple[float, bool]]) -> float | None:
         return round(expected_calibration_error([c for c, _ in pairs], [ok for _, ok in pairs]), 4) if pairs else None
