@@ -299,3 +299,8 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - **A business-owners name** is told which part to send (`boppr` or `bopgl`).
 - **Extraction never skips MinerU** (user, 2026-10-30): the endpoint refuses a request that carries no MinerU text (`page_texts` for `ocr_plus_image`; `printed_texts` for `image_only`: the same text, held back from the prompt and used to check the answer against the pages); and a job whose MinerU text fails for good ends `failed` instead of `done` without the full text. The research tools (`testing.latency_check`, `testing.run_extraction`) can still read `image_only` to measure the model alone.
 
+## Changes of 2026-11-24 (review Phase 4)
+
+- A1: the window planner, label rules, row identity and confidence helpers serving uses moved to `contracts/`, the served MinerU client and its PDF renderer to `adapters/`; `serving` imports no build-time code; the runtime packages as a whole do in 3 places, each named in `tests/test_layering.py` (a stall notice, a command-line helper, calibration's fitting).
+- A2: `extract` runs `serving.stages` (route, release, answer, printed, confidence, review, output, validate, result) with one `ReadSettings`; same name, signature and output. Three type errors that were in its body are gone (268 in all).
+

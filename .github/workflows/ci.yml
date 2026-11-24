@@ -35,7 +35,7 @@ jobs:
 
       - name: Types
         # The whole tree, not a subset: a package excluded from type checking is
-        # a package where a signature change breaks a caller silently. The 271
+        # a package where a signature change breaks a caller silently. The 268
         # errors older than this check are frozen per file; a new one fails
         # (scripts/check_type_errors.py).
         run: |

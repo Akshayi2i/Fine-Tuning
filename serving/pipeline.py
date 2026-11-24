@@ -30,32 +30,40 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from calibration.apply_calibration import CalibratedField, CalibratedResult, apply_calibration
-from calibration.features import shown_ocr_text
+from calibration.apply_calibration import (  # noqa: F401 - read by serving.stages through this module (review A2)
+    CalibratedField,
+    CalibratedResult,
+    apply_calibration,
+)
+from calibration.features import (
+    shown_ocr_text,  # noqa: F401 - read by serving.stages through this module (review A2)
+)
 from calibration.fit_calibration import CalibrationParams
-from calibration.list_completeness import (
+from calibration.list_completeness import (  # noqa: F401 - read by serving.stages through this module (review A2)
     check_document,
     is_row_completeness_flag,
     merge_review_flags,
 )
-from calibration.logprob_confidence import field_confidences
+from calibration.logprob_confidence import (
+    field_confidences,  # noqa: F401 - read by serving.stages through this module (review A2)
+)
 from common.canonical import (
     collapse_spans,
     compact_schema,
     envelope,
     expand_answer,
     is_field_value,
-    values_view,
+    values_view,  # noqa: F401 - read by serving.stages through this module (review A2)
     with_output_dates,
     with_system_fields,
-    without_bare_values,
+    without_bare_values,  # noqa: F401 - read by serving.stages through this module (review A2)
 )
 from common.constants import DEFAULT_REVIEW_CONFIDENCE_THRESHOLD
 from common.full_text import build_text_sections, text_coverage
 from common.prompts import fast_layout
 from common.schemas import (
-    is_canonical,
-    is_common_model,
+    is_canonical,  # noqa: F401 - read by serving.stages through this module (review A2)
+    is_common_model,  # noqa: F401 - read by serving.stages through this module (review A2)
     is_valid,
     iter_validation_errors,
     iter_validation_errors_by_keyword,
@@ -68,9 +76,15 @@ from inference_core.input_builder import EMPTY_PAGE_TEXT, build_messages
 from inference_core.model_runner import Generation, LoadedModel, generate, generate_batch
 from inference_core.span_map import SpanMapError, map_compact_field_spans, map_field_spans
 from serving.adapter_router import Route, RoutingError, route
-from serving.consistency import consistency_flags
+from serving.consistency import (
+    consistency_flags,  # noqa: F401 - read by serving.stages through this module (review A2)
+)
 from serving.doc_type_classifier import Classifier
-from serving.value_flags import near_tie_flags, route_served, routed_paths
+from serving.value_flags import (  # noqa: F401 - read by serving.stages through this module (review A2)
+    near_tie_flags,
+    route_served,
+    routed_paths,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1795,417 +1809,16 @@ def extract(
             and schema with no flag. Off, such a policy is refused, or read
             against the fallback when the caller asked.
     """
-    request = _numbered_pages(request)
-    route_ = _resolve_route(
-        request, classifier,
-        confidence_threshold=classifier_threshold,
-        adapter_map=adapter_map or {},
-        fallback_doc_type=fallback_doc_type,
+    # The reading, stage by stage (serving.stages, review A2): each stage's body is
+    # the block of this function it was. The keyword arguments are one ReadSettings.
+    from serving.read_settings import ReadSettings
+    from serving.stages import read
+
+    settings = ReadSettings(
+        adapter_map=adapter_map, calibrators=calibrators, thresholds=thresholds,
+        classifier_threshold=classifier_threshold, review_threshold=review_threshold,
+        strict_schema=strict_schema, plan=plan, fallback_doc_type=fallback_doc_type,
+        release_runtimes=release_runtimes, detect_lob=detect_lob, base_model_loaded=base_model_loaded,
+        lob_confidence_threshold=lob_confidence_threshold, lob_uncertain_threshold=lob_uncertain_threshold,
     )
-
-    # The policy's line: the caller's, else the classifier's (or none).
-    resolution = _resolve_lob(
-        request, classifier, route_, detect=detect_lob,
-        line_threshold=lob_confidence_threshold, uncertain_threshold=lob_uncertain_threshold,
-    )
-    if resolution.flags:
-        route_ = replace(route_, review_flags=[*route_.review_flags, *resolution.flags])
-
-    release = None
-    lob_fallback_used = fallback = False
-    if plan is not None:
-        from serving.release_router import UnservedDocType
-
-        try:
-            # A policy no line could be found for is read by the base model
-            # against the fallback, flagged - the caller need not opt in, since
-            # the pipeline itself looked. A caller's unknown line is still refused
-            # unless the caller asked for the fallback.
-            routed = plan.route(route_.doc_type, resolution.lob,
-                                allow_fallback=request.allow_lob_fallback
-                                or resolution.source == "undetected")
-        except UnservedDocType as exc:
-            raise PipelineError(str(exc)) from exc
-        release = routed.release
-        fallback = routed.lob_fallback_used
-    elif route_.doc_type == "policy" and resolution.lob:
-        # No serving plan - fields first, the golden eval, compare_models: a
-        # line no schema has is refused as the plan refuses it, or read against
-        # the fallback, flagged, when the caller asked. It used to be read
-        # against the fallback with whatever adapter was routed, unflagged.
-        from serving.release_router import _unroutable
-
-        problem = _unroutable(resolution.lob)
-        if problem and not request.allow_lob_fallback:
-            raise PipelineError(f"{request.source_id}: {problem}")
-        fallback = bool(problem)
-    if fallback:
-        if not base_model_loaded:
-            # The engine is one release's merged model: reading with "no
-            # adapter" would be that release, against a schema it never
-            # trained on, reported as the base model.
-            raise PipelineError(
-                f"{request.source_id} would be read by the base model against the fallback "
-                "schema, but this endpoint's engine is the release's merged model, not the base: "
-                "the release covers every known line, so the engine holds no base model. A "
-                "policy with no line, a package or an undetected line cannot be read here; send "
-                "its single line of business.")
-        # The base model, no LoRA, against the canonical _fallback.json: no
-        # adapter trained on this line's layout is promoted.
-        lob_fallback_used = True
-        from inference_core.model_runner import NO_ADAPTER
-
-        route_ = replace(route_, adapter=NO_ADAPTER)
-        # A release's calibrators were fitted to its adapter, not the base.
-        calibrators = thresholds = None
-
-    # Serve THROUGH the release the plan chose: its adapter and its calibrators.
-    # The choice used to be a yes/no check and was then thrown away, so a
-    # personal-lines release "answered" a homeowners policy that the unified
-    # model then read, with the unified model's confidence.
-    runtime = (release_runtimes or {}).get(release.release_id) if release is not None else None
-    if runtime is not None:
-        if runtime.adapter is not None:
-            route_ = replace(route_, adapter=runtime.adapter)
-        if runtime.calibrators is not None:
-            calibrators, thresholds = runtime.calibrators, runtime.thresholds
-
-    # Calibration is per document type, and which type this is only becomes
-    # known once the classifier has run — so it is selected here, not by the
-    # caller. The endpoint used to resolve it from the caller-supplied
-    # `doc_type`, which is absent on every classification-driven request; the
-    # lookup fell through to `.get("")` and the request was refused before
-    # extraction ever ran.
-    # The v1 transform is needed only when no fitted calibrator set applies.
-    if lob_fallback_used:
-        # The base model has no fitted calibrators, and the endpoint may hold no
-        # v1 parameters for the type: confidence is then raw. Every field is
-        # flagged for review either way (no calibrator set below).
-        try:
-            calibration = _calibration_for(calibration, route_.doc_type)
-        except PipelineError:
-            calibration = None
-        if calibration is None:
-            from calibration.fit_calibration import CalibrationParams
-
-            # The identity: raw confidence, reported as a diagnostic only.
-            calibration = CalibrationParams(method="temperature", doc_type=route_.doc_type,
-                                            model_version=model.tag, temperature=1.0)
-    else:
-        calibration = _calibration_for(calibration, route_.doc_type) if calibrators is None else None
-
-    # The line selects the policy's canonical schema. It is the caller's to
-    # supply; with none, `schema_key` selects the client's canonical fallback,
-    # so a policy's output is canonical JSON either way.
-    lob = None if lob_fallback_used else resolution.lob
-    canonical = is_canonical(route_.schema_doc_type, route_.schema_acord_form, lob)
-    common_model = canonical and route_.schema_doc_type == "policy" and is_common_model(
-        route_.schema_doc_type, route_.schema_acord_form, lob)
-
-    # Every page of every document is read (decision 2026-10-19): a policy in
-    # windows, a long Loss Run in windows, anything else in one call.
-    latency: float | None = None
-    merge_flags: list[str] = []
-    reconciliation: dict[str, Any] | None = None
-    window_latencies: list[float] = []
-    window_stats: list[dict[str, Any]] = []
-    printed_check: dict[str, Any] | None = None
-    windows = lossrun_windows(request) if route_.schema_doc_type == "lossrun" else []
-
-    if canonical and route_.schema_doc_type == "policy":
-        # Every canonical policy is read as windows — section group x page
-        # window — planned by the SAME function the corpus build expanded its
-        # training rows with, so a served window is a shape a training row had.
-        # Always, whatever the length: a threshold computed from prompt length
-        # would move between corpus builds and re-shape documents silently.
-        extraction, all_spans, latency, pages_used, merge_flags = _extract_policy_windows(
-            request, model, route_, lob, latencies=window_latencies, stats=window_stats,
-        )
-        if common_model:
-            # The conventions the training labels follow, applied to the merged
-            # answer against every page's text (serving.conventions): each value
-            # once, citing every page that prints it; no extra field repeating a
-            # field; a value no page prints flagged.
-            from contracts.modality import NATIVE
-            from serving.conventions import conform
-
-            page_texts = None if request.modality_mode == "image_only" else (
-                dict(request.page_texts) or dict(enumerate(_all_page_texts(request), start=1)))
-            conformed = conform(extraction, all_spans, page_texts,
-                                native=(request.ocr_meta or {}).get("modality") == NATIVE)
-            extraction, all_spans = conformed.extraction, conformed.spans
-            merge_flags.extend(conformed.flags)
-            if page_texts:
-                merge_flags.extend(_likely_missed(extraction, page_texts, lob))
-        # Printed values only (decision 2026-10-24): a value the answer holds
-        # that no page prints is taken out of the JSON and listed for review
-        # (serving.printed_values). With no page text (image only) nothing can be
-        # checked yet: fields first checks it when MinerU's text arrives. The
-        # text is the request's printed_texts when it carries one (the golden
-        # eval's noisy mode), else the text the model read.
-        from serving.printed_values import hold_to_printed
-
-        checked_texts = _printed_texts(request)
-        if common_model and checked_texts:
-            # Right value, wrong role: a declarations label printing another value
-            # than the one served under it. Before the check, so its flags follow
-            # their values (held.joined).
-            merge_flags.extend(_role_mismatches(extraction, checked_texts, lob))
-        held = hold_to_printed(extraction, all_spans, checked_texts, lob=lob)
-        extraction, all_spans, printed_check = held.extraction, held.spans, held.record
-        # Flags raised before it follow their values; a value taken out keeps one.
-        merge_flags = held.joined(merge_flags)
-    elif len(windows) > 1:
-        # A Loss Run longer than one window: read by window, merged and
-        # reconciled. One that fits a window is read in one call below.
-        extraction, all_spans, latency, pages_used, merge_flags, reconciliation = (
-            _extract_lossrun_windows(request, model, route_, windows, latencies=window_latencies))
-    else:
-        # Derived from the images actually sent, not from page_texts: an
-        # image_only document has no page_texts, and defaulting to [1] made
-        # check_document sum table_row_counts for page 1 alone — flagging every
-        # multi-page image_only extraction as row-incomplete.
-        pages_used = (
-            sorted(request.page_texts) if request.page_texts
-            else list(range(1, len(request.image_paths) + 1))
-        )
-        page_ocr = None if request.modality_mode == "image_only" else _all_page_texts(request)
-        # Images by page, in the order the texts are in. Sent as the caller
-        # listed them, `page_10.png` listed before `page_2.png` put page 10's
-        # image beside page 2's text.
-        extraction, all_spans, latency = _generate_once(
-            model, route_, [_image_for(request, page) for page in pages_used],
-            page_ocr, request.modality_mode,
-            page_numbers=pages_used if request.page_texts else None,
-            lob=lob,
-        )
-
-    if not window_latencies and latency is not None:
-        window_latencies.append(latency)                  # read in one call
-    if common_model:
-        # A coverage whose unit was read in another window comes back unlinked.
-        merge_flags.extend(unit_link_flags(extraction))
-    if route_.schema_doc_type == "lossrun":
-        if reconciliation is None:
-            from serving.lossrun_merge import reconcile_extraction
-
-            reconciliation = reconcile_extraction(extraction).as_dict()
-        # A mismatch is a claims list that does not add up to what the document
-        # prints. Unverifiable (nothing printed to check against) is reported,
-        # not flagged: the Loss Run schema carries no printed totals yet.
-        if reconciliation.get("status") == "mismatch":
-            merge_flags.append(LOSSRUN_TOTALS_MISMATCH_FLAG)
-
-    # Calibration, completeness and the per-field output all read VALUES. For a
-    # canonical document that is each envelope's `parsed`; a flat document is
-    # its own values view. The spans were re-keyed to the same paths.
-    values = values_view(extraction)
-
-    # --- confidence --------------------------------------------------------
-    # One span map for the answer returned, on both paths: one interleaved
-    # call, or windows whose spans the merge re-keyed - never one call per
-    # page, so the spans describe exactly the document that was returned. The previous per-page
-    # loop left `all_spans` holding only the last page's map while `extraction`
-    # was the merged document, so fields merged from earlier pages carried no
-    # confidence and a field the declarations page won still reported the
-    # rejected page's value.
-    # The release bundle's calibrator set when the endpoint holds one, the v1
-    # transform otherwise. Not a silent fallback: a release whose calibrate stage
-    # never ran has no per-field-type curves and no measured thresholds, and
-    # serving it through the v1 path is a knowing downgrade rather than an
-    # equivalent.
-    if calibrators is not None:
-        calibrated: CalibratedResult = _feature_calibrated(
-            # The model form, envelopes and all: flattened it gives the same
-            # values, and it still carries each value's printed form. A
-            # common-model line's ids and codes are no reading, and not scored.
-            extraction=without_bare_values(extraction) if common_model else extraction,
-            spans=all_spans,
-            calibrators=calibrators, thresholds=thresholds,
-            # The same definition validation fits the calibrators with: the OCR
-            # text of the pages the model was shown, none for image_only.
-            page_text=None if request.modality_mode == "image_only" else shown_ocr_text(
-                [request.page_texts.get(page) for page in pages_used]
-                if request.page_texts else [request.ocr_text]
-            ),
-            common_model=common_model,
-            # Each page's own text, so a value is grounded on the pages it cites.
-            page_texts=None if request.modality_mode == "image_only" else (
-                {int(p): t for p, t in request.page_texts.items()} or None),
-            modality_mode=request.modality_mode,
-        )
-    else:
-        log.warning(
-            "no calibrator set supplied for %s, so confidence falls back to the v1 raw "
-            "aggregate, and EVERY field is flagged for review: that number is length-biased "
-            "and tied to no measured error rate (arch v2.1 §5.1) — load the release bundle's "
-            "calibrators to get the guarantee.", request.source_id,
-        )
-        raw = field_confidences(all_spans)
-        calibrated = apply_calibration(raw, calibration, review_threshold=review_threshold)
-        # No measured threshold, no promise. Accepting a field above a fixed 0.70
-        # claimed an error rate nobody measured; the confidence is still reported,
-        # as a diagnostic, but nothing is accepted on it.
-        for path, f in calibrated.fields.items():
-            if not f.needs_review:
-                calibrated.fields[path] = replace(
-                    f, needs_review=True, reason="no fitted calibrator; nothing is auto-accepted"
-                )
-                calibrated.review_flags.append(f"{path}:uncalibrated")
-
-    # --- list completeness: the signal logprobs cannot see ------------------
-    completeness = check_document(
-        values, route_.schema_doc_type,
-        ocr_meta=request.ocr_meta, pages_used=pages_used,
-    )
-    # A value whose tokens all but chose another (serving.value_flags): on the
-    # spans as served, after the merge and the printed-values check.
-    merge_flags.extend(near_tie_flags(all_spans))
-    flags = merge_review_flags(
-        completeness, calibrated.review_flags + route_.review_flags + merge_flags
-        + ([LOB_FALLBACK_FLAG] if lob_fallback_used else [])
-    )
-
-    full_text_pages = _full_text_pages(request)
-
-    # --- the client's canonical envelope -----------------------------------
-    # confidence and flagged are filled here, from the calibrated fields, never
-    # by the model. A list whose row count disagrees with the document is
-    # flagged on every value in it: the rows present may each be confident, and
-    # the list as a whole still needs a person.
-    if canonical:
-        # Values that cannot all be true together (serving.consistency): checked on
-        # the merged answer, so a date from the declarations and one from a later
-        # window are compared, and routed to review below with the other value flags.
-        flags.extend(consistency_flags(extraction))
-        incomplete = tuple(
-            flag.split(":", 1)[0] for flag in flags if is_row_completeness_flag(flag)
-        )
-        # Values a flag sends to review though they are served: printed only off
-        # the pages they cite, a near tie, a label printing another value
-        # (serving.value_flags).
-        routed = routed_paths(flags)
-        scores = {
-            path: (
-                f.confidence,
-                f.needs_review or path in routed or any(
-                    path == name or path.startswith((f"{name}[", f"{name}."))
-                    for name in incomplete
-                ),
-            )
-            for path, f in calibrated.fields.items()
-        }
-        output = with_system_fields(
-            envelope(extraction, scores),
-            page_count=len(request.image_paths) or len(request.page_texts) or None,
-            source_file_name=request.source_file_name,
-            lob=lob, modality=(request.ocr_meta or {}).get("modality"),
-        )
-        if common_model:
-            # The full-text tier: every printed word by form and section, built
-            # from the page text by Fideon's section builder, never by the model
-            # (SPEC_21 §4.6, common.full_text). Before validation, so the client's
-            # schema judges it too.
-            text_sections = build_text_sections(full_text_pages)
-            if text_sections:
-                output["text_sections"] = text_sections
-            else:
-                flags.append(NO_FULL_TEXT_FLAG)
-    else:
-        output = extraction
-
-    # --- no key the client's schema does not name ------------------------------
-    # Decoding is held to a closed schema, so the model cannot write one - but
-    # that rests on the server's grammar alone, and a backend without it (or a
-    # bug) would serve an invented key flagged schema:invalid at most
-    # (fields first serves with strict_schema off). Taken out here, whatever
-    # the backend, and said: nothing is served that the schema has no place for.
-    unknown_keys: list[str] = []
-    if canonical and isinstance(output, dict):
-        output, unknown_keys = _without_unknown_keys(output, route_, lob)
-        flags.extend(f"{path}:{UNKNOWN_KEY_FLAG}" for path in unknown_keys)
-
-    # --- schema validation, mirroring the audit gate ------------------------
-    # Against the client's FULL schema for a canonical document, envelope and
-    # all — the model form it was generated in is ours, the contract is theirs.
-    verdict = schema_verdict(
-        extraction, output, doc_type=route_.schema_doc_type,
-        acord_form=route_.schema_acord_form, lob=lob, common_model=common_model,
-    )
-    output, filled = verdict.output, verdict.filled
-    schema_valid = verdict.valid
-    validation_errors = list(verdict.errors)
-    if not schema_valid:
-        if strict_schema:
-            raise PipelineError(
-                f"the extraction for {request.source_id} failed schema validation and will not be "
-                f"returned (Fideon SPEC_07 Stage 3 mirrors this on every production call): "
-                + "; ".join(validation_errors[:4])
-            )
-        flags.append("schema:invalid")
-
-    if canonical:
-        # Every key of the line's schema, whatever the model found: a value it
-        # did not extract is null, not absent, so every served JSON - from the
-        # base model or a trained one - has the same keys (common.canonical.
-        # with_all_keys). After validation, which judges the model's own answer
-        # (an answer missing a required section must still fail; on a
-        # common-model line, the filled answer with its sections checked as
-        # written, above), and after confidence, so the nulls carry none of it.
-        output = filled if filled is not None else _with_every_key(output, route_, lob)
-
-    # SPEC_21's every-word rule, measured on what is served.
-    coverage = text_coverage(full_text_pages, output) if canonical and common_model else None
-
-    result = ExtractionResult(
-        source_id=request.source_id,
-        doc_type=route_.schema_doc_type,
-        model_version=model.tag,
-        mode=request.modality_mode,
-        schema_valid=schema_valid,
-        overall_confidence=calibrated.overall_confidence,
-        extraction=output,
-        fields={
-            path: f.as_output()
-            for path, f in sorted(calibrated.fields.items())
-            if path != "line_of_business" and "[" not in path
-            and not any(path == gone or path.startswith(f"{gone}.") for gone in unknown_keys)
-        },
-        list_fields={
-            name: {"rows": values.get(name, []), **signal.as_output()}
-            for name, signal in sorted(completeness.items())
-        },
-        line_of_business=(resolution.as_output() if resolution.source is not None
-                          else _lob_output(calibrated.fields)),
-        pages_used=pages_used,
-        review_flags=sorted(set(flags)),
-        route_info={
-            "adapter": route_.adapter or None,
-            "foundation_only": route_.foundation_only,
-            "classifier_confidence": (
-                route_.classification.confidence if route_.classification else None
-            ),
-            "classifier_method": (
-                route_.classification.method if route_.classification else None
-            ),
-            "lob_fallback_used": lob_fallback_used,
-
-            "lob_source": resolution.source,
-        },
-        latency_ms=latency,
-        validation_errors=validation_errors,
-        reconciliation=reconciliation,
-        window_latencies_ms=window_latencies,
-        text_coverage=coverage,
-        window_stats=window_stats,
-        printed_check=printed_check,
-        confidence_features=dict(calibrated.features),
-        calibrated_with=CalibratedWith(calibrators, thresholds) if calibrators is not None else None,
-    )
-
-    log.info(
-        "extracted %s as %s (confidence %.3f, %d review flag(s), adapter=%s)",
-        request.source_id, result.doc_type, result.overall_confidence,
-        len(result.review_flags), route_.adapter or "foundation-only",
-    )
-    return result
+    return read(request, model, classifier, calibration, settings)

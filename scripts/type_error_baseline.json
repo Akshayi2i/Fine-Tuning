@@ -51,7 +51,7 @@
   "serving/consistency.py": 5,
   "serving/conventions.py": 3,
   "serving/lossrun_merge.py": 2,
-  "serving/pipeline.py": 5,
+  "serving/pipeline.py": 2,
   "serving/policy_merge.py": 10,
   "serving/raw_parsed.py": 11,
   "serving/vllm_entrypoint.py": 4,
