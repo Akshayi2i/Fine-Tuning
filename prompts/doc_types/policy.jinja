@@ -66,7 +66,7 @@ Section 4 is usually most of the document by page count and carries **no extract
 - A value the document prints that no field of the schema is defined for goes under the additional fields: its label as printed, its value and every page that prints it - one entry, however often it is printed. Never place it in a field whose description it does not meet.
 - A value that has a field of its own goes in that field only, never also under the additional fields.
 {%- if read_elsewhere %}
-- These parts of the schema are read by other requests and are not shown here: {{ read_elsewhere }}. A value that belongs under one of them is read there: leave it out here, and never write it under the additional fields.
+- These parts of the schema are read by other requests and are not shown here: {{ read_elsewhere }}. A value that belongs under one of them is read there: leave it out here, and never write it under the additional fields.{% if printed_here %} A value printed with an entry listed here is still written in that entry's own field, though it is also read elsewhere: {{ printed_here }}.{% endif %}
 {%- endif %}
 - A risk unit's number, and whether a coverage is included, are values only where the document prints them. Never write them by default.
 - Policy wording - definitions, conditions, exclusions - is not a value. It never goes under the additional fields.

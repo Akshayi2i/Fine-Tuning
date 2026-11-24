@@ -11,7 +11,7 @@
 # Request: {{ title }}
 Read the pages above for these top-level keys only: {{ top_keys }}. {% if required_keys %}Emit {{ required_keys }} always, as `{}` when nothing in them is stated, and any other key only when these pages state something under it.{% else %}Emit a key only when these pages state something under it.{% endif %} A key whose kind is a list holds its entries in document order, and is left out when these pages show none.
 {%- if read_elsewhere %}
-These parts of the schema are read by other requests and are not listed here: {{ read_elsewhere }}. A value that belongs under one of them is read there: leave it out here, and never write it under the additional fields.
+These parts of the schema are read by other requests and are not listed here: {{ read_elsewhere }}. A value that belongs under one of them is read there: leave it out here, and never write it under the additional fields.{% if printed_here %} A value printed with an entry listed here is still written in that entry's own field, though it is also read elsewhere: {{ printed_here }}.{% endif %}
 {%- endif %}
 
 ## Fields

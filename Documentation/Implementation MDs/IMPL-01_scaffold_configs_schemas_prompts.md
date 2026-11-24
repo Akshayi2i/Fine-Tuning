@@ -38,7 +38,7 @@ Scaffold the `insurance-extraction-finetuning` repo and create every config file
 - **`configs/model_view.yaml`** — repo-owned replacements for common-model descriptions written for schema authors, and how coverage codes are offered (`oneof` or `enum`); part of the prompt.
 - **`configs/lob_meanings.yaml`** — one role-based sentence per registered line, for the line classifier (no carrier wording).
 - **`configs/label_mappings.yaml`** — labels written for one line's schema used under another's (applied when targets are built and labels scored, never to stored labels).
-- **`configs/coverage_code_recodes.yaml`** — coverage codes re-coded when bundles are prepared; **`configs/coverage_code_meanings.yaml`** — a template of neutral meanings per coverage code, to be filled in; not yet applied to the model view or the prompt.
+- **`configs/coverage_code_recodes.yaml`** — coverage codes re-coded when bundles are prepared; **`configs/coverage_code_meanings.yaml`** — a neutral meaning per coverage code, written by someone who knows the coverages (never generated): a filled `meaning` (and `tell_apart`) is the code's text in the model view and the prompt (`common.model_view.code_meaning`), an empty one falls back to the code file's name. Part of the prompt hash. Lists the seven personal lines, `gl`, `bopgl`, `boppr` and `wc` (since 2026-11-24); all empty on that date.
 - **`configs/canonical schema/`** — the client's schemas, read-only (§3b).
 - **Not created under v2.1:** `configs/training/{acord,lossrun,policy}_adapter.yaml`. There is one adapter and no per-type adapter (arch §4.1); a per-type config arrives only with a type that passes the §4.2 graduation gate. The original v1 description, for reference — LoRA rank 16 / alpha 32 / dropout 0.05, LR `7e-5` (range 5e-5–1e-4), epochs 4 (range 3–5), **effective batch 16–32**; each references its `doc_type`, its schema file, and `foundation_version: <set at runtime>`.
   - **One shared `acord` adapter only** (arch §4b Option 1). Per-form adapter configs (`acord25`/`acord125`/`acord140`) are **not created** — with limited data per form, one adapter learning shared "ACORD-ness" generalizes better than several data-starved ones. Add them only when a form has 1000+ examples *and* eval shows the shared adapter underperforming. The per-form **schemas** still exist, because the classifier must select the right schema regardless.
@@ -140,7 +140,7 @@ Every policy is extracted into the client's canonical JSON for its line. These f
     - `ocr_plus_image`: OCR text and page images of one document; the OCR text is the primary source for dense text, identifiers and amounts, the images are the authority on layout, and where the two disagree on a character the image wins.
     - `noisy_ocr_image`: identical to `ocr_plus_image` (`common.constants.PROMPT_MODE_ALIASES`) — **the noise lives in the data, not the instruction**.
     - `image_only`: page images and no OCR text; read the values from the pixels, and output null rather than a partly guessed identifier or amount.
-  - Be versioned by `common.prompts.PROMPT_TEMPLATE_VERSION` (now **7.2.0**), a constant recorded in the corpus manifest (IMPL-05), not text in the prompt.
+  - Be versioned by `common.prompts.PROMPT_TEMPLATE_VERSION` (now **8.0.0**, since 2026-11-24), a constant recorded in the corpus manifest (IMPL-05), not text in the prompt.
 - **`doc_type_classifier_prompt.jinja`** — zero-shot prompt asking the model to name the doc type (`acord`/`policy`/`lossrun`) and, if acord, the form number — the **two-level classification** of arch §4b — and, when lines are passed, a policy's line of business from the registered lines, each with its meaning from `configs/lob_meanings.yaml`. Output a small fixed JSON: `{"doc_type": "...", "acord_form": "...", "lob": "..." | null, "confidence": 0.0}` (without `lob` when no lines are passed). A `line_only` variant asks the line alone, among the lines passed. Line detection ships off (`routing.detect_lob: false`).
 
 **Non-negotiable:** `common.prompts.render_system_prompt(...)` is the single renderer used by dataset build (IMPL-05), evaluation (IMPL-08), serving (IMPL-11), and testing (IMPL-12); `render_classifier_prompt(...)` renders the classifier. Training-time and inference-time prompts must render identically (arch §7).
@@ -277,8 +277,8 @@ after them follows in windows.
 (description replacements; a test fails once the client's own text matches an entry),
 `configs/lob_meanings.yaml` (a test keeps recorded carrier labels out and requires every registered line),
 `configs/label_mappings.yaml`, `configs/coverage_code_recodes.yaml` (27 codes re-coded at bundling), and
-`configs/coverage_code_meanings.yaml` (the accuracy plan's template of neutral code meanings, to be filled in;
-not yet read by the model view).
+`configs/coverage_code_meanings.yaml` (neutral code meanings, written by a person; read by the model view
+since 2026-11-24, empty meanings falling back to the name).
 
 ## Changes since 2026-10-05
 
@@ -347,3 +347,13 @@ not yet read by the model view).
 - New training config keys, every one off or neutral by default: `batch.vit_gradient_checkpointing`, `dataloader_num_workers`, `per_device_eval_batch_size`; `data_mix.twins_per_seed_per_epoch`; `line_balance.count` / `distinct_repeats`; `continued_training.rehearsal_old_share` / `rehearsal_weight_by_line_errors`; `hard_examples`; evaluation `validation_sample_by_empty_target`, `validation_rows_per_family_max`, `validation_sample_mode_shares`, `selection_two_thirds_candidate`, `calibration_reuses_selection`, `golden_noisy_share`, `run_to_run_share`, `golden_documents_in_flight`. `evaluation.early_stopping_patience` (read by nothing) is removed.
 - `orchestration/config/pipeline.yaml`: `defaults.ocr_workers`; a `notifications` block (`webhook_url_env`, `on_stage_failure`, `on_gate_block`, `on_run_complete`); `continued_training` fresh-run rules (`fresh_when_new_share_above`, `fresh_every_n_cycles`, `fresh_when_golds_changed`), all off.
 - `configs/inference/vllm_serving.yaml`: `generation.top_logprobs: 2`, `serving.near_tie_margin: 0.1`. New env vars: `FIDEON_ALLOW_DIRTY_TREE`, `FIDEON_NOTIFY_WEBHOOK_URL`.
+
+## Changes of 2026-11-24 (prompt version 8.0.0, review P1-P5)
+
+- `PROMPT_TEMPLATE_VERSION` 8.0.0, `FAST_LAYOUT_VERSION` 2; prompt hash `33f296bb…` (7.2.0's was `370dd983…`; v4 is served from commit 19b1bff). The corpus is rebuilt and the adapter trained on it in cycle 3.
+- P1: a request that names parts read by other requests, and holds a field for a value printed beside its entries (`common.model_view.PRINTED_STRING_FIELDS`: a coverage's `form_refs`), says that value is still written there (`common.prompts._printed_here`; `prompts/fast/group.jinja`, `prompts/doc_types/policy.jinja`).
+- P2: `configs/coverage_code_meanings.yaml` is read (`common.model_view.code_meaning`) and in the prompt hash; gl, bopgl, boppr and wc listed. Meanings are empty until a coverage expert writes them: `tests/test_coverage_code_meanings.py` marks the check expected to fail until then.
+- P3: the fast field list says `r` and `v`, not `raw` and `parsed` (`common.prompts._compact_words`); `page_ref` stays on an additional field's entry, which the compact answer keeps.
+- P4: the fast image-only request says each page is its image and its marker, not "its own text" (`prompts/fast/system.jinja`). The standard template still has the sentence: fixed with P6, before the standard profile is used again.
+- P5 (decision: relax the rule): descriptions may show the values and column headings a field holds; never a carrier's wording or one line's example. Nine replaced in `configs/model_view.yaml`; `tests/test_prompt_examples.py`.
+- Stale comments fixed in `prompts/system_prompt_template.jinja` (test names) and `configs/schema_sections.yaml` (what `lineblk` holds per line).

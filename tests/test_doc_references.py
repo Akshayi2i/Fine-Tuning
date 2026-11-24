@@ -26,15 +26,10 @@ NOT_TESTS: dict[str, str] = {
     "test_examples": "a count in a corpus view (val_examples, test_examples)",
 }
 
-#: Stale names that cannot be fixed yet, and why. The prompt templates' bytes,
-#: comments included, are hashed into ``prompt_hash()``: correcting a comment
-#: there is a new prompt version, done with the cycle 3 prompt changes (review
-#: Phase 3, P1-P5). :func:`test_held_names_are_still_stale` fails once they are
-#: fixed, so this list cannot outlive them.
-HELD_FOR_PROMPT_VERSION: dict[str, set[str]] = {
-    "prompts/system_prompt_template.jinja": {"test_prompt_parity",
-                                             "test_prompt_carries_descriptions_but_no_alias_strings"},
-}
+#: Stale names that cannot be fixed yet, and why (a template's bytes, comments
+#: included, are hashed into ``prompt_hash()``: correcting one is a new prompt
+#: version). Empty since the prompt version of 2026-11-24 fixed the last two.
+HELD_FOR_PROMPT_VERSION: dict[str, set[str]] = {}
 
 _PATH = re.compile(r"tests/(test_[A-Za-z0-9_]+\.py)")
 _NAME = re.compile(r"(?<![A-Za-z0-9_./])(test_[a-z0-9_]{3,})\b(?!\.py|/)")

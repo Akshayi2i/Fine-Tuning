@@ -57,6 +57,8 @@ shared:
     - Home Cyber Protection Coverage
     used_by:
     - homeowners
+    - bopgl
+    - boppr
   X_EQUIPMENT_BREAKDOWN:
     meaning: ''
     tell_apart: ''
@@ -72,6 +74,8 @@ shared:
     - Mech/Elec/Pressure Sys
     used_by:
     - homeowners
+    - bopgl
+    - boppr
   X_IDENTITY_THEFT:
     meaning: ''
     tell_apart: ''
@@ -142,6 +146,9 @@ shared:
     - motorcycle
     - recreational_vehicle
     - ocean_marine
+    - gl
+    - bopgl
+    - boppr
   X_ORDINANCE_LAW:
     meaning: ''
     tell_apart: ''
@@ -153,6 +160,7 @@ shared:
     - Ordinance and Law
     used_by:
     - homeowners
+    - boppr
   X_PERSONAL_LIABILITY:
     meaning: ''
     tell_apart: ''
@@ -315,6 +323,76 @@ shared:
     used_by:
     - homeowners
     - dwelling_fire
+  X_HIRED_NONOWNED_AUTO:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Hired and non-owned auto liability
+    printed_as:
+    - Hired and Non-Owned Auto
+    - Nonowned Hired Auto Liability
+    - Non Owned Hired Auto Liability Coverage New York
+    - HIRED AUTO AND NON-OWNED AUTO LIABILITY - NEW YORK
+    - Hired/Non-Owned Auto Liability (per occurrence/aggregate)
+    - Hired/Non-Owned Auto Liability
+    - HIRED AUTO AND NON-OWNED AUTO LIABILITY
+    - Hired Auto Liability
+    - Nonowned Auto Liability
+    used_by:
+    - gl
+    - bopgl
+    - boppr
+  X_ADDITIONAL_INSURED:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Additional insured
+    printed_as:
+    - Blanket Additional Insured
+    - Additional Insured - Mortgagee, Assignee or Receiver
+    - Additional Insured - Owners, Lessees or Contractors - Completed Operations
+    - Additional Insured - Owners, Lessees or Contractors - Scheduled Person or Organization
+    - Additional Insured Designated Person or Organization
+    - Designated Person or Organization
+    - Vendors
+    - Lessor of Premises
+    - Owner of Leased Land
+    - Owners, Lessees or Contractors Completed Work - Automatic Status
+    - State or Political Subdivision - Premises Permits
+    - Additional Insured - Lessor of Leased Equipment
+    used_by:
+    - gl
+    - bopgl
+    - boppr
+  X_PRIMARY_NONCONTRIBUTORY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Primary and noncontributory
+    printed_as:
+    - Primary and Noncontributory Endorsement
+    - Primary and Noncontributory - Other Insurance Condition
+    used_by:
+    - gl
+  X_WAIVER_OF_SUBROGATION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Waiver of subrogation
+    printed_as:
+    - Blanket Waiver of Subrogation
+    - Waiver of Transfer of Rights of Recovery Against Others to Us
+    - Waiver Of Subrogation
+    used_by:
+    - gl
+    - bopgl
+  X_TERRORISM:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Terrorism (TRIA)
+    printed_as:
+    - Terrorism Coverage
+    - Terrorism
+    - Terrorism Risk Insurance Act
+    - Certified Terrorism Loss
+    used_by:
+    - gl
 homeowners:
   HO_ADDITIONAL_INSURED:
     meaning: ''
@@ -1148,3 +1226,2555 @@ personal_umbrella:
     - Liability Limit
     - Liability Per Occurrence
     - Liability Per Occurrence*
+
+# Added 2026-11-24 (review P2): the lines cycle 2 trained on - fill these first. Each code's
+# shown_today is the code file's name (what the model sees now), printed_as its printed names.
+gl:
+  GL_BI_PD:
+    meaning: ''
+    tell_apart: ''
+    shown_today: 'Coverage A - Bodily injury and property damage liability (its limits: Each Occurrence Limit, General Aggregate
+      Limit)'
+    printed_as:
+    - Coverage A Bodily Injury and Property Damage Liability
+    - Coverage A - Bodily Injury and Property Damage Liability
+    - Bodily Injury and Property Damage (Coverage L)
+    - Coverage L - Bodily Injury/Property Damage
+    - Each Occurrence Limit
+    - Each Occurrence
+    - General Aggregate Limit (Other Than Products-Completed Operations)
+    - General Aggregate Limit (Other Than Products Completed Operations)
+    - General Aggregate (except Products-Completed Operations Limit)
+    - General Aggregate Limit - other than Products/Completed Work
+    - General Aggregate Limit
+    - General Aggregate
+    - General Aggregate Limit (Other Than Products-Completed Ops)
+    - Designated Construction Project(s) General Aggregate Limit
+    - Independent Contractors/Subcontractors Sublimit
+    - Per Occurrence Limit
+    - Cov L - Bodily Injury & Property Damage
+    - Liability and Medical Expenses Limit
+    - General Aggregate (other than Products/Completed Operations)
+    - GENERAL AGGREGATE LIMIT PER LOCATION
+    - Each Occurrence Lim it
+  GL_PRODUCTS_COMPLETED_OPS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Products-completed operations (Products-Completed Operations Aggregate Limit)
+    printed_as:
+    - Products-Completed Operations Aggregate Limit
+    - Products/Completed Operations Aggregate Limit
+    - Products/Completed Operations (Coverage N)
+    - Coverage N - Products/Completed Work
+    - Aggregate Limit - Products/Completed Work
+    - Products - Completed Operations Aggregate Limit
+    - Products/Completed Operations Liability Coverage Part
+    - PRODUCTS - COMP/OP AGG
+    - Products-Completed Ops Aggregate Limit
+    - Coverage N - Products/Completed Operations
+    - Cov N - Products/Completed Operations
+    - Products Completed Operations Aggregate
+    - Products/Completed Operations Aggregate
+    - Pro d u c t s / Completed Operation s Aggregate Lim it
+  GL_PERSONAL_ADVERTISING_INJURY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Coverage B - Personal and advertising injury liability (Personal and Advertising Injury Limit)
+    printed_as:
+    - Personal and Advertising Injury Limit
+    - Personal & Advertising Injury Limit
+    - Personal/Advertising Injury Limit
+    - Personal/Advertising Limit
+    - Coverage B Personal and Advertising Injury Liability
+    - Coverage P - Personal and Advertising Injury Liability
+    - Personal and Advertising Injury Liability
+    - Personal & Advertising Injury Limit (Any One Person/Organization)
+    - PERSONAL & ADV INJURY
+    - Coverage P - Personal Injury & Advertising Liability
+    - Personal And Advertising Injury
+    - Personal and Advertising Injury Limit (Any One Person or Organization)
+    - Person al an d Advertising Injury Limit
+  GL_DAMAGE_TO_PREMISES_RENTED:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Damage to premises rented to you, or fire legal liability (Damage To Premises Rented To You Limit, Fire Damage
+      Limit)
+    printed_as:
+    - Damage to Premises Rented to You Limit
+    - Damage to Premises Rented to You
+    - Fire Damage Limit
+    - Fire Legal Liability Limit
+    - Fire Legal Liability
+    - Coverage O - Fire Legal Liability
+    - Fire Damage
+    - Fire Damage (Any One Fire)
+    - Damage to Premises Rented to You (limit per premises)
+    - Damages To Premises Rented To You (Any One Premises)
+    - DAMAGE TO RENTED PREMISES (Ea occurrence)
+    - Broadened Coverage for Damage to Premises Rented to You
+    - Fire Legal Liability (Toolbox)
+    - Damage To Premises Rented To You Limit (Any One Premises)
+    - Rented To You Limit (Any One Premises)
+    - Damages To Premises Rented To You Lim it
+  GL_LIQUOR_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Liquor liability (Each Common Cause Limit, Liquor Aggregate Limit)
+    printed_as:
+    - Liquor Liability Coverage Part
+    - Liquor Liability Coverage Form
+    - Liquor Each Common Cause Limit
+    - Each Common Cause Limit
+    - Liquor Aggregate Limit
+  GL_ABUSE_MOLESTATION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Abuse or molestation liability
+    printed_as:
+    - Abuse or Molestation Coverage Form
+    - Each Act of Abuse
+    - Abusive Conduct Liability Coverage Form
+    - Each Abusive Conduct Limit
+  GL_PROFESSIONAL_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Professional liability written with the general liability
+    printed_as:
+    - Professional Liability
+    - Professional Liability Coverage
+    - Professional Liability Coverage Part
+    - Each Act, Error or Omission
+    - Each Professional Incident Limit
+    - Each Claim Limit of Liability
+  GL_CARE_CUSTODY_CONTROL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Care, custody or control (limited coverage)
+    printed_as:
+    - Care, Custody, Control Limited Coverage
+    - Care, Custody or Control
+  GL_EMPLOYEE_BENEFITS_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employee benefits liability (Each Employee Limit, Aggregate Limit)
+    printed_as:
+    - Employee Benefits Liability
+    - Employee Benefits Liability Coverage
+  GL_POLLUTION_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Pollution liability written with the general liability
+    printed_as:
+    - Pollution Liability Coverage Part
+    - Limited Pollution Coverage
+    - Pesticide or Herbicide Applicator - Limited Pollution Coverage
+  GL_COVERAGE_EXTENSION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: CGL coverage extension (broadening) endorsement
+    printed_as:
+    - Commercial General Liability Extension
+    - General Liability Broadening Endorsement
+    - Contractors Extender
+    - Contractors Extender Endorsement Deluxe
+    - Contractors Custom Protector Coverages
+    - Fitness and Wellness Liability Insurance Extension
+    - Technology Services Extension Endorsement
+    - Contractors Extension Endorsement
+    - Business General Liability - Extra Coverage
+    - General Liability Coverage (Business General Liability Extra Coverage)
+  GL_SNOW_PLOW_OPERATIONS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Snow plow or snow removal operations coverage
+    printed_as:
+    - Snow Plow Operations Coverage
+    - Snow Removal Coverage
+    - Snow Removal Operations Coverage
+  GL_SUPPLEMENTARY_PAYMENTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Supplementary payments - Coverages A and B (bail bonds, loss of earnings)
+    printed_as:
+    - Supplementary Payments - Coverages A and B
+    - Supplementary Payments
+    - Supplementary Payments Aggregate Limit
+  GL_OWNERS_CONTRACTORS_PROTECTIVE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Owners and contractors protective (OCP) liability coverage part
+    printed_as:
+    - Owners and Contractors Protective Liability Coverage Part
+    - Owners and Contractors Protective Liability
+    - Owners and Contractors Protective Liability Coverage Form
+  GL_ACCOUNTS_RECEIVABLE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Accounts receivable
+    printed_as:
+    - Accounts receivable
+    - Accounts Receivable Coverage
+  GL_APPURTENANT_STRUCTURES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Garages, storage buildings and other appurtenant structures
+    printed_as:
+    - Garages, storage buildings and other appurtenant structures
+  GL_ARSON_REWARD:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Arson and theft reward
+    printed_as:
+    - Arson and theft reward
+  GL_AUTOMOBILE_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Automobile liability (combined single limit)
+    printed_as:
+    - Automobile liability (combined single limit)
+    - AUTOMOBILE LIABILITY COMBINED SINGLE LIMIT (Ea accident)
+  GL_BI_DEPENDENT_PROPERTIES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income from dependent properties
+    printed_as:
+    - Business income from dependent properties
+  GL_BI_OFF_PREMISES_OPERATIONS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income from off-premises operations
+    printed_as:
+    - Business income from off-premises operations
+  GL_BI_UTILITY_SERVICES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income for off-premises utility services
+    printed_as:
+    - Business income for off-premises utility services
+    - OFF-PREMISES UTILITY SERVICES
+  GL_BI_WEBSITES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income from websites
+    printed_as:
+    - Business income from websites
+  GL_BRANDS_LABELS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Brands and labels
+    printed_as:
+    - Brands and labels
+  GL_BUILDING_PROPERTY_OF_OTHERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Building property of others
+    printed_as:
+    - Building property of others
+  GL_BUSINESS_INCOME_EXTRA_EXPENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income and extra expense
+    printed_as:
+    - Business income and extra expense
+    - Business income and extra expense sub-limit (waiting period 24 hours)
+    - Business Income & Extra Expense Including Rental Value
+  GL_CIVIL_AUTHORITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income for civil authority orders
+    printed_as:
+    - Business income for civil authority orders
+  GL_CLAIM_EXPENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Claim expense
+    printed_as:
+    - Claim expense
+  GL_COLLAPSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Collapse
+    printed_as:
+    - Collapse
+  GL_COMPUTERS_WORLDWIDE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Computers worldwide
+    printed_as:
+    - Computers worldwide
+  GL_COMPUTER_COVERAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Computer coverage
+    printed_as:
+    - Computer coverage
+  GL_COMPUTER_INTERRUPTION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Interruption of computer operations
+    printed_as:
+    - Interruption of computer operations
+  GL_CONDO_COVERED_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Condo covered property
+    printed_as:
+    - Condo covered property
+    - Condo Covered Property limit
+  GL_CONTRACTORS_EQUIPMENT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Scheduled contractor's equipment
+    printed_as:
+    - Scheduled contractor's equipment
+    - Tools & Equipment
+    - Scheduled Tools and Equipment
+    - Scheduled Tools and Equipment (per occurrence)
+    - Contractor's Tools
+    - Blanket Contractor's Equipment
+  GL_CONTRACTORS_POLLUTION_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contractor's pollution liability
+    printed_as:
+    - Contractor's pollution liability
+    - CONTRACTOR'S POLLUTION LIABILITY COVERAGE
+    - CONTRACTOR'S POLLUTION LIABILITY COVERAGE Each Pollution Incident Limit
+    - CONTRACTOR'S POLLUTION LIABILITY COVERAGE Pollution Incident Aggregate Limit
+  GL_CONTRACTOR_BROADENING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contractor broadening endorsement
+    printed_as:
+    - Contractor broadening endorsement
+  GL_CONTRACT_PENALTIES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contract penalties
+    printed_as:
+    - Contract penalties
+  GL_CYBER_VIRUS_MALWARE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Cyber virus and malware
+    printed_as:
+    - Cyber virus and malware
+    - CYBER VIRUS AND MALWARE COVERAGE
+  GL_DATA_BREACH_DEFENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Data breach defense and liability
+    printed_as:
+    - Data breach defense and liability
+    - Data Breach Defense and Liability annual aggregate
+    - Data Breach Defense and Liability each claim limit
+  GL_DATA_BREACH_RESPONSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Data breach response expenses
+    printed_as:
+    - Data breach response expenses
+    - Data Breach Response Expenses limit of insurance
+  GL_DEBRIS_REMOVAL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Debris removal
+    printed_as:
+    - Debris removal
+  GL_DETACHED_TRAILERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Non-owned detached trailers
+    printed_as:
+    - Non-owned detached trailers
+  GL_ELECTRONIC_DATA:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Electronic data
+    printed_as:
+    - Electronic data
+  GL_EMPLOYEE_DISHONESTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employee dishonesty
+    printed_as:
+    - Employee dishonesty
+    - EMPLOYEE DISHONESTY COVERAGE
+  GL_EPL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employment practices liability
+    printed_as:
+    - Employment practices liability
+    - Employment Practices Liability Insurance EACH CLAIM LIMIT
+    - Employment Practices Liability Insurance ANNUAL AGGREGATE LIMIT
+  GL_EQUIPMENT_BREAKDOWN:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Equipment breakdown
+    printed_as:
+    - Equipment breakdown
+  GL_EXTORTION_THREATS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Extortion threats
+    printed_as:
+    - Extortion threats
+    - Extortion threats sub-limit
+  GL_FINE_ARTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fine arts
+    printed_as:
+    - Fine arts
+    - FINE ARTS COVERAGE
+  GL_FIRE_DEPARTMENT_SERVICE_CHARGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fire department service charge
+    printed_as:
+    - Fire department service charge
+  GL_FIRE_EXTINGUISHER_RECHARGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fire extinguisher recharge
+    printed_as:
+    - Fire extinguisher recharge
+  GL_FORGERY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Forgery (including credit cards, currency and money orders)
+    printed_as:
+    - Forgery (including credit cards, currency and money orders)
+    - FORGERY COVERAGE (INCLUDING CREDIT CARDS, CURRENCY AND MONEY ORDERS)
+  GL_FRAUDULENT_TRANSFER:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fraudulent transfer
+    printed_as:
+    - Fraudulent transfer
+    - FRAUDULENT TRANSFER COVERAGE
+  GL_GLASS_EXPENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Glass expense
+    printed_as:
+    - Glass expense
+  GL_IDENTITY_RECOVERY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Identity recovery
+    printed_as:
+    - Identity recovery
+    - IDENTITY RECOVERY FOR BUSNESSOWNERS AND EMPLOYEES
+  GL_INSTALLATION_FLOATER:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Installation floater
+    printed_as:
+    - Installation floater
+  GL_LEASEHOLD_IMPROVEMENTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Leasehold improvements
+    printed_as:
+    - Leasehold improvements
+  GL_LEASE_ASSESSMENT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Lease assessment
+    printed_as:
+    - Lease assessment
+  GL_LOCK_KEY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Lock and key replacement
+    printed_as:
+    - Lock and key replacement
+  GL_LOST_KEYS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Lost keys
+    printed_as:
+    - Lost keys
+  GL_MONEY_SECURITIES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Money and securities
+    printed_as:
+    - Money and securities
+    - MONEY AND SECURITIES COVERAGE
+  GL_NEWLY_ACQUIRED_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Newly acquired or constructed property
+    printed_as:
+    - Newly acquired or constructed property
+  GL_ORDINANCE_OR_LAW:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Ordinance or law
+    printed_as:
+    - Ordinance or law
+    - ORDINANCE OR LAW COVERAGE
+  GL_OUTDOOR_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Outdoor property
+    printed_as:
+    - Outdoor property
+  GL_OUTDOOR_SIGNS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Outdoor signs on premises
+    printed_as:
+    - Outdoor signs on premises
+  GL_PAIRS_OR_SETS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Pairs or sets
+    printed_as:
+    - Pairs or sets
+  GL_PAVED_SURFACES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Paved surfaces
+    printed_as:
+    - Paved surfaces
+  GL_PERSONAL_EFFECTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Personal effects
+    printed_as:
+    - Personal effects
+  GL_POLLUTANT_CLEANUP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Pollutants and contaminants clean up and removal
+    printed_as:
+    - Pollutants and contaminants clean up and removal
+  GL_PRESERVATION_OF_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Preservation of property
+    printed_as:
+    - Preservation of property
+  GL_PROPERTY_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Property off-premises
+    printed_as:
+    - Property off-premises
+  GL_SALESPERSONS_SAMPLES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Salespersons samples
+    printed_as:
+    - Salespersons samples
+  GL_SPOILAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Spoilage (perishable goods and refrigeration contamination)
+    printed_as:
+    - Spoilage (perishable goods and refrigeration contamination)
+    - SPOILAGE
+    - Perishable Goods Spoilage limit
+    - Refrigeration Contamination limit
+  GL_SUMP_BACKUP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Sump overflow, sewer and drain back-up
+    printed_as:
+    - Sump overflow, sewer and drain back-up
+    - SUMP OVERFLOW OR SUMP PUMP FAILURE
+    - Discharge from Sewer, Drain, or Sump
+    - BACK-UP OF SEWERS AND DRAINS COVERAGE
+  GL_TENANTS_LEGAL_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Tenant's legal liability
+    printed_as:
+    - Tenant's legal liability
+    - TENANT'S LEGAL LIABILITY COVERAGE
+  GL_THEFT_DAMAGE_TO_BUILDING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Theft damage to building
+    printed_as:
+    - Theft damage to building
+  GL_TRANSIT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Transit coverage
+    printed_as:
+    - Transit coverage
+  GL_TRANSIT_BUSINESS_INCOME:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Transit business income
+    printed_as:
+    - Transit business income
+  GL_UMBRELLA_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Umbrella liability
+    printed_as:
+    - Umbrella liability
+    - Umbrella aggregate limit
+    - Umbrella each occurrence limit
+    - Umbrella bodily injury by disease aggregate limit
+    - Umbrella products-completed operations aggregate limit
+    - Umbrella general aggregate limit (other than Products-Completed Operations, Bodily Injury By Disease and Automobile)
+  GL_UNAUTHORIZED_CARD_USE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Unauthorized business card use
+    printed_as:
+    - Unauthorized business card use
+  GL_VALUABLE_PAPERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Valuable papers and records
+    printed_as:
+    - Valuable papers and records
+    - Valuable Papers & Records Coverage
+  GL_WATER_DAMAGE_OTHER_LIQUID:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Water damage, other liquid, powder or molten material damage
+    printed_as:
+    - Water damage, other liquid, powder or molten material damage
+  GL_BUILDING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Building (package property part)
+    printed_as:
+    - Building
+  GL_BUSINESS_PERSONAL_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property (package property part)
+    printed_as:
+    - Business Personal Property
+  GL_BPP_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property - off premises
+    printed_as:
+    - Business Personal Property - Off Premises
+  GL_LOSS_OF_INCOME:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Loss of income (package property part)
+    printed_as:
+    - Loss of Income
+  GL_CONTRACTORS_INLAND_MARINE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contractors inland marine endorsement
+    printed_as:
+    - Contractors Inland Marine Endorsement - Enhanced (per occurrence)
+    - Contractors Inland Marine Endorsement - Enhanced
+  GL_PROPERTY_ENHANCEMENT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Property enhancement endorsement
+    printed_as:
+    - Property Enhancement Endorsement
+  GL_GARAGEKEEPERS_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Garagekeepers liability
+    printed_as:
+    - Garagekeepers Liability
+bopgl:
+  BOPGL_ACCOUNTS_RECEIVABLE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Accounts receivable (on premises / off premises)
+    printed_as:
+    - Accounts Receivable (on premises/off premises)
+    - Accounts Receivable
+  BOPGL_ADDITIONAL_EXPENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Additional expense
+    printed_as:
+    - Additional Expense
+    - Extra Expense
+  BOPGL_ADDITIONAL_INSURED_OWNER_LEASED_LAND:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Additional insured - owner of leased land
+    printed_as:
+    - Owner of Leased Land
+  BOPGL_ADDITIONAL_INSURED_VENDORS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Additional insured - vendors
+    printed_as:
+    - Vendors
+  BOPGL_ADDITIONAL_TENANT_IMPROVEMENTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Additional tenant's improvements and betterments
+    printed_as:
+    - Additional tenant's improvements and betterments
+  BOPGL_AGGREGATE_PER_PROJECT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Amendment - aggregate limits (per project)
+    printed_as:
+    - AMENDMENT - AGGREGATE LIMITS (PER PROJECT)
+  BOPGL_ANTENNAS_SIGNS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: 'Outdoor property: antennas, fences or signs'
+    printed_as:
+    - Antennas, Fences, Or Signs
+  BOPGL_APPURTENANT_STRUCTURES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Garages, storage buildings and other appurtenant structures
+    printed_as:
+    - Garages, storage buildings and other appurtenant structures
+  BOPGL_ARSON_REWARD:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Arson and theft reward
+    printed_as:
+    - Arson and theft reward
+  BOPGL_AUTOMOBILE_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Automobile liability (combined single limit)
+    printed_as:
+    - Automobile liability (combined single limit)
+    - AUTOMOBILE LIABILITY
+    - COMBINED SINGLE LIMIT (Ea accident)
+  BOPGL_AUTO_INCREASE_BUILDING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Automatic increase in the building limit
+    printed_as:
+    - BUILDING LIMIT - AUTOMATIC ANNUAL INCREASE (PERCENTAGE)
+    - SM-26 Automatic Increase, RC
+    - Automatic Increase - Building - 3 Percent
+    - BUILDING INFLATION PROTECTION
+    - Automatic Increase - Building - 2 Percent
+    - Automatic Increase - Building - 4 Percent
+    - Automatic Increase - Building - 5 Percent
+    - Automatic Increase - Building - 6 Percent
+    - Automatic Increase - Building - 8 Percent
+    - Automatic Increase - Building - 10 Percent
+    - Inflation Guard
+  BOPGL_BI_DEPENDENT_PROPERTIES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income from dependent properties
+    printed_as:
+    - Business Income from Dependent Properties
+    - Earnings From Dependent Locations
+    - Loss of Income From Dependent Property
+    - Dependent Properties
+    - Business Income and Extra Expense - Dependent Properties
+  BOPGL_BI_OFF_PREMISES_OPERATIONS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income from off-premises operations
+    printed_as:
+    - Business income from off-premises operations
+    - Off-Premises Operations
+  BOPGL_BI_ORDINARY_PAYROLL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income - extended number of days for ordinary payroll expenses
+    printed_as:
+    - Business Income - Extended Number of Days for Ordinary Payroll Expenses
+  BOPGL_BI_UTILITY_SERVICES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income for off-premises utility services
+    printed_as:
+    - Business income for off-premises utility services
+    - Off-Premises Utility Services (business income)
+  BOPGL_BI_WEBSITES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income from websites
+    printed_as:
+    - Business income from websites
+    - Websites
+  BOPGL_BLANKET_ADDITIONAL_INSURED:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Blanket additional insured by contract
+    printed_as:
+    - BLANKET ADDITIONAL INSURED BY CONTRACT
+  BOPGL_BPP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property
+    printed_as:
+    - BUSINESS PERSONAL PROPERTY LIMIT OF INSURANCE
+    - Business Personal Property
+    - Coverage B - Business Property - Fire
+    - Coverage B -- Business Personal Property
+    - Coverage B - Business Property
+    - Cov B - Business Property
+    - Business Personal Property Limit
+    - Cov. B - Business Personal Property
+  BOPGL_BPP_ENHANCEMENT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Businessowners personal property enhancement endorsement (tier as printed)
+    printed_as:
+    - Businessowners Personal Property Enhancement
+  BOPGL_BPP_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property off premises
+    printed_as:
+    - Business Personal Property - Off Premises
+    - Business Property - Off Premises
+  BOPGL_BPP_OF_OTHERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property of others
+    printed_as:
+    - Business Property Of Others
+  BOPGL_BPP_REPLACEMENT_COST:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property replacement cost
+    printed_as:
+    - Business Personal Property Replacement Coverage
+    - SF-27B Replacement Cost Provision
+    - Enhanced Replacement Cost
+  BOPGL_BPP_STORAGE_UNITS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property temporarily in storage units
+    printed_as:
+    - Business Personal Property Temporarily In Storage Units
+    - Business Personal Property - Portable Storage Units
+  BOPGL_BRANDS_LABELS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Brands and labels
+    printed_as:
+    - Brands and labels
+  BOPGL_BROADENED_WIND:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Broadened wind
+    printed_as:
+    - Broadened Wind
+  BOPGL_BUILDING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Building
+    printed_as:
+    - BUILDING LIMIT OF INSURANCE
+    - Cov. A - Building
+    - Building
+    - Coverage A - Building - Fire
+    - Coverage A -- Building
+    - BUILDING COVERAGE
+  BOPGL_BUILDING_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Building property off premises
+    printed_as:
+    - Building Property - Off Premises
+  BOPGL_BUILDING_PROPERTY_OF_OTHERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Building property of others
+    printed_as:
+    - Building property of others
+  BOPGL_CIVIL_AUTHORITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Civil authority
+    printed_as:
+    - Civil Authority
+    - BUSINESS INCOME FOR CIVIL AUTHORITY ORDERS
+    - Civil Authority Orders
+  BOPGL_CLAIM_EXPENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Claim expense
+    printed_as:
+    - Claim expense
+  BOPGL_COLLAPSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Collapse
+    printed_as:
+    - Collapse
+  BOPGL_COMPUTERS_WORLDWIDE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Computers worldwide
+    printed_as:
+    - Computers worldwide
+  BOPGL_COMPUTER_COVERAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Computer coverage
+    printed_as:
+    - Computer Coverage
+  BOPGL_COMPUTER_FRAUD:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Computer fraud and funds transfer fraud
+    printed_as:
+    - Computer Fraud and Funds Transfer Fraud
+  BOPGL_COMPUTER_OPERATIONS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Interruption of computer operations
+    printed_as:
+    - Interruption of Computer Operations
+  BOPGL_CONTRACTORS_EQUIPMENT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Scheduled contractor's equipment
+    printed_as:
+    - Scheduled contractor's equipment
+    - SCHEDULED CONTRACTOR'S EQUIPMENT COVERAGE
+    - Scheduled Contractor's Equipment Coverage
+  BOPGL_CONTRACTORS_INSTALLATION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contractors installation coverage
+    printed_as:
+    - Contractors Installation Coverage
+  BOPGL_CONTRACTORS_POLLUTION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contractor's pollution liability coverage
+    printed_as:
+    - CONTRACTOR'S POLLUTION LIABILITY COVERAGE
+  BOPGL_CONTRACTORS_TOOLS_UNSCHEDULED:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contractor's tools and equipment (unscheduled)
+    printed_as:
+    - Contractor's Tools and Equipment Coverage
+    - Contractors Tools and Equipment Coverage - Unscheduled
+  BOPGL_CONTRACTOR_BROADENING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contractor broadening endorsement
+    printed_as:
+    - CONTRACTOR BROADENING ENDORSEMENT
+  BOPGL_CONTRACT_PENALTIES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contract penalties
+    printed_as:
+    - Contract penalties
+  BOPGL_COUNTERFEIT_MONEY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Money orders and counterfeit money
+    printed_as:
+    - Money Orders and Counterfeit Money
+    - Counterfeit Money Or Money Orders
+  BOPGL_CREDIT_CARD_FORGERY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business credit card, forgery and counterfeit money
+    printed_as:
+    - Business Credit Card, Forgery, And Counterfeit Money
+  BOPGL_CREDIT_CARD_RECEIPTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Credit card receipts
+    printed_as:
+    - Credit Card Receipts Coverage
+  BOPGL_CYBER_FIRST_PARTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: First party breach event coverage (Section II of the cyber insurance endorsement)
+    printed_as:
+    - SECTION II - FIRST PARTY BREACH EVENT COVERAGE
+    - First Party Breach Event Coverage
+  BOPGL_CYBER_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Cyber liability coverage (Section I of the cyber insurance endorsement)
+    printed_as:
+    - SECTION I - CYBER LIABILITY COVERAGE
+    - Cyber Liability Coverage
+  BOPGL_CYBER_VIRUS_MALWARE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Cyber virus and malware
+    printed_as:
+    - Cyber virus and malware
+    - CYBER VIRUS AND MALWARE COVERAGE
+  BOPGL_DAMAGE_TO_PREMISES_RENTED:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Damage to premises rented to you / fire legal liability
+    printed_as:
+    - Damage to Premises Rented To You (any one premises)
+    - Damage to Premises Rented To You
+    - Fire Legal Liability - Classic
+    - Fire Legal Liability
+    - Coverage O -- Fire Legal Liability
+    - Fire Legal Liability - Enhanced
+    - Fire Legal Liability Limit
+  BOPGL_DATA_BREACH_DEFENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Data breach defense and liability
+    printed_as:
+    - Data breach defense and liability
+  BOPGL_DATA_BREACH_RESPONSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Data breach response expenses
+    printed_as:
+    - Data breach response expenses
+  BOPGL_DATA_RECORDS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Electronic data records and programs
+    printed_as:
+    - Data Records And Programs
+  BOPGL_DATA_RESTORATION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Data restoration (cyber insurance endorsement)
+    printed_as:
+    - Data Restoration
+  BOPGL_DEBRIS_REMOVAL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Debris removal
+    printed_as:
+    - Debris Removal (Refer to SF-311S)
+    - Debris Removal
+    - Additional Debris Removal Expense
+    - Debris Removal (Refer to SF-311P)
+    - Additional Debris Removal
+  BOPGL_DEMOLITION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Demolition cost
+    printed_as:
+    - Demolition Coverage
+  BOPGL_DESIGNATED_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Coverage applicable to designated premises or project only
+    printed_as:
+    - Coverage Applicable to Designated Premises or Project Only
+  BOPGL_DETACHED_TRAILERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Non-owned detached trailers
+    printed_as:
+    - Non-owned detached trailers
+  BOPGL_ELECTRONIC_DATA:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Electronic data
+    printed_as:
+    - Electronic Data
+    - Electronic Data Processing
+  BOPGL_EMPLOYEE_BENEFITS_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employee benefits liability
+    printed_as:
+    - Employee Benefits Liability
+  BOPGL_EMPLOYEE_DISHONESTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employee dishonesty
+    printed_as:
+    - Employee Dishonesty
+    - EMPLOYEE DISHONESTY COVERAGE - EXCLUDES ERISA - NEW YORK
+    - EMPLOYEE DISHONESTY COVERAGE
+  BOPGL_EPL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employment practices liability
+    printed_as:
+    - Employment practices liability
+  BOPGL_EPL_FIDUCIARY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employment practices / fiduciary liability
+    printed_as:
+    - Employment Practices/Fiduciary Liability
+  BOPGL_ERISA_COMPLIANCE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Welfare and pension plan ERISA compliance
+    printed_as:
+    - Welfare and Pension Plan ERISA Compliance
+  BOPGL_EXPEDITING_EXPENSES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Expediting expenses
+    printed_as:
+    - EXPEDITING EXPENSES
+    - EXPEDITING EXPENSE
+  BOPGL_EXTENDED_BUSINESS_INCOME:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Extended business income - extended number of days
+    printed_as:
+    - Extended Business Income - Extended Number of Days
+    - Business Income - Extended Period of Indemnity
+  BOPGL_EXTORTION_THREATS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Extortion threats
+    printed_as:
+    - Extortion threats
+    - EXTORTION THREATS SUB-LIMIT
+  BOPGL_FAILSAFE_EO:
+    meaning: ''
+    tell_apart: ''
+    shown_today: FailSafe technology errors or omissions liability
+    printed_as:
+    - FailSafe technology errors or omissions liability
+  BOPGL_FINE_ARTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fine arts
+    printed_as:
+    - Fine arts
+    - FINE ARTS COVERAGE
+  BOPGL_FIRE_DEPT_SERVICE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fire department service charge
+    printed_as:
+    - Fire Department Service Charge
+    - Fire Department Service Charges
+  BOPGL_FIRE_EXTINGUISHER_RECHARGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fire extinguisher systems recharge expense
+    printed_as:
+    - Fire Extinguisher Systems Recharge Expense
+    - Recharge Of Fire Extinguishing Equipment
+    - Fire Protective Devices Recharge
+    - FIRE EXTINGUISHER RECHARGE
+  BOPGL_FORGERY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Forgery or alteration
+    printed_as:
+    - Forgery or Alteration
+    - Forgery
+    - FORGERY COVERAGE (INCLUDING CREDIT CARDS, CURRENCY AND MONEY ORDERS)
+    - Forgery and Alteration
+  BOPGL_FRAUDULENT_TRANSFER:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fraudulent transfer
+    printed_as:
+    - Fraudulent transfer
+    - FRAUDULENT TRANSFER COVERAGE
+  BOPGL_GARAGEKEEPERS_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Garagekeepers liability
+    printed_as:
+    - Garagekeepers Liability
+  BOPGL_GLASS_EXPENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Glass expense
+    printed_as:
+    - Glass Expense
+    - Glass Expenses
+    - Glass Coverage
+  BOPGL_HAZARDOUS_SUBSTANCES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Hazardous substances (equipment breakdown enhancement)
+    printed_as:
+    - HAZARDOUS SUBSTANCES
+  BOPGL_IDENTITY_RECOVERY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Identity recovery for busnessowners and employees
+    printed_as:
+    - IDENTITY RECOVERY FOR BUSNESSOWNERS AND EMPLOYEES
+    - IDENTITY RECOVERY ENDORSEMENT
+    - Identity Recovery
+  BOPGL_INCREASED_COST_CONSTRUCTION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Increased cost of construction
+    printed_as:
+    - Increased Cost of Construction
+    - Increased Costs - Ordinance Or Law
+    - Ordinance and Law Coverage
+    - Building Ordinance or Law Coverage
+    - Increased Cost - Ordinance or Law
+  BOPGL_INVENTORY_APPRAISAL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Inventory and appraisal expenses
+    printed_as:
+    - Inventory And Appraisal Expenses
+  BOPGL_LEASEHOLD_IMPROVEMENTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Leasehold improvements
+    printed_as:
+    - Leasehold improvements
+  BOPGL_LEASE_ASSESSMENT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Lease assessment
+    printed_as:
+    - Lease Assessment
+  BOPGL_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: 'Business liability - bodily injury and property damage (its limits: per occurrence, the aggregate other
+      than products-completed operations)'
+    printed_as:
+    - Liability and Medical Expenses (per occurrence limit)
+    - Liability and Medical Expenses
+    - Other than Products / Completed Operations Aggregate
+    - Other than Products / Completed Operations Annual Aggregate
+    - Cov. L - Bodily Injury and Property Damage
+    - Coverage L - Liability
+    - Cov L-Bodily Injury & Property Damage
+    - Cov. L - Bodily Injury and Property Damage - Add'l Blgs
+    - Coverage L -- Bodily Injury And Property Damage Liability
+    - Each Occurrence Limit
+    - General Aggregate Limit – other than Products/Completed Work
+    - LIABILITY AND MEDICAL EXPENSES PER OCCURRENCE
+    - LIABILITY AND MEDICAL LIABILITY AGGREGATE
+    - Liability and Medical Expenses Limit
+    - Liability and Medical Expense Limit - Each Occurrence
+    - General Aggregate (other than Products/Completed Operations)
+    - Coverage A - Bodily Injury and Property Damage Liability
+    - General Aggregate
+  BOPGL_LIMITED_FUNGUS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Limited fungus and related perils
+    printed_as:
+    - Limited Fungus And Related Perils
+  BOPGL_LIQUOR_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Liquor liability
+    printed_as:
+    - Liquor Liability
+  BOPGL_LOCK_KEY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Key and lock replacement
+    printed_as:
+    - Key and Lock Replacement
+    - Lock And Key Replacement
+    - Lock Replacement
+    - Lock And Keys Replacement
+  BOPGL_LOSS_OF_EARNINGS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Loss of earnings
+    printed_as:
+    - Loss Of Earnings
+  BOPGL_LOSS_OF_INCOME:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Loss of income
+    printed_as:
+    - Loss of Income - 3 Months Included
+    - Loss of Income
+    - Coverage C -- Loss Of Income (Actual Loss Sustained - 12 Months)
+    - Coverage C -- Loss Of Income
+    - Business Income
+    - Loss of Income - 12 Months Included
+    - Business Income and Extra Expense
+    - Business Income for Interruption of Practice
+  BOPGL_LOSS_OF_INCOME_LIMIT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Loss of income included limit (SF-312A)
+    printed_as:
+    - SF-312A - Loss of Income Included Limit
+    - SF-312A - Increased Limit, Loss of Income
+  BOPGL_LOST_KEYS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Lost keys
+    printed_as:
+    - Lost keys
+  BOPGL_MONEY_SECURITIES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Money and securities (on / off premises)
+    printed_as:
+    - Money and Securities (on/off premises)
+    - Money and Securities
+    - MONEY AND SECURITIES COVERAGE
+    - Money and Securities - On Premise
+    - Money And Securities (Inside Premises)
+  BOPGL_MONEY_SECURITIES_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Money and securities - off premises
+    printed_as:
+    - Money and Securities - Off Premise
+    - Money And Securities (Outside Premises)
+  BOPGL_MOTEL_GUESTS_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Motel guests property liability
+    printed_as:
+    - Motel Guests Property Liability Coverage
+    - Motel Guests Property Liability Coverage (Each Motel Guest)
+    - Motel Guests Property Liability Coverage (Each Occurrence)
+  BOPGL_NEWLY_ACQUIRED_BPP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property at newly acquired locations
+    printed_as:
+    - Newly Acquired Locations - Business Personal Property
+    - Business Personal Property - Newly Acquired or Constructed Property
+    - Business Property At Newly Acquired Locations
+    - Business Property - Newly Acquired
+  BOPGL_NEWLY_ACQUIRED_BUILDINGS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Newly acquired or constructed buildings
+    printed_as:
+    - Newly Acquired Buildings
+    - Building - Newly Acquired or Constructed Property
+  BOPGL_NEWLY_ACQUIRED_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Newly acquired or constructed property
+    printed_as:
+    - Newly Acquired or Constructed Property
+  BOPGL_ORDINANCE_OR_LAW:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Ordinance or law
+    printed_as:
+    - Ordinance or law
+    - ORDINANCE OR LAW COVERAGE
+    - Ordinance or Law - Demolition Cost, Increased Cost of Construction
+  BOPGL_OUTDOOR_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Outdoor property
+    printed_as:
+    - Outdoor Property
+  BOPGL_OUTDOOR_SIGNS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Outdoor signs
+    printed_as:
+    - Outdoor Signs
+    - OUTDOOR SIGNS ON PREMISES
+  BOPGL_PAIRS_OR_SETS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Pairs or sets
+    printed_as:
+    - Pairs or sets
+  BOPGL_PAVED_SURFACES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Paved surfaces
+    printed_as:
+    - Paved surfaces
+  BOPGL_PERSONAL_EFFECTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Personal effects
+    printed_as:
+    - Personal Effects
+    - Personal Articles
+  BOPGL_PERSONAL_INJURY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Personal injury
+    printed_as:
+    - PERSONAL INJURY
+    - Coverage P -- Personal And Advertising Injury Liability
+    - LS-49 Personal Injury Liability
+    - Personal and Advertising Injury Liability (Refer to SF-311P)
+    - Personal & Advertising Injury Limit
+    - Personal and Advertising Injury
+    - Coverage B - Personal and Advertising Injury Liability
+  BOPGL_PERSONAL_PROPERTY_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Personal property off-premises
+    printed_as:
+    - Personal Property Off-Premises
+    - PROPERTY OFF-PREMISES
+  BOPGL_POLLUTANT_CLEANUP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Pollutant clean up and removal
+    printed_as:
+    - Pollutant Clean Up And Removal
+    - Pollutant Cleanup and Removal
+    - POLLUTANTS AND CONTAMINANTS CLEAN UP AND REMOVAL
+  BOPGL_PRESERVATION_OF_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Preservation of property
+    printed_as:
+    - Preservation of Property
+  BOPGL_PRODUCTS_COMPLETED_OPS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Products-completed operations (Products / Completed Operations Aggregate)
+    printed_as:
+    - Products / Completed Operations Aggregate
+    - Products / Completed Operations Annual Aggregate
+    - Cov. N - Products/Completed Operations
+    - Food or Beverages for Consumption on Premises
+    - Products/Completed Work Hazard Aggregate Limit
+    - Aggregate Limit – Products/Completed Work
+  BOPGL_PROPERTY_AWAY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: While away from insured premises
+    printed_as:
+    - WHILE AWAY FROM INSURED PREMISES
+  BOPGL_SALESPERSONS_SAMPLES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Salespersons samples
+    printed_as:
+    - Salespersons samples
+  BOPGL_SEASONAL_INCREASE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Seasonal increase in the business personal property limit
+    printed_as:
+    - SEASONAL INCREASE PERCENTAGE - BUSINESS PERSONAL PROPERTY
+    - Seasonal Increase - 25 Percent
+    - SEASONAL VARIATION
+    - Seasonal Increase
+  BOPGL_SEWER_BACKUP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Back-up of sewers and drains coverage
+    printed_as:
+    - BACK-UP OF SEWERS AND DRAINS COVERAGE
+    - Backup of Sewer and Drains
+    - SF-72A - Backup, Discharge, Or Overflow
+    - Water Backup and Overflow Coverage
+    - Sewer or Drain Back Up
+  BOPGL_SIGNS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Exterior signs
+    printed_as:
+    - EXTERIOR SIGNS
+  BOPGL_SIGNS_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Signs away from the premises
+    printed_as:
+    - Signs Away From The Premises
+  BOPGL_SPOILAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Spoilage
+    printed_as:
+    - Spoilage
+    - Refrigerated Food Products Food Spoilage
+    - Refrigerated Property
+    - Refrigerated Food Products
+    - Spoilage And Contaminated Food Coverage
+  BOPGL_SPRINKLER_LEAKAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Sprinkler leakage
+    printed_as:
+    - SPRINKLER LEAKAGE
+  BOPGL_STRETCH_PLUS_BLANKET:
+    meaning: ''
+    tell_apart: ''
+    shown_today: STRETCH PLUS blanket limit
+    printed_as:
+    - STRETCH PLUS blanket limit
+  BOPGL_SUMP_BACKUP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Sump overflow, sewer and drain back-up
+    printed_as:
+    - Sump overflow, sewer and drain back-up
+    - SUMP OVERFLOW OR SUMP PUMP FAILURE
+  BOPGL_TENANTS_LEGAL_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Tenant's legal liability coverage
+    printed_as:
+    - TENANT'S LEGAL LIABILITY COVERAGE
+  BOPGL_THEFT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Theft coverage (optional property coverage)
+    printed_as:
+    - Theft Coverage
+  BOPGL_THEFT_DAMAGE_BUILDING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Theft damage to building
+    printed_as:
+    - Theft Damage to Building
+  BOPGL_TRANSIT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Transit coverage
+    printed_as:
+    - TRANSIT COVERAGE
+    - Transportation - Business Property
+    - Transportation - Tools and Equipment
+    - Property In Transit
+  BOPGL_TRANSIT_BUSINESS_INCOME:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Transit business income
+    printed_as:
+    - Transit business income
+  BOPGL_TREES_PLANTS_SHRUBS_BPP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Trees, plants and shrubs (business personal property side)
+    printed_as:
+    - Trees, Plants, And Shrubs
+  BOPGL_TREES_SHRUBS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Trees, shrubs and plants
+    printed_as:
+    - Trees, Shrubs, And Plants
+  BOPGL_UMBRELLA_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Umbrella liability
+    printed_as:
+    - Umbrella liability
+    - Umbrella
+    - Umbrella Liability Supplemental Policy
+  BOPGL_UNAUTHORIZED_CARD_USE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Unauthorized business card use
+    printed_as:
+    - Unauthorized business card use
+  BOPGL_UTILITY_INTERRUPTION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Utility interruption
+    printed_as:
+    - Utility Interruption
+    - Utility Service Disruption (Property Damage And Time Element)
+  BOPGL_UTILITY_SERVICES_DIRECT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Utility services - direct damage
+    printed_as:
+    - Utility Services
+    - Utility Services - Direct Damage
+    - OFF-PREMISES UTILITY SERVICES - DIRECT DAMAGE
+  BOPGL_VALUABLE_PAPERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Valuable papers and records (on / off premises)
+    printed_as:
+    - Valuable Papers and Records (on/off premises)
+    - Valuable Papers and Records
+    - Valuable Papers & Records
+  BOPGL_WATER_DAMAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Water damage, other liquid, powder or molten material damage
+    printed_as:
+    - Water Damage, Other Liquid, Powder or Molten Material Damage
+boppr:
+  BOPPR_ACCOUNTS_RECEIVABLE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Accounts receivable
+    printed_as:
+    - Accounts Receivable
+    - Accounts Receivable (on premises/off premises)
+  BOPPR_ADDED_WATER_DAMAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Added water damages coverage
+    printed_as:
+    - Added Water Damages Coverage
+  BOPPR_ADDITIONAL_EXPENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Additional expense
+    printed_as:
+    - Additional Expense
+    - Extra Expense
+  BOPPR_ADDITIONAL_INSURED_OWNER_LEASED_LAND:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Additional insured - owner of leased land
+    printed_as:
+    - Owner of Leased Land
+  BOPPR_ADDITIONAL_INSURED_VENDORS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Additional insured - vendors
+    printed_as:
+    - Vendors
+  BOPPR_ADDITIONAL_PERSONAL_PROPERTY_OF_OTHERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Additional personal property of others
+    printed_as:
+    - Additional Personal Property of Others
+  BOPPR_ANTENNAS_SIGNS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: 'Outdoor property: antennas, fences or signs'
+    printed_as:
+    - Antennas, Fences, Or Signs
+  BOPPR_APPURTENANT_STRUCTURES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Garages, storage buildings, and other appurtenant structures
+    printed_as:
+    - GARAGES, STORAGE BUILDINGS, AND OTHER APPURTENANT STRUCTURES
+  BOPPR_ARSON_THEFT_REWARD:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Arson and theft reward
+    printed_as:
+    - ARSON AND THEFT REWARD
+  BOPPR_AUTO_INCREASE_BPP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Automatic increase in the business personal property limit
+    printed_as:
+    - Automatic Increase - Business Personal Property - 3 Percent
+  BOPPR_AUTO_INCREASE_BUILDING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Automatic increase in the building limit
+    printed_as:
+    - SM-26 Automatic Increase, RC
+    - Automatic Increase - Building - 3 Percent
+    - Automatic Increase - Building - 2 Percent
+    - Automatic Increase - Building - 4 Percent
+    - Automatic Increase - Building - 5 Percent
+    - Automatic Increase - Building - 6 Percent
+    - Automatic Increase - Building - 8 Percent
+    - Automatic Increase - Building - 10 Percent
+    - Inflation Guard
+    - BUILDING INFLATION PROTECTION
+    - BUILDING LIMIT - AUTOMATIC ANNUAL INCREASE (PERCENTAGE)
+  BOPPR_BI_EXTENDED_DAYS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income extended number of days
+    printed_as:
+    - Business income extended number of days
+    - Extended Business Income – Extended Number of Days
+    - Business Income – Extended Number of Days for Ordinary Payroll Expenses
+  BOPPR_BI_OFF_PREMISES_OPERATIONS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income from off-premises operations
+    printed_as:
+    - BUSINESS INCOME FROM OFF-PREMISES OPERATIONS
+  BOPPR_BI_OFF_PREMISES_UTILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income for off-premises utility services
+    printed_as:
+    - BUSINESS INCOME FOR OFF-PREMISES UTILITY SERVICES
+  BOPPR_BI_ORDINARY_PAYROLL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income - ordinary payroll
+    printed_as:
+    - Ordinary Payroll (60 Days)
+  BOPPR_BI_WAITING_PERIOD:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income waiting period
+    printed_as:
+    - Business Income Waiting Period (72 Hours)
+  BOPPR_BI_WEBSITES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income from websites
+    printed_as:
+    - BUSINESS INCOME FROM WEBSITES
+  BOPPR_BPP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property (Coverage B)
+    printed_as:
+    - Coverage B - Business Property - Fire
+    - Coverage B -- Business Personal Property
+    - Coverage B - Business Property
+    - Business Personal Property
+    - Cov B - Business Property
+    - Cov. B - Business Personal Property
+    - BUSINESS PERSONAL PROPERTY LIMIT OF INSURANCE
+  BOPPR_BPP_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property off premises
+    printed_as:
+    - Business Personal Property - Off Premises
+    - Business Property - Off Premises
+  BOPPR_BPP_OF_OTHERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property of others
+    printed_as:
+    - Business Property Of Others
+  BOPPR_BRANDS_LABELS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Brands and labels
+    printed_as:
+    - BRANDS AND LABELS
+  BOPPR_BROADENED_WIND:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Broadened wind
+    printed_as:
+    - Broadened Wind
+  BOPPR_BUILDING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Building (Coverage A)
+    printed_as:
+    - Coverage A - Building - Fire
+    - Cov. A - Building
+    - Coverage A -- Building
+    - Coverage A - Building
+    - Building
+    - BUILDING LIMIT OF INSURANCE
+    - BUILDING COVERAGE
+  BOPPR_BUILDING_GLASS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Building glass
+    printed_as:
+    - Building Glass (Including Breakage)
+  BOPPR_BUILDING_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Building property off premises
+    printed_as:
+    - Building Property - Off Premises
+  BOPPR_BUILDING_PROPERTY_OF_OTHERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Building property of others
+    printed_as:
+    - BUILDING PROPERTY OF OTHERS
+  BOPPR_BUSINESSOWNERS_ADVANTAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Businessowners advantage endorsement
+    printed_as:
+    - Businessowners Advantage Endorsement
+  BOPPR_CANINE_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Canine liability
+    printed_as:
+    - Canine Liability Limit
+    - Canine Liability
+  BOPPR_CIVIL_AUTHORITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income for civil authority orders
+    printed_as:
+    - BUSINESS INCOME FOR CIVIL AUTHORITY ORDERS
+    - Civil Authority
+  BOPPR_CLAIM_EXPENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Claim expense
+    printed_as:
+    - CLAIM EXPENSE
+  BOPPR_COLLAPSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Collapse
+    printed_as:
+    - COLLAPSE
+  BOPPR_COMPUTERS_WORLDWIDE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Computers worldwide
+    printed_as:
+    - COMPUTERS WORLDWIDE
+  BOPPR_COMPUTER_COVERAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Computer coverage
+    printed_as:
+    - Computer Coverage
+  BOPPR_COMPUTER_FRAUD:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Computer fraud and funds transfer fraud
+    printed_as:
+    - Computer Fraud and Funds Transfer Fraud
+  BOPPR_COMPUTER_OPERATIONS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Interruption of computer operations
+    printed_as:
+    - INTERRUPTION OF COMPUTER OPERATIONS
+  BOPPR_CONTRACTORS_EQUIPMENT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contractors' tools and equipment - scheduled basis
+    printed_as:
+    - Contractors' Tools and Equipment - Scheduled Basis
+  BOPPR_CONTRACTORS_INSTALLATION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contractors installation coverage
+    printed_as:
+    - Contractors Installation Coverage
+    - Contractors Optional Coverage
+    - Property at each covered job site
+    - Property at a temporary storage location
+    - Property at all covered job sites combined
+  BOPPR_CONTRACTORS_TOOLS_UNSCHEDULED:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contractor's tools and equipment (unscheduled)
+    printed_as:
+    - Contractor's Tools and Equipment Coverage
+    - Contractors Tools and Equipment Coverage - Unscheduled
+    - Contractors' Tools and Equipment - Blanket Basis
+  BOPPR_CONTRACT_PENALTIES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Contract penalties
+    printed_as:
+    - CONTRACT PENALTIES
+  BOPPR_COUNTERFEIT_MONEY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Money orders and counterfeit money
+    printed_as:
+    - Counterfeit Money Or Money Orders
+  BOPPR_CREDIT_CARD_FORGERY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business credit card, forgery and counterfeit money
+    printed_as:
+    - Business Credit Card, Forgery, And Counterfeit Money
+  BOPPR_CREDIT_CARD_RECEIPTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Credit card receipts
+    printed_as:
+    - Credit Card Receipts Coverage
+  BOPPR_CYBER_FIRST_PARTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: First party breach event coverage (Section II of the cyber insurance endorsement)
+    printed_as:
+    - SECTION II - FIRST PARTY BREACH EVENT COVERAGE
+    - First Party Breach Event Coverage
+  BOPPR_CYBER_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Cyber liability coverage (Section I of the cyber insurance endorsement)
+    printed_as:
+    - SECTION I - CYBER LIABILITY COVERAGE
+    - Cyber Liability Coverage
+  BOPPR_CYBER_VIRUS_MALWARE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Cyber virus and malware coverage
+    printed_as:
+    - CYBER VIRUS AND MALWARE COVERAGE
+  BOPPR_DATA_DESTRUCTION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Destruction of electronic data records and programs
+    printed_as:
+    - Destruction of Data Records And Programs
+  BOPPR_DATA_RECORDS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Electronic data records and programs
+    printed_as:
+    - Data Records And Programs
+  BOPPR_DATA_RESTORATION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Data restoration (cyber insurance endorsement)
+    printed_as:
+    - Data Restoration
+  BOPPR_DEBRIS_REMOVAL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Debris removal / additional debris removal expense
+    printed_as:
+    - Debris Removal (Refer to SF-311S)
+    - Additional Debris Removal Expense
+    - Debris Removal
+    - Debris Removal (Refer to SF-311P)
+    - Additional Debris Removal
+  BOPPR_DEMOLITION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Demolition cost
+    printed_as:
+    - Demolition Coverage
+  BOPPR_DEPENDENT_LOCATIONS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business income from dependent properties
+    printed_as:
+    - Earnings From Dependent Locations
+    - Loss of Income From Dependent Property
+    - Business Income and Extra Expense - Dependent Properties
+    - Business Income From Dependent Properties - Waiting Period Applies
+  BOPPR_DO_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Directors and officers liability
+    printed_as:
+    - Directors and officers liability
+    - Coverage Part A. Non Profit Directors & Officers LIMITS OF LIABILITY (EACH CLAIM)
+    - Coverage Part A. Non Profit Directors & Officers LIMITS OF LIABILITY (IN THE AGGREGATE)
+  BOPPR_EC_BPP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property - extended coverage perils
+    printed_as:
+    - Coverage B - Business Property - Extended Coverage
+  BOPPR_EC_BUILDING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Building - extended coverage perils
+    printed_as:
+    - Coverage A - Building - Extended Coverage
+  BOPPR_ELECTRONIC_DATA:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Electronic data
+    printed_as:
+    - ELECTRONIC DATA
+    - Electronic Data Processing
+  BOPPR_EMPLOYEE_BENEFITS_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employee benefits liability
+    printed_as:
+    - Employee Benefits Liability
+  BOPPR_EMPLOYEE_DISHONESTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employee dishonesty coverage - excludes erisa - new york
+    printed_as:
+    - EMPLOYEE DISHONESTY COVERAGE - EXCLUDES ERISA - NEW YORK
+    - EMPLOYEE DISHONESTY COVERAGE
+    - Employee Dishonesty
+  BOPPR_EPL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employment practices liability
+    printed_as:
+    - Employment practices liability
+    - Coverage Part B. Employment Practices LIMITS OF LIABILITY (EACH CLAIM)
+    - Coverage Part B. Employment Practices LIMITS OF LIABILITY (IN THE AGGREGATE)
+  BOPPR_EPL_FIDUCIARY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Employment practices / fiduciary liability
+    printed_as:
+    - Employment Practices/Fiduciary Liability
+  BOPPR_ERISA_COMPLIANCE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Welfare and pension plan ERISA compliance
+    printed_as:
+    - Welfare and Pension Plan ERISA Compliance
+  BOPPR_EXPEDITING_EXPENSES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Expediting expenses
+    printed_as:
+    - EXPEDITING EXPENSES
+    - EXPEDITING EXPENSE
+  BOPPR_FIDUCIARY_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fiduciary liability
+    printed_as:
+    - Fiduciary liability
+    - Coverage Part C. Fiduciary Liability
+    - Coverage Part C. Fiduciary Liability RETENTION
+  BOPPR_FINE_ARTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fine arts coverage - new york
+    printed_as:
+    - FINE ARTS COVERAGE - NEW YORK
+  BOPPR_FIRE_DEPT_SERVICE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fire department service charge
+    printed_as:
+    - Fire Department Service Charges
+    - Fire Department Service Charge - No Deductible Applies
+  BOPPR_FIRE_EXTINGUISHER_RECHARGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fire extinguisher systems recharge expense
+    printed_as:
+    - Recharge Of Fire Extinguishing Equipment
+    - Fire Protective Devices Recharge
+  BOPPR_FIRE_LEGAL_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fire legal liability / damage to premises rented (Coverage O)
+    printed_as:
+    - Fire Legal Liability
+    - Coverage O -- Fire Legal Liability
+    - Fire Legal Liability - Enhanced
+    - Damage to Premises Rented To You (any one premises)
+    - Damage to Premises Rented To You
+    - Fire Legal Liability - Classic
+    - Fire Legal Liability Limit
+  BOPPR_FORGERY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Forgery or alteration
+    printed_as:
+    - Forgery
+    - Forgery and Alteration
+    - Forgery or Alteration - Optional Coverage Deductible Applies
+  BOPPR_FRAUDULENT_TRANSFER:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Fraudulent transfer coverage
+    printed_as:
+    - FRAUDULENT TRANSFER COVERAGE
+  BOPPR_GARAGEKEEPERS_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Garagekeepers liability
+    printed_as:
+    - Garagekeepers Liability
+  BOPPR_GLASS_EXPENSE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Glass expense
+    printed_as:
+    - GLASS EXPENSE
+    - Glass Expenses
+    - Glass Coverage
+  BOPPR_HAZARDOUS_SUBSTANCES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Hazardous substances (equipment breakdown enhancement)
+    printed_as:
+    - HAZARDOUS SUBSTANCES
+  BOPPR_IDENTITY_RECOVERY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Identity recovery for busnessowners and employees
+    printed_as:
+    - IDENTITY RECOVERY FOR BUSNESSOWNERS AND EMPLOYEES
+    - IDENTITY RECOVERY ENDORSEMENT
+  BOPPR_INVENTORY_APPRAISAL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Inventory and appraisal expenses
+    printed_as:
+    - Inventory And Appraisal Expenses
+  BOPPR_LEASEHOLD_IMPROVEMENTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Leasehold improvements
+    printed_as:
+    - LEASEHOLD IMPROVEMENTS
+  BOPPR_LEASE_ASSESSMENT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Lease assessment
+    printed_as:
+    - LEASE ASSESSMENT
+  BOPPR_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business liability - bodily injury and property damage (Coverage L)
+    printed_as:
+    - Coverage L - Liability
+    - Cov. L - Bodily Injury and Property Damage
+    - Cov. L - Bodily Injury and Property Damage - Add'l Blgs
+    - Coverage L -- Bodily Injury And Property Damage Liability
+    - Premises Liability
+    - Liability and Medical Expenses (per occurrence limit)
+    - Liability and Medical Expenses
+    - Other than Products / Completed Operations Aggregate
+    - Other than Products / Completed Operations Annual Aggregate
+    - Cov L-Bodily Injury & Property Damage
+    - Each Occurrence Limit
+    - General Aggregate Limit – other than Products/Completed Work
+    - LIABILITY AND MEDICAL EXPENSES PER OCCURRENCE
+    - LIABILITY AND MEDICAL LIABILITY AGGREGATE
+    - Liability and Medical Expense Limit - Each Occurrence
+    - General Aggregate
+    - General Aggregate (Other than Products - Completed Operations)
+  BOPPR_LIMITED_FUNGUS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Limited fungus and related perils
+    printed_as:
+    - Limited Fungus And Related Perils
+  BOPPR_LOCK_KEY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Lock and key replacement
+    printed_as:
+    - Lock And Key Replacement
+    - Key and Lock Replacement
+    - Lock Replacement
+    - Lock And Keys Replacement
+  BOPPR_LOSS_OF_EARNINGS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Loss of earnings
+    printed_as:
+    - Loss Of Earnings
+  BOPPR_LOSS_OF_INCOME:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Loss of income / business income (Coverage C)
+    printed_as:
+    - Coverage C -- Loss Of Income (Actual Loss Sustained - 12 Months)
+    - Loss of Income - 3 Months Included
+    - Coverage C -- Loss Of Income
+    - Loss of Income
+    - Business Income
+    - Loss of Income - 12 Months Included
+    - Business Income and Extra Expense
+    - Business Income for Interruption of Practice
+    - Business Income & Extra Expense - Actual Loss Sustained (12 Months)
+  BOPPR_LOSS_OF_INCOME_LIMIT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Loss of income included limit (SF-312A Loss of Income Special Limitations)
+    printed_as:
+    - SF-312A - Loss of Income Included Limit
+    - SF-312A - Increased Limit, Loss of Income
+  BOPPR_LOST_KEYS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Lost keys
+    printed_as:
+    - LOST KEYS
+  BOPPR_MONEY_SECURITIES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Money and securities coverage
+    printed_as:
+    - MONEY AND SECURITIES COVERAGE
+    - MONEY AND SECURITIES
+    - Money and Securities - On Premise
+    - Money and Securities (on/off premises)
+    - Money And Securities (Inside Premises)
+  BOPPR_MONEY_SECURITIES_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Money and securities - off premises
+    printed_as:
+    - Money and Securities - Off Premise
+    - Money And Securities (Outside Premises)
+  BOPPR_MOTEL_GUESTS_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Motel guests property liability
+    printed_as:
+    - Motel Guests Property Liability Coverage
+    - Motel Guests Property Liability Coverage (Each Motel Guest)
+    - Motel Guests Property Liability Coverage (Each Occurrence)
+  BOPPR_NEWLY_ACQUIRED_BPP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property at newly acquired locations
+    printed_as:
+    - Newly Acquired Locations - Business Personal Property
+    - Business Personal Property - Newly Acquired or Constructed Property
+    - Business Property At Newly Acquired Locations
+    - Business Property - Newly Acquired
+  BOPPR_NEWLY_ACQUIRED_BUILDINGS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Newly acquired or constructed buildings
+    printed_as:
+    - Newly Acquired Buildings
+    - Building - Newly Acquired or Constructed Property
+  BOPPR_NEWLY_ACQUIRED_LOI:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Loss of income at newly acquired locations
+    printed_as:
+    - Newly Acquired Locations - Loss Of Income
+  BOPPR_NEWLY_ACQUIRED_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Newly acquired or constructed property
+    printed_as:
+    - NEWLY ACQUIRED OR CONSTRUCTED PROPERTY
+  BOPPR_NON_OWNED_TRAILERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Non-owned detached trailers
+    printed_as:
+    - NON-OWNED DETACHED TRAILERS
+  BOPPR_OUTDOOR_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Outdoor property
+    printed_as:
+    - OUTDOOR PROPERTY
+  BOPPR_OUTDOOR_SIGNS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Outdoor signs on premises
+    printed_as:
+    - OUTDOOR SIGNS ON PREMISES
+    - Outdoor Signs
+  BOPPR_PAIRS_SETS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Pairs or sets
+    printed_as:
+    - PAIRS OR SETS
+  BOPPR_PAVED_SURFACES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Paved surfaces
+    printed_as:
+    - PAVED SURFACES
+  BOPPR_PERIOD_OF_LOSS_EXTENSION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Extended period of loss of income
+    printed_as:
+    - Period Of Loss Extension - Loss Of Income
+    - Business Income - Extended Period of Indemnity
+    - Extended Business Income - Extended Number of Days
+    - Business Income - Extended Number of Days for Ordinary Payroll Expenses
+    - Extended Period of Indemnity (30 Days)
+  BOPPR_PERSONAL_EFFECTS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Personal effects
+    printed_as:
+    - Personal Effects
+    - Personal Articles
+  BOPPR_PERSONAL_INJURY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Personal and advertising injury liability (Coverage P)
+    printed_as:
+    - Coverage P -- Personal And Advertising Injury Liability
+    - LS-49 Personal Injury Liability
+    - Personal and Advertising Injury Liability (Refer to SF-311P)
+    - PERSONAL INJURY
+    - Personal & Advertising Injury Limit
+    - Personal and Advertising Injury
+    - Personal and Advertising Injury Limit (Any One Person or Organization)
+  BOPPR_POLLUTANT_CLEANUP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Pollutant clean up and removal
+    printed_as:
+    - Pollutant Clean Up And Removal
+    - Pollutant Cleanup and Removal
+  BOPPR_PORTABLE_STORAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property in portable storage units
+    printed_as:
+    - Business Personal Property - Portable Storage Units
+    - Business Personal Property Temporarily In Storage Units
+  BOPPR_PRESERVATION_OF_PROPERTY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Preservation of property
+    printed_as:
+    - PRESERVATION OF PROPERTY
+  BOPPR_PRODUCTS_COMPLETED_OPS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Products-completed operations (Coverage N)
+    printed_as:
+    - Cov. N - Products/Completed Operations
+    - Products/Completed Work Hazard Aggregate Limit
+    - Products / Completed Operations Aggregate
+    - Products / Completed Operations Annual Aggregate
+    - Aggregate Limit – Products/Completed Work
+    - Products - Completed Operations Aggregate Limit
+  BOPPR_PROPERTY_AWAY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: While away from insured premises
+    printed_as:
+    - WHILE AWAY FROM INSURED PREMISES
+  BOPPR_PROPERTY_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Property off-premises
+    printed_as:
+    - PROPERTY OFF-PREMISES
+    - Personal Property Off-Premises
+  BOPPR_REPLACEMENT_COST:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Replacement cost provision
+    printed_as:
+    - SF-27B Replacement Cost Provision
+    - Business Personal Property Replacement Coverage
+    - Enhanced Replacement Cost
+    - Building Replacement Cost
+    - Business Personal Property Replacement Cost
+  BOPPR_SALESPERSONS_SAMPLES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Salespersons samples
+    printed_as:
+    - SALESPERSONS SAMPLES
+  BOPPR_SEASONAL_INCREASE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Seasonal increase in the business personal property limit
+    printed_as:
+    - Seasonal Increase - 25 Percent
+    - SEASONAL VARIATION
+    - SEASONAL INCREASE PERCENTAGE - BUSINESS PERSONAL PROPERTY
+    - Seasonal Increase
+  BOPPR_SERVICE_LINE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Service line coverage
+    printed_as:
+    - Service Line Coverage
+  BOPPR_SEWER_BACKUP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Back-up of sewers and drains coverage
+    printed_as:
+    - BACK-UP OF SEWERS AND DRAINS COVERAGE
+    - Backup of Sewer and Drains
+    - SF-72A - Backup, Discharge, Or Overflow
+    - Water Backup and Overflow Coverage
+    - Sewer or Drain Back Up
+  BOPPR_SIGNS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Exterior signs
+    printed_as:
+    - EXTERIOR SIGNS
+  BOPPR_SIGNS_OFF_PREMISES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Signs away from the premises
+    printed_as:
+    - Signs Away From The Premises
+  BOPPR_SNOW_ICE_REMOVAL:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Snow and/or ice removal
+    printed_as:
+    - Snow and/or Ice Removal
+  BOPPR_SPECIAL_FORM_BPP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property - special form causes of loss (SF-4)
+    printed_as:
+    - Coverage B - Business Property - SF-4
+  BOPPR_SPOILAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Spoilage
+    printed_as:
+    - SPOILAGE
+    - Refrigerated Food Products Food Spoilage
+    - Refrigerated Property
+    - Refrigerated Food Products
+    - Spoilage And Contaminated Food Coverage
+    - Spoilage - $500 Deductible
+  BOPPR_SPRINKLER_LEAKAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Sprinkler leakage
+    printed_as:
+    - SPRINKLER LEAKAGE
+  BOPPR_STRETCH_BLANKET:
+    meaning: ''
+    tell_apart: ''
+    shown_today: STRETCH blanket limit (the property part's blanket limit)
+    printed_as:
+    - STRETCH® PLUS Blanket Limit
+    - STRETCH® Blanket Limit
+  BOPPR_SUMP_OVERFLOW:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Sump overflow or sump pump failure
+    printed_as:
+    - SUMP OVERFLOW OR SUMP PUMP FAILURE
+  BOPPR_THEFT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Theft coverage (optional property coverage)
+    printed_as:
+    - Theft Coverage
+  BOPPR_THEFT_DAMAGE_BUILDING:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Theft damage to building
+    printed_as:
+    - THEFT DAMAGE TO BUILDING
+  BOPPR_TRANSIT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Transit coverage
+    printed_as:
+    - TRANSIT COVERAGE
+    - Transportation - Business Property
+    - Transportation - Tools and Equipment
+    - Property In Transit
+  BOPPR_TRANSIT_BI:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Transit business income
+    printed_as:
+    - TRANSIT BUSINESS INCOME
+  BOPPR_TREES_PLANTS_SHRUBS_BPP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Trees, plants and shrubs (business personal property side)
+    printed_as:
+    - Trees, Plants, And Shrubs
+  BOPPR_TREES_SHRUBS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Trees, shrubs and plants
+    printed_as:
+    - Trees, Shrubs, And Plants
+  BOPPR_UNAUTHORIZED_CARD_USE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Unauthorized business card use
+    printed_as:
+    - UNAUTHORIZED BUSINESS CARD USE
+  BOPPR_UNMANNED_AIRCRAFT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Unmanned aircraft liability
+    printed_as:
+    - Unmanned aircraft liability
+  BOPPR_UTILITY_INTERRUPTION:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Utility interruption
+    printed_as:
+    - Utility Interruption
+    - Utility Service Disruption (Property Damage And Time Element)
+    - Utility Services - Time Element
+  BOPPR_UTILITY_SERVICES_DIRECT:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Off-premises utility services - direct damage
+    printed_as:
+    - OFF-PREMISES UTILITY SERVICES - DIRECT DAMAGE
+    - Utility Services
+    - Utility Services - Direct Damage
+    - Utility Services - Direct Damage Building
+    - Utility Services - Direct Damage Contents
+  BOPPR_VALUABLE_PAPERS:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Valuable papers and records
+    printed_as:
+    - Valuable Papers And Records
+    - Valuable Papers and Records (on/off premises)
+    - Valuable Papers & Records
+  BOPPR_VALUATION_CHANGES_STOCK:
+    meaning: ''
+    tell_apart: ''
+    shown_today: 'Valuation changes: commodity, finished and mercantile stock'
+    printed_as:
+    - 'VALUATION CHANGES: COMMODITY, FINISHED AND MERCANTILE STOCK'
+  BOPPR_VMM_BPP:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Business personal property - vandalism and malicious mischief
+    printed_as:
+    - Coverage B - Business Property - Vandalism
+  BOPPR_WATER_DAMAGE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Water damage, other liquid, powder or molten material damage
+    printed_as:
+    - WATER DAMAGE, OTHER LIQUID, POWDER OR MOLTEN MATERIAL DAMAGE
+wc:
+  WC_EMPLOYERS_LIABILITY:
+    meaning: ''
+    tell_apart: ''
+    shown_today: 'Part Two - Employers liability insurance (its limits: Bodily injury by Accident each accident, Bodily injury
+      by Disease policy limit, Bodily injury by Disease each employee)'
+    printed_as:
+    - Employers Liability Insurance
+    - Employers Liability
+    - Part Two
+    - Part Two - Employers Liability Insurance
+    - Coverage B - Employers Liability
+    - Bodily Injury by Accident
+    - Bodily Injury by Disease
+    - Limits Emp Liability
+  WC_OTHER_STATES:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Part Three - Other states insurance (the states listed in Item 3.C)
+    printed_as:
+    - Other States Insurance
+    - Other States
+    - Part Three
+    - Part Three - Other States Insurance
+  WC_PART_ONE:
+    meaning: ''
+    tell_apart: ''
+    shown_today: Part One - Workers compensation insurance (the statutory benefits of the states listed in Item 3.A)
+    printed_as:
+    - Workers Compensation Insurance
+    - Workers Compensation
+    - Part One
+    - Part One - Workers Compensation Insurance
+    - Coverage A - Workers Compensation

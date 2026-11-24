@@ -40,6 +40,12 @@ from common.config import CONFIG_DIR, load_yaml
 #: here, until the client's own text is rewritten for the model.
 MODEL_VIEW_CONFIG = CONFIG_DIR / "model_view.yaml"
 
+#: What each coverage code means, written by someone who knows the coverages
+#: (review P2, decision 2026-11-24). A code is shown with its meaning - and its
+#: ``tell_apart``, when given - once filled; until then with its name from the
+#: line's code file, as before. Part of the prompt hash (common.prompts).
+COVERAGE_CODE_MEANINGS = CONFIG_DIR / "coverage_code_meanings.yaml"
+
 #: Fields the pipeline fills, never the model, per common-model definition.
 #: Shown, they would teach the model to write values no page prints.
 PIPELINE_FILLED: dict[str, tuple[str, ...]] = {
@@ -105,13 +111,33 @@ def model_view_config() -> dict[str, Any]:
     return load_yaml(MODEL_VIEW_CONFIG)
 
 
+@cache
+def coverage_code_meanings() -> dict[str, Any]:
+    return load_yaml(COVERAGE_CODE_MEANINGS) if COVERAGE_CODE_MEANINGS.exists() else {}
+
+
+def code_meaning(code: str, lob: str | None) -> str | None:
+    """``code``'s filled meaning for ``lob`` (the line's own entry, else the
+    shared one), with its ``tell_apart`` after it; None while it is empty."""
+    meanings = coverage_code_meanings()
+    entry = (meanings.get(lob) or {}).get(code) if lob else None
+    entry = entry or (meanings.get("shared") or {}).get(code) or {}
+    meaning = str(entry.get("meaning") or "").strip()
+    if not meaning:
+        return None
+    tell_apart = str(entry.get("tell_apart") or "").strip()
+    return f"{meaning} {tell_apart}" if tell_apart else meaning
+
+
 def model_view(bundle: dict[str, Any]) -> dict[str, Any]:
     """``bundle`` (whole or sliced) as the model is shown and constrained to it."""
     config = model_view_config()
     schema = copy.deepcopy(bundle)
     defs: dict[str, Any] = schema.setdefault("$defs", {})
-    names: dict[str, str] = dict(schema.get("fideon:coverage_code_names") or {})
     lob = schema.get("fideon:lob")
+    # Each code by its meaning once one is written, else by its name (review P2).
+    names: dict[str, str] = {code: code_meaning(code, lob if isinstance(lob, str) else None) or name
+                             for code, name in (schema.get("fideon:coverage_code_names") or {}).items()}
 
     _drop_top_level(schema)
     for name, fields in PIPELINE_FILLED.items():

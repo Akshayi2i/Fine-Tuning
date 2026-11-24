@@ -6,7 +6,7 @@
   Training-time and inference-time prompts must render BYTE-IDENTICALLY.
   Divergence is the most common cause of post-fine-tuning degradation and it is
   invisible in training metrics, because training never sees the serving prompt
-  (arch 7). test_prompt_parity guards this.
+  (arch 7). tests/test_parity.py and tests/test_serving_parity.py guard this.
 
   The injected schema carries each field's `description` - the semantic gloss
   with exclusions - which is how the model resolves surface labels it has never
@@ -17,7 +17,15 @@
   lexical prior that makes confusable errors worse, never closes the long tail,
   and turns every newly observed phrasing into a retrain trigger. Every rule
   below is therefore stated in terms of ROLES and MEANINGS, never wordings.
-  test_prompt_carries_descriptions_but_no_alias_strings enforces this.
+  test_no_alias_string_reaches_the_prompt and
+  test_the_prompt_files_carry_no_alias_strings enforce this.
+
+  The field descriptions the schema carries are not this template's prose: they
+  may show short examples of the values and column headings a field holds
+  ('Included', 'Pr/Co'), never a carrier's own wording and never an example of
+  one particular line, since the common model's definitions are shown to every
+  line (review P5, decision 2026-11-24; overrides in configs/model_view.yaml,
+  tests/test_prompt_examples.py).
 
   Sections above the include are shared by every document type. The included
   block is that type's own structure and failure modes (IMPL-12 section 2): a

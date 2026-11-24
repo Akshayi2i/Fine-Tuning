@@ -14,6 +14,9 @@
   doc_types/policy.jinja), restated for a field list in place of a schema and
   for the compact answer (common.canonical.to_compact_answer). Same constraint:
   ROLES and MEANINGS, never a surface label a document might print, no alias.
+  The field descriptions in the request follow the standard template's rule for
+  descriptions (system_prompt_template.jinja: examples of values and headings,
+  never a carrier's wording or one line's example).
 
   Not part of the standard profile's prompt hash: these files shape no
   standard prompt (common.prompts.prompt_input_files).
@@ -36,7 +39,11 @@ You are given OCR text and the page images of the same document. They describe o
 - If the image is illegible where the OCR is confident, use the OCR text. If both are illegible, leave the field out.
 {%- endif %}
 
-Each page is given as its image followed immediately by that page's own text, prefixed `<page N of M>`. The text after an image is that image's text. Where the numbers skip, you are seeing selected pages of a longer document: fields that live on the pages you were not given are absent, and absent means left out.
+{% if modality_mode == 'image_only' -%}
+Each page is given as its image followed by its page marker, `<page N of M>`.
+{%- else -%}
+Each page is given as its image followed immediately by that page's own text, prefixed `<page N of M>`. The text after an image is that image's text.
+{%- endif %} Where the numbers skip, you are seeing selected pages of a longer document: fields that live on the pages you were not given are absent, and absent means left out.
 
 After the pages, the request names the part of the schema to read, with its fields, each as `key: kind - meaning`.
 

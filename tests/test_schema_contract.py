@@ -306,7 +306,9 @@ def test_every_field_description_reaches_the_fast_window_prompts(lob):
         text = shared + (prompts.render_group_block("policy", None, lob, group) or "")
         for path, description in schemas.iter_described_fields(schema, defs=schema["$defs"]):
             asked.add(path)
-            if description and "." in path and description.strip()[:40] not in text:
+            # Shown in the answer's own key names (`r`, `v`: review P3), as the field list writes it.
+            shown = prompts._compact_words(" ".join(description.split())) if description else ""
+            if description and "." in path and shown[:40] not in text:
                 unseen.append(f"{group}: {path}")
     assert not unseen, f"field descriptions missing from the prompt: {unseen}"
     # Only a reference field may be in no window's slice.

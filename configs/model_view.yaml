@@ -37,6 +37,19 @@ descriptions:
   # The client's text sends a blank signature line to text_sections, which the
   # model is never asked for.
   countersignature: Countersignature, when a name or date is actually printed. A blank signature line is not one.
+  # Examples (review P5, decision 2026-11-24): a description may show the values and
+  # column headings its field holds ('Included', 'Pr/Co'), never a carrier's own
+  # wording, and never an example of one line - these definitions are shared, so
+  # each one is shown to every line (tests/test_prompt_examples.py).
+  carrier.claims_notice_recipient: Department or person claims are noticed to, as printed.
+  document.title: Document title as printed, e.g. 'Policy Declarations'.
+  policy.policy_type: Product, program or policy form name as printed.
+  Form.form_number: Form number as printed.
+  Form.sequence: Sequence or item number printed after the form number, as printed.
+  Deductible.percentage_basis: What the percentage is of, as printed (e.g. a named coverage's limit).
+  RatingExposure.exposure_qualifier: Qualifier printed with the rating basis, as printed (whose payroll or which receipts it counts).
+  RatingExposure.schedule_number: Schedule number the classification is printed under, as printed.
+  Building.cause_of_loss: Causes of loss form or basis for the building, as printed (e.g. 'Special', 'Basic').
   Coverage.form_refs: >-
     Form numbers printed with this coverage that grant or modify it. Printed
     values: each exactly as printed, as a plain string.

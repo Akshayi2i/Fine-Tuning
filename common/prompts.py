@@ -40,7 +40,10 @@ PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 #: Bumped whenever the template's rendered output changes in any way.
 #: Recorded in the corpus manifest; a change forces a corpus rebuild and a new
 #: training cycle, exactly like a schema change (arch §7).
-PROMPT_TEMPLATE_VERSION = "7.2.0"
+#: 8.0.0 (2026-11-24, cycle 3, review P1-P5): the read-elsewhere exception for printed fields, `r`/`v` in
+#: the fast field list, the image-only page sentence, code meanings when written, no carrier wording or
+#: one line's example in a description. v4 (7.2.0) is served from commit 19b1bff.
+PROMPT_TEMPLATE_VERSION = "8.0.0"
 
 _SYSTEM_TEMPLATE = "system_prompt_template.jinja"
 _CLASSIFIER_TEMPLATE = "doc_type_classifier_prompt.jinja"
@@ -55,7 +58,9 @@ _FAST_GROUP_TEMPLATE = "fast/group.jinja"
 #: the rule that aligns a document's windows across groups - changes. Part of
 #: the fast profile's identity (:func:`format_identity`); the standard profile
 #: does not read it.
-FAST_LAYOUT_VERSION = "1"
+#: 2 (2026-11-24): meanings say `r`/`v`, not `raw`/`parsed` (P3); the image-only page
+#: sentence (P4); the read-elsewhere exception (P1); code meanings (P2).
+FAST_LAYOUT_VERSION = "2"
 
 #: How the document type is named to the model in prose.
 _DOC_TYPE_LABELS: dict[str, str] = {
@@ -251,6 +256,7 @@ def render_system_prompt(
         common_model=doc_type.lower() == "policy" and is_common_model(doc_type, acord_form, lob),
         required_keys=_prose_list(required_fields(doc_type, acord_form, lob, sections)),
         read_elsewhere=_read_elsewhere(doc_type, acord_form, lob, sections),
+        printed_here=_printed_here(doc_type, acord_form, lob, sections),
         output_shape=output_shape_for_prompt(doc_type, acord_form, lob, sections),
         doc_type_label=doc_type_label(doc_type, acord_form),
         modality_mode=mode,
@@ -307,6 +313,7 @@ def render_group_block(
         top_keys=_prose_list(top),
         required_keys=_prose_list(required_fields(doc_type, acord_form, lob, sections)),
         read_elsewhere=_read_elsewhere(doc_type, acord_form, lob, sections),
+        printed_here=_printed_here(doc_type, acord_form, lob, sections),
         fields=listing["fields"],
         kinds=listing["kinds"],
         codes=listing["codes"],
@@ -361,14 +368,31 @@ def compact_fields_for_prompt(
     return _CompactListing(resolved_schema(doc_type, acord_form, lob, sections)).render()
 
 
+#: The client's schema names a value's keys ``raw``, ``parsed``, ``page_ref``; the
+#: fast layout's answer writes them ``r``, ``v``, ``p`` (common.canonical.COMPACT_KEYS),
+#: and its system message teaches those. A meaning shown in the fast field list
+#: says the short names (review P3, 2026-11-24). ``page_ref`` is not rewritten: an
+#: additional-field entry keeps that key in the compact answer.
+_COMPACT_WORDS: tuple[tuple[str, str], ...] = (("`raw`", "`r`"), ("`parsed`", "`v`"))
+
+
+def _compact_words(text: str) -> str:
+    import re
+
+    for long, short in _COMPACT_WORDS:
+        text = text.replace(long, short)
+    return re.sub(r"\bin parsed\b", "in `v`", text)
+
+
 def _short(text: Any) -> str:
-    """A meaning as the fast field list shows it: whole up to
-    :data:`SHORT_MEANING_CHARS`, else its first sentence."""
+    """A meaning as the fast field list shows it, in the compact answer's key
+    names (:func:`_compact_words`): whole up to :data:`SHORT_MEANING_CHARS`, else
+    its first sentence."""
     import re
 
     if not isinstance(text, str):
         return ""
-    text = " ".join(text.split())
+    text = _compact_words(" ".join(text.split()))
     if len(text) <= SHORT_MEANING_CHARS:
         return text
     for match in re.finditer(r"\.\s+(?=[A-Z`'\"(])", text):
@@ -561,6 +585,27 @@ def _read_elsewhere(
     return _prose_list([name for name in whole if name not in here])
 
 
+def _printed_here(
+    doc_type: str, acord_form: str | None, lob: str | list[str] | None, sections: str | None,
+) -> str:
+    """The fields of this window's entries that hold a value printed beside the
+    entry (``common.model_view.PRINTED_STRING_FIELDS``) - for a window that also
+    names parts read by other requests, else "" (review P1, 2026-11-24).
+
+    The read-elsewhere sentence tells the model to leave out a value that
+    belongs under another part: a form number belongs under the forms. But a
+    coverage's ``form_refs`` asks for the form numbers printed with it, the same
+    numbers. Named from the model view, never in a template's prose."""
+    if not _read_elsewhere(doc_type, acord_form, lob, sections):
+        return ""
+    from common.model_view import PRINTED_STRING_FIELDS
+
+    defs = resolved_schema(doc_type, acord_form, lob, sections).get("$defs") or {}
+    names = [field for definition, fields in PRINTED_STRING_FIELDS.items()
+             for field in fields if field in ((defs.get(definition) or {}).get("properties") or {})]
+    return _prose_list(list(dict.fromkeys(names)))
+
+
 def _prose_list(names: list[str]) -> str:
     """``carrier``, ``named_insured`` and ``policy`` — for a sentence, not a list."""
     quoted = [f"`{n}`" for n in names]
@@ -651,7 +696,7 @@ def prompt_input_files() -> list[Path]:
     hash - are exactly what they were before the profile existed.
     """
     from common.config import CONFIG_DIR, SHARED_FORMAT_CONFIG, fast_profile
-    from common.model_view import MODEL_VIEW_CONFIG
+    from common.model_view import COVERAGE_CODE_MEANINGS, MODEL_VIEW_CONFIG
     from common.schemas import CANONICAL_DIR, COMMON_MODEL, SCHEMA_DIR
 
     fast = fast_profile()
@@ -664,6 +709,7 @@ def prompt_input_files() -> list[Path]:
         + [COMMON_MODEL]
         + sorted(CANONICAL_DIR.glob("*.coverage_codes.yaml"))
         + [MODEL_VIEW_CONFIG]
+        + [COVERAGE_CODE_MEANINGS]
         + [CONFIG_DIR / "schema_sections.yaml"]
         + [CONFIG_DIR / "lob_meanings.yaml"]
         + ([SHARED_FORMAT_CONFIG] if fast else [])
