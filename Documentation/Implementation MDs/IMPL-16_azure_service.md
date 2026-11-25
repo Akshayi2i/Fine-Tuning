@@ -20,6 +20,7 @@ The service is the production extraction routine. A caller sends one policy PDF 
 | Webhooks | `azure_service/webhooks.py` | `WebhookSender`: signed POSTs for `fields_ready`, `done` and `failed`, with no document content. |
 | Settings | `azure_service/settings.py` | `Settings.from_env`: the environment both containers read. `check_api` and `check_worker` refuse a start without what each needs. |
 | Job lists | `azure_service/jobs.py` | `python -m azure_service.jobs failed|partial`: the jobs that need a person. |
+| Telemetry | `azure_service/telemetry.py` | Five numbers per finished job - seconds per stage, queue age, windows not read, values removed as not printed, guards that could not run - one log line each (`LogTelemetry`) until a backend is chosen (decision 2026-11-25, review S4). Never document content. A telemetry failure never fails a job. |
 | Retention | `azure_service/retention.py` | Keeping flagged documents for review. Off by default; on only for tenants named in `REVIEW_RETENTION_TENANTS`. |
 
 Blob layout in the jobs container (`store.py`):
@@ -162,6 +163,10 @@ Read elsewhere: `API_PORT` (default 8080, `api.main`); `AZURE_STORAGE_CONNECTION
 COPY lines: `pyproject.toml`, `requirements-service.lock`, `common/`, `contracts/` and `adapters/` (since 2026-11-24, review A1), `artifact_registry/`, `registry_utils/`, `data_pipeline/`, `inference_core/`, `calibration/`, `serving/`, `postprocessing/`, `evaluation/`, `orchestration/`, `configs/`, `schemas/`, `prompts/`, `azure_service/`.
 
 `training/`, `testing/`, `pilot/`, `data/` and `tests/` are not in it. The served packages (`common`, `contracts`, `adapters`, `inference_core`, `calibration`, `serving`, `azure_service`) import nothing from the build-time ones beyond the few `tests/test_layering.py` still allows, each named there; until that list is empty the image keeps `data_pipeline/`, `evaluation/` and `orchestration/`. `scripts/` left it on 2026-11-24. `tests/test_production_image_imports.py` runs the served code with every package the image leaves out blocked, so served code that imports one fails on a laptop too (`test_the_dockerfile_leaves_training_and_testing_out`). `azure_service/Dockerfile.dockerignore` and the root `.dockerignore` exclude everything else from the build context (`test_the_root_dockerignore_leaves_out_what_the_service_one_does`). DEPLOY.md says to build from a clean `git archive` export, never from the working tree.
+
+## Before go-live
+
+`azure_service/GO_LIVE_CHECKLIST.md` (decision 2026-11-25, review S9: two clouds): what the code enforces about where documents travel, and six conditions it cannot - RunPod Secure Cloud under a signed DPA, a data centre near the Azure region, vLLM's request logging off, the pod's caches removed and its volume encrypted, where TLS ends, both servers behind tokens - each confirmed and signed by a named person. One worker per GPU is a limit (decision 2026-11-25, review S2; `DEPLOY.md`).
 
 ## Open
 

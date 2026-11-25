@@ -117,7 +117,9 @@ class Worker:
     """Reads queued jobs fields first on one GPU; see the module's docstring."""
 
     def __init__(self, store: JobStore, queue_: JobQueue, runtime: ServingRuntime, settings: Any, *,
-                 webhooks: Any, links: Any = None, clock: Any = time.time, retention: Any = None) -> None:
+                 webhooks: Any, links: Any = None, clock: Any = time.time, retention: Any = None,
+                 telemetry: Any = None) -> None:
+        from azure_service.telemetry import LogTelemetry
         from serving.fields_first import GpuTurns
 
         self.store = store
@@ -129,6 +131,8 @@ class Worker:
         self.links = links
         #: :class:`azure_service.retention.ReviewRetention`, or None (the default: off).
         self.retention = retention
+        #: Five numbers per finished job (:mod:`azure_service.telemetry`; logs only by default).
+        self.telemetry = telemetry if telemetry is not None else LogTelemetry()
         self.clock = clock
         self.turns = GpuTurns(settings.text_max_wait_s)
         self._text: queue.Queue[_Phase2] = queue.Queue()
@@ -439,7 +443,7 @@ class Worker:
         except Exception as exc:  # noqa: BLE001 - reported on the job
             self._failed(record, lease, exc, phase=2)
             return
-        self._finish(record, lease, "done")
+        self._finish(record, lease, "done", result)
 
     # ------------------------------------------------------------------
     # Endings
@@ -510,15 +514,25 @@ class Worker:
             return
         self._finish(record, lease, status)
 
-    def _finish(self, record: dict[str, Any], lease: Lease, event: str) -> None:
+    def _finish(self, record: dict[str, Any], lease: Lease, event: str, result: Any = None) -> None:
         job_id = record["job_id"]
         self._delete(job_id, lease)
+        self._emit(record, event, result)
         if event == "done":
             self._retain(record)                 # before the PDF is deleted
         if not self.settings.keep_files:
             self.store.delete_transient(record["tenant"], job_id)
         self._clean_local(job_id)
         self.webhooks.notify(record, event)
+
+    def _emit(self, record: dict[str, Any], event: str, result: Any) -> None:
+        """The job's five numbers to telemetry; never a reason for the job to fail."""
+        from azure_service.telemetry import job_numbers
+
+        try:
+            self.telemetry.job_finished(job_numbers(record, event, result))
+        except Exception as exc:  # noqa: BLE001 - monitoring never ends a job
+            log.warning("job %s: telemetry not sent (%s)", record.get("job_id"), type(exc).__name__)
 
     def _retain(self, record: dict[str, Any]) -> None:
         """Keep a finished job for review when its tenant is opted in and its result

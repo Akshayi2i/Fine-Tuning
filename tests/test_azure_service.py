@@ -870,3 +870,77 @@ def test_given_up_jobs_are_listed_without_document_names(service):
     assert "document" not in listed[0]
     assert [line["job_id"] for line in failed_jobs(service.store, "other")] == []
     assert done_id not in [line["job_id"] for line in partial_jobs(service.store)]
+
+
+# --------------------------------------------------------------------------
+# Telemetry: five numbers per finished job (review S4, decision 2026-11-25)
+# --------------------------------------------------------------------------
+
+
+class _Recorded:
+    def __init__(self) -> None:
+        self.jobs: list = []
+
+    def job_finished(self, numbers) -> None:
+        self.jobs.append(numbers)
+
+
+def _worker_with(service: Service, telemetry) -> Worker:
+    worker = service.worker()
+    worker.telemetry = telemetry
+    return worker
+
+
+def test_a_finished_job_reports_its_numbers_and_nothing_of_the_document(service):
+    from dataclasses import asdict
+
+    recorded = _Recorded()
+    job_id = service.submit(name="Acme Holdings policy.pdf")["job_id"]
+    worker = _worker_with(service, recorded)
+    worker.poll_once()
+    worker.text_once()
+    [numbers] = recorded.jobs
+    assert numbers.job_id == job_id and numbers.outcome == "done"
+    assert numbers.stage_seconds and "total" in numbers.stage_seconds and numbers.queue_seconds is not None
+    assert (numbers.windows_failed, numbers.guards_not_run) == (0, 0)
+    assert "Acme" not in json.dumps(asdict(numbers))
+
+
+def test_unreadable_windows_and_given_up_jobs_are_counted(tmp_path):
+    recorded = _Recorded()
+    service = _with_backend(Service(tmp_path), AnswersBadly(1))
+    service.submit()
+    worker = _worker_with(service, recorded)
+    worker.poll_once()
+    worker.text_once()
+    assert recorded.jobs[-1].outcome == "done" and recorded.jobs[-1].windows_failed > 0
+
+    given_up = service.submit()["job_id"]
+    for _ in range(service.settings.max_attempts):
+        assert service.queue.receive(300) is not None
+        service.clock.advance(301)
+    _worker_with(service, recorded).poll_once()
+    assert (recorded.jobs[-1].job_id, recorded.jobs[-1].outcome) == (given_up, "failed")
+
+
+def test_a_telemetry_failure_never_fails_the_job(service):
+    class Broken:
+        def job_finished(self, numbers):
+            raise RuntimeError("monitoring down")
+
+    job_id = service.submit()["job_id"]
+    worker = _worker_with(service, Broken())
+    worker.poll_once()
+    worker.text_once()
+    assert service.status(job_id)["status"] == "done"
+
+
+def test_the_default_telemetry_is_one_log_line(service, caplog):
+    import logging
+
+    service.submit()
+    worker = service.worker()
+    with caplog.at_level(logging.INFO, logger="azure_service.telemetry"):
+        worker.poll_once()
+        worker.text_once()
+    assert [r.message for r in caplog.records if r.message.startswith("job numbers: ")]

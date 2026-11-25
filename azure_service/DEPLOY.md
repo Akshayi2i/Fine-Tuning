@@ -242,6 +242,16 @@ ingress' request timeout against your largest PDFs on your slowest client link.
 
 **The worker** - no ingress, **exactly one replica per GPU**:
 
+> **The limit, and why** (decision 2026-11-25, review S2: kept until a real load test).
+> The model and MinerU share one GPU, and whose turn it is lives in a lock inside the
+> worker's own process (`serving.fields_first.GpuTurns`). A second worker on the same
+> GPU cannot see that lock: its MinerU runs would land on the GPU while the first
+> worker's fields are being read, and the 2-minute fields target goes with them. So
+> `--max-replicas 1` per GPU, and a second GPU means a second pod and a second worker
+> pointed at it. Refused for now: separate GPUs for the model and for OCR (no turns,
+> a second GPU's cost), and a queue in front of each server (new code at the server).
+> What reopens it: a measured load the one worker per GPU cannot carry.
+
 ```bash
 az containerapp create -g $RG -n extraction-worker --environment $ENV \
    --image $ACR.azurecr.io/extraction-worker:$TAG --registry-server $ACR.azurecr.io --registry-identity $ID \
