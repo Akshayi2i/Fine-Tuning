@@ -91,7 +91,8 @@ python -m orchestration.run release-check --version v2 --tenant T --corpus v1   
                    metadata (acord_form, lob: classic auto read as personal auto) and the gold, read
                    under the form-edition rule on common-model lines, as the golden eval reads it
   2. Read it       harness:   serving.pipeline.extract (StaticClassifier: the type is known; windows over
-                              every page, merged; identity calibration; strict_schema=False)
+                              every page, merged; identity calibration; ReadSettings.testing():
+                              an invalid answer kept, flagged)
                    as_served: evaluation.golden_eval.read_as_served - extract image_only with the
                               release's calibrators, then golden_eval.borrowed_printed_check (the answer
                               held to the stored page text: a value no page prints taken out) and its

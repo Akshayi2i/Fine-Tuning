@@ -195,10 +195,10 @@ def pre_annotate(
             "review rule around it are complete."
         )
 
-    result = extract(
-        request, model, classifier, calibration,
-        strict_schema=False,  # a rough draft is the point; review fixes it
-    )
+    from serving.read_settings import ReadSettings
+
+    # A rough draft is the point; review fixes it.
+    result = extract(request, model, classifier, calibration, settings=ReadSettings.draft())
 
     draft = Draft(
         source_id=source_id,

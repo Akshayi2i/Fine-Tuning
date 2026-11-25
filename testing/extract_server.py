@@ -440,6 +440,7 @@ class ExtractService:
         from data_pipeline.dataset_builder.policy_windows import pages_to_read, plan_windows
         from serving.doc_type_classifier import StaticClassifier
         from serving.pipeline import ExtractionRequest, extract
+        from serving.read_settings import ReadSettings
 
         folder = self.work_dir / job.id
         pages_dir = folder / "pages"
@@ -468,7 +469,7 @@ class ExtractService:
             request, self.model, StaticClassifier("policy"),
             CalibrationParams(method="temperature", doc_type="policy", model_version=self.model.tag,
                               temperature=1.0),
-            strict_schema=False,
+            settings=ReadSettings.testing(),
         )
         done = time.perf_counter()
         summary = {

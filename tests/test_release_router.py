@@ -564,4 +564,4 @@ def test_the_endpoint_hands_the_serving_plan_to_every_extraction(client, monkeyp
         "ocr_text": "Named Insured",
     }}, state)
 
-    assert seen.get("plan") is plan, "the serving plan never reached extract"
+    assert seen["settings"].plan is plan, "the serving plan never reached extract"

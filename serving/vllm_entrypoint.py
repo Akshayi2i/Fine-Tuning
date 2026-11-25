@@ -793,20 +793,20 @@ def handler(event: dict[str, Any], state: EndpointState) -> dict[str, Any]:
         # and redeploying changed no behaviour at all — the hardcoded defaults
         # inside `extract` won every time, silently.
         tuning = serving_thresholds()
+        from serving.read_settings import ReadSettings
+
         result: ExtractionResult = extract(
             request,
             state.model,
             state.classifier,
             state.calibration,
-            adapter_map=state.adapter_map,
             # The serving plan reaches `extract`, or the refusal it exists for
             # never happens: a document type no promoted release covers would be
             # extracted by a model that never trained on it, against a schema it
             # has never seen (arch v2.1 §12.3).
-            plan=state.plan,
-            release_runtimes=state.release_runtimes,
-            base_model_loaded=state.base_model_loaded,
-            **tuning,
+            settings=ReadSettings.endpoint(adapter_map=state.adapter_map, plan=state.plan,
+                                           release_runtimes=state.release_runtimes,
+                                           base_model_loaded=state.base_model_loaded, tuning=tuning),
         )
     except ServingError as exc:
         # The message names what was wrong with the request; it never echoes the

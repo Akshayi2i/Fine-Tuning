@@ -157,12 +157,13 @@ def _extract(model: Any, request: Any, doc_type: str) -> tuple[dict[str, Any], l
     from calibration.fit_calibration import CalibrationParams
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import extract
+    from serving.read_settings import ReadSettings
 
     calibration = CalibrationParams(method="temperature", doc_type=doc_type,
                                     model_version=model.tag, temperature=1.0)
     try:
         result = extract(request, model, StaticClassifier(doc_type, request.known_acord_form), calibration,
-                         strict_schema=False)
+                         settings=ReadSettings.testing())
     except Exception as exc:  # noqa: BLE001 - the other route still runs
         log.error("%s on %s failed: %s: %s", model.tag, request.source_id, type(exc).__name__, exc)
         return {}, [], f"{type(exc).__name__}: {exc}"

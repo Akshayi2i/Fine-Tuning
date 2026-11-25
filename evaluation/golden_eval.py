@@ -567,6 +567,7 @@ def _read_with_result(context: _ReadContext, doc: GoldenDocument, mode: str, *, 
     )
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import ExtractionRequest, extract
+    from serving.read_settings import ReadSettings
 
     calibration = CalibrationParams(
         method="temperature", doc_type=doc.doc_type,
@@ -615,7 +616,7 @@ def _read_with_result(context: _ReadContext, doc: GoldenDocument, mode: str, *, 
     reading = _Reading()
     result, errors = _attempts(
         lambda: extract(request, context.model, StaticClassifier(doc.doc_type, doc.acord_form), calibration,
-                        calibrators=context.calibrators, thresholds=context.thresholds, strict_schema=False),
+                        settings=ReadSettings.gate(calibrators=context.calibrators, thresholds=context.thresholds)),
         f"{doc.source_id} ({mode})",
     )
     if errors and result is not None:
@@ -706,12 +707,13 @@ def _read_again(context: _ReadContext, doc: GoldenDocument, request: Any, calibr
     from evaluation.run_eval import IMAGE_ONLY_MODE
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import extract
+    from serving.read_settings import ReadSettings
 
     mode = metadata["modality_mode"]
     result, errors = _attempts(
         lambda: extract(replace(request, send_order="reversed"), context.model,
                         StaticClassifier(doc.doc_type, doc.acord_form), calibration,
-                        calibrators=context.calibrators, thresholds=context.thresholds, strict_schema=False),
+                        settings=ReadSettings.gate(calibrators=context.calibrators, thresholds=context.thresholds)),
         f"{doc.source_id} ({mode}, repeat)",
     )
     retried = ({"source_id": doc.source_id, "mode": mode, "pass": "repeat", "error": errors[0]}

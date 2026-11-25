@@ -165,8 +165,10 @@ def test_the_backlog_is_the_unlabelled_documents_read_with_the_releases_calibrat
                         lambda c, sid, **kw: (SimpleNamespace(source_id=sid, known_acord_form=None), None))
     calls = []
 
-    def extract(request, model, classifier, calibration, *, calibrators, thresholds, strict_schema):
-        calls.append((request.source_id, calibrators, thresholds))
+    def extract(request, model, classifier, calibration, *, settings):
+        # The gate's profile (serving.read_settings.ReadSettings.gate): the release's calibrators.
+        assert settings.strict_schema is False
+        calls.append((request.source_id, settings.calibrators, settings.thresholds))
         if request.source_id == "policy_0101":
             raise RuntimeError("engine died")
         return SimpleNamespace(source_id=request.source_id, doc_type="policy", overall_confidence=0.5,

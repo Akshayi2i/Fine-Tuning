@@ -323,6 +323,7 @@ def backlog_results(client: BlobClient, model: Any, *, version: str, doc_types: 
     from calibration.fit_calibration import CalibrationParams
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import extract
+    from serving.read_settings import ReadSettings
     from testing.run_extraction import document_request
 
     calibrators, thresholds = release_calibration(client, version, tenant_id)
@@ -340,7 +341,7 @@ def backlog_results(client: BlobClient, model: Any, *, version: str, doc_types: 
                     request, model, StaticClassifier(doc_type, request.known_acord_form),
                     CalibrationParams(method="temperature", doc_type=doc_type, model_version=version,
                                       temperature=1.0),
-                    calibrators=calibrators, thresholds=thresholds, strict_schema=False))
+                    settings=ReadSettings.gate(calibrators=calibrators, thresholds=thresholds)))
             except Exception as exc:  # noqa: BLE001 - one document must not end the queue
                 log.error("review queue: %s not extracted (%s: %s)", source_id, type(exc).__name__,
                           str(exc)[:200])

@@ -41,3 +41,42 @@ class ReadSettings:
     base_model_loaded: bool = True
     lob_confidence_threshold: float = 0.90
     lob_uncertain_threshold: float = 0.60
+
+    # ------------------------------------------------------------------
+    # The named profiles: each entry point reads with one, never with flags
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def served(cls, options: Mapping[str, Any] | None = None) -> ReadSettings:
+        """The production service (the Azure worker, through ``serving.fields_first``): an
+        answer that fails the schema is served flagged ``schema:invalid``, not refused;
+        ``options`` are the serving thresholds (``vllm_entrypoint.serving_thresholds``) and
+        the release's calibrators and thresholds (``azure_service.runtime.extract_options``)."""
+        return cls(strict_schema=False, **dict(options or {}))
+
+    @classmethod
+    def gate(cls, *, calibrators: Any = None, thresholds: Any = None) -> ReadSettings:
+        """The gate's reading of the frozen set (``evaluation.golden_eval``) and the review
+        queue a release builds (``orchestration.label_noise``): the release's calibrators,
+        an invalid answer kept and flagged so it is scored, not lost."""
+        return cls(calibrators=calibrators, thresholds=thresholds, strict_schema=False)
+
+    @classmethod
+    def testing(cls) -> ReadSettings:
+        """The testing tools (``testing.run_extraction``, ``compare_models``,
+        ``latency_check``): no release calibrators, an invalid answer kept and flagged."""
+        return cls(strict_schema=False)
+
+    @classmethod
+    def draft(cls) -> ReadSettings:
+        """A pre-annotation draft (``data_pipeline.labeling.pre_annotate``): a rough draft is
+        the point - review fixes it - so an invalid answer is kept, flagged."""
+        return cls(strict_schema=False)
+
+    @classmethod
+    def endpoint(cls, *, adapter_map: Mapping[str, Any] | None, plan: Any, release_runtimes: Mapping[str, Any] | None,
+                 base_model_loaded: bool, tuning: Mapping[str, Any] | None = None) -> ReadSettings:
+        """The RunPod endpoint (``serving.vllm_entrypoint.handler``): its serving plan, release
+        runtimes and engine, and the serving thresholds; an invalid answer is refused."""
+        return cls(adapter_map=adapter_map, plan=plan, release_runtimes=release_runtimes,
+                   base_model_loaded=base_model_loaded, **dict(tuning or {}))

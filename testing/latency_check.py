@@ -265,6 +265,7 @@ def time_document(pdf: Path, lob: str, *, backend: Any, model: Any, reader: Any,
     from data_pipeline.dataset_builder.policy_windows import pages_to_read, plan_windows
     from serving.doc_type_classifier import StaticClassifier
     from serving.pipeline import ExtractionRequest, extract
+    from serving.read_settings import ReadSettings
 
     key = key or pdf.stem
     began = time.perf_counter()
@@ -282,7 +283,7 @@ def time_document(pdf: Path, lob: str, *, backend: Any, model: Any, reader: Any,
     windows = len(plan_windows(lob, every_page, declarations_page, texts or None))
     sent_before = backend.sent_bytes
     model_started = time.perf_counter()
-    result = extract(request, model, StaticClassifier("policy"), _calibration(model), strict_schema=False)
+    result = extract(request, model, StaticClassifier("policy"), _calibration(model), settings=ReadSettings.testing())
     done = time.perf_counter()
     sent = {
         "pdf": round(len(data) / 2**20, 1) if mode != "image_only" else 0.0,

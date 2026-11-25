@@ -1791,8 +1791,14 @@ def extract(
     base_model_loaded: bool = True,
     lob_confidence_threshold: float = 0.90,
     lob_uncertain_threshold: float = 0.60,
+    settings: Any = None,
 ) -> ExtractionResult:
     """Run one document through the full pipeline.
+
+    ``settings``: the reading's options as one :class:`serving.read_settings.ReadSettings`,
+    a named profile of it (``ReadSettings.served``, ``.gate``, ``.testing`` ...) - how every
+    caller in this repository passes them since 2026-11-24 (review A2). Given, the keyword
+    options are left at their defaults; both at once is refused.
 
     Args:
         strict_schema: raise on a schema-invalid response rather than returning
@@ -1814,11 +1820,17 @@ def extract(
     from serving.read_settings import ReadSettings
     from serving.stages import read
 
-    settings = ReadSettings(
+    given = ReadSettings(
         adapter_map=adapter_map, calibrators=calibrators, thresholds=thresholds,
         classifier_threshold=classifier_threshold, review_threshold=review_threshold,
         strict_schema=strict_schema, plan=plan, fallback_doc_type=fallback_doc_type,
         release_runtimes=release_runtimes, detect_lob=detect_lob, base_model_loaded=base_model_loaded,
         lob_confidence_threshold=lob_confidence_threshold, lob_uncertain_threshold=lob_uncertain_threshold,
     )
+    if settings is None:
+        settings = given
+    elif given != ReadSettings():
+        # One of the two would be silently ignored: a caller passing strict_schema=False
+        # beside settings would be read strict.
+        raise TypeError("extract takes the reading's options as settings= or as keywords, not both")
     return read(request, model, classifier, calibration, settings)

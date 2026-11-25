@@ -306,6 +306,7 @@ def read_fields(pdf: bytes, *, name: str, lob: str, source_id: str, model: Any, 
     thresholds, the serving thresholds.
     """
     from serving.pipeline import ExtractionRequest, extract
+    from serving.read_settings import ReadSettings
 
     began = time.perf_counter()
     # The turn is held from the start, rendering included, though rendering is
@@ -319,8 +320,7 @@ def read_fields(pdf: bytes, *, name: str, lob: str, source_id: str, model: Any, 
             source_id=source_id, image_paths=read["images"], page_texts={}, modality_mode="image_only",
             known_doc_type="policy", known_lob=lob, source_file_name=name,
         )
-        result = extract(request, model, classifier, calibration, strict_schema=False,
-                         **dict(extract_options or {}))
+        result = extract(request, model, classifier, calibration, settings=ReadSettings.served(extract_options))
         answered = time.perf_counter()
         checked: dict[str, Any] | None = None
         served: Any = None

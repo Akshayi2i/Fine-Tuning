@@ -44,6 +44,7 @@ from typing import Any, cast
 from calibration.fit_calibration import CalibrationParams
 from common.ocr_text import clean_page_text
 from serving.pipeline import NO_FULL_TEXT_FLAG, ExtractionRequest, ExtractionResult, extract
+from serving.read_settings import ReadSettings
 
 log = logging.getLogger(__name__)
 
@@ -697,7 +698,7 @@ def run_batch(
                                                 model_version=model.tag, temperature=1.0)
                 result, metrics = run_document(
                     request, model, StaticClassifier(doc_type, request.known_acord_form), calibration,
-                    golden=golden if score else None, strict_schema=False,
+                    golden=golden if score else None, settings=ReadSettings.testing(),
                 )
             metrics["path"], metrics["calibration"] = path_name, calibration_source
         except Exception as exc:  # noqa: BLE001 - one document must not end the batch
