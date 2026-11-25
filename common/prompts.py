@@ -43,7 +43,10 @@ PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 #: 8.0.0 (2026-11-24, cycle 3, review P1-P5): the read-elsewhere exception for printed fields, `r`/`v` in
 #: the fast field list, the image-only page sentence, code meanings when written, no carrier wording or
 #: one line's example in a description. v4 (7.2.0) is served from commit 19b1bff.
-PROMPT_TEMPLATE_VERSION = "8.0.0"
+#: 8.1.0 (2026-11-25, review P6, P8, and P4 in the standard template): "null" said once both ways on a
+#: canonical document, the image-only page sentence in the standard template, the classifier told it reads
+#: the opening pages. Still cycle 3: nothing was trained on 8.0.0.
+PROMPT_TEMPLATE_VERSION = "8.1.0"
 
 _SYSTEM_TEMPLATE = "system_prompt_template.jinja"
 _CLASSIFIER_TEMPLATE = "doc_type_classifier_prompt.jinja"

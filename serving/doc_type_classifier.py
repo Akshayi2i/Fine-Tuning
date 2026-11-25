@@ -82,6 +82,10 @@ class Classification:
     lob_hypothesis_agreed: bool | None = None
     #: "base": the base model read the line, among every known line.
     lob_stage: str | None = None
+    #: The ``confidence`` the model wrote about itself, kept for the record only: a model
+    #: classifier's ``confidence`` is measured from its tokens (:func:`value_confidence`,
+    #: review P8, 2026-11-25), as the line's is.
+    stated_confidence: float | None = None
 
     @property
     def is_usable(self) -> bool:
@@ -238,7 +242,12 @@ def known_line(value: Any) -> str | None:
 
 
 def line_confidence(text: str, tokens: list[str], logprobs: list[float]) -> float | None:
-    """The probability of the ``lob`` value's tokens: exp of their summed logprobs.
+    """The probability of the ``lob`` value's tokens (:func:`value_confidence`)."""
+    return value_confidence(text, tokens, logprobs, "lob")
+
+
+def value_confidence(text: str, tokens: list[str], logprobs: list[float], key: str) -> float | None:
+    """The probability of the ``key`` value's tokens: exp of their summed logprobs.
 
     Read from the generation, so a line the model wrote hesitantly scores low
     even when the model claims to be sure. The value is looked for in the JSON
@@ -261,8 +270,8 @@ def line_confidence(text: str, tokens: list[str], logprobs: list[float]) -> floa
         return None
     start = where[0]
     try:
-        # The last `lob` when the object repeats the key, as json.loads reads it.
-        span = {s.field_path: s for s in scan_json_spans(text[start:where[1]])}.get("lob")
+        # The last one when the object repeats the key, as json.loads reads it.
+        span = {s.field_path: s for s in scan_json_spans(text[start:where[1]])}.get(key)
         if span is None:
             return None
         first, last = start + span.char_start, start + span.char_end
@@ -274,6 +283,40 @@ def line_confidence(text: str, tokens: list[str], logprobs: list[float]) -> floa
         # SpanMapError is a ValueError, and so is a malformed \u escape; a
         # logprob that is no number is a TypeError.
         return None
+
+
+#: The most of the opening pages' text sent: a cut, since the type and the line show
+#: in the headers and the layout, not in every word.
+MAX_TEXT_CHARS = 4000
+
+
+def fitted_text(system_prompt: str, text: str) -> str:
+    """As much of ``text`` (at most :data:`MAX_TEXT_CHARS`) as fits ``classify``'s
+    ``max_seq_len`` (configs/shared/sequence.yaml) beside ``system_prompt``, the page
+    images, the chat scaffolding and the answer, by the corpus build's estimate
+    (contracts.token_estimates: a digit is a token) - review P8, 2026-11-25: the full
+    4,000 characters came to ~4,236 tokens against 4,096 on the prompt that lists every line."""
+    from common.config import sequence_for_task
+    from contracts.token_estimates import (
+        TEMPLATE_OVERHEAD_TOKENS,
+        estimate_text_tokens,
+        estimate_visual_tokens,
+    )
+
+    sequence = sequence_for_task("classify")
+    spare = (int(sequence["max_seq_len"]) - int(sequence["max_output_tokens"]) - TEMPLATE_OVERHEAD_TOKENS
+             - estimate_text_tokens(system_prompt) - estimate_visual_tokens(CLASSIFIER_PAGES, "classify"))
+    text = text[:MAX_TEXT_CHARS]
+    if estimate_text_tokens(text) <= spare:
+        return text
+    low, high = 0, len(text)                      # the longest head that fits
+    while low < high:
+        middle = (low + high + 1) // 2
+        if estimate_text_tokens(text[:middle]) <= spare:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low]
 
 
 #: How many of a document's pages the classifier reads, from the first: the
@@ -312,12 +355,13 @@ def classifier_messages(
     serving or is trained on them: the first two page images and the text
     :func:`classifier_input` picked for them. Shared so the two cannot drift."""
     content: list[dict[str, Any]] = [{"type": "image", "image": p} for p in image_paths[:CLASSIFIER_PAGES]]
+    system = render_classifier_prompt(lines=lines, line_only=line_only)
     if ocr_text:
-        # Cut at 4,000 characters: the type and the line show in the headers
-        # and the layout, not in every word of the opening pages.
-        content.append({"type": "text", "text": ocr_text[:4000]})
+        # Cut to what fits the classify cap beside the prompt (fitted_text): the type
+        # and the line show in the headers and the layout, not in every word.
+        content.append({"type": "text", "text": fitted_text(system, ocr_text)})
     return [
-        {"role": "system", "content": render_classifier_prompt(lines=lines, line_only=line_only)},
+        {"role": "system", "content": system},
         {"role": "user", "content": content},
     ]
 
@@ -378,13 +422,21 @@ class ZeroShotClassifier:
         # Logprobs for the line's confidence: the one number here routing acts on.
         result = self.generate(self.model, messages, want_logprobs=True, **named)
         classification = parse_classification(result.text)
+        tokens = list(getattr(result, "tokens", None) or [])
+        logprobs = list(getattr(result, "token_logprobs", None) or [])
+        # The type's confidence from the generation, never the number the model wrote
+        # about itself (review P8): routing acts on it. Not measurable - no logprobs, or
+        # the answer does not scan - it is 0.0, the low-confidence path, as a line with
+        # no measured confidence is uncertain. An ACORD form with no number stays 0.0.
+        classification.stated_confidence = classification.confidence
+        measured = value_confidence(result.text, tokens, logprobs, "doc_type")
+        unusable_acord = classification.doc_type == "acord" and classification.acord_form is None
+        classification.confidence = 0.0 if measured is None or unusable_acord else measured
         base = self.adapter == NO_ADAPTER or getattr(self.model, "is_base", False)
         classification.method = "zero_shot_base" if base else "zero_shot"
         if classification.lob is not None:
             classification.lob_stage = "base"
-            classification.lob_confidence = line_confidence(
-                result.text, list(getattr(result, "tokens", None) or []),
-                list(getattr(result, "token_logprobs", None) or []))
+            classification.lob_confidence = line_confidence(result.text, tokens, logprobs)
             classification.lob_candidates = [(classification.lob, classification.lob_confidence or 0.0)]
         return classification
 

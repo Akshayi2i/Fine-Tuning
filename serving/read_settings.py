@@ -29,7 +29,9 @@ class ReadSettings:
     thresholds: Any = None
     classifier_threshold: float = 0.70
     review_threshold: float = DEFAULT_REVIEW_CONFIDENCE_THRESHOLD
-    #: Raise on a schema-invalid response rather than returning it (the audit gate).
+    #: Raise on a schema-invalid response rather than return it flagged
+    #: ``schema:invalid``. Production reads it from ``schema.invalid_answers``
+    #: (configs/inference/vllm_serving.yaml, review R7); True is extract's default.
     strict_schema: bool = True
     #: The endpoint's ``ServingPlan``: a document type no promoted release covers
     #: is refused before any generation.
@@ -52,7 +54,7 @@ class ReadSettings:
         answer that fails the schema is served flagged ``schema:invalid``, not refused;
         ``options`` are the serving thresholds (``vllm_entrypoint.serving_thresholds``) and
         the release's calibrators and thresholds (``azure_service.runtime.extract_options``)."""
-        return cls(strict_schema=False, **dict(options or {}))
+        return cls(**{"strict_schema": False, **dict(options or {})})
 
     @classmethod
     def gate(cls, *, calibrators: Any = None, thresholds: Any = None) -> ReadSettings:
@@ -77,6 +79,7 @@ class ReadSettings:
     def endpoint(cls, *, adapter_map: Mapping[str, Any] | None, plan: Any, release_runtimes: Mapping[str, Any] | None,
                  base_model_loaded: bool, tuning: Mapping[str, Any] | None = None) -> ReadSettings:
         """The RunPod endpoint (``serving.vllm_entrypoint.handler``): its serving plan, release
-        runtimes and engine, and the serving thresholds; an invalid answer is refused."""
+        runtimes and engine, and the serving thresholds - ``schema.invalid_answers`` among
+        them, as the worker reads it (review R7)."""
         return cls(adapter_map=adapter_map, plan=plan, release_runtimes=release_runtimes,
                    base_model_loaded=base_model_loaded, **dict(tuning or {}))

@@ -176,6 +176,15 @@ printed_values:
   # serving.printed_values; any other value is refused.
   mode: strict
 
+schema:
+  # An answer that fails the client's schema (decision 2026-11-25, review R7):
+  # serve_flagged - served with schema:invalid in review_flags and schema_valid
+  # false, so a person reviews it rather than losing the document; refuse - the
+  # document fails with an error and no fields. Read by the Azure worker and the
+  # RunPod endpoint alike (vllm_entrypoint.serving_thresholds); any other value
+  # is refused.
+  invalid_answers: serve_flagged
+
 fields_first:
   # Pages MinerU reads before the fields are served (serving.fields_first.
   # pages_to_verify): chosen so that as many values as possible have a page they

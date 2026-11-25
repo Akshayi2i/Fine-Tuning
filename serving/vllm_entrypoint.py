@@ -745,6 +745,10 @@ def serving_thresholds() -> dict[str, Any]:
     if isinstance(routing.get("detect_lob"), bool):
         tuning["detect_lob"] = routing["detect_lob"]
 
+    # What production does with an answer the client's schema refuses (review R7):
+    # one setting, so the worker and the endpoint cannot differ again.
+    tuning["strict_schema"] = invalid_answers_refused(config)
+
     # An operator-chosen schema for a document nobody could identify. Absent by
     # default, and then an unroutable document is refused rather than extracted
     # against a schema nobody chose.
@@ -752,6 +756,23 @@ def serving_thresholds() -> dict[str, Any]:
     if isinstance(fallback, str) and fallback.strip():
         tuning["fallback_doc_type"] = fallback.strip()
     return tuning
+
+
+#: ``schema.invalid_answers`` in configs/inference/vllm_serving.yaml, and what each means.
+INVALID_ANSWERS = {"serve_flagged": False, "refuse": True}
+
+
+def invalid_answers_refused(config: dict[str, Any] | None = None) -> bool:
+    """Whether a schema-invalid answer is refused (``strict_schema``) rather than served
+    flagged, from ``schema.invalid_answers`` (default ``serve_flagged``, decision
+    2026-11-25). An unknown value is refused: it would otherwise pick one silently."""
+    from common.config import ConfigError, serving_config
+
+    value = ((config if config is not None else serving_config()).get("schema") or {}).get(
+        "invalid_answers", "serve_flagged")
+    if value not in INVALID_ANSWERS:
+        raise ConfigError(f"schema.invalid_answers is {value!r}; expected one of {sorted(INVALID_ANSWERS)}")
+    return INVALID_ANSWERS[value]
 
 
 def handler(event: dict[str, Any], state: EndpointState) -> dict[str, Any]:

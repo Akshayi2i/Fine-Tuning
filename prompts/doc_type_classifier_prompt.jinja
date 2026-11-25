@@ -25,7 +25,7 @@ This document is an insurance policy. Identify its line of business: the one lin
 {% for name, meaning in lines -%}
 - `{{ name }}` - {{ meaning }}
 {% endfor %}
-Judge by what the coverage is for - what is insured, against what, for whom - not by which words appear on the document. Decide from the whole document, not the first page alone.
+Judge by what the coverage is for - what is insured, against what, for whom - not by which words appear on the document. Decide from every page you are given - the document's opening pages - not the first page alone.
 
 Return only this JSON object, with no explanation and no markdown fences:
 {"lob": {% for name, _meaning in lines %}"{{ name }}"{% if not loop.last %} | {% endif %}{% endfor %}}
@@ -44,7 +44,7 @@ How to decide:
 - A row-per-loss listing is the strongest signal for `lossrun`, even when a page of policy-like header information precedes it.
 - Coverage terms, limits and a premium, with no per-loss listing, indicate `policy`.
 - A pre-printed form identifier with fill-in blanks indicates `acord`, even when the content also describes coverage.
-- Decide from the whole document, not the first page alone.
+- Decide from every page you are given - the document's opening pages - not the first page alone.
 
 If and only if the type is `acord`, also report the form number, read from the form identifier printed on the document:
 

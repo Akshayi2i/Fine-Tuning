@@ -685,7 +685,7 @@ What the build does now that the sections above did not describe. Each module sp
   its windows.
 - **Long Loss Runs** are read window by window only when one answer cannot hold their rows, then merged
   and reconciled (`serving/lossrun_merge.merge_and_reconcile`).
-- **Prompt** `PROMPT_TEMPLATE_VERSION = "8.0.0"` (2026-11-24; 7.2.0 before, which v4 was trained on). On common-model lines it says: each value once, its
+- **Prompt** `PROMPT_TEMPLATE_VERSION = "8.1.0"` (2026-11-25; 7.2.0 is what v4 was trained on). On common-model lines it says: each value once, its
   `page_ref` listing every page that prints it; rows only from the pages given; a value with a field never
   repeated under the additional fields; the arrays window is told which sections other windows read. The
   self-contained lines, ACORD and Loss Run prompts are frozen as fingerprints
@@ -1182,7 +1182,7 @@ Every policy is extracted into the client's canonical JSON for its line. These f
     - `ocr_plus_image`: OCR text and page images of one document; the OCR text is the primary source for dense text, identifiers and amounts, the images are the authority on layout, and where the two disagree on a character the image wins.
     - `noisy_ocr_image`: identical to `ocr_plus_image` (`common.constants.PROMPT_MODE_ALIASES`) — **the noise lives in the data, not the instruction**.
     - `image_only`: page images and no OCR text; read the values from the pixels, and output null rather than a partly guessed identifier or amount.
-  - Be versioned by `common.prompts.PROMPT_TEMPLATE_VERSION` (now **8.0.0**, since 2026-11-24), a constant recorded in the corpus manifest (IMPL-05), not text in the prompt.
+  - Be versioned by `common.prompts.PROMPT_TEMPLATE_VERSION` (now **8.1.0**, since 2026-11-25), a constant recorded in the corpus manifest (IMPL-05), not text in the prompt.
 - **`doc_type_classifier_prompt.jinja`** — zero-shot prompt asking the model to name the doc type (`acord`/`policy`/`lossrun`) and, if acord, the form number — the **two-level classification** of arch §4b — and, when lines are passed, a policy's line of business from the registered lines, each with its meaning from `configs/lob_meanings.yaml`. Output a small fixed JSON: `{"doc_type": "...", "acord_form": "...", "lob": "..." | null, "confidence": 0.0}` (without `lob` when no lines are passed). A `line_only` variant asks the line alone, among the lines passed. Line detection ships off (`routing.detect_lob: false`).
 
 **Non-negotiable:** `common.prompts.render_system_prompt(...)` is the single renderer used by dataset build (IMPL-05), evaluation (IMPL-08), serving (IMPL-11), and testing (IMPL-12); `render_classifier_prompt(...)` renders the classifier. Training-time and inference-time prompts must render identically (arch §7).
@@ -1399,6 +1399,14 @@ since 2026-11-24, empty meanings falling back to the name).
 - P4: the fast image-only request says each page is its image and its marker, not "its own text" (`prompts/fast/system.jinja`). The standard template still has the sentence: fixed with P6, before the standard profile is used again.
 - P5 (decision: relax the rule): descriptions may show the values and column headings a field holds; never a carrier's wording or one line's example. Nine replaced in `configs/model_view.yaml`; `tests/test_prompt_examples.py`.
 - Stale comments fixed in `prompts/system_prompt_template.jinja` (test names) and `configs/schema_sections.yaml` (what `lineblk` holds per line).
+
+## Changes of 2026-11-25 (prompt version 8.1.0, review P6, P8 and P4 in the standard template)
+
+- `PROMPT_TEMPLATE_VERSION` 8.1.0; prompt hash `0ad341d9...` (8.0.0's was `33f296bb...`). Nothing was trained on 8.0.0: both ride on cycle 3.
+- P6: on a canonical document the standard template says once that a field not stated is left out and a value printed but not parseable keeps `raw` with `parsed` null; its date and enum rules say `parsed` is null there (the flat ACORD and Loss Run prompts keep "output null").
+- P4 in the standard template: the image-only page sentence, as in the fast one.
+- P8: the classifier prompt says it reads the opening pages, not the whole document.
+- The old-style fingerprints re-frozen (`tests/fixtures/old_style_prompt_fingerprints.json`): prompt text only, every schema and required-field fingerprint unchanged.
 
 ---
 
@@ -4572,7 +4580,7 @@ worker: render pages, plan windows,  ──HTTPS──>   LoRA, asked for as pol
   - when a corpus version is given: a missing corpus manifest, one with no `mineru_version`, or a MinerU on this machine that differs from it (`assert_ocr_pin`); with no MinerU installed it only logs the pin;
   - no model given: `cold_start` does not load one itself.
 - `promote` runs the same prompt-hash, window-plan and base-model checks (`registry_utils.releases.serving_refusal`), so a release serving would refuse is never promoted (IMPL-13).
-- **Every tuneable has a reader.** `serving_thresholds()` passes `routing.classifier_confidence_threshold`, `confidence.review_threshold`, `routing.detect_lob`, `routing.lob_confidence_threshold`, `routing.lob_uncertain_threshold` and `routing.fallback_doc_type` (unset in the shipped config) into `extract`. `long_documents.conflict_resolution` is read by no code; it names the rule the window merge applies by group order.
+- **Every tuneable has a reader.** `serving_thresholds()` passes `routing.classifier_confidence_threshold`, `confidence.review_threshold`, `routing.detect_lob`, `routing.lob_confidence_threshold`, `routing.lob_uncertain_threshold` and `routing.fallback_doc_type` (unset in the shipped config) into `extract`, and `schema.invalid_answers` as `strict_schema` (`invalid_answers_refused`: `serve_flagged`, the shipped value, or `refuse`; any other refused). `long_documents.conflict_resolution` is read by no code; it names the rule the window merge applies by group order.
 - **The request** (`build_request`): `source_id` and one image per page are required. `page_texts` (prompt text, `ocr_plus_image`) and `printed_texts` (the same MinerU text held back from an `image_only` prompt and used only to check the answer) must each number exactly pages 1..n. A request with no MinerU text at all is refused (decision 2026-10-30: extraction never skips MinerU). `lob` (or `line_of_business`) is one line or a list; it is lower-cased, classic auto is read as `personal_auto` (`common.lob.merge_line`), and a single line with no schema is refused unless `allow_lob_fallback` is sent (a business-owners name is told to send `boppr` or `bopgl`). `lob_hypothesis` is a line hint; `source_file_name` (or `file_name`) is written into the output by the system.
 - **Calibration is chosen after classification.** The handler passes the whole `{doc_type: params}` map to `extract`. `assert_calibration_present` runs only when no release is served or a served release has no calibrators of its own; an empty map is no calibration.
 - `build_adapter_map` maps a doc type to a per-type adapter only when its directory holds `adapter_config.json`.
@@ -4580,8 +4588,8 @@ worker: render pages, plan windows,  ──HTTPS──>   LoRA, asked for as pol
 
 ### 2. `serving/doc_type_classifier.py`
 - Two levels: doc type in `acord`, `policy`, `lossrun` (`common.constants.ACTIVE_DOC_TYPES`) and the ACORD form. A wrong type means the wrong prompt and schema, so the classifier is measured on the golden set (IMPL-08).
-- Reads the first two pages (`CLASSIFIER_PAGES = 2`): their images by page number and their text joined, cut at 4,000 characters (`classifier_input`, `classifier_messages`). Training rows are built by the same functions.
-- `ZeroShotClassifier` prompts the loaded model with `doc_type_classifier_prompt.jinja`. It can also read a policy's line (`Classification.lob`); the line's confidence is the probability of its own tokens (`line_confidence`), never a number the model writes.
+- Reads the first two pages (`CLASSIFIER_PAGES = 2`): their images by page number and their text joined, cut to what fits `classify`'s `max_seq_len` beside the prompt, the images and the answer by the corpus build's estimate, at most 4,000 characters (`fitted_text`, review P8: the full 4,000 came to ~4,236 of 4,096 tokens on the largest prompt) (`classifier_input`, `classifier_messages`). Training rows are built by the same functions.
+- `ZeroShotClassifier` prompts the loaded model with `doc_type_classifier_prompt.jinja`. It can also read a policy's line (`Classification.lob`); the type's confidence and the line's are the probability of their own tokens (`value_confidence`, `line_confidence`; review P8), never a number the model writes - kept as `stated_confidence` only; not measurable (no logprobs), the type's is 0.0, the low-confidence path. The prompt says it reads the opening pages.
 - A request that names its `doc_type` skips classification (`StaticClassifier`). The Azure worker always sends `policy` with the caller's line, so production runs no classifier.
 - The endpoint holds a classifier only when one is given to `cold_start`, or when `routing.detect_lob` is on: then `line_classifier` reads lines with the base weights and no adapter, and only on an engine that holds the base.
 
@@ -4630,7 +4638,7 @@ worker: render pages, plan windows,  ──HTTPS──>   LoRA, asked for as pol
 - List completeness (`calibration.list_completeness.check_document`) and `near_tie` (top-1/top-2 margin below `serving.near_tie_margin`, 0.1 nats) are added. `serving.consistency` flags values that cannot all be true together (date order, a term over 24 months, implausible dates, limit order, premium below items, malformed postal code, state or policy number). `serving.value_flags.route_served` sends a value with `printed_off_cited_page`, `role_mismatch`, `near_tie`, `parsed_mismatch` or a consistency flag to review (`flagged` in its envelope).
 - The canonical envelope gets the system fields (`common.canonical.with_system_fields`). A common-model policy gets the full-text tier `text_sections`, built from the page text by Fideon's section builder (`common.full_text.build_text_sections` over `common/section_builder`, copied byte for byte and recorded in `SOURCE.json`; `scripts/check_section_builder.py` reports drift), never by the model; with no page text it is flagged `text_sections:no_page_text`. `text_coverage` is the share of page-text words found in the served JSON.
 - Keys the client's schema does not name are removed and flagged `<path>:unknown_key_removed` (`_without_unknown_keys`).
-- **Schema validation mirrors the audit gate.** `schema_verdict` judges the answer against the client's full schema; on a common-model line it judges the every-key-filled answer, and a required section no window wrote or an object written empty (`minProperties`) still fails. With `strict_schema` (the default) an invalid answer is an error; otherwise it is flagged `schema:invalid`. `served_schema_verdict` is the same judgement for checkpoint selection (`evaluation/metrics/coverage_metrics.score_schema_validity`).
+- **Schema validation mirrors the audit gate.** `schema_verdict` judges the answer against the client's full schema; on a common-model line it judges the every-key-filled answer, and a required section no window wrote or an object written empty (`minProperties`) still fails. With `strict_schema` an invalid answer is an error; otherwise it is served flagged `schema:invalid`. Production serves it flagged: `schema.invalid_answers: serve_flagged` in `configs/inference/vllm_serving.yaml`, read by the Azure worker and the RunPod endpoint alike (decision 2026-11-25, review R7); `extract`'s own default is strict. `served_schema_verdict` is the same judgement for checkpoint selection (`evaluation/metrics/coverage_metrics.score_schema_validity`).
 - After validation, every key of the line's schema is filled, `null` where nothing was extracted (`common.canonical.with_all_keys`, without `fideon:` annotations).
 - `line_of_business` is the line resolution `{lines, source, confidence, candidates, hypothesis_agreed}` for a policy (`source`: `caller`, `detected`, `detected_uncertain`, `undetected`), else `{value, confidence}` from the line spans. `route` records the adapter, the classifier's confidence and method, `lob_fallback_used` and `lob_source`.
 
@@ -4678,7 +4686,7 @@ IMPL-12 (testing) and IMPL-08 (golden eval) call this function and never re-impl
 - [ ] A served policy JSON carries every key of its line's schema, `null` where nothing was extracted, and no key the schema does not name.
 - [ ] A common-model policy with page text carries `text_sections` from the section builder, valid against the client's schema; one without is flagged `text_sections:no_page_text`.
 - [ ] A form edition in an unambiguous shape inside its form number moves to an empty `edition_date`; a filled one is never overwritten.
-- [ ] A schema-invalid answer is an error with `strict_schema`; checkpoint selection judges with `served_schema_verdict`.
+- [ ] A schema-invalid answer is served flagged in production (`schema.invalid_answers`), an error with `strict_schema`; checkpoint selection judges with `served_schema_verdict`.
 - [ ] Without release calibrators every field is flagged for review; raw confidence is never presented as calibrated.
 - [ ] A request with no MinerU text is refused.
 - [ ] Every Azure result carries the `pins` block.

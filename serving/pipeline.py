@@ -15,8 +15,10 @@ tests would describe the wrong one.
       -> validate against the schema
       -> JSON + confidence + review flags
 
-The schema validation at the end mirrors the Fideon SPEC_07 Stage 3 audit gate: a
-schema-invalid response is an **error**, not a returned result.
+The schema validation at the end mirrors the Fideon SPEC_07 Stage 3 audit gate. What a
+schema-invalid response becomes is ``strict_schema``: an error (extract's default), or a
+result flagged ``schema:invalid`` - what production serves (``schema.invalid_answers`` in
+configs/inference/vllm_serving.yaml, decision 2026-11-25, review R7).
 """
 
 from __future__ import annotations
@@ -1802,8 +1804,9 @@ def extract(
 
     Args:
         strict_schema: raise on a schema-invalid response rather than returning
-            it. Mirrors the audit gate — a response that fails validation is an
-            error, not a result.
+            it flagged ``schema:invalid``. Production reads it from
+            ``schema.invalid_answers`` (configs/inference/vllm_serving.yaml): served
+            flagged, so a person reviews it (decision 2026-11-25).
         plan: the endpoint's :class:`~serving.release_router.ServingPlan`. Given
             one, a document type no promoted release covers is refused HERE,
             before any generation — extracting it would run a model that never

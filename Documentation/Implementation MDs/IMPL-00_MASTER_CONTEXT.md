@@ -676,7 +676,7 @@ What the build does now that the sections above did not describe. Each module sp
   its windows.
 - **Long Loss Runs** are read window by window only when one answer cannot hold their rows, then merged
   and reconciled (`serving/lossrun_merge.merge_and_reconcile`).
-- **Prompt** `PROMPT_TEMPLATE_VERSION = "8.0.0"` (2026-11-24; 7.2.0 before, which v4 was trained on). On common-model lines it says: each value once, its
+- **Prompt** `PROMPT_TEMPLATE_VERSION = "8.1.0"` (2026-11-25; 7.2.0 is what v4 was trained on). On common-model lines it says: each value once, its
   `page_ref` listing every page that prints it; rows only from the pages given; a value with a field never
   repeated under the additional fields; the arrays window is told which sections other windows read. The
   self-contained lines, ACORD and Loss Run prompts are frozen as fingerprints

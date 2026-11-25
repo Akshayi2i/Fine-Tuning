@@ -68,7 +68,11 @@ You are given OCR text and the page images of the same document. They describe o
 - If the image is illegible where the OCR is confident, use the OCR text. If both are illegible, output null.
 {%- endif %}
 
-Each page is given as its image followed immediately by that page's own text, prefixed `<page N of M>`. The text after an image is that image's text. Where the numbers skip, you are seeing selected pages of a longer document: fields that live on the pages you were not given are absent, and absent means null.
+{% if modality_mode == 'image_only' -%}
+Each page is given as its image followed by its page marker, `<page N of M>`.
+{%- else -%}
+Each page is given as its image followed immediately by that page's own text, prefixed `<page N of M>`. The text after an image is that image's text.
+{%- endif %} Where the numbers skip, you are seeing selected pages of a longer document: fields that live on the pages you were not given are absent, and absent means null.
 
 A value that appears on more than one page is one value, not several.{% if common_model %} Write it once, in its own field, and list in its `page_ref` every page that prints it.{% endif %}
 
@@ -87,7 +91,7 @@ A value that appears on more than one page is one value, not several.{% if commo
   - `parsed`: the same value in the format set out under Value formats below.
   - `page_ref`: the page numbers, from the `<page N of M>` markers, that the value was read from.
 {%- endif %}
-- Emit only the fields the document states, and omit every other field. An omitted field is null. Wherever these instructions say to output null, omit the field instead.
+- Emit only the fields the document states, and omit every other field. An omitted field is null. Wherever these instructions say to output null for a field the document does not state, omit the field instead. A value the document prints that cannot be put in its format keeps `raw`, with `parsed` null.
 - Always emit the top-level objects the schema lists as required, as `{}` when nothing in them is stated.
 - Do not add keys the schema does not define.
 {%- else -%}
@@ -117,10 +121,10 @@ A document typically names several different parties, several different dates, a
 {% if canonical -%}
 These formats apply to `parsed`. `raw` is always the text as printed, never reformatted.
 {% endif -%}
-- Dates: `{{ date_format }}`, with a zero-padded month and day. Resolve an ambiguous order from other dates on the same document. If the order cannot be resolved, or a component is missing, output null. Never invent a day or a month.
+- Dates: `{{ date_format }}`, with a zero-padded month and day. Resolve an ambiguous order from other dates on the same document. If the order cannot be resolved, or a component is missing, {% if canonical %}`parsed` is null{% else %}output null{% endif %}. Never invent a day or a month.
 - Numbers: digits only, with an optional leading minus and an optional decimal point. No currency symbols, no thousands separators, no units, no trailing text. A figure shown in parentheses is negative.
 - `0` is a value, not an absence. Output `0` where the document states zero, and null where it states nothing.
-- Enumerated fields: output exactly one of the listed values, spelled exactly as listed. Map the document's wording onto the list by meaning. If the document supports none of them, output null. Never output a value outside the list.
+- Enumerated fields: output exactly one of the listed values, spelled exactly as listed. Map the document's wording onto the list by meaning. If the document supports none of them, {% if canonical %}`parsed` is null{% else %}output null{% endif %}. Never output a value outside the list.
 - Text: transcribe as printed. Do not expand abbreviations, change capitalisation, correct spelling, or reorder words. Do not append anything the document does not contain.
 - Multi-line text such as an address: join the lines into one string separated by `, `, preserving their order.
 

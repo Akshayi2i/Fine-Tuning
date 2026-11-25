@@ -304,3 +304,9 @@ MinerU), and comparing against a MinerU it does not have refused every deploymen
 - A1: the window planner, label rules, row identity and confidence helpers serving uses moved to `contracts/`, the served MinerU client and its PDF renderer to `adapters/`; `serving` imports no build-time code; the runtime packages as a whole do in 3 places, each named in `tests/test_layering.py` (a stall notice, a command-line helper, calibration's fitting).
 - A2: `extract` runs `serving.stages` (route, release, answer, printed, confidence, review, output, validate, result) with one `ReadSettings`; same name, signature and output. Three type errors that were in its body are gone (268 in all).
 - A2, the callers: every entry point passes `extract` a named `ReadSettings` profile (`served`, `gate`, `testing`, `draft`, `endpoint`) instead of keyword flags; settings and keywords together are refused.
+
+## Changes of 2026-11-25 (review Phase 5)
+
+- P8: the classifier's type confidence is measured from its tokens (`value_confidence`), the model's own number kept as `stated_confidence`; the prompt says it reads the opening pages; its page text is cut to what fits `classify`'s 4,096 tokens (`fitted_text`). `scripts/measure_lob_detection.py` is still to run, on the pod, before `routing.detect_lob` is switched on.
+- R7: `schema.invalid_answers` (`serve_flagged`) decides what a schema-invalid answer becomes, for the worker and the endpoint alike; the endpoint used to refuse it.
+- P6 and P4 in the standard template (prompt version 8.1.0): "null" said once both ways on a canonical document; the image-only page sentence.

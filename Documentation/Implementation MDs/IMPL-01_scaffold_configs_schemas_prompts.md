@@ -140,7 +140,7 @@ Every policy is extracted into the client's canonical JSON for its line. These f
     - `ocr_plus_image`: OCR text and page images of one document; the OCR text is the primary source for dense text, identifiers and amounts, the images are the authority on layout, and where the two disagree on a character the image wins.
     - `noisy_ocr_image`: identical to `ocr_plus_image` (`common.constants.PROMPT_MODE_ALIASES`) — **the noise lives in the data, not the instruction**.
     - `image_only`: page images and no OCR text; read the values from the pixels, and output null rather than a partly guessed identifier or amount.
-  - Be versioned by `common.prompts.PROMPT_TEMPLATE_VERSION` (now **8.0.0**, since 2026-11-24), a constant recorded in the corpus manifest (IMPL-05), not text in the prompt.
+  - Be versioned by `common.prompts.PROMPT_TEMPLATE_VERSION` (now **8.1.0**, since 2026-11-25), a constant recorded in the corpus manifest (IMPL-05), not text in the prompt.
 - **`doc_type_classifier_prompt.jinja`** — zero-shot prompt asking the model to name the doc type (`acord`/`policy`/`lossrun`) and, if acord, the form number — the **two-level classification** of arch §4b — and, when lines are passed, a policy's line of business from the registered lines, each with its meaning from `configs/lob_meanings.yaml`. Output a small fixed JSON: `{"doc_type": "...", "acord_form": "...", "lob": "..." | null, "confidence": 0.0}` (without `lob` when no lines are passed). A `line_only` variant asks the line alone, among the lines passed. Line detection ships off (`routing.detect_lob: false`).
 
 **Non-negotiable:** `common.prompts.render_system_prompt(...)` is the single renderer used by dataset build (IMPL-05), evaluation (IMPL-08), serving (IMPL-11), and testing (IMPL-12); `render_classifier_prompt(...)` renders the classifier. Training-time and inference-time prompts must render identically (arch §7).
@@ -357,3 +357,11 @@ since 2026-11-24, empty meanings falling back to the name).
 - P4: the fast image-only request says each page is its image and its marker, not "its own text" (`prompts/fast/system.jinja`). The standard template still has the sentence: fixed with P6, before the standard profile is used again.
 - P5 (decision: relax the rule): descriptions may show the values and column headings a field holds; never a carrier's wording or one line's example. Nine replaced in `configs/model_view.yaml`; `tests/test_prompt_examples.py`.
 - Stale comments fixed in `prompts/system_prompt_template.jinja` (test names) and `configs/schema_sections.yaml` (what `lineblk` holds per line).
+
+## Changes of 2026-11-25 (prompt version 8.1.0, review P6, P8 and P4 in the standard template)
+
+- `PROMPT_TEMPLATE_VERSION` 8.1.0; prompt hash `0ad341d9...` (8.0.0's was `33f296bb...`). Nothing was trained on 8.0.0: both ride on cycle 3.
+- P6: on a canonical document the standard template says once that a field not stated is left out and a value printed but not parseable keeps `raw` with `parsed` null; its date and enum rules say `parsed` is null there (the flat ACORD and Loss Run prompts keep "output null").
+- P4 in the standard template: the image-only page sentence, as in the fast one.
+- P8: the classifier prompt says it reads the opening pages, not the whole document.
+- The old-style fingerprints re-frozen (`tests/fixtures/old_style_prompt_fingerprints.json`): prompt text only, every schema and required-field fingerprint unchanged.
