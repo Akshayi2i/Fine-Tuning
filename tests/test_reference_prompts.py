@@ -39,3 +39,25 @@ def test_the_reference_files_are_not_prompt_input() -> None:
     from common.prompts import prompt_input_files
 
     assert not any("testing/prompts" in path.as_posix() for path in prompt_input_files())
+
+
+def test_the_prompt_hash_does_not_depend_on_line_endings(monkeypatch) -> None:
+    """A Windows checkout (core.autocrlf) holds the prompt files with CRLF, the pod's with LF.
+    Hashed as raw bytes, a release packaged on one was refused on the other: found 2026-11-25,
+    when this laptop's hash for v4's own code (7.2.0) differed from v4's recorded fdcce708."""
+    import pathlib
+
+    from common.prompts import prompt_hash
+
+    real = pathlib.Path.read_bytes
+
+    def as_lf(self):
+        return real(self).replace(b"\r\n", b"\n")
+
+    def as_crlf(self):
+        return as_lf(self).replace(b"\n", b"\r\n")
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", as_lf)
+    lf = prompt_hash()
+    monkeypatch.setattr(pathlib.Path, "read_bytes", as_crlf)
+    assert prompt_hash() == lf

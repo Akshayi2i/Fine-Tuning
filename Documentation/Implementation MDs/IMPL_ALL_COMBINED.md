@@ -1392,7 +1392,7 @@ since 2026-11-24, empty meanings falling back to the name).
 
 ## Changes of 2026-11-24 (prompt version 8.0.0, review P1-P5)
 
-- `PROMPT_TEMPLATE_VERSION` 8.0.0, `FAST_LAYOUT_VERSION` 2; prompt hash `33f296bb…` (7.2.0's was `370dd983…`; v4 is served from commit 19b1bff). The corpus is rebuilt and the adapter trained on it in cycle 3.
+- `PROMPT_TEMPLATE_VERSION` 8.0.0, `FAST_LAYOUT_VERSION` 2; prompt hash `4d70ccb4…` (7.2.0's, v4's, was `fdcce708…`; v4 is served from commit 19b1bff). The corpus is rebuilt and the adapter trained on it in cycle 3.
 - P1: a request that names parts read by other requests, and holds a field for a value printed beside its entries (`common.model_view.PRINTED_STRING_FIELDS`: a coverage's `form_refs`), says that value is still written there (`common.prompts._printed_here`; `prompts/fast/group.jinja`, `prompts/doc_types/policy.jinja`).
 - P2: `configs/coverage_code_meanings.yaml` is read (`common.model_view.code_meaning`) and in the prompt hash; gl, bopgl, boppr and wc listed. Meanings are empty until a coverage expert writes them: `tests/test_coverage_code_meanings.py` marks the check expected to fail until then.
 - P3: the fast field list says `r` and `v`, not `raw` and `parsed` (`common.prompts._compact_words`); `page_ref` stays on an additional field's entry, which the compact answer keeps.
@@ -1402,11 +1402,15 @@ since 2026-11-24, empty meanings falling back to the name).
 
 ## Changes of 2026-11-25 (prompt version 8.1.0, review P6, P8 and P4 in the standard template)
 
-- `PROMPT_TEMPLATE_VERSION` 8.1.0; prompt hash `0ad341d9...` (8.0.0's was `33f296bb...`). Nothing was trained on 8.0.0: both ride on cycle 3.
+- `PROMPT_TEMPLATE_VERSION` 8.1.0; prompt hash `56e0d980...` (8.0.0's was `4d70ccb4...`). Nothing was trained on 8.0.0: both ride on cycle 3.
 - P6: on a canonical document the standard template says once that a field not stated is left out and a value printed but not parseable keeps `raw` with `parsed` null; its date and enum rules say `parsed` is null there (the flat ACORD and Loss Run prompts keep "output null").
 - P4 in the standard template: the image-only page sentence, as in the fast one.
 - P8: the classifier prompt says it reads the opening pages, not the whole document.
 - The old-style fingerprints re-frozen (`tests/fixtures/old_style_prompt_fingerprints.json`): prompt text only, every schema and required-field fingerprint unchanged.
+
+## Changes of 2026-11-25 (the prompt hash and line endings)
+
+- `prompt_hash()` reads its files with line endings normalised (CRLF to LF). A Windows checkout (`core.autocrlf`) holds them with CRLF, the pod's with LF, and the hash was over raw bytes, so a release packaged on one machine was refused on the other. Found when this laptop's hash for v4's own code (`5c93943`, 7.2.0) was not v4's recorded `fdcce708…`; with LF it is, at `5c93943` and at `19b1bff` alike, as is the window plan (`…5dba374a1c54`). The pod's values are unchanged; the hashes quoted in this file's changes of 2026-11-24 and 2026-11-25 were the laptop's CRLF values and are corrected above (`tests/test_reference_prompts.py`).
 
 ---
 

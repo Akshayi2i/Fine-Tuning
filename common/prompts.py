@@ -730,7 +730,10 @@ def prompt_hash() -> str:
     for path in prompt_input_files():
         digest.update(path.relative_to(root).as_posix().encode())
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        # Line endings normalised: a Windows checkout (core.autocrlf) holds these files with CRLF and the
+        # pod's with LF, and a raw-bytes hash made a release packaged on one machine refused on the other.
+        # The pod's (LF) value is the one every recorded hash holds (checked on v4: fdcce708..., 2026-11-25).
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
     identity = format_identity()
     if identity is not None:
         digest.update(b"format_profile\0")
