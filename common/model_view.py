@@ -116,16 +116,44 @@ def coverage_code_meanings() -> dict[str, Any]:
     return load_yaml(COVERAGE_CODE_MEANINGS) if COVERAGE_CODE_MEANINGS.exists() else {}
 
 
+def _code_entry(meanings: dict[str, Any], key: str | None, code: str) -> dict[str, Any]:
+    """``code``'s entry under ``key`` (a line, or ``shared``), normalised to a
+    mapping. The file is hand-written, so tolerate the shapes a person writes: a
+    bare string is the meaning; a missing key or code is ``{}``; anything else is
+    a clear error, not an obscure one later."""
+    if key is None:
+        return {}
+    container = meanings.get(key)
+    if container is None:
+        return {}
+    if not isinstance(container, dict):
+        raise ModelViewError(
+            f"coverage_code_meanings.yaml: '{key}' must map a coverage code to its "
+            f"meaning, got {type(container).__name__}")
+    entry = container.get(code)
+    if entry is None:
+        return {}
+    if isinstance(entry, str):
+        return {"meaning": entry}
+    if isinstance(entry, dict):
+        return entry
+    raise ModelViewError(
+        f"coverage_code_meanings.yaml: entry '{key}.{code}' must be text, or a mapping "
+        f"with 'meaning'/'tell_apart', got {type(entry).__name__}")
+
+
 def code_meaning(code: str, lob: str | None) -> str | None:
-    """``code``'s filled meaning for ``lob`` (the line's own entry, else the
-    shared one), with its ``tell_apart`` after it; None while it is empty."""
+    """``code``'s filled meaning for ``lob`` - the line's own entry over the
+    shared one, field by field - with its ``tell_apart`` after it; None while the
+    meaning is empty. A line entry that gives only ``tell_apart`` still takes the
+    shared meaning (review P2)."""
     meanings = coverage_code_meanings()
-    entry = (meanings.get(lob) or {}).get(code) if lob else None
-    entry = entry or (meanings.get("shared") or {}).get(code) or {}
-    meaning = str(entry.get("meaning") or "").strip()
+    line = _code_entry(meanings, lob, code)
+    shared = _code_entry(meanings, "shared", code)
+    meaning = str(line.get("meaning") or shared.get("meaning") or "").strip()
     if not meaning:
         return None
-    tell_apart = str(entry.get("tell_apart") or "").strip()
+    tell_apart = str(line.get("tell_apart") or shared.get("tell_apart") or "").strip()
     return f"{meaning} {tell_apart}" if tell_apart else meaning
 
 

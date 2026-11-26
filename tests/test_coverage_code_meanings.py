@@ -62,6 +62,40 @@ def test_a_shared_codes_meaning_serves_every_line_that_uses_it(meanings) -> None
         assert "X_MED_PAY = Medical expenses of others, regardless of fault." in _codes_text(lob)
 
 
+def test_a_line_entry_with_only_tell_apart_keeps_the_shared_meaning(meanings) -> None:
+    """A line that only disambiguates must still take the shared meaning, not drop it."""
+    meanings["shared"]["X_MED_PAY"] = {"meaning": "Medical expenses of others."}
+    meanings["gl"]["X_MED_PAY"] = {"tell_apart": "Not the policy's own medical payments coverage."}
+    _clear_caches()
+    assert model_view.code_meaning("X_MED_PAY", "gl") == (
+        "Medical expenses of others. Not the policy's own medical payments coverage.")
+    # a line without the override still gets the shared meaning alone
+    assert model_view.code_meaning("X_MED_PAY", "boppr") == "Medical expenses of others."
+
+
+def test_a_scalar_string_entry_is_read_as_the_meaning(meanings) -> None:
+    """``CODE: "its meaning"`` (a person's shorthand) is the meaning, not a crash."""
+    meanings["gl"]["GL_LIAB"] = "Liability for injury to others."
+    _clear_caches()
+    assert model_view.code_meaning("GL_LIAB", "gl") == "Liability for injury to others."
+
+
+def test_a_malformed_entry_raises_a_clear_error(meanings) -> None:
+    """A wrong-typed entry names the offending code, instead of an AttributeError later."""
+    meanings["gl"]["GL_LIAB"] = ["not", "allowed"]
+    _clear_caches()
+    with pytest.raises(model_view.ModelViewError, match="gl.GL_LIAB"):
+        model_view.code_meaning("GL_LIAB", "gl")
+
+
+def test_a_non_mapping_line_block_raises_a_clear_error(meanings) -> None:
+    """A line key that is not a mapping of codes is a clear error, naming the line."""
+    meanings["gl"] = "oops, should be a mapping of code -> meaning"
+    _clear_caches()
+    with pytest.raises(model_view.ModelViewError, match="'gl'"):
+        model_view.code_meaning("GL_LIAB", "gl")
+
+
 def test_the_meanings_file_is_prompt_input() -> None:
     """Writing a meaning changes what the model is shown, so it changes the prompt hash."""
     assert model_view.COVERAGE_CODE_MEANINGS in prompt_input_files()
