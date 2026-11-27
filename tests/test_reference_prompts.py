@@ -61,3 +61,29 @@ def test_the_prompt_hash_does_not_depend_on_line_endings(monkeypatch) -> None:
     lf = prompt_hash()
     monkeypatch.setattr(pathlib.Path, "read_bytes", as_crlf)
     assert prompt_hash() == lf
+
+
+def test_the_prompt_hash_tolerates_an_absent_meanings_file(monkeypatch) -> None:
+    """coverage_code_meanings.yaml is optional (model_view reads it only when it exists).
+    A checkout without it must hash a no-meanings state, not raise FileNotFoundError on every
+    prompt_hash() call - corpus build, package, cold-start check (review follow-up 2026-11-27)."""
+    import pathlib
+
+    from common.model_view import COVERAGE_CODE_MEANINGS
+    from common.prompts import prompt_hash
+
+    real_exists = pathlib.Path.exists
+    real_read = pathlib.Path.read_bytes
+    absent = COVERAGE_CODE_MEANINGS.resolve()
+
+    def exists(self):
+        return False if self.resolve() == absent else real_exists(self)
+
+    def read_bytes(self):
+        if self.resolve() == absent:
+            raise FileNotFoundError(self)                        # as a genuinely absent file would
+        return real_read(self)
+
+    monkeypatch.setattr(pathlib.Path, "exists", exists)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", read_bytes)
+    assert len(prompt_hash()) == 64                              # does not raise

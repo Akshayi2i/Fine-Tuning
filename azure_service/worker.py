@@ -69,6 +69,8 @@ from typing import Any
 
 from azure_service.job_queue import JobQueue, LeaseLostError, QueueError, QueueMessage
 from azure_service.runtime import (
+    IDENTITY_CALIBRATION,
+    RELEASE_CALIBRATION,
     JobRefused,
     ServingRuntime,
     identity_calibration,
@@ -329,7 +331,7 @@ class Worker:
             record.update(status="fields_ready" if already_served else "running", error=None,
                           started=record.get("started") or now, model=reading.model.tag,
                           release=reading.release_id, route=reading.route,
-                          calibration="release" if reading.calibrators is not None else "identity",
+                          calibration=RELEASE_CALIBRATION if reading.calibrators is not None else IDENTITY_CALIBRATION,
                           pins={**reading.pins, "schema_version": schema_pin(record["lob"])})
             record.setdefault("timings_s", {})["queued"] = round(record["started"] - record["submitted"], 2)
             self._write_status(record, lease)

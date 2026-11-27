@@ -889,7 +889,8 @@ def _window_stat(group: str, pages: list[int], attempt: int, result: Any, outcom
     }
 
 
-#: The reasons the prompt-length check could not run, each warned about once.
+#: The exception types for which the prompt-length check's failure has been warned about, each once per
+#: process (keyed by type name, so a per-document message does not grow this without bound).
 _PROMPT_CHECK_FAILURES: set[str] = set()
 
 
@@ -913,8 +914,12 @@ def _check_prompt_tokens(source_id: str, stat: dict[str, Any], result: Any,
     except Exception as exc:  # noqa: BLE001 - a diagnostic: it never costs the window
         reason = f"{type(exc).__name__}: {exc}"[:200]
         stat["prompt_check_error"] = reason
-        if reason not in _PROMPT_CHECK_FAILURES:
-            _PROMPT_CHECK_FAILURES.add(reason)
+        # Warn once per exception TYPE, not per message: a message that embeds a path or count varies by
+        # document, and keying the dedup on the whole string would both re-warn and grow this set without
+        # bound over a long-lived worker's life.
+        kind = type(exc).__name__
+        if kind not in _PROMPT_CHECK_FAILURES:
+            _PROMPT_CHECK_FAILURES.add(kind)
             log.warning("%s: the prompt-length check could not run (%s); a server resizing pages "
                         "to another budget would go unnoticed", source_id, reason)
         return

@@ -128,6 +128,26 @@ def test_a_release_without_calibrators_is_served_with_raw_confidence_and_said_so
     assert "no calibrators" in caplog.text
 
 
+def test_the_pins_name_the_calibration_as_a_label_not_the_artifact_paths(registry):
+    """review S1: pins['calibration'] is the provenance label the worker records ('release'),
+    not release.calibrators (a dict of blob references) - an opaque value that would disagree
+    with the job record's own 'calibration' field."""
+    promote(registry)
+    calibrate(registry)
+    runtime = load_runtime(settings(), registry, models=Models(), reader=object())
+    reading = runtime.tenant("default").reading("personal_auto")
+    assert reading.calibrators is not None                         # fitted calibrators loaded
+    assert reading.pins["calibration"] == "release"                # a label, == the worker's record
+
+
+def test_a_release_served_with_raw_confidence_pins_identity(registry):
+    promote(registry)                                              # no calibrate(): raw confidence
+    runtime = load_runtime(settings(), registry, models=Models(), reader=object())
+    reading = runtime.tenant("default").reading("personal_auto")
+    assert reading.calibrators is None
+    assert reading.pins["calibration"] == "identity"
+
+
 def test_one_backend_per_served_name_with_the_configured_server(monkeypatch):
     import inference_core.openai_backend as openai_backend
 

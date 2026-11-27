@@ -905,3 +905,40 @@ def test_structured_decoding_on_masked_logprobs_is_refused_at_load():
     config = dataclasses.replace(load_runner_config(), logprobs_mode="processed_logprobs")
     with pytest.raises(ValueError, match="raw_logprobs"):
         config.assert_logprobs_are_the_models_own()
+
+
+def test_the_prompt_length_check_warns_once_per_exception_type(monkeypatch, caplog):
+    """review follow-up (R4): the 'could not run' warning is deduped by exception type, so a
+    message that varies per document neither re-warns nor grows the process-global set without
+    bound in a long-lived worker. The full reason is still recorded in each window's stat."""
+    import logging
+
+    import inference_core.prompt_tokens as prompt_tokens
+    from inference_core.model_runner import Generation
+    from serving import pipeline
+
+    seq = {"n": 0}
+
+    def varying_boom(messages):
+        seq["n"] += 1
+        raise RuntimeError(f"cannot size page {seq['n']}")      # a message that differs every call
+
+    monkeypatch.setattr(prompt_tokens, "expected_prompt", varying_boom)
+    monkeypatch.setattr(pipeline, "_PROMPT_CHECK_FAILURES", set())
+
+    gen = Generation(text="{}", prompt_tokens=10)
+    messages = [{"role": "user", "content": []}]
+    stats = []
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            stat: dict = {}
+            pipeline._check_prompt_tokens("doc1", stat, gen, messages, [])
+            stats.append(stat)
+
+    # Each window keeps its own full, varying reason.
+    assert all("RuntimeError: cannot size page" in s["prompt_check_error"] for s in stats)
+    assert stats[0]["prompt_check_error"] != stats[1]["prompt_check_error"]
+    # But the dedup set holds the type alone, and the warning fired once.
+    assert len(pipeline._PROMPT_CHECK_FAILURES) == 1
+    assert "RuntimeError" in pipeline._PROMPT_CHECK_FAILURES
+    assert caplog.text.count("the prompt-length check could not run") == 1

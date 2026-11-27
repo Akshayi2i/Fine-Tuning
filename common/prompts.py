@@ -733,7 +733,10 @@ def prompt_hash() -> str:
         # Line endings normalised: a Windows checkout (core.autocrlf) holds these files with CRLF and the
         # pod's with LF, and a raw-bytes hash made a release packaged on one machine refused on the other.
         # The pod's (LF) value is the one every recorded hash holds (checked on v4: fdcce708..., 2026-11-25).
-        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
+        # An absent file hashes as empty: coverage_code_meanings.yaml is optional (model_view reads it only
+        # when it exists), so a checkout without it must hash a no-meanings state, not raise FileNotFoundError.
+        content = path.read_bytes() if path.exists() else b""
+        digest.update(content.replace(b"\r\n", b"\n"))
     identity = format_identity()
     if identity is not None:
         digest.update(b"format_profile\0")

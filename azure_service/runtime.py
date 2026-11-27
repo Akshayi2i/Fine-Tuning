@@ -46,6 +46,10 @@ RELEASE_ROUTE = "release"
 
 #: The calibration a reading with no fitted calibrators uses: raw confidence.
 IDENTITY_CALIBRATION = "identity"
+#: The calibration a release reading uses: the release's fitted calibrators. This is
+#: the provenance label the pins carry (review S1), not the calibrators' artifact
+#: references; it matches the worker's own ``record["calibration"]``.
+RELEASE_CALIBRATION = "release"
 
 
 def served_pins(release: Any, *, calibration: str | None) -> dict[str, Any]:
@@ -134,7 +138,9 @@ class TenantRuntime:
     def build_pins(self) -> None:
         """Both readings' pins, from the values the start-up checks read."""
         if self.release_pins is None and self.release is not None:
-            calibration = self.release.calibrators if self.release_runtime and                 self.release_runtime.calibrators is not None else IDENTITY_CALIBRATION
+            calibration = (RELEASE_CALIBRATION
+                           if self.release_runtime and self.release_runtime.calibrators is not None
+                           else IDENTITY_CALIBRATION)
             self.release_pins = served_pins(self.release, calibration=calibration)
         if self.base_pins is None:
             self.base_pins = served_pins(None, calibration=IDENTITY_CALIBRATION)
