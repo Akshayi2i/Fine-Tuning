@@ -310,6 +310,29 @@ def test_unknown_stage_names_the_valid_ones():
         stages_from("trian", "finetune")
 
 
+def test_to_stage_stops_after_the_named_stage():
+    """--to-stage lets a cycle build the corpus, freeze beside training, then train."""
+    from orchestration.run import _selected_stages
+    upto = [s.name for s in _selected_stages("finetune", None, "dataset_build")]
+    assert upto == ["ingestion", "preprocessing", "labeling", "dataset_build"]
+    rest = [s.name for s in _selected_stages("finetune", "training", None)]
+    assert rest == ["training", "checkpoint_eval"]
+
+
+def test_from_and_to_stage_select_a_middle_span():
+    from orchestration.run import _selected_stages
+    span = [s.name for s in _selected_stages("all", "dataset_build", "training")]
+    assert span == ["dataset_build", "training"]
+
+
+def test_to_stage_before_or_outside_the_run_is_refused():
+    from orchestration.run import _selected_stages
+    with pytest.raises(PipelineError, match="to-stage"):
+        _selected_stages("finetune", "training", "dataset_build")   # before --from-stage
+    with pytest.raises(PipelineError, match="to-stage"):
+        _selected_stages("finetune", None, "trian")                 # not a stage
+
+
 # --------------------------------------------------------------------------
 # finetune, end to end on fixtures
 # --------------------------------------------------------------------------

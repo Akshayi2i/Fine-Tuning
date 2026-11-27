@@ -34,7 +34,10 @@ if [ "$1" = "-c" ]; then
   exit 0
 fi
 case "$3" in
-  finetune) exit "${FINETUNE_EXIT:-0}" ;;
+  finetune) case "$*" in
+      *--from-stage*) exit "${TRAIN_EXIT:-0}" ;;   # the training half of the split
+      *) exit "${FINETUNE_EXIT:-0}" ;;             # the corpus-build half (--to-stage)
+    esac ;;
   freeze-eval-set) case "$*" in *--mark-reviewed*) exit "${REVIEWED_EXIT:-0}" ;; *) exit 0 ;; esac ;;
   package) exit "${PACKAGE_EXIT:-0}" ;;
 esac
@@ -85,10 +88,18 @@ def test_the_whole_cycle_in_order(tmp_path):
     code, calls, out = _run(tmp_path, "--after importc2 --after ocrloop -- --skip-ingest --fresh",
                             exits={"importc2": "0", "ocrloop": "0"})
     assert code == 0, out
-    assert _steps(calls) == [
-        "stop servers", "version", "finetune --version v4 --skip-ingest --fresh", "frozen?",
-        "freeze-eval-set --corpus v4", "mark reviewed", "package --version v4 --keep-staging",
+    steps = _steps(calls)
+    # The freeze runs in the background during training, so filter it out: the main thread's order is
+    # build the corpus (--to-stage), check frozen, train (--from-stage), package.
+    main = [s for s in steps if not (s.startswith("freeze-eval-set --corpus") or s == "mark reviewed")]
+    assert main == [
+        "stop servers", "version", "finetune --version v4 --to-stage dataset_build --skip-ingest --fresh",
+        "frozen?", "finetune --version v4 --from-stage training --skip-ingest --fresh",
+        "package --version v4 --keep-staging",
     ]
+    # the eval set is frozen (in parallel) and its review records copied, after the corpus is built
+    assert "freeze-eval-set --corpus v4" in steps and "mark reviewed" in steps
+    assert steps.index("frozen?") < steps.index("freeze-eval-set --corpus v4")
     assert "this cycle is v4" in out and "done: v4 is packaged" in out
 
 
@@ -108,10 +119,21 @@ def test_a_run_waited_for_that_failed_stops_everything(tmp_path):
     assert "'importc2' ended with '1', not 0: stopping before any training" in out
 
 
-def test_a_finetune_that_failed_freezes_nothing_and_packages_nothing(tmp_path):
+def test_a_corpus_build_that_failed_freezes_nothing_and_packages_nothing(tmp_path):
     code, calls, out = _run(tmp_path, "-- --fresh", env="FINETUNE_EXIT=1")
     assert code == 1
-    assert _steps(calls) == ["stop servers", "version", "finetune --version v4 --fresh"]
+    assert _steps(calls) == ["stop servers", "version",
+                             "finetune --version v4 --to-stage dataset_build --fresh"]
+    assert "--version v4 --from-stage" in out                     # how to resume it
+
+
+def test_a_training_that_failed_packages_nothing(tmp_path):
+    """The corpus built and the freeze may run beside it, but a failed training stops before the gate."""
+    code, calls, out = _run(tmp_path, "-- --fresh", env="TRAIN_EXIT=1")
+    assert code == 1
+    steps = _steps(calls)
+    assert "finetune --version v4 --from-stage training --fresh" in steps
+    assert not any(s.startswith("package") for s in steps)
     assert "--version v4 --from-stage" in out                     # how to resume it
 
 

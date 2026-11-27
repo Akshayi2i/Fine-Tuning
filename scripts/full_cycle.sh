@@ -75,31 +75,73 @@ case "$version" in
   v[0-9]*) ;;
   *) say "could not work out the next version (got '$version'): stopping"; exit 1 ;;
 esac
-say "this cycle is $version: finetune $*"
-if ! "$PY" -m orchestration.run finetune --version "$version" ${tenant_args[@]+"${tenant_args[@]}"} "$@"; then
-  say "finetune stopped. Resume it: bash scripts/pod_run.sh start ${version}r -- $PY -m orchestration.run finetune" \
-      "--version $version --from-stage <the stage that failed> $*   then freeze and package as below"
+say "this cycle is $version: finetune $* (build the corpus, freeze beside training, then train)"
+
+# 3a. Build the corpus (ingest through dataset_build): the test split must exist before it can freeze.
+if ! "$PY" -m orchestration.run finetune --version "$version" --to-stage dataset_build \
+      ${tenant_args[@]+"${tenant_args[@]}"} "$@"; then
+  say "the corpus build stopped. Resume it: bash scripts/pod_run.sh start ${version}r -- $PY -m" \
+      "orchestration.run finetune --version $version --from-stage <the stage that failed> $*   then package as below"
   exit 1
 fi
 
-# 4. The eval set the gate scores.
+# 3b. Freeze V's test split as the eval set now, in the BACKGROUND, so it copies while the GPUs train
+#     (the freeze needs only the corpus, not the trained model: it used to run after selection and
+#     leave the GPUs idle). --mark-reviewed copies the review records the gate needs and runs only if
+#     the freeze itself succeeds.
+freeze_pid=""
+freeze_log="$LOG_DIR/${version}-freeze.log"
 frozen="$(value 'import sys
 from artifact_registry.blob_client import BlobClient
 from evaluation.freeze_eval_set import is_frozen
 print(is_frozen(BlobClient(), tenant_id=sys.argv[1] or None))')"
-if [ "$frozen" = "True" ]; then
+if [ "$frozen" = "False" ]; then
+  say "freezing $version's test split as the eval set, beside training (log: $freeze_log)"
+  ( "$PY" -m orchestration.run freeze-eval-set --corpus "$version" ${tenant_args[@]+"${tenant_args[@]}"} \
+      && "$PY" -m orchestration.run freeze-eval-set --mark-reviewed ${tenant_args[@]+"${tenant_args[@]}"} ) \
+      >"$freeze_log" 2>&1 &
+  freeze_pid=$!
+elif [ "$frozen" = "True" ]; then
   say "the eval set is already frozen: the gate scores it as it is"
-elif [ "$frozen" = "False" ]; then
-  say "freezing $version's test split as the eval set"
-  "$PY" -m orchestration.run freeze-eval-set --corpus "$version" ${tenant_args[@]+"${tenant_args[@]}"}
 else
-  say "could not tell whether the eval set is frozen (got '$frozen'): stopping before package"
+  say "could not tell whether the eval set is frozen (got '$frozen'): stopping before training"
   exit 1
 fi
-say "copying the frozen golds' review records"
-if ! "$PY" -m orchestration.run freeze-eval-set --mark-reviewed ${tenant_args[@]+"${tenant_args[@]}"}; then
-  say "a frozen gold has no review record, so the gate would refuse the set: stopping before package"
+
+# 3c. Train and select on the freed GPUs (stages training through checkpoint selection).
+say "training and checkpoint selection for $version"
+train_rc=0
+"$PY" -m orchestration.run finetune --version "$version" --from-stage training \
+    ${tenant_args[@]+"${tenant_args[@]}"} "$@" || train_rc=$?
+
+# 3d. The background freeze must have finished AND succeeded before the gate reads the set.
+if [ -n "$freeze_pid" ]; then
+  say "waiting for the eval-set freeze to finish"
+  freeze_rc=0
+  wait "$freeze_pid" || freeze_rc=$?
+  if [ "$freeze_rc" != "0" ]; then
+    say "the eval-set freeze failed (exit $freeze_rc), so the gate would have no set: stopping before package." \
+        "Read $freeze_log; re-freeze: $PY -m orchestration.run freeze-eval-set --corpus $version (then --mark-reviewed)"
+    [ "$train_rc" = "0" ] && exit 1
+  else
+    say "eval set frozen and review records copied"
+  fi
+fi
+
+if [ "$train_rc" != "0" ]; then
+  say "finetune stopped. Resume it: bash scripts/pod_run.sh start ${version}r -- $PY -m orchestration.run" \
+      "finetune --version $version --from-stage <the stage that failed> $*   then package as below"
   exit 1
+fi
+
+# 3e. A set already frozen (True above) still needs its review records copied each cycle; the
+#     parallel path did this in the background.
+if [ "$frozen" = "True" ]; then
+  say "copying the frozen golds' review records"
+  if ! "$PY" -m orchestration.run freeze-eval-set --mark-reviewed ${tenant_args[@]+"${tenant_args[@]}"}; then
+    say "a frozen gold has no review record, so the gate would refuse the set: stopping before package"
+    exit 1
+  fi
 fi
 
 # 5. Calibration, the gate, the release.

@@ -170,17 +170,25 @@ def gate_override_from(args: argparse.Namespace) -> GateOverrideRecord | None:
     return override
 
 
-def _selected_stages(command: str, from_stage: str | None) -> Sequence[pipeline_dag.Stage]:
-    if not from_stage:
-        return stages_for(command)
+def _selected_stages(command: str, from_stage: str | None,
+                     to_stage: str | None = None) -> Sequence[pipeline_dag.Stage]:
     # `--from-stage` on `all` still spans both commands: resuming at `checkpoint_eval`
     # should carry on into packaging, not stop at the end of finetune.
-    return stages_from(from_stage, command)
+    stages = stages_for(command) if not from_stage else stages_from(from_stage, command)
+    if to_stage:
+        names = [s.name for s in stages]
+        if to_stage not in names:
+            raise pipeline_dag.PipelineError(
+                f"--to-stage {to_stage!r} must name a stage at or after the start; "
+                f"stages here are {names}")
+        stages = tuple(stages)[: names.index(to_stage) + 1]
+    return stages
 
 
-def run_command(command: str, ctx: StageContext, *, from_stage: str | None = None) -> RunReport:
+def run_command(command: str, ctx: StageContext, *, from_stage: str | None = None,
+                to_stage: str | None = None) -> RunReport:
     """Run one build command. ``all`` is the two commands back to back."""
-    return run_stages(ctx, _selected_stages(command, from_stage), command=command)
+    return run_stages(ctx, _selected_stages(command, from_stage, to_stage), command=command)
 
 
 class VersionError(ValueError):
@@ -284,6 +292,10 @@ def _add_finetune_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--commit", default=None, help="repo commit the pod clones; defaults to HEAD")
     parser.add_argument("--from-stage", dest="from_stage", default=None,
                         help="resume at this stage; earlier stages are not re-run")
+    parser.add_argument("--to-stage", dest="to_stage", default=None,
+                        help="stop after this stage; later stages are not run (the mirror of "
+                             "--from-stage). Lets a cycle pause after dataset_build so the eval set "
+                             "freezes beside training; resume the rest with --from-stage training")
     parser.add_argument("--skip-ingest", dest="skip_ingest", action="store_true")
     parser.add_argument("--ocr-workers", dest="ocr_workers", type=int, default=None,
                         help="documents the OCR stage reads at once against the served MinerU "
@@ -609,6 +621,13 @@ def flag_problem(args: argparse.Namespace) -> str | None:
                 f"after training: nothing would train from the base, and {args.version}'s adapter "
                 "would go through the gate as it trained. --fresh applies to a new cycle: run "
                 "finetune/all without --version")
+    to_stage = getattr(args, "to_stage", None)
+    if to_stage:
+        names = [s.name for s in stages_for(args.command)]
+        if to_stage not in names:
+            return f"--to-stage {to_stage!r} is not a stage of {args.command}; expected one of {names}"
+        if from_stage and STAGE_BY_NAME[to_stage].number < STAGE_BY_NAME[from_stage].number:
+            return (f"--to-stage {to_stage} is before --from-stage {from_stage}: nothing would run")
     try:
         fixes_defect_for(getattr(args, "fixes_defect", None))
         gate_override_from(args)
@@ -873,7 +892,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     # The raw-documents login too: only ingestion and OCR may reach raw-documents/
     # (arch §18a), and an injected client would otherwise stand in for both.
     ctx = build_context(args, client=client, raw_client=for_ingestion())
-    report = run_command(args.command, ctx, from_stage=getattr(args, "from_stage", None))
+    report = run_command(args.command, ctx, from_stage=getattr(args, "from_stage", None),
+                         to_stage=getattr(args, "to_stage", None))
     # One post saying how the command ended (orchestration.notify; a no-op without a webhook).
     from orchestration.notify import run_complete
 
